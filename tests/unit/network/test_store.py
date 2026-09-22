@@ -123,6 +123,79 @@ def test_two_threads_writing_one_record_lose_nothing_and_reverse_nothing(root: P
     assert store.load(NETWORK, root).sequence == writers + 1
 
 
+def test_mutate_reads_after_the_lock_and_cannot_ride_an_earlier_write(root: Path) -> None:
+    """``mutate`` is the read-modify-write the store's lock alone could not give.
+
+    The lock serialises writers, and a caller's own ``load`` → mutate → ``save`` is
+    a LONGER span than one write: measured on the pair listener, the record is read,
+    a human is asked to compare a code, and the admission is written back minutes
+    later from that copy — reverting whatever the heartbeat, a membership pull or a
+    peer's rotation wrote meanwhile, with a HIGHER sequence on the reverted file.
+
+    So the cell pins the property rather than a race: a body's read happens AFTER
+    the lock is taken, which is what makes a second read-modify-write of the same
+    record see the first one's write. Nested here in one thread — the same sequence
+    two relay threads get, without the timing that makes a racing cell flaky — and
+    the two appends must BOTH be on disk at the end. Pre-fix there is nothing to
+    call: the shape in use was ``load`` beside ``save``, and the second read would
+    hand back the state the first write replaced.
+    """
+    store.save(_record(), root)
+    with store.mutate(NETWORK, root) as first:
+        first.removed_ids.append("d_first")
+        store.save(first, root)
+        with store.mutate(NETWORK, root) as second:
+            assert second.removed_ids == ["d_first"], "a read inside the lock sees the write"
+            second.removed_ids.append("d_second")
+            store.save(second, root)
+    final = store.load(NETWORK, root)
+    assert final.removed_ids == ["d_first", "d_second"]
+
+
+def test_threads_that_read_modify_write_through_mutate_lose_nothing(root: Path) -> None:
+    """Six threads appending one row each: all six must be on disk at the end.
+
+    The sibling cell above races ``save`` and pins the sequence; this one races the
+    whole read-modify-write, which is the span a relay thread actually holds. The
+    barrier puts every writer at its own read at the same instant, and what makes the
+    cell deterministic is that ``mutate`` refuses to let two of them overlap: the
+    second is still waiting for the lock when the first writes, so it reads the
+    first's row rather than the file the first replaced.
+
+    Passing this cell does NOT prove the record cannot be written concurrently —
+    only that the writers that go through ``mutate`` do not lose each other's edits.
+    """
+    store.save(_record(), root)
+    writers = 6
+    barrier = threading.Barrier(writers, timeout=30)
+    guard = threading.Lock()
+    errors: list[BaseException] = []
+
+    def append_one(index: int) -> None:
+        try:
+            barrier.wait()
+            with store.mutate(NETWORK, root) as record:
+                record.removed_ids.append(f"d_{index}")
+                store.save(record, root)
+        except BaseException as exc:  # noqa: BLE001 - the assertion is the report
+            with guard:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=append_one, args=(index,), name=f"mesh-rmw-{index}")
+        for index in range(writers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(thread.is_alive() for thread in threads), "a writer never returned"
+    assert errors == [], f"{len(errors)} writer(s) raised: {errors[:2]}"
+    assert sorted(store.load(NETWORK, root).removed_ids) == [
+        f"d_{index}" for index in range(writers)
+    ]
+
+
 def test_one_lock_per_target_is_released_and_not_leaked(root: Path) -> None:
     """The registry of write locks must not grow with the traffic.
 

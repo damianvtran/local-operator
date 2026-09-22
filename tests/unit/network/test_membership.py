@@ -127,6 +127,31 @@ def test_removing_a_member_tombstones_rotates_and_bumps_the_epoch(root: Path) ->
     assert reloaded.previous_epoch == 1
 
 
+def test_one_rotation_write_advances_the_sequence_by_one(root: Path) -> None:
+    """ONE WRITE, ONE NUMBER: the manual bump beside the rotation's ``save`` is gone.
+
+    ``save`` derives the sequence from the file it is about to replace
+    (``max(caller, on-disk) + 1``), so ``rotate_epoch`` incrementing it by hand first
+    stepped the number TWICE for one write. The sequence is not decoration: an epoch
+    broadcast carries it so a receiver can tell "I already have this" from "this is
+    newer", and two writers of one value is exactly the shape this PR removes. The
+    cell pins what replaces it — one rotation, one number — and it fails against the
+    manual bump (which stamped 3 where the file it replaced held 1).
+    """
+    record, state = _record()
+    _admit_peer(record)
+    store.save(record, root)
+    store.save_secrets(state, root)
+    assert store.load(NETWORK, root).sequence == 1
+    relay.rotate_epoch(record, state, by=SELF, reason="member_removed", root=root)
+    on_disk = store.load(NETWORK, root)
+    assert on_disk.epoch == 2
+    assert on_disk.sequence == 2, "one write moved the sequence by more than one"
+    # And the copy a broadcaster reads (``panic_frame``, ``epoch_frame``) is the copy
+    # on disk, which is what made the second bump redundant rather than harmless.
+    assert record.sequence == on_disk.sequence
+
+
 def test_a_rotation_inside_the_lock_is_refused() -> None:
     record, state = _record()
     relay.rotate_epoch(record, state, by=SELF, reason="member_removed", persist=False)

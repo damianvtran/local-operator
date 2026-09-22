@@ -90,6 +90,7 @@ from local_operator.network.identity import (
     verify_rotation_statement,
 )
 from local_operator.network.invite import (
+    REASON_USED,
     MintedInvite,
     claim_or_consume,
     consume,
@@ -910,9 +911,13 @@ def rotate_epoch(
     state.rotate(wire.b64u(token_bytes(32)), record.epoch)
     record.rotations[str(record.epoch)] = by
     record.rotation_lock_until = moment + ROTATION_LOCK_S
-    record.sequence += 1
     record.trust = "active"
     if persist:
+        # NO MANUAL BUMP BEFORE THE WRITE. ``save`` derives the sequence from the
+        # file it is about to replace (``max(caller, on-disk) + 1``), so a bump here
+        # would step it twice per rotation — a number that means "this is newer"
+        # does not need the step, and the two write paths that disagree would be a
+        # second rule for one value.
         store.save(record, root)
         store.save_secrets(state, root)
     return RotationOutcome(
@@ -1368,14 +1373,24 @@ def announce_identity_rotation(
         # The row's own id changes with the key, so the record is rewritten here
         # rather than by the caller: leaving the old id in `self_device_id` would
         # make the next handshake verify against a key this device no longer holds.
-        old_member = record.self_member()
-        if old_member is not None and old_member.device_id == old.device_id:
-            old_member.previous_ids = [*old_member.previous_ids, old.device_id]
-            old_member.device_id = new.device_id
-            old_member.public_key = new.public_key
-            old_member.rotated_at = time.time()
-            record.self_device_id = new.device_id
-            store.save(record, root or server.root)
+        # The read is inside the lock (``store.mutate``) and the guard re-checked
+        # against what is on disk, so a record another writer already rotated is
+        # left alone rather than rewritten from this loop's older listing.
+        try:
+            with store.mutate(record.network_id, root or server.root) as current:
+                old_member = current.self_member()
+                if old_member is None or old_member.device_id != old.device_id:
+                    continue
+                old_member.previous_ids = [*old_member.previous_ids, old.device_id]
+                old_member.device_id = new.device_id
+                old_member.public_key = new.public_key
+                old_member.rotated_at = time.time()
+                current.self_device_id = new.device_id
+                store.save(current, root or server.root)
+        except FileNotFoundError:
+            # A network forgotten between the listing and the rewrite is not a
+            # reason to abandon the announcement to the others.
+            continue
     return {"sent": sent, "queued": queued}
 
 
@@ -2418,16 +2433,25 @@ class RelayServer:
         endpoints = self.advertised_endpoints()
         if not endpoints:
             return
+        # ONE NETWORK AT A TIME, under that record's own lock (``store.mutate``):
+        # this runs on the heartbeat, so it is one of the writers a peer's rotation
+        # or a membership pull can collide with, and the endpoints it writes are
+        # three lines of a record whose members and epoch those writers own.
         for record in store.list_networks(self.root):
-            member = record.member(self.identity.device_id)
-            if member is None or list(member.endpoints) == endpoints:
+            try:
+                with store.mutate(record.network_id, self.root) as current:
+                    member = current.member(self.identity.device_id)
+                    if member is None or list(member.endpoints) == endpoints:
+                        continue
+                    member.endpoints = list(endpoints)
+                    store.save(current, self.root)
+            except FileNotFoundError:
+                # A network the operator forgot while this loop was listing it: the
+                # row this would have written belongs to a record that is gone, and
+                # writing it back would resurrect it (``save`` creates the file).
                 continue
-            member.endpoints = list(endpoints)
-            store.save(record, self.root)
 
-    def _note_peer_endpoints(
-        self, record: NetworkRecord, device_id: str, endpoints: list[str]
-    ) -> None:
+    def _note_peer_endpoints(self, network_id: str, device_id: str, endpoints: list[str]) -> None:
         """Record where a peer says it can be reached, on its member row.
 
         THE ROW IS THE ONLY PLACE ``_ensure_link`` DIALS, so a declaration that
@@ -2436,16 +2460,27 @@ class RelayServer:
         otherwise have is the observed source address of the connection, whose
         port is ephemeral and closed by the time anything dials it, and writing
         that would be a worse lie than an honest empty list.
+
+        IT TAKES A NETWORK ID, NOT A RECORD, and that is the point: BOTH callers
+        arrive here holding a record they read across a completed handshake — a
+        round trip, milliseconds to seconds — so writing that copy back would revert
+        a rotation or a membership pull that landed while the handshake was in
+        flight. The read happens inside the lock instead, and a record that cannot be
+        reloaded is still not this connection's problem.
         """
         if not endpoints or not device_id:
             return
-        member = record.member(device_id)
-        if member is None or not member.active:
+        try:
+            with store.mutate(network_id, self.root) as record:
+                member = record.member(device_id)
+                if member is None or not member.active:
+                    return
+                if list(member.endpoints) == list(endpoints):
+                    return
+                member.endpoints = list(endpoints)
+                store.save(record, self.root)
+        except FileNotFoundError:
             return
-        if list(member.endpoints) == list(endpoints):
-            return
-        member.endpoints = list(endpoints)
-        store.save(record, self.root)
 
     # -- membership at rest, and the one read that keeps it current ---------
 
@@ -2508,21 +2543,27 @@ class RelayServer:
         if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
             return "bad_answer"
         rows = detail["members"]
-        record = next(
+        listed = next(
             (item for item in store.list_networks(self.root) if item.network_id == link.network_id),
             None,
         )
-        if record is None:
+        if listed is None:
             return "unknown_network"
         # STAMPED BEFORE THE MERGE, and stamped on an answer that changed nothing:
         # the stamp is evidence that this peer's TABLE answered, not that its table
         # differed, and the reporting surfaces read it as exactly that.
         link.member_pulled_at = time.time()
-        changed, added = adopt_members(record, rows)
-        link.member_pull_added = list(added)
-        if not changed:
-            return ""
-        store.save(record, self.root)
+        # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
+        # the lock: ``adopt_members`` merges INTO the record it is handed, so a
+        # rotation applied between the pull's answer arriving and this write would
+        # be merged away — reverted on disk, with the higher sequence ``save``
+        # stamps hiding it.
+        with store.mutate(listed.network_id, self.root) as record:
+            changed, added = adopt_members(record, rows)
+            link.member_pull_added = list(added)
+            if not changed:
+                return ""
+            store.save(record, self.root)
         self.audit.record(
             AuditEvent(
                 event="membership_learned",
@@ -2874,8 +2915,12 @@ class RelayServer:
                 # it can only be reached by a peer able to NAME the invite id — which
                 # lives in the token and in this device's own record and in no audit
                 # record — i.e. by the leak this rule is for.
-                with self._invite_lock:
-                    joined = store.load(network_id, self.root)
+                # ``_invite_lock`` serialises the two invite flows against each
+                # other; ``store.mutate`` serialises this record's writers. Both are
+                # needed and neither implies the other: the claim below is a
+                # read-modify-write of an invite row on a record the heartbeat and
+                # the membership loop are writing at the same time.
+                with self._invite_lock, store.mutate(network_id, self.root) as joined:
                     invite_id = str(handshake.join_block.get("invite_id") or "")
                     try:
                         claim_or_consume(
@@ -2904,8 +2949,7 @@ class RelayServer:
                 # earliest moment at which `redeemed` means what it says. Re-checked
                 # rather than assumed — a challenge round trip has happened since
                 # the read above, and the record on disk is the authority.
-                with self._invite_lock:
-                    joined = store.load(network_id, self.root)
+                with self._invite_lock, store.mutate(network_id, self.root) as joined:
                     try:
                         claim_or_consume(
                             joined,
@@ -3069,21 +3113,16 @@ class RelayServer:
         #
         # A RECORD THAT CANNOT BE RELOADED IS NOT AN ERROR HERE: the link is
         # already established and useful, and losing the address hint costs a
-        # future dial attempt, not this connection.
-        record = next(
-            (
-                item
-                for item in store.list_networks(self.root)
-                if item.network_id == result.network_id
-            ),
-            None,
+        # future dial attempt, not this connection. Both helpers take the network id
+        # and re-read inside the record's lock, which is what makes that tolerance
+        # safe to hand them rather than this method's own copy of the record.
+        self._note_peer_endpoints(
+            result.network_id, result.peer_device_id, handshake.peer_endpoints
         )
-        if record is not None:
-            self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
-            # The LISTENER's half of "a completed handshake clears the refusal mark":
-            # this device did not dial, so nothing else here would notice that a peer
-            # is talking to it again (see `_clear_refusal_mark`).
-            self._clear_refusal_mark(record)
+        # The LISTENER's half of "a completed handshake clears the refusal mark":
+        # this device did not dial, so nothing else here would notice that a peer
+        # is talking to it again (see `_clear_refusal_mark`).
+        self._clear_refusal_mark(result.network_id)
         self.audit.record(
             AuditEvent(
                 event="link_opened",
@@ -3122,14 +3161,24 @@ class RelayServer:
             )
         )
         for record in store.list_networks(self.root):
-            member = record.member(device_id)
-            if member is None:
+            # The duplicate counters are read-modify-write like every other row
+            # edit, so the read is inside the lock: this runs on the accept and
+            # link threads while the heartbeat and the membership loop write the
+            # same record.
+            try:
+                with store.mutate(record.network_id, self.root) as current:
+                    member = current.member(device_id)
+                    if member is None:
+                        continue
+                    member.duplicate_count += 1
+                    member.last_seen_instance = instance_id
+                    if self.identity_use.recent_instance_count(device_id) >= 3:
+                        member.suspect = True
+                    store.save(current, self.root)
+            except FileNotFoundError:
+                # Forgotten while this thread listed it. A counter for a network that
+                # no longer exists is not worth resurrecting the file for.
                 continue
-            member.duplicate_count += 1
-            member.last_seen_instance = instance_id
-            if self.identity_use.recent_instance_count(device_id) >= 3:
-                member.suspect = True
-            store.save(record, self.root)
 
     def link_closed(self, link: PeerLink, reason: str) -> None:
         with self._links_lock:
@@ -3571,61 +3620,70 @@ class RelayServer:
 
     def _op_epoch(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Apply a rotation from a peer, with the deterministic conflict rules."""
-        record = self.store_view.network(link.network_id)
-        if record is None:
+        if self.store_view.network(link.network_id) is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
-        state = store.require_secrets(record.network_id, self.root)
+        state = store.require_secrets(link.network_id, self.root)
         incoming = int(frame.get("epoch") or 0)
-        if incoming == record.epoch and str(frame.get("rotation_id") or "") != record.rotations.get(
-            str(record.epoch), ""
-        ):
-            # THE CONCURRENT-ROTATION RULE: same epoch, different rotator. The
-            # receiver refuses, audits the conflict, and answers with its own state
-            # so the sender learns it lost the race. Convergence comes from the
-            # lowest-id rule when both frames arrive before either is applied.
-            self.audit.record(
-                AuditEvent(
-                    event="epoch_conflict",
-                    actor=link.device_id,
-                    subject=record.network_id,
-                    network_id=record.network_id,
-                    epoch=incoming,
-                    outcome="refused",
-                    cause="epoch_stale",
-                    detail={
-                        "epoch": incoming,
-                        "rotation_id": str(frame.get("rotation_id") or ""),
-                        "winner": record.rotations.get(str(record.epoch), ""),
-                    },
+        # THE DECISION AND THE APPLY ARE ONE READ-MODIFY-WRITE. Which branch this
+        # takes is read off the record, and the applied branch rewrites the very
+        # fields that decision read — the epoch, the member list, the rotation — so
+        # the record the comparison is made against must be the one being replaced.
+        # A decision taken on a snapshot would let this device answer "stale refus"
+        # for an epoch it has just written, or apply a rotation on top of a record
+        # that moved in between.
+        with store.mutate(link.network_id, self.root) as record:
+            if incoming == record.epoch and str(
+                frame.get("rotation_id") or ""
+            ) != record.rotations.get(str(record.epoch), ""):
+                # THE CONCURRENT-ROTATION RULE: same epoch, different rotator. The
+                # receiver refuses, audits the conflict, and answers with its own state
+                # so the sender learns it lost the race. Convergence comes from the
+                # lowest-id rule when both frames arrive before either is applied.
+                self.audit.record(
+                    AuditEvent(
+                        event="epoch_conflict",
+                        actor=link.device_id,
+                        subject=record.network_id,
+                        network_id=record.network_id,
+                        epoch=incoming,
+                        outcome="refused",
+                        cause="epoch_stale",
+                        detail={
+                            "epoch": incoming,
+                            "rotation_id": str(frame.get("rotation_id") or ""),
+                            "winner": record.rotations.get(str(record.epoch), ""),
+                        },
+                    )
                 )
-            )
-            self._queue_epoch_for(link.device_id, record, state, reason="epoch_conflict")
-            return {
-                "op": "ack",
-                "req": frame.get("req"),
-                "detail": {
-                    "epoch": record.epoch,
-                    "rotation_id": record.rotations.get(str(record.epoch), ""),
-                },
-            }
-        outcome = apply_epoch(record, state, frame, sender_device_id=link.device_id, root=self.root)
-        if outcome.applied:
-            self.audit.record(
-                AuditEvent(
-                    event="epoch_rotated",
-                    actor=link.device_id,
-                    subject=record.network_id,
-                    network_id=record.network_id,
-                    epoch=record.epoch,
-                    detail={
-                        "epoch_before": state.previous_epoch,
-                        "epoch_after": record.epoch,
+                self._queue_epoch_for(link.device_id, record, state, reason="epoch_conflict")
+                return {
+                    "op": "ack",
+                    "req": frame.get("req"),
+                    "detail": {
+                        "epoch": record.epoch,
                         "rotation_id": record.rotations.get(str(record.epoch), ""),
-                        "removed": list(frame.get("removed") or []),
                     },
-                )
+                }
+            outcome = apply_epoch(
+                record, state, frame, sender_device_id=link.device_id, root=self.root
             )
-            self._rehandshake_network(record.network_id, reason="epoch_stale")
+            if outcome.applied:
+                self.audit.record(
+                    AuditEvent(
+                        event="epoch_rotated",
+                        actor=link.device_id,
+                        subject=record.network_id,
+                        network_id=record.network_id,
+                        epoch=record.epoch,
+                        detail={
+                            "epoch_before": state.previous_epoch,
+                            "epoch_after": record.epoch,
+                            "rotation_id": record.rotations.get(str(record.epoch), ""),
+                            "removed": list(frame.get("removed") or []),
+                        },
+                    )
+                )
+                self._rehandshake_network(record.network_id, reason="epoch_stale")
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -3724,30 +3782,43 @@ class RelayServer:
         if record is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
         state = store.require_secrets(record.network_id, self.root)
-        leave(record, device_id=link.device_id, root=self.root)
-        self.audit.record(
-            AuditEvent(
-                event="member_left",
-                actor=link.device_id,
-                subject=record.network_id,
-                network_id=record.network_id,
-                epoch=record.epoch,
-                detail={"epoch": record.epoch},
+        # THE TOMBSTONE AND THE ROTATION ARE ONE READ-MODIFY-WRITE of this record,
+        # so both read inside the lock: both are computed from the member table,
+        # which the heartbeat, a membership pull and a peer's rotation all write.
+        # A leave landing on a pre-write snapshot would revert whatever they wrote
+        # in the same second — and the tombstone is the sentence that has to
+        # survive, because "the very next handshake from that device fails" is only
+        # true while the row it names is still on disk.
+        outcome = None
+        with store.mutate(link.network_id, self.root) as record:
+            leave(record, device_id=link.device_id, root=self.root)
+            self.audit.record(
+                AuditEvent(
+                    event="member_left",
+                    actor=link.device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={"epoch": record.epoch},
+                )
             )
-        )
-        rotator = lowest_id_admin(record)
-        if rotator == record.self_device_id:
-            outcome = rotate_epoch(
-                record, state, by=record.self_device_id, reason="member_left", root=self.root
-            )
+            rotator = lowest_id_admin(record)
+            if rotator == record.self_device_id:
+                outcome = rotate_epoch(
+                    record, state, by=record.self_device_id, reason="member_left", root=self.root
+                )
+        if outcome is not None:
             self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
         return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
 
     def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self.store_view.network(link.network_id)
-        if record is None:
+        if self.store_view.network(link.network_id) is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
-        apply_panic(record, frame, sender_device_id=link.device_id, root=self.root)
+        # A panic rewrites trust, and an admin sender's panic rotates the epoch and
+        # the secret: the read is inside the lock so the alarm is not written back
+        # over a record that moved underneath it.
+        with store.mutate(link.network_id, self.root) as record:
+            apply_panic(record, frame, sender_device_id=link.device_id, root=self.root)
         self.audit.record(
             AuditEvent(
                 event="panic_received",
@@ -3774,11 +3845,13 @@ class RelayServer:
         return {"op": "ack", "req": frame.get("req"), "detail": "untrusted"}
 
     def _op_trust(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self.store_view.network(link.network_id)
-        if record is None:
+        if self.store_view.network(link.network_id) is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
         trust = trust_state(frame.get("trust") or "active")
-        set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
+        # ``set_trust`` is an in-place edit of the whole record, so it reads and
+        # writes inside the lock.
+        with store.mutate(link.network_id, self.root) as record:
+            set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
         return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
 
     def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
@@ -3788,7 +3861,11 @@ class RelayServer:
         statement = frame.get("statement")
         if not isinstance(statement, dict):
             raise MeshRefusal("bad_rotation_statement", "no rotation statement was carried")
-        member = apply_device_rotation(record, statement, root=self.root)
+        # The member row is rewritten in place: read and write inside the lock, so
+        # a membership pull that admitted somebody in the same second is not
+        # reverted by this one-row edit.
+        with store.mutate(link.network_id, self.root) as record:
+            member = apply_device_rotation(record, statement, root=self.root)
         self.audit.record(
             AuditEvent(
                 event="device_rotated",
@@ -5028,25 +5105,46 @@ class RelayServer:
                         "was admitted"
                     ),
                 )
-            member_row = admit(
-                record,
-                device_id=joiner_id,
-                public_key=joiner_key,
-                name=joiner_name,
-                role=_invite_role(record, invite_id),
-                capabilities=sorted(_invite_capabilities(record, invite_id)),
-                added_by=record.self_device_id,
-                added_via="invite",
-                # What the JOINER declared about itself in its hello, falling back
-                # to the observed source address only when it declared nothing.
-                # The observed address is an ephemeral port, so it is a last
-                # resort: it is why every paired peer used to be unreachable the
-                # moment the pairing link closed (QA round 1, F-2).
-                endpoints=list(handshake.peer_endpoints) or [peer_addr],
-                root=self.root,
-            )
-            consume(record, invite_id, outcome="admitted")
-            store.save(record, self.root)
+            # THE ADMISSION RE-READS THE RECORD. This is the widest read-modify-write
+            # in the package: everything above waited on the JOINER's round trip and
+            # then on a HUMAN, so the record this method holds is older than anything
+            # the heartbeat, a membership pull or a peer's rotation wrote while the two
+            # people were reading their codes — and ``admit`` plus ``consume`` rewrite
+            # the member table and the invite row, so writing this copy back reverted
+            # all of it. The read happens inside the lock, and the checks are made
+            # against THAT read: "the record on disk is the authority" is this
+            # package's own rule for a re-read after a wait (the join path states it),
+            # and the single-use token is RE-CHECKED because a second joiner reaches
+            # this line with the same invite when an operator confirms twice. The
+            # conflict rule needs no re-check here: :func:`admit` applies it first
+            # thing on the record it is handed, which is exactly why the pre-check
+            # above can be a courtesy to the humans rather than a guard.
+            with store.mutate(result.network_id, self.root) as record:
+                if not acquire_invite(record, invite_id):
+                    raise PairingRefusal(
+                        REASON_USED,
+                        "that invite has already been used; mint a new one to admit another "
+                        "device",
+                    )
+                member_row = admit(
+                    record,
+                    device_id=joiner_id,
+                    public_key=joiner_key,
+                    name=joiner_name,
+                    role=_invite_role(record, invite_id),
+                    capabilities=sorted(_invite_capabilities(record, invite_id)),
+                    added_by=record.self_device_id,
+                    added_via="invite",
+                    # What the JOINER declared about itself in its hello, falling back
+                    # to the observed source address only when it declared nothing.
+                    # The observed address is an ephemeral port, so it is a last
+                    # resort: it is why every paired peer used to be unreachable the
+                    # moment the pairing link closed (QA round 1, F-2).
+                    endpoints=list(handshake.peer_endpoints) or [peer_addr],
+                    root=self.root,
+                )
+                consume(record, invite_id, outcome="admitted")
+                store.save(record, self.root)
             state = store.require_secrets(result.network_id, self.root)
             frame = pair_result_frame(
                 # The joiner's correlation id, echoed so it can match this answer
@@ -5116,9 +5214,19 @@ class RelayServer:
         except (MeshRefusal, wire.LinkCryptoError, OSError) as exc:
             reason = getattr(exc, "code", "error")
             try:
-                if record is not None and acquire_invite(record, invite_id):
-                    consume(record, invite_id, outcome=reason)
-                    store.save(record, self.root)
+                # THE REFUSAL'S CONSUME RE-READS TOO, for the same reason the
+                # admission does: this handler runs after the human step and after the
+                # SAS check, so the copy it used to write back predated every write
+                # those seconds allowed — including another flow's consume of this
+                # same invite. A record that has since been forgotten is not a reason
+                # to lose the abort frame below.
+                try:
+                    with store.mutate(result.network_id, self.root) as current:
+                        if acquire_invite(current, invite_id):
+                            consume(current, invite_id, outcome=reason)
+                            store.save(current, self.root)
+                except FileNotFoundError:
+                    pass
                 # THE REFUSING DEVICE'S OWN SENTENCE GOES WITH THE CODE. It is the
                 # only place the joiner can learn WHICH id was refused and what to do
                 # about it: `device_id_conflict` alone is a dead end, and this is the
@@ -5339,13 +5447,17 @@ class RelayServer:
             link.start()
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
-            self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
+            # ``record`` was read before this handshake and is only an id source now:
+            # a round trip has happened since, so the write re-reads inside the lock.
+            self._note_peer_endpoints(
+                record.network_id, result.peer_device_id, handshake.peer_endpoints
+            )
             # CONTACT RE-EVALUATES MEMBERSHIP (§8.4). A link is the one moment both
             # ends are known to be up, and the member table is a distributed fact
             # the local record can hold a stale snapshot of (Q-R2-1). The stamp on
             # the link is what `refresh_membership` reads to decide what is due.
             self._pull_members(link)
-            self._clear_refusal_mark(record)
+            self._clear_refusal_mark(record.network_id)
             return link, "ok"
         except MeshRefusal as refusal:
             _close_quietly(sock)
@@ -5353,10 +5465,10 @@ class RelayServer:
             return None, refusal.code
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
-            self._note_refused_handshake(record, host, mode)
+            self._note_refused_handshake(record.network_id, host, mode)
             return None, f"handshake_refused:{exc.__class__.__name__}"
 
-    def _clear_refusal_mark(self, record: NetworkRecord) -> None:
+    def _clear_refusal_mark(self, network_id: str) -> None:
         """A COMPLETED handshake clears a ``refused_by_peers`` mark.
 
         The mark says "peers refused this device"; the moment a peer accepts it,
@@ -5365,13 +5477,21 @@ class RelayServer:
         a state nobody re-checked (Q-R2-6). The refusal path sets it
         (:meth:`_note_refused_handshake`) and every successful handshake, in either
         direction, clears it here: one writer for each transition.
-        """
-        if record.stale != "refused_by_peers":
-            return
-        record.stale = ""
-        store.save(record, self.root)
 
-    def _note_refused_handshake(self, record: NetworkRecord, host: str, mode: str) -> None:
+        Like :meth:`_note_peer_endpoints` it takes the ID rather than the caller's
+        record, because both callers hold theirs across a completed handshake and
+        the mark is one field of a record other writers are editing.
+        """
+        try:
+            with store.mutate(network_id, self.root) as record:
+                if record.stale != "refused_by_peers":
+                    return
+                record.stale = ""
+                store.save(record, self.root)
+        except FileNotFoundError:
+            return
+
+    def _note_refused_handshake(self, network_id: str, host: str, mode: str) -> None:
         """Name a peer's SILENT refusal of this device's handshake, LOCALLY.
 
         THE REFUSAL IS SILENT BY DESIGN AND THAT LEFT THIS DEVICE WITHOUT A CLUE. A
@@ -5415,7 +5535,7 @@ class RelayServer:
                 actor="unknown",
                 subject=host,
                 outcome="refused",
-                network_id=record.network_id,
+                network_id=network_id,
                 cause="auth_failed",
                 detail={
                     "cause": "peer_closed_silently",
@@ -5424,9 +5544,13 @@ class RelayServer:
                 },
             )
         )
-        if record.stale != "refused_by_peers":
-            record.stale = "refused_by_peers"
-            store.save(record, self.root)
+        try:
+            with store.mutate(network_id, self.root) as record:
+                if record.stale != "refused_by_peers":
+                    record.stale = "refused_by_peers"
+                    store.save(record, self.root)
+        except FileNotFoundError:
+            return
 
     def _rehandshake_network(self, network_id: str, *, reason: str) -> None:
         """Close and redial every live link at the new epoch.
@@ -5626,19 +5750,25 @@ class RelayServer:
         ]
 
     def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self._require_network(str(frame.get("network") or ""))
-        state = store.require_secrets(record.network_id, self.root)
-        minted: MintedInvite = mint_invite(
-            record,
-            state.secret,
-            role=str(frame.get("role") or "read"),
-            ttl_s=float(frame.get("ttl_s") or 600.0),
-            hosts=[str(host) for host in frame.get("hosts") or []] or None,
-            device_id=str(frame.get("device_id") or ""),
-        )
-        record.invites.append(minted.record)
-        store.save(record, self.root)
-        path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
+        # ``_require_network`` resolves a name to an id and answers the refusal;
+        # the record it returns is not the one this WRITES. Minting appends an
+        # invite row to a record the heartbeat, the membership loop and a peer's
+        # rotation all write, so the read is inside the lock: minting from a
+        # snapshot would revert whatever they wrote in between.
+        resolved = self._require_network(str(frame.get("network") or ""))
+        with store.mutate(resolved.network_id, self.root) as record:
+            state = store.require_secrets(record.network_id, self.root)
+            minted: MintedInvite = mint_invite(
+                record,
+                state.secret,
+                role=str(frame.get("role") or "read"),
+                ttl_s=float(frame.get("ttl_s") or 600.0),
+                hosts=[str(host) for host in frame.get("hosts") or []] or None,
+                device_id=str(frame.get("device_id") or ""),
+            )
+            record.invites.append(minted.record)
+            store.save(record, self.root)
+            path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
         self.audit.record(
             AuditEvent(
                 event="invite_minted",
@@ -5667,26 +5797,31 @@ class RelayServer:
         }
 
     def _ctl_member_rm(self, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self._require_network(str(frame.get("network") or ""))
-        state = store.require_secrets(record.network_id, self.root)
+        # ``_require_network`` resolves the name and answers the refusal; the record
+        # it returns is not the one this WRITES. The tombstone and the rotation it
+        # triggers are one read-modify-write of the member table, so they read
+        # inside the lock (see ``_op_leave`` for why that ordering is load-bearing).
+        resolved = self._require_network(str(frame.get("network") or ""))
+        state = store.require_secrets(resolved.network_id, self.root)
         device_id = str(frame.get("device_id") or "")
-        outcome = remove_member(
-            record, state, device_id=device_id, by=record.self_device_id, root=self.root
-        )
-        self.audit.record(
-            AuditEvent(
-                event="member_removed",
-                actor=record.self_device_id,
-                subject=device_id,
-                network_id=record.network_id,
-                epoch=outcome.epoch,
-                detail={
-                    "initiated_by": record.self_device_id,
-                    "rekeyed": True,
-                    "epoch_after": outcome.epoch,
-                },
+        with store.mutate(resolved.network_id, self.root) as record:
+            outcome = remove_member(
+                record, state, device_id=device_id, by=record.self_device_id, root=self.root
             )
-        )
+            self.audit.record(
+                AuditEvent(
+                    event="member_removed",
+                    actor=record.self_device_id,
+                    subject=device_id,
+                    network_id=record.network_id,
+                    epoch=outcome.epoch,
+                    detail={
+                        "initiated_by": record.self_device_id,
+                        "rekeyed": True,
+                        "epoch_after": outcome.epoch,
+                    },
+                )
+            )
         self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
         self._rehandshake_network(record.network_id, reason="epoch_stale")
         return {
@@ -5697,24 +5832,28 @@ class RelayServer:
         }
 
     def _ctl_trust(self, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self._require_network(str(frame.get("network") or ""))
-        before = record.trust
-        set_trust(
-            record,
-            trust=trust_state(frame.get("trust") or "active"),
-            reason=str(frame.get("reason") or "operator"),
-            root=self.root,
-        )
-        self.audit.record(
-            AuditEvent(
-                event="trust_changed",
-                actor=record.self_device_id,
-                subject=record.network_id,
-                network_id=record.network_id,
-                epoch=record.epoch,
-                detail={"from": before, "to": record.trust, "reason": "operator"},
+        resolved = self._require_network(str(frame.get("network") or ""))
+        # ``set_trust`` rewrites the whole record from the object it is handed, and
+        # the audit's ``from`` has to be the value the write replaced, so both are
+        # read inside the same block as the write.
+        with store.mutate(resolved.network_id, self.root) as record:
+            before = record.trust
+            set_trust(
+                record,
+                trust=trust_state(frame.get("trust") or "active"),
+                reason=str(frame.get("reason") or "operator"),
+                root=self.root,
             )
-        )
+            self.audit.record(
+                AuditEvent(
+                    event="trust_changed",
+                    actor=record.self_device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={"from": before, "to": record.trust, "reason": "operator"},
+                )
+            )
         return {"network_id": record.network_id, "trust": record.trust}
 
     def _ctl_pair_pending(self, _frame: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5766,32 +5905,36 @@ class RelayServer:
         }
 
     def _ctl_panic(self, frame: dict[str, Any]) -> dict[str, Any]:
-        record = self._require_network(str(frame.get("network") or ""))
-        state = store.require_secrets(record.network_id, self.root)
-        member = record.self_member()
-        is_admin = bool(member and "admin" in member.capabilities)
-        outbound = panic(
-            record,
-            state,
-            by=record.self_device_id,
-            is_admin=is_admin,
-            reason=str(frame.get("reason") or "operator_panic"),
-            root=self.root,
-        )
-        self.audit.record(
-            AuditEvent(
-                event="panic_raised",
-                actor=record.self_device_id,
-                subject=record.network_id,
-                network_id=record.network_id,
-                epoch=record.epoch,
-                detail={
-                    "epoch_before": record.epoch - (1 if is_admin else 0),
-                    "epoch_after": record.epoch,
-                    "reachable_peers": len(self.links),
-                },
+        # The panic's own read-modify-write: an admin's panic rotates the epoch and
+        # the secret, so the read is inside the lock. The broadcast that follows it
+        # stays outside, because a socket send is not part of the record's state.
+        resolved = self._require_network(str(frame.get("network") or ""))
+        state = store.require_secrets(resolved.network_id, self.root)
+        with store.mutate(resolved.network_id, self.root) as record:
+            member = record.self_member()
+            is_admin = bool(member and "admin" in member.capabilities)
+            outbound = panic(
+                record,
+                state,
+                by=record.self_device_id,
+                is_admin=is_admin,
+                reason=str(frame.get("reason") or "operator_panic"),
+                root=self.root,
             )
-        )
+            self.audit.record(
+                AuditEvent(
+                    event="panic_raised",
+                    actor=record.self_device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={
+                        "epoch_before": record.epoch - (1 if is_admin else 0),
+                        "epoch_after": record.epoch,
+                        "reachable_peers": len(self.links),
+                    },
+                )
+            )
         # PANIC KEEPS ITS BROADCAST BEHAVIOUR: the frame carries the new secret to
         # every reachable peer.
         delivered = 0
@@ -5801,12 +5944,16 @@ class RelayServer:
         for link in list(self.links.values()):
             if link.network_id == record.network_id:
                 link.close("we-closed")
-        set_trust(
-            record,
-            trust="untrusted",
-            reason="this device raised a panic",
-            root=self.root,
-        )
+        # A SECOND block, not one held across the broadcast: this write is an edit
+        # of the trust field alone, and it re-reads (so it cannot revert anything
+        # the rotation above, or another writer, put on disk meanwhile).
+        with store.mutate(resolved.network_id, self.root) as record:
+            set_trust(
+                record,
+                trust="untrusted",
+                reason="this device raised a panic",
+                root=self.root,
+            )
         return {
             "network_id": record.network_id,
             "epoch": record.epoch,
@@ -5822,38 +5969,43 @@ class RelayServer:
         reason to trust the device less; it is a reason to stop it being able to
         read new traffic, which the peers' rotation handles.
         """
-        record = self._require_network(str(frame.get("network") or ""))
+        # The record is kept across a disconnect (the operator must still see what
+        # happened), and the trust write lands on WHATEVER the record now is: the
+        # sends below are addressed from this resolved copy, and the write re-reads
+        # inside the lock rather than writing that copy back.
+        resolved = self._require_network(str(frame.get("network") or ""))
         reachable = 0
         for link in list(self.links.values()):
-            if link.network_id != record.network_id:
+            if link.network_id != resolved.network_id:
                 continue
             if link.send(
-                {"op": "net_leave", "network_id": record.network_id, "locality": "remote"}
+                {"op": "net_leave", "network_id": resolved.network_id, "locality": "remote"}
             ):
                 reachable += 1
         time.sleep(0.05)
         for link in list(self.links.values()):
-            if link.network_id == record.network_id:
+            if link.network_id == resolved.network_id:
                 link.close("we-closed")
-        secrets_file = store.secrets_path(record.network_id, self.root)
+        secrets_file = store.secrets_path(resolved.network_id, self.root)
         if secrets_file.exists():
             secrets_file.unlink()
-        set_trust(
-            record,
-            trust="disconnected",
-            reason="this device disconnected",
-            root=self.root,
-        )
-        self.audit.record(
-            AuditEvent(
-                event="disconnect_initiated",
-                actor=record.self_device_id,
-                subject=record.network_id,
-                network_id=record.network_id,
-                epoch=record.epoch,
-                detail={"epoch": record.epoch, "reachable_peers": reachable},
+        with store.mutate(resolved.network_id, self.root) as record:
+            set_trust(
+                record,
+                trust="disconnected",
+                reason="this device disconnected",
+                root=self.root,
             )
-        )
+            self.audit.record(
+                AuditEvent(
+                    event="disconnect_initiated",
+                    actor=record.self_device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={"epoch": record.epoch, "reachable_peers": reachable},
+                )
+            )
         return {
             "network_id": record.network_id,
             "reachable_peers": reachable,
