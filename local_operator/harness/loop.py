@@ -1999,12 +1999,25 @@ class AgentLoop:
                     # child's todo allowance, and a child with open todos was cut
                     # off after eight of them.
                     #
-                    # The source of the BATCH is taken from its first tagged
-                    # entry. A batch can mix producers in principle only when two
-                    # drains fire in the same yield; the follow-up drain latches on
-                    # a moving list, so the mixed case is the follow-up one and the
-                    # charge follows the producer that will keep it alive.
-                    source = late[0][0]
+                    # A batch can MIX producers: two drains fire in the same
+                    # yield. The charge must follow the producer whose budget
+                    # actually bounds this re-entry, or the fix re-opens the
+                    # defect it closes. Taking ``late[0][0]`` charged an
+                    # aside+still-moving-follow-up batch to the 8-budget (the
+                    # collector appends steering, then asides, then follow-ups),
+                    # so a parent's hub note could STILL spend a child's todo
+                    # allowance (review MAJOR-1, reproduced: a cut-off on the
+                    # aside budget with todos still moving). A FOLLOW-UP in the
+                    # batch WINS, because the follow-up producer is the one that
+                    # keeps the run alive and is charged the larger budget; only
+                    # a pipeline with no follow-up (steering and/or asides, both
+                    # new instructions that are not self-limiting) charges the
+                    # bounded steering/aside budget.
+                    source = (
+                        "follow-up"
+                        if any(tag == "follow-up" for tag, _ in late)
+                        else late[0][0]
+                    )
                     budget = (
                         config.max_follow_up_continuations
                         if source == "follow-up"
@@ -2022,10 +2035,19 @@ class AgentLoop:
                             budget,
                             source,
                         )
+                        # COPY IS USER-FACING and must be TRUE: the old
+                        # sentence named an internal budget and producer tag
+                        # ("(8, aside)") a reader cannot act on, and claimed
+                        # "work is still queued" when the code DISCARDS this
+                        # batch (``_discard_pending_custom`` below, which fails
+                        # an aside's question with "withdrawn unasked"). Say what
+                        # happened and what it means, in words that do not
+                        # depend on knowing the loop's vocabulary.
                         yield NoticeEvent(
                             text=(
-                                f"Continuation limit reached ({budget}, {source}); "
-                                "work is still queued — stopping."
+                                "This turn was stopped because it kept being asked to "
+                                "keep going; the pending message was dropped. Reply with "
+                                "what to do next."
                             ),
                             kind="warning",
                         )
