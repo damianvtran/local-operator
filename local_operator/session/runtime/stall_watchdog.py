@@ -2203,8 +2203,21 @@ def _extend_for_execution(armed: "_Armed", now: float, moved: "tuple[str, ...]")
         # BEFORE the re-arm, because the re-arm reads it back through ``deadline()``.
         armed.executing_at[plane] = now
     try:
-        faulthandler.dump_traceback_later(
-            max(MIN_REARM_S, armed.deadline() - now), file=armed.handle, exit=True
+        # THROUGH ``_arm_timer``, SO THE EXIT LEG IS THE ONE THIS ARM HOLDS (agent review
+        # round 3, BLOCKER). This site spelled ``exit=True`` itself and was the only one
+        # of the four that bypassed the single spelling — which :func:`_arm_timer`'s
+        # docstring forbids, and on which this module's own claim ("the timer is armed
+        # with ``exit=`` answered at every re-arm") depends. The reachable case is
+        # exactly the one the fold exists for: the loop is EXECUTING while its tick is
+        # starved, i.e. work is in flight — so a fatal arm here ends the runtime the
+        # bound is supposed to leave alive. Measured on the reviewer's real-child
+        # counterfactual: this site armed fatally nine times, rc=1 with fires=1 and
+        # markers=0 (killed, so ``held_fire`` was False and the verdict narrated "ended
+        # ITSELF"); with the flag taken from the arm, rc=0 with fires=9 and markers=9.
+        _arm_timer(
+            armed.handle,
+            max(MIN_REARM_S, armed.deadline() - now),
+            exit_leg=not armed.held,
         )
     except (OSError, ValueError, RuntimeError):
         # A re-arm that cannot happen leaves the timer on its previous deadline, which
