@@ -113,6 +113,14 @@ _AMBIENT_VARS = (
     # suite would take the allow path while looking like it tested the refusal.
     # Tests that need it set it explicitly.
     "LOCAL_OPERATOR_AGENT_MAY_DELEGATE",
+    # The session's own scratchpad root, exported to the `bash` child and the
+    # `eval` worker in the same three arms as the allowance above (set / cleared
+    # / omitted). It names a real machine resource — a directory inside ONE
+    # session's store — so an inherited value would have the suite's children
+    # writing into whichever session happened to launch pytest, and the OMITTED
+    # arm would be untestable because the writer's presence test would see a
+    # name it never set. Tests that need an arm set it explicitly.
+    "LOCAL_OPERATOR_SCRATCHPAD",
     # The escape that waives the test-hosting rule, so a suite whose subject is a
     # notification frame can observe one (it answers "not a test session", and
     # the process kill switch still wins). An inherited value is the
@@ -228,6 +236,22 @@ _AMBIENT_VARS = (
     # "redirectable anchor path" the design forbids, and the suite should not
     # inherit one either.
     "PROGRAMDATA",
+    # The three package-manager config dirs the mobile installer reads to work out
+    # where pnpm and corepack keep what they manage for THEMSELVES
+    # (`mobile/install.py`'s `_pnpm_home`/`_corepack_home`, which the fetch guard
+    # resolves through before it refuses a tree it could build in). Each NAMES A
+    # REAL-MACHINE RESOURCE and each STEERS BEHAVIOUR: an inherited `PNPM_HOME`
+    # moves both pnpm's tools directory — the one the guard reads to recognise a
+    # seeded pin — and the content-addressable store every install on the machine
+    # shares through hard links; `XDG_DATA_HOME` moves those two through pnpm's
+    # own fallback order; `COREPACK_HOME` moves the cache a corepack fetch writes
+    # into. A suite that inherited any of them would have its children resolving
+    # against, and writing to, whatever the developer's shell happened to name.
+    # Safe for the tests that exercise these homes: they set them with
+    # `monkeypatch.setenv` or stub the resolver, never inherit one.
+    "PNPM_HOME",
+    "XDG_DATA_HOME",
+    "COREPACK_HOME",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real

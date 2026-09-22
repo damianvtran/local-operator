@@ -32,8 +32,9 @@ from typing import Any
 import pytest
 
 from local_operator import update
+from local_operator.incidents import STALL_BOUND_CAUSE
 from local_operator.session.attention import _classify_orphaned_run
-from local_operator.session.runtime import journal, registry
+from local_operator.session.runtime import journal, registry, stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
@@ -914,3 +915,72 @@ def _rendered_text(session: Any) -> str:
             if text:
                 parts.append(str(text))
     return "\n".join(parts)
+
+
+def test_a_fired_stall_bound_is_narrated_as_its_own_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE BOUND'S EXIT HAS A CLASS, and it is read off the bound's own dump.
+
+    The defect this closes, measured on this fleet on 2026-09-21: a peer session
+    (pid 4698) was ended by the stall bound, its dump was on disk, and its death
+    was narrated as ``unattributed`` — which is the taxonomy's word for "no act
+    was recorded". That is the worst of the three possible readings, because it
+    is not "we could not tell" but "the instrument knew and did not say so"; a
+    bound that fires and cannot name itself is indistinguishable to the next
+    reader from one that never fired.
+
+    THE DUMP IS THE ONLY PLACE THE CLASS CAN COME FROM. ``faulthandler`` reaches
+    its timer from a C thread and calls ``_exit(1)`` there, so no exit hook, no
+    journal write and no reaper runs after a fire. That is why the rung reads the
+    artifact rather than a record — and why it sits ABOVE every other rung: it is
+    written at the instant of death, later than anything the row itself says.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _session_directory(tmp_path, "sess-stall")
+    writer = journal.TurnJournal(directory, "sess-stall", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn(command_id="cmd-stall")
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+
+    dump = stall_watchdog.dump_path(row.pid)
+    dump.parent.mkdir(parents=True, exist_ok=True)
+
+    # (a) A HEADER-ONLY FILE IS NOT A FIRE — the hard-death shape, which must keep
+    # reaching the arm that says no act was recorded.
+    dump.write_text("[stall watchdog] armed\n", encoding="utf-8")
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert cause != STALL_BOUND_CAUSE, reason
+
+    # (b) A FIRE, WITH THE PROGRESS LINE: the runtime was ended by the composite
+    # leg, and the detail says which one so a reader is not sent looking for a
+    # loop that never came back.
+    dump.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.PROGRESS_MARKER}{STALL_BOUND_CAUSE}: 300s of "
+        f"CPU with no progress\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n",
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert kind == "error"
+    assert cause == STALL_BOUND_CAUSE, cause
+    assert "ITSELF" in reason, reason
+    assert "stopped advancing" in reason, reason
+
+    # (c) A FIRE WITH NO PROGRESS LINE: the SILENCE leg, and the detail has to say
+    # so — the class is deliberately one token for both legs.
+    dump.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n",
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert cause == STALL_BOUND_CAUSE, cause
+    assert "no plane reported" in reason, reason
+
+    # (d) A DUMP OLDER THAN THIS TURN IS NOT THIS TURN'S. The file is keyed by pid
+    # alone, so a recycled pid would otherwise let another runtime's freeze be
+    # narrated as this row's death.
+    os.utime(dump, (row.started_at - 600, row.started_at - 600))
+    assert journal.death_verdict(row)[1] != STALL_BOUND_CAUSE

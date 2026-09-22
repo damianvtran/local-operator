@@ -118,7 +118,11 @@ from typing import Callable, Mapping
 
 from rich.cells import cell_len
 
-from local_operator.model.registry import STATIC_MODEL_HOSTINGS, static_models
+from local_operator.model.registry import (
+    AGGREGATOR_ROUTER_MODEL_IDS,
+    STATIC_MODEL_HOSTINGS,
+    static_models,
+)
 
 #: A trailing parenthesised qualifier: the release date or channel a curated
 #: name carries to separate two snapshots of one model — ``Claude Opus 4.5
@@ -142,6 +146,36 @@ _QUALIFIER = re.compile(r"\s*\([^()]*\)$")
 #: ``deepseek-v4-flash-0731`` (8). Rendered at every width from 120 down to 50,
 #: the margin costs ZERO segments: the worst case is two extra cells on one row.
 _ID_MARGIN = 4
+
+#: Display names for the ROUTER ids — the synthetic meta-models an aggregator
+#: serves whose id is a single word (``auto``) rather than a vendor-scoped slug.
+#:
+#: WHY THIS IS A NAMING RULE AND NOT A LISTING NAME. Every other id an
+#: aggregator serves is a model it RESELLS, and ``_unambiguous_name`` refuses a
+#: reseller's listing name on purpose: two aggregators carry the same 398 names
+#: and no listing name can say which route is answering. The router is the
+#: exception the refusal was never about — it is not resold, it is the route
+#: ITSELF, so it has a name of its own to state rather than one that has to say
+#: which vendor's weights are behind it. Stating it costs nothing and reads as a
+#: model rather than as a config keyword.
+#:
+#: TITLE CASE (``Auto``, not ``auto``) because this string heads the band's model
+#: segment beside other human names (``Claude Opus 5``, ``OpenAI GPT-5``); a
+#: lowercase ``auto`` there reads as the raw id it started from. The SELECTOR the
+#: rest of the app identifies the model by is unchanged — ``resolved_a_name``
+#: compares against ``provider/model_id``, and this only changes what the human
+#: form prints.
+#:
+#: GATED ON THE PROVIDER, and that is load-bearing rather than defensive. ``auto``
+#: is a router id ONLY behind an aggregator; on ``ollama/auto`` — or any local or
+#: vendor server a user happens to name ``auto`` — the same word is an ordinary
+#: model, and an id-only lookup renamed it (measured: ``ollama/auto`` went from
+#: rendering ``Ollama`` to rendering ``Auto``, and ``resolved_a_name`` flipped
+#: with it, which is a decision input to ``attached._restored_model_specs``'
+#: display-name adoption). This is the same provider gate
+#: ``discovery.is_meta_route_id`` applies, for the same reason, and the two must
+#: agree on what a router is.
+_ROUTER_NAMES: dict[str, str] = dict.fromkeys(AGGREGATOR_ROUTER_MODEL_IDS, "Auto")
 
 
 @dataclass(frozen=True)
@@ -211,7 +245,13 @@ def _model_label(provider: str, model_id: str, name: str) -> ModelLabel:
     # What the band's ``shorten-model`` rung showed before this module existed,
     # and still the floor it may never do much worse than — see _ID_MARGIN.
     bare_id = ident.rpartition("/")[2] or ident
-    chosen = _unambiguous_name(provider, model_id, ident, name)
+    # The router name is looked up ONLY on an aggregator hosting (``_resells``).
+    # ``auto`` is a router behind an aggregator and an ordinary model everywhere
+    # else (``ollama/auto``), so the id alone would rename a local model the
+    # user happened to name ``auto`` — the exact hazard ``discovery
+    # .is_meta_route_id`` is provider-scoped to avoid.
+    router_name = _ROUTER_NAMES.get(model_id) if _resells(provider) else None
+    chosen = router_name or _unambiguous_name(provider, model_id, ident, name)
     if not chosen:
         # No name anyone can vouch for: exactly the behaviour this segment had
         # before, selector and all.

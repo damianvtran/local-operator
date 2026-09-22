@@ -241,6 +241,35 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the ratchet stays tight; the tighten band below (1,200) is nowhere near
 #: tripped and the next context reduction tightens it.
 #:
+#: RAISED 30,025 -> 30,150 for the per-command memory guard's ``memory_mb``
+#: field (2026-09-21), stated with the same arithmetic the guard exists to
+#: force. The base — ``origin/main`` 40544beb, the tree the PR diffs against —
+#: measures 83,336 chars = ~29,977 billed on THIS machine, i.e. 48 tokens of
+#: headroom; a ``BashParams`` field costs ~51 even with the shortest honest
+#: description, so the head with the shipped three-semantics description
+#: measures ~30,088 here. The alternative the ladder prefers — OFFSET the cost
+#: — was measured and is NOT available: no schema clause in the prefix is
+#: filler, and the field is not droppable because the tool-result text ("pass
+#: memory_mb on the bash call") and the escape from F7 both name it.
+#:
+#: THE CEILING CLEARS **CI**, NOT JUST THIS MACHINE, and that is why it sits
+#: ~60 above the local head rather than ~12 (remediation round 1, measured):
+#: there IS a local-vs-CI gap for this change, because `tool_schemas` is
+#: computed from the real pydantic models and one of them is platform-shaped.
+#: Local (macOS, py3.12.13) measured `tool_schemas` 49,353 chars / head 30,088;
+#: CI (ubuntu, py3.12) measured 49,420 chars / head **30,113** — 67 more
+#: schema chars, ~25 billed tokens — so a ceiling set 12 above the LOCAL head
+#: failed CI by exactly 13 tokens. The ceiling is therefore set with CI as the
+#: binding reading: 37 above CI's head and 62 above this machine's. Only the
+#: CI figure matters for the gate, so the 37 is the one to read; it sits just
+#: UNDER the 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises chose, and the 62 above local is simply the
+#: same ceiling seen from the smaller reading. The band is descriptive of prior
+#: raises, not a constraint this one satisfies — the local-vs-CI gap, not the
+#: band, decides the number here, and the tighten band below (1,200) is nowhere
+#: near tripped. Earlier raises in this file found NO local-vs-CI gap; this one
+#: does, so it is recorded rather than carried as the assumption that the two
+#: always agree.
 #: RAISED 29,950 -> 30,025 for the scratchpad-salience change, stated here with
 #: the arithmetic because the guard exists to make this an explicit decision.
 #: The base — THIS BRANCH'S base, ``origin/main`` 0bc5fb3a, the tree the PR
@@ -315,14 +344,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: listener, no state), and the tool's own ``description`` is what keeps the
 #: schema from being paid for nothing — it names the capability and says what
 #: this build cannot do.
-#: THE MERGED HEAD, measured by running THIS script after folding `main` in:
-#:   85,253 chars = ~30,667 billed  (28 tools)
+#: THE MERGED HEAD, measured by running THIS script after folding `main` in —
+#: re-measured at the fold that produced the head this branch merges at, not
+#: carried over: an earlier revision of this comment named a figure taken before
+#: `main` moved again, and a ceiling is only a guard if the number under it is the
+#: one the tree actually produces.
+#:   85,630 chars = ~30,802 billed  (28 tools)
 #: The two raises above are separate changes that both land here — the
 #: scratchpad-salience clause and the `network` tool — so this ceiling is the
-#: single number covering both, with 33 billed tokens of headroom under the
+#: single number covering both, with 48 billed tokens of headroom under the
 #: ratchet those raises describe. ONE assignment: the guard reads the module
 #: constant, so a second value above it would be a figure nothing asserts.
-BUDGET_BILLED_TOKENS = 30_700
+BUDGET_BILLED_TOKENS = 30_850
+
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

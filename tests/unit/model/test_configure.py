@@ -5161,3 +5161,49 @@ def test_the_provider_controller_refuses_it_where_both_tui_paths_call_it() -> No
     with pytest.raises(ValueError) as refused:
         controller.resolve_model("TypeSafe", "jev-1.13")
     assert "not chat completions" in str(refused.value)
+
+
+def test_the_router_ladder_is_scoped_to_the_router_route_not_the_hosting() -> None:
+    """The router's ladder and seed are keyed on the ROUTE AND the id, and this
+    is the control that proves neither half alone is enough.
+
+    Every OTHER aggregator id keeps the ordinary rules: no ladder from an
+    id-keyed table (a vendor model the harness has not transcribed) and, on an
+    aggregator hosting, no seeded default either. If the router exception had
+    been implemented as "any aggregator hosting seeds its default" or "any id
+    named `auto` gets the ladder", one of the arms below would have moved.
+    """
+    # A non-router id on an aggregator hosting: unchanged — no ladder, no seed.
+    #
+    # The canonical id is a bare vendor id the table does not transcribe, so
+    # the ladder is empty and nothing is seeded (aggregator route).
+    untranscribed = build_model_spec("radient", "some-vendor/untranscribed-1")
+    assert untranscribed.reasoning_efforts == ()
+    assert untranscribed.reasoning_effort is None
+
+    # A router id on a NON-aggregator hosting: `auto` is a local model there.
+    local_auto = build_model_spec("ollama", "auto")
+    assert local_auto.reasoning_efforts == ()
+    assert local_auto.reasoning_effort is None
+
+
+def test_the_router_seed_is_the_routes_own_default_per_provider() -> None:
+    """The SEED is asked of ``aggregator_router_effort_default`` rather than a
+    shared constant, so it is keyed on the provider beside the ladder and the
+    two cannot drift.
+
+    This is the half the ladder-membership test cannot see: the Radient router
+    seeds its ``auto`` sentinel (the server resolves it), while OpenRouter --
+    with no ``auto`` enum member -- seeds ``high``. A shared default would leave
+    one route wrong.
+    """
+    from local_operator.model.configure import aggregator_router_effort_default
+
+    assert aggregator_router_effort_default("radient", "auto") == "auto"
+    assert aggregator_router_effort_default("radient-key", "auto") == "auto"
+    assert aggregator_router_effort_default("openrouter", "auto") == "high"
+
+    # Non-router routes have NO seed: the sibling returns None, which is what
+    # keeps the ``if router_levels`` branch the only place a seed is applied.
+    assert aggregator_router_effort_default("ollama", "auto") is None
+    assert aggregator_router_effort_default("radient", "some-vendor/other") is None

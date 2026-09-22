@@ -25,7 +25,7 @@ import inspect
 import logging
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -216,14 +216,21 @@ JobStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"
 JobType = Literal["bash", "task"]
 
 # run(job_id, signal, report_progress) -> awaitable text result
-JobRunFn = Callable[[str, AbortSignal, Callable[[str], None]], Awaitable[str | None]]
+JobRunFn = Callable[
+    [str, AbortSignal, "Callable[[str | Mapping[str, Any]], None]"], Awaitable[str | None]
+]
 DeliverySink = Callable[[str, str, "AsyncJob | None"], Awaitable[None] | None]
 
 #: Custom-message type used by a session to deliver a settled job's result
 #: back into the conversation as a re-entering message (rendered as a user
 #: message). Lives here because the job manager owns the lifecycle.
 JOB_RESULT_MESSAGE_TYPE = "job_result"
-ProgressFn = Callable[[str], None]
+#: A runner's progress report. A plain string is the common case and lands in
+#: ``latest_details["progress"]``; a MAPPING merges structured fields into
+#: ``latest_details`` alongside it, which is how a runner records something a
+#: renderer or compaction wants by key (e.g. bash's memory-kill peak and ceiling)
+#: without smuggling it into the human-readable text.
+ProgressFn = Callable[["str | Mapping[str, Any]"], None]
 
 
 def _usage_components(usage: Usage | None, model_label: str | None) -> list[Usage]:
@@ -1293,10 +1300,19 @@ class AsyncJobManager:
     # -- internals ----------------------------------------------------------
 
     def _progress_fn(self, job_id: str) -> ProgressFn:
-        def report(details: str) -> None:
+        def report(details: "str | Mapping[str, Any]") -> None:
             job = self._jobs.get(job_id)
             if job is not None:
-                job.latest_details = {"progress": details}
+                if isinstance(details, Mapping):
+                    # Structured field(s): merge onto whatever is there, keeping
+                    # any ``progress`` line already recorded. This is the channel
+                    # a runner uses to hand a renderer/compaction a keyed value
+                    # (bash's memory-kill peak/ceiling) rather than only text.
+                    merged = dict(job.latest_details or {})
+                    merged.update(details)
+                    job.latest_details = merged
+                else:
+                    job.latest_details = {"progress": details}
                 self._notify_transient_job_change()
 
         return report

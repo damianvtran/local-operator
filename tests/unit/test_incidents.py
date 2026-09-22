@@ -723,3 +723,39 @@ def test_an_mcp_mention_no_longer_earns_an_incident_category() -> None:
         # text REACHING it, which is exactly what the deleted rule did.
         assert "previous turn ended" in incident.render()
     assert classify_incident("model context protocol connection lost").category == "network"
+
+
+def test_a_fired_stall_bound_has_a_class_of_its_own() -> None:
+    """The bound's exit is a NAMED death, not an unattributed one.
+
+    Measured 2026-09-21: a runtime ended by its own stall bound left a dump on
+    disk and was recorded as ``unattributed`` — the taxonomy's word for "no act
+    was recorded" — because this table had no entry for it. The bound is the one
+    involuntary arm whose actor is the VICTIM, which is why its sentence says so:
+    a reader who found ``runtime-killed``'s unattributed arm would go looking for
+    a reaper or a sweep that never ran.
+    """
+    from local_operator.incidents import (
+        CUT_OFF_CAUSES,
+        STALL_BOUND_CAUSE,
+        render_cut_off_reason,
+    )
+
+    assert (
+        STALL_BOUND_CAUSE in CUT_OFF_CAUSES
+    ), "a bound that fires without a class is indistinguishable from one that never fired"
+    rendered = render_cut_off_reason(STALL_BOUND_CAUSE)
+    assert "ITSELF" in rendered, rendered
+    assert "stall bound" in rendered, rendered
+    # The bound is RENDERED FROM THE CONSTANT, never typed into the sentence, and
+    # the default is what a sentence shared by every host can honestly name.
+    from local_operator.session.runtime.stall_watchdog import DEFAULT_STALL_S
+    from local_operator.session.runtime.types import bound_text
+
+    assert bound_text(DEFAULT_STALL_S) in rendered, rendered
+
+    # THE DETAIL CARRIES THE LEG, which is the only place the two are told apart
+    # (one class, two reasons to fire).
+    assert "no plane reported" in render_cut_off_reason(
+        STALL_BOUND_CAUSE, detail="its own stall bound fired: no plane reported for the whole bound"
+    )

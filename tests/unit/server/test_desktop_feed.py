@@ -1785,12 +1785,16 @@ def test_the_status_probe_forks_once_whatever_the_record_population(tmp_path, mo
         the FAILURE path, which falls back to probing per record by design (QA
         round 2, Q6), so a silent shim would measure the fallback instead of the
         batching this test is about. ``S`` is an ordinary sleeping process — the
-        answer a live pid gets.
+        answer a live pid gets — and the trailing start time is the second field
+        the probe reads beside the state: a shim that answers the OLD two-field
+        line is a batch that answers nothing, i.e. it measures the fallback.
         """
 
         def run(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             asks.append([str(item) for item in argv])
-            answered = "".join(f"{pid} S\n" for pid in str(argv[-1]).split(","))
+            answered = "".join(
+                f"{pid} S Mon Sep 21 09:53:01 2026\n" for pid in str(argv[-1]).split(",")
+            )
             return subprocess.CompletedProcess(argv, 0, stdout=answered)
 
     monkeypatch.setattr(procstate, "subprocess", _NoFork())

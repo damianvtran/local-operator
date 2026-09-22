@@ -25084,11 +25084,14 @@ class OperatorApp(App[None]):
 
         def on_update(update: AgentToolUpdate) -> None:
             detail = _partial_text(update)
-            if detail:
-                source.shell.progress = detail[-4096:]
-                current_card = card_ref()
-                if self._is_current(source) and current_card is not None:
+            current_card = card_ref()
+            if self._is_current(source) and current_card is not None:
+                if detail:
+                    source.shell.progress = detail[-4096:]
                     current_card.set_partial_detail(detail)
+                # The advisory rides every update (it is not output), so it is set
+                # even when `detail` is empty — mirroring `on_tool_updated`.
+                current_card.set_live_advisory(_partial_advisory(update))
 
         async def persist(result: ToolResult) -> None:
             """One persistence hop; a spawn failure is still a completed
@@ -32591,7 +32594,7 @@ class OperatorApp(App[None]):
         ``/model``: that command's listing volunteers that a pick persists, so
         this one has to volunteer that a level does not.
         """
-        rungs = ("auto", *levels)
+        rungs = levels if "auto" in levels else ("auto", *levels)
         marked = current or "auto"
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
@@ -37217,7 +37220,7 @@ class OperatorApp(App[None]):
         the user is scanning for one they already understand.
         """
         current = getattr(_model_spec(self._session), "reasoning_effort", None) or "auto"
-        rungs = ("auto", *levels)
+        rungs = levels if "auto" in levels else ("auto", *levels)
         return [
             ArgumentChoice(
                 name,
@@ -43382,6 +43385,12 @@ class OperatorApp(App[None]):
         detail = _partial_text(message.event.partial_result)
         if detail:
             card.set_partial_detail(detail)
+        # The advisory rides the SAME event as the output but is not output: it
+        # goes to the card's persistent state line (design review D1). Set even
+        # when the text is empty, so a card whose advisory arrived on a snapshot
+        # with no new output still paints it — and cleared when the producer stops
+        # sending it, so the line does not outlive the condition.
+        card.set_live_advisory(_partial_advisory(message.event.partial_result))
 
     def on_tool_ended(self, message: ToolEnded) -> None:
         event = message.event
@@ -45139,6 +45148,23 @@ def _partial_text(partial_result) -> str:
         if text:
             return text
     return ""
+
+
+def _partial_advisory(partial_result) -> str | None:
+    """The memory advisory carried on a streaming update, or ``None``.
+
+    A sibling of :func:`_partial_text` because the advisory is not output: it
+    travels in the update's ``details`` (never in the text), so the card can
+    paint it as a persistent state line instead of as a line the command printed
+    (design review D1/D2). Absent details, or a non-string value, read as "no
+    advisory" rather than raising — a card must never fail to render because a
+    producer sent a shape it did not expect.
+    """
+    details = getattr(partial_result, "details", None)
+    if not isinstance(details, dict):
+        return None
+    value = details.get("memory_advisory")
+    return value if isinstance(value, str) and value else None
 
 
 class _TreeRow(Text):

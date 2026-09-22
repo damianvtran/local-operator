@@ -546,6 +546,16 @@ def wake_receipt_headline(text: str) -> str:
     head, _, _ = text.partition("\n\n")
     head = " ".join(head.split())  # collapse any envelope whitespace
     head = head.split(" — cancel with wake(", 1)[0]
+    # The scratchpad clause needs its OWN strip rather than riding the cancel
+    # hint's, and the difference is why this line exists: a FINAL delivery carries
+    # no cancel hint at all, so there the clause survived the split above and
+    # landed in the headline — model-facing markup on a human surface, the defect
+    # this function exists to prevent. Imported lazily to keep this module
+    # host-free (see the module docstring), and imported rather than re-spelled so
+    # the stripper and the formatter cannot drift apart.
+    from local_operator.harness.wake import WAKE_SCRATCH_CLAUSE
+
+    head = head.split(WAKE_SCRATCH_CLAUSE, 1)[0]
     # Strip EVERY leading marker, not one. A single strip leaves a doubled
     # prefix ("(alarm) (alarm) …") leaking model-facing markup onto a human
     # surface — the exact defect this function exists to prevent, surviving

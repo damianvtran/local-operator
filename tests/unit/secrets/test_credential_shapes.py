@@ -68,7 +68,12 @@ from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.variables import VariableStore
 from tests.unit.secrets.credential_shape_corpus import (
+    COMPACT_TOKEN_PAIR,
+    COUNT_QUALIFIER_NAMES,
+    COUNT_TAIL_RELEASED_NAMES,
+    COUNTER_USAGE_LINE,
     DUMP_COMMAND_CASES,
+    FIXTURE_VALUE,
     NEGATIVE_CASES,
     POSITIVE_CASES,
     Case,
@@ -214,6 +219,53 @@ def test_ordinary_text_is_left_byte_identical_on_every_surface(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     assert SURFACES[surface](case.text) == case.text, f"{surface} rewrote {case.reason}"
+
+
+#: The corpus rows that make the MASK MARKER their own subject, named by REASON so
+#: that a rename or a removal fails loudly instead of quietly checking nothing.
+MASK_MARKER_NEGATIVE_REASONS: tuple[str, ...] = (
+    "the mask marker alone: the pass's own output is not its own input",
+    "the marker inside prose, in a credential position: a peer's evidence",
+    "the marker inside a JSON tool argument: the shape a bash call journals",
+)
+
+
+def test_the_mask_marker_neither_masks_nor_labels_nor_escalates() -> None:
+    """A message carrying the marker files no incident — the peer's report, pinned.
+
+    The third of three "credential reached X" reports was this claim: a message that
+    CONTAINS the mask marker re-fires a fresh incident, so "a detector whose output
+    is its own input cannot settle". It is measured false, and the corpus could not
+    settle it because the marker appeared in no row on either half; a claim that
+    travels as prose is a claim the next session re-litigates, so it takes rows.
+
+    What this test adds over the rows is the rest of the claim. The parametrised
+    negative test asserts the BYTE half — the marker survives every surface — and
+    the corpus digest pins the label and severity of what the table MATCHES, which
+    for these rows is nothing. The three assertions below are stated together
+    because they are one finding: no mask, no label, no escalation. ``reached_model``
+    is derived from the hit list (:func:`shape_report`), so the empty hit list is
+    what keeps the escalation half from being vacuously true — a rule that matched
+    would file a hit, and the ``.npmrc`` ``_authToken=`` spelling is one of this
+    table's own measured examples of a hit that files, labels, and still does not
+    escalate — eight labels over the 23 corpus rows that re-fire, enumerated where
+    the marker rows argue their own boundary in ``credential_shape_corpus``.
+    """
+    cases = [case for case in NEGATIVE_CASES if case.reason in MASK_MARKER_NEGATIVE_REASONS]
+    missing = set(MASK_MARKER_NEGATIVE_REASONS) - {case.reason for case in cases}
+    assert not missing, f"the marker rows were renamed or removed: {sorted(missing)}"
+
+    for case in cases:
+        # Anti-vacuity first: a row that no longer carries the marker would satisfy
+        # every assertion below while pinning nothing at all.
+        assert REDACTION_MARKER in case.text, f"{case.reason} no longer carries the marker"
+        changed = [name for name, surface in SURFACES.items() if surface(case.text) != case.text]
+        assert not changed, f"{case.reason} was rewritten on {changed}"
+        assert match_shape_names(case.text) == [], f"{case.reason} was labelled"
+        _, hits = scrub_shapes_with_hits(case.text)
+        assert not hits, f"{case.reason} filed a hit"
+        report = redaction_shapes.shape_report(hits)
+        assert report.reached_model is False, f"{case.reason} escalated"
 
 
 def test_the_corpus_is_big_enough_to_be_evidence() -> None:
@@ -425,6 +477,149 @@ def test_a_known_value_split_at_every_offset_is_still_masked() -> None:
         published = redactor.feed(raw[:offset]) + redactor.feed(raw[offset:])
         published += redactor.feed(b"", final=True)
         assert secret not in published.decode(), f"value leaked when split at {offset}"
+
+
+def test_a_shape_straddling_the_deferral_boundary_is_masked_and_registered() -> None:
+    """A cap-forced cut must not publish the two halves of a credential.
+
+    The release point has always refused to cut through a KNOWN value; the same
+    rule was missing for a SHAPE, and the cap is the one release chosen without
+    regard to the text around it. A DSN sitting on that boundary came out as an
+    unmasked head in one released slice and an unmasked tail in the next —
+    neither half carries the spelling the pattern needs — and nothing later can
+    repair it, because the live stream is the one surface no pass re-reads.
+
+    Swept rather than sampled: with 4 KiB reads the cap puts a slice boundary
+    every 4096 bytes, so the offsets below walk the credential across it. The
+    real store is the sink, because the second half of the property is that a
+    value the pipe masks is CONTAINED — masked later in a form no rule knows.
+    """
+    store = VariableStore(cwd=".")
+    # The mask removes the whole userinfo, but the value the shape REGISTERS is the
+    # password group — so the reuse below spells only that, which is the form no
+    # rule in the table has a spelling for.
+    password = SENTINEL_FRAGMENT.rsplit(":", 1)[-1]
+    for offset in range(4080, 4112):
+        body = "." * offset + SENTINEL + "." * 20000
+        redactor = builtin._PipeRedactor([], contain=store.register_shape_hits_for_containment)
+        raw = body.encode()
+        published = [redactor.feed(raw[i : i + 4096]) for i in range(0, len(raw), 4096)]
+        published.append(redactor.feed(b"", final=True))
+        text = b"".join(published).decode()
+        assert SENTINEL_FRAGMENT not in text, f"the password was published, cut at {offset}"
+        assert REDACTION_MARKER in text, f"the shape was not masked, cut at {offset}"
+    assert store.redact(f"prefix {password} suffix") == (
+        f"prefix {REDACTION_MARKER} suffix"
+    ), "the value the pipe masked was not registered for containment"
+
+
+def test_no_chunk_boundary_publishes_what_one_pass_would_mask() -> None:
+    """The invariant the boundary fix exists for, stated as the property itself.
+
+    Whatever the filter publishes, concatenated, must be what a single pass over
+    the same bytes produces. That is stronger than "the password is absent": it
+    also fails if a fix buys the mask by dropping, duplicating or reordering
+    output, which is the way this class of change usually goes wrong.
+
+    The filler is a character a DSN spelling follows: a WORD character runs into
+    the scheme and defeats the pattern's leading ``\\b``, so the table matches
+    neither release and the property is vacuous there. That spelling's own
+    behaviour — a slice boundary CREATING the boundary word the one-piece text
+    lacks, so the streamed pass masks MORE than the single pass — is pre-existing,
+    identical before and after this change, and in the safe direction; it is not
+    this fix's to move.
+    """
+    for offset in (4090, 4094, 4095, 4096, 4097, 8190, 8191, 8192):
+        body = "." * offset + SENTINEL + "." * 20000
+        for chunk in (7, 4096, 8192, 8193):
+            redactor = builtin._PipeRedactor([])
+            raw = body.encode()
+            published = [redactor.feed(raw[i : i + chunk]) for i in range(0, len(raw), chunk)]
+            published.append(redactor.feed(b"", final=True))
+            assert b"".join(published).decode() == scrub_secrets(body), (
+                f"streamed output diverged from the one-piece pass at offset {offset}, "
+                f"chunk {chunk}"
+            )
+
+
+def test_the_boundary_hold_is_bounded_and_still_streams() -> None:
+    """The fix holds bytes back, so the hold is asserted rather than implied.
+
+    Moving a cut out of a shape means publishing less per read, and the whole
+    reason the cap exists is that the held buffer must not be a function of what
+    the child prints. Both halves are asserted on the STRUCTURE (a peak and a
+    bound), never on a wall clock — see AGENTS.md, "Calibrate ceilings from CI".
+    The peak assertion is what keeps this test honest: it fails if the hold stops
+    being exercised, which is how the bound would go stale without anyone
+    noticing.
+
+    The credential assertion comes FIRST, and deliberately: on the pre-fix source
+    this row has to fail for the reason it exists — the value being published —
+    and not because ``_PIPE_HOLD_LIMIT`` does not exist there. A test whose only
+    pre-fix failure is a missing symbol pins the seam rather than the property.
+    """
+    line = "." * 4095 + SENTINEL + "." * (4 * 1024 * 1024)
+    redactor = builtin._PipeRedactor([])
+    peak = 0
+    published = 0
+    chunks: list[bytes] = []
+    for start in range(0, len(line), 4096):
+        chunk = redactor.feed(line[start : start + 4096].encode())
+        chunks.append(chunk)
+        published += len(chunk)
+        peak = max(peak, len(redactor.pending))
+    tail = redactor.feed(b"", final=True)
+    chunks.append(tail)
+    published += len(tail)
+    assert (
+        SENTINEL_FRAGMENT not in b"".join(chunks).decode()
+    ), "the credential straddling the boundary was published"
+    assert peak <= builtin._PIPE_HOLD_LIMIT, "the hold must not grow with the child's output"
+    assert peak > builtin._PIPE_DEFERRAL_LIMIT, "the boundary hold was never exercised"
+    assert redactor.pending == ""
+    assert published >= len(line) - builtin._PIPE_HOLD_LIMIT, "the line must still stream"
+
+
+def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
+    """``_PIPE_HOLD_LIMIT`` bounds the SHAPE rule, not the filter's whole hold.
+
+    The older KNOWN-value rule holds whatever a registered value needs, because a
+    registered value is a credential the session was told about and publishing it
+    in two halves is the leak that rule exists to prevent. So the filter's total
+    hold is ``max(_PIPE_HOLD_LIMIT, len(value) + _PIPE_DEFERRAL_LIMIT)`` — a bound
+    over what the SESSION knows, never over what the child prints, which is the
+    property the cap is for. Asserted with a NON-EMPTY secret on purpose: an empty
+    one exercises only the first term, which is how this limit came to be
+    documented as the whole bound in the first place.
+
+    ``getattr`` because this row is a guard on the filter as a whole rather than a
+    discriminator for this change — the rule it measures predates it and the
+    numbers are the same on the pre-fix source, so it must not fail there for a
+    missing symbol.
+    """
+    limit = getattr(builtin, "_PIPE_HOLD_LIMIT", builtin._PIPE_DEFERRAL_LIMIT)
+    worst = 0
+    for size, read in ((1_000, 4096), (5_000, 4096), (24_576, 65536), (30_000, 65536)):
+        secret = ("q7Xk2m" * (size // 6 + 1))[:size]
+        line = "." * 100_000 + secret + "." * 100_000
+        raw = line.encode()
+        redactor = builtin._PipeRedactor([secret])
+        published: list[bytes] = []
+        peak = 0
+        for start in range(0, len(raw), read):
+            published.append(redactor.feed(raw[start : start + read]))
+            peak = max(peak, len(redactor.pending))
+        published.append(redactor.feed(b"", final=True))
+        assert (
+            secret not in b"".join(published).decode()
+        ), f"a registered value of {size} B was published at {read} B reads"
+        assert peak <= max(
+            limit, size + builtin._PIPE_DEFERRAL_LIMIT
+        ), f"holding a {size} B value at {read} B reads took {peak} B"
+        worst = max(worst, peak)
+    assert (
+        worst > limit
+    ), "the second term must actually bind at some size, or this test measures the first one twice"
 
 
 def test_a_line_with_no_terminator_is_released_and_stays_bounded() -> None:
@@ -2232,7 +2427,67 @@ def _corpus_grading() -> str:
 #: What the whole corpus produces TODAY, values included: every masked text, every
 #: hit and every grading. Regenerate by printing ``_corpus_grading()`` — and only in
 #: the commit that argues why the behaviour moved.
-_CORPUS_GRADING_DIGEST = "8895d033a508776b8f2822477eded754315af15ea85db4a496233f4539f79316"
+#:
+#: Moved on 2026-09-21 by the false-positive fix, and the argument is short because
+#: the measurement is: **no pre-existing case moved at all.** The corpus as it stood
+#: at ``origin/main`` (308 cases) produces byte-identical masked text, labels, values,
+#: windows, ``complete`` and ``exposed`` under this module — measured case by case
+#: against ``git show origin/main:local_operator/redaction_shapes.py`` loaded beside
+#: it. The digest moves for one reason only: the corpus GREW, to 335 cases, and the
+#: added cases are the specification for the fix — 5 compact-JSON positives, 4 counter
+#: negatives, one positive per name in ``COUNT_QUALIFIER_NAMES`` (the credential names
+#: an any-segment count sweep released in the first version of this change: agent
+#: review R1-1, QA round 1 Q-1), and one negative per name in
+#: ``COUNT_TAIL_RELEASED_NAMES`` (the boundary the tail arm draws, pinned in the half
+#: it releases: QA round 2, Q2-1).
+#:
+#: MOVED ONCE MORE on 2026-09-21, in the commit that answers agent review R1-1, and
+#: the argument is again a measurement rather than a claim: no production code
+#: changed in that commit — the diff to ``redaction_shapes.py`` is comments only, so
+#: nothing could move — and the digest delta is exactly the one added row. Measured
+#: by recomputing this function over the corpus WITHOUT that row under the same
+#: module: 341 cases produce ``d76461eb…``, the constant this commit replaces, and
+#: 342 produce the value below. The row is ``glpat-lowercase-token-value``, the
+#: boundary agent review R1-1 named: an all-lowercase, separator-carrying tail is
+#: read as a NAME, and ``origin/main`` masked this one as ``vendor-prefixed-token``.
+#: It sits in the NEGATIVE half on purpose, so the accepted residual is a test that
+#: fails if a later rule narrows it, rather than a paragraph someone has to trust.
+#:
+#: Moved AGAIN on 2026-09-21, by the fix for a vendor-prefixed FALSE POSITIVE, and
+#: the argument is the same measurement rather than a claim: the 335-case corpus
+#: described just above produces a BYTE-IDENTICAL grading under the fixed module
+#: (``git show origin/main:local_operator/redaction_shapes.py`` loaded beside it, and
+#: ``_corpus_grading()`` computed for that corpus under both modules and compared),
+#: so nothing already in the table moved — not a masked text, not a label, not a
+#: value, not a window, not a severity. The digest moves because the corpus grew to
+#: 341: five negatives for the spellings an ordinary env-var NAME takes in prose
+#: (``<prefix>_<name>=<value>``, the dash-joined form, and a fixed-prefix name), and
+#: one positive for the npm token's own hex-and-dash spelling, which pins the
+#: boundary the new tail predicate must leave alone.
+#:
+#: Moved on 2026-09-21 a fourth time, by the commit that pinned the MASK MARKER as
+#: corpus negatives, and the argument is once again a measurement: this commit's diff
+#: to ``redaction_shapes.py`` is EMPTY (tests only), so nothing could move — and the
+#: digest delta is exactly the three added rows, measured the same way as the round
+#: before it: recomputing ``_corpus_grading()`` over the 342 rows the constant above
+#: covered, i.e. this corpus minus the three marker rows, produces that constant
+#: byte for byte, and 345 produce the value below. What the three rows change is
+#: coverage rather than behaviour: the marker appeared in no row on either half, and
+#: its claim — that a message CONTAINING the detector's own output re-fires an
+#: incident — now fails against a table instead of against a paragraph.
+#:
+#: Moved on 2026-09-21 a FIFTH time, by the commit answering agent review R1-1/R1-3 on the
+#: marker pin, and the argument is the same measurement rather than a claim:
+#: ``redaction_shapes.py`` is untouched in this commit as well (its diff against
+#: the merge base ``2a9a737a`` is empty — this is a tests-and-comments change), so
+#: nothing could move,
+#: and the digest delta is exactly the ONE added row. Measured the same way: recomputing the
+#: grading over the 345 rows the constant above covered, i.e. this corpus minus
+#: ``npm-config-manage-package-manager-versions=false``, reproduces that constant byte for
+#: byte, and 346 produce the value below. The row closes the combination agent review R1-3
+#: named — the reported family's dash join CARRYING a value, the one spelling #1399 moved,
+#: which the four rows beside it covered only by intersection.
+_CORPUS_GRADING_DIGEST = "886301f87ca385b1ae23b705efbe31a30bd08b604ad9b770095c2752b7058690"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -2276,6 +2531,116 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
             assert hit.exposed is exposed, (case.reason, hit.label)
             checked += 1
     assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
+
+
+def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
+    """The name half of the assignment rule, at the segment level.
+
+    A count word is the QUALIFIER, and it is not always the first segment:
+    ``ephemeral_5m_input_tokens`` is a counter whose first segment is a MODE. The
+    judgement read ``segments[0]`` only, so the tail ``tokens`` won it, a counter
+    was masked, and on the compact spelling — where the next field's key sits
+    inside the match — the grader then found a fragment of the swallowed text in
+    the unmasked first key and demanded a rotation for a NUMBER.
+
+    Both halves, and the second half is asserted over NAMES rather than over
+    spellings: an any-segment sweep released the ``COUNT_QUALIFIER_NAMES`` family
+    — ``REDIS_CACHE_PASSWORD``, ``FACEBOOK_PAGE_ACCESS_TOKEN`` — which share the
+    counters' segment-level shape and are credentials, not counts (agent review
+    R1-1, QA round 1 Q-1). The first version of this test asserted four one- and
+    two-segment names with no count word in them, which is exactly why it could
+    report "nothing loses a mask" while a real name did: a name has to be driven
+    through BOTH the judgement and the pass, so that is what happens here.
+    """
+    for counter in (
+        "ephemeral_5m_input_tokens",
+        "ephemeral_1h_input_tokens",
+        "max_tokens",
+        "context_tokens",
+        "num_tokens",
+    ):
+        assert redaction_shapes.is_credential_name(counter), counter
+        assert redaction_shapes.is_count_shaped(counter), counter
+    for credential in ("access_token", "refresh_token", "client_secret", "api_key"):
+        assert redaction_shapes.is_credential_name(credential), credential
+        assert not redaction_shapes.is_count_shaped(credential), credential
+    for name in COUNT_TAIL_RELEASED_NAMES:
+        # The boundary the tail arm draws, asserted in the OTHER direction: a
+        # qualified quantity tail is a count, so these stay readable — and the
+        # corpus carries the case for each, so neither direction can drift alone
+        # (QA round 2, Q2-1).
+        assert redaction_shapes.is_credential_name(name), name
+        assert redaction_shapes.is_count_shaped(name), name
+    for name in COUNT_QUALIFIER_NAMES:
+        # Both readings, because either one alone can pass for the wrong reason:
+        # the judgement must call it a credential, and the pass must mask it.
+        assert redaction_shapes.is_credential_name(name), name
+        assert not redaction_shapes.is_count_shaped(name), name
+        masked = scrub_shapes(f"{name}={FIXTURE_VALUE}")
+        assert REDACTION_MARKER in masked, f"{name} left its value readable"
+        assert FIXTURE_VALUE not in masked, name
+
+
+def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> None:
+    """The measured over-mask, pinned in both directions.
+
+    On a compact pair the greedy value crossed the closing quote into the NEXT
+    field: the mask replaced the neighbour's key and value, and the grader —
+    correctly, for that match — found a fragment of the swallowed text inside the
+    UNMASKED first key and filed a rotation demand for a credential that had been
+    covered whole. So this asserts the shape of the right answer, not a count:
+    both keys stay readable, both values go, and nothing escalates.
+    """
+    text = COMPACT_TOKEN_PAIR
+    masked, hits = scrub_shapes_with_hits(text)
+    assert "access_token" in masked, "the credential's own key was masked away"
+    assert "refresh_token" in masked, "the neighbouring KEY was masked away"
+    assert masked.count(REDACTION_MARKER) == 2, masked
+    report = redaction_shapes.shape_report(hits)
+    assert not report.reached_model, report
+
+
+def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:
+    """The OVER-REACH direction: narrowing the value grammar may not stop filing.
+
+    The fix stops a fragment of a SWALLOWED neighbouring field grading as exposed.
+    It must not stop the other case, which is the one the whole control exists for:
+    a credential whose own characters are readable in the text the model gets.
+
+    Built from the corpus's compact pair — the same value echoed back in the clear
+    beside it, which is the spelling a response that quotes its own token has — and
+    asserted in BOTH directions: the pair is masked, and the hit is graded as having
+    reached the model BECAUSE the echo is still readable (the echo is not under a
+    credential name, so the pass leaves it alone; that survivor is the exposure).
+    Kept out of the corpus rather than added to it because it legitimately
+    ESCALATES, and the corpus holds exactly one escalating case by construction
+    (``_ESCALATING_POSITIVE_CASES``); this is the test that pins the direction
+    without widening that set.
+    """
+    obj = json.loads(COMPACT_TOKEN_PAIR)
+    value = obj["access_token"]
+    text = COMPACT_TOKEN_PAIR[:-1] + f',"echo":"{value}"' + "}"
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked.count(REDACTION_MARKER) == 2, masked
+    assert f'"echo":"{value}"' in masked, "the readable copy is the exposure"
+    assert redaction_shapes.shape_report(hits).reached_model, hits
+
+
+def test_the_measured_counter_line_is_not_an_incident() -> None:
+    """The operator's Bedrock evidence line, driven end to end.
+
+    The false positive was a rotation demand for a usage COUNTER, filed from a
+    ``write`` of the Bedrock cost-tracking evidence file. The line is in the
+    negative corpus; this drives it through the pass and asserts the two things
+    the notice depends on — the text is untouched, and nothing is graded as
+    exposed — so a future widening that re-classifies a counter reds here even if
+    the corpus row is edited away.
+    """
+    text = COUNTER_USAGE_LINE
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked == text, masked
+    assert hits == [], hits
+    assert not redaction_shapes.shape_report(hits).reached_model
 
 
 def test_the_contained_notice_names_the_tool_and_carries_no_value() -> None:

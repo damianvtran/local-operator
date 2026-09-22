@@ -255,7 +255,12 @@ async def main(model_id: str = MODEL_ID, arms: int = 4) -> None:
     # must not differ between the turn and the aside, and the bottom rung
     # spends the fewest output tokens.
     efforts = base.reasoning_efforts
-    spec = base.model_copy(update={"reasoning_effort": efforts[0]}) if efforts else base
+    # The cheapest REAL rung: skip the `auto` sentinel, which delegates rather
+    # than names a depth (round-2 review R2-3).
+    from local_operator.model.effort import cheapest_real_rung
+
+    lowest = cheapest_real_rung(efforts)
+    spec = base.model_copy(update={"reasoning_effort": lowest}) if lowest else base
     store = AuthStore(default_db_path())
     oauth = await store.get_oauth_access("anthropic")
 
