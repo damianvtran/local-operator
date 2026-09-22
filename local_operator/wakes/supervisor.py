@@ -67,7 +67,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 #: A STABLE name, not ``__name__``. This module is the LaunchAgent's
 #: ``python -m`` target, so ``__name__`` is ``__main__`` in the one process
@@ -350,6 +350,7 @@ def _due_sessions(
     now_ms: int,
     *,
     deliveries: Mapping[str, dict[str, Any]] | None = None,
+    spooled: Mapping[str, dict[str, Any]] | None = None,
 ) -> list[tuple[str, str, int]]:
     """``(session_id, cwd, due_ms)`` for every session with a wake due now.
 
@@ -366,10 +367,22 @@ def _due_sessions(
     It changes two decisions here and no others: a fire that is already owed is
     not re-engaged until its recorded backoff says so, and it stays fireable
     past the staleness bound that would otherwise drop it for good.
+
+    ``spooled`` is the OTHER reason a runtime may be wanted (see
+    :mod:`local_operator.wakes.spooled`): a session holding a spooled message that
+    asked for a turn and never got one. Those rows are not schedules, so they
+    have no entry in the index and no due time of their own — they are due the
+    moment the spool holds them, which is what makes this the drain's successor
+    (the handover that would otherwise end with the mail and no runtime). A
+    session that is already firing a due wake this pass is not listed twice, and
+    a DORMANT one is skipped exactly as its schedules are: the kill switch is
+    the user's, and a spooled turn is not an exception to it.
     """
+    from local_operator.wakes.spooled import next_attempt_at_ms
     from local_operator.wakes.store import next_due_at
 
     due: list[tuple[str, str, int]] = []
+    dormant: set[str] = set()
     for session_id, entry in index.items():
         if not isinstance(entry, dict):
             continue
@@ -379,6 +392,7 @@ def _due_sessions(
             # user reopens it. Firing here would resurrect a session the kill
             # switch ended. A pending delivery record is left in place for the
             # same reason: reopening the session is what delivers it.
+            dormant.add(session_id)
             continue
         earliest = next_due_at(entry)
         if earliest is None or earliest > now_ms:
@@ -473,8 +487,28 @@ def _due_sessions(
         due.append(
             (session_id, cwd if isinstance(cwd, str) and cwd else os.path.expanduser("~"), fireable)
         )
-    # Oldest first: if several are due at once, the one that has waited
+    # Older first: if several are due at once, the one that has waited
     # longest gets its runtime first.
+    # SPOOLED TURNS, AFTER the index's own rows so a session that is due both ways
+    # fires once (the index row is the more specific occurrence: it names a
+    # schedule the runtime advances, while a spooled turn simply stops being
+    # owed once its spool is drained, which is the state the reconciler above
+    # settles).
+    scheduled = {row[0] for row in due}
+    for session_id, record in (spooled or {}).items():
+        if not isinstance(record, dict) or session_id in scheduled or session_id in dormant:
+            continue
+        if next_attempt_at_ms(record) > now_ms:
+            continue
+        cwd = record.get("cwd")
+        noted = record.get("noted_at_ms")
+        due.append(
+            (
+                session_id,
+                cwd if isinstance(cwd, str) and cwd else os.path.expanduser("~"),
+                int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
+            )
+        )
     due.sort(key=lambda row: row[2])
     return due
 
@@ -508,7 +542,7 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
 
 def _load_and_reconcile_state(
     config_dir: Path,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Read the index and the ledger in ONE thread hop, RECONCILED here.
 
     ONE hop, not two. This runs once per slice pass, in a process whose whole
@@ -524,12 +558,50 @@ def _load_and_reconcile_state(
     no longer owed — an entry that is gone, or a schedule that has moved past it.
     """
     from local_operator.wakes.deliveries import read_deliveries
+    from local_operator.wakes.spooled import read_spooled
     from local_operator.wakes.store import read_index
 
     index = read_index(config_dir)
     deliveries = read_deliveries(config_dir)
+    spooled = read_spooled(config_dir)
     _reconcile_deliveries(config_dir, index, deliveries)
-    return index, deliveries
+    _reconcile_spooled(config_dir, spooled)
+    return index, deliveries, spooled
+
+
+def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> None:
+    """Drop obligations whose cause is gone (see :mod:`local_operator.wakes.spooled`).
+
+    AN OBLIGATION IS A CLAIM ABOUT A SPOOL, and the spool is the authority: a
+    session whose ``inbox.jsonl`` no longer holds a row that asks for a turn
+    (the successor drained it, a viewer's engage delivered it, the row was
+    recalled) owes nothing, and keeping the record would make this process raise
+    a runtime for a session with nothing to run — a wake-up with no work, on
+    every pass, which is exactly the churn the cap and the backoff exist to
+    avoid. A missing session directory reads the same way: the row went with it.
+
+    Mutates the caller's freshly read copy, so the pass that read it decides on
+    what is left rather than on what was found.
+    """
+    from local_operator.wakes.spooled import clear_spooled_turn, spool_owes_turn
+
+    sessions = Path(config_dir) / "sessions"
+    for session_id, record in list(spooled.items()):
+        if spool_owes_turn(sessions / session_id):
+            continue
+        # COMPARE-AND-DELETE: the writer is in another process, and a row it
+        # spools in the window between this read and that unlink re-arms the
+        # record — deleting it unconditionally would strand that message with no
+        # owner, which is defect (B) again (review round 1, R1-4). The guard
+        # narrows the window to the unlink itself; the drain-side half of the same
+        # finding is closed in ``inbox.settle_owed_turn``, which re-notes an
+        # obligation its own spool still owes.
+        clear_spooled_turn(
+            config_dir,
+            session_id,
+            expected_updated_at_ms=record.get("updated_at_ms"),
+        )
+        del spooled[session_id]
 
 
 def _reconcile_deliveries(
@@ -658,12 +730,26 @@ async def _engage_one(
     due_ms: int,
     moment: int,
     semaphore: asyncio.Semaphore,
+    *,
+    on_outcome: Callable[[str], None] | None = None,
 ) -> bool:
     """Engage one due session. Returns whether a runtime was started.
 
     Split out so the sweep can run these concurrently; every skip and failure
     is contained here so one session can never fail the pass.
+
+    ``on_outcome`` IS THE ONLY WAY THE CALLER LEARNS WHY, and the reason it
+    exists is that this function's ``False`` covers four different situations the
+    spooled-turn walk has to tell apart (review round 1, R1-1): a session that is
+    SERVED (``live`` — nothing was tried, the handover has not begun), one whose
+    directory is gone (``ghost``), one whose owner holds the lease without
+    answering (``wedged``), and one whose engage could not start a runtime
+    (``failed``). The one caller that needs the distinction passes a callback;
+    every other caller, and every existing test, is unchanged by its absence.
+    ``started`` is the success word. The callback is called from the sweep's own
+    task, so it must not block or raise — ``_note_spooled_attempt`` neither does.
     """
+    outcome: Callable[[str], None] = on_outcome or (lambda _reason: None)
     from local_operator.session.runtime.launch import WakeErrand, engage_runtime
 
     overdue_s = (moment - due_ms) / 1000.0
@@ -682,6 +768,7 @@ async def _engage_one(
                     session_id,
                     overdue_s,
                 )
+            outcome("live")
             return False
         if not await asyncio.to_thread(_session_exists, config_dir, session_id):
             if _skip_log.should_log(session_id, "ghost"):
@@ -691,6 +778,7 @@ async def _engage_one(
                     session_id,
                     overdue_s,
                 )
+            outcome("ghost")
             return False
         # Probed BEFORE the engage, not after it fails, because the engage
         # would otherwise burn its whole deadline against a lease this process
@@ -724,6 +812,7 @@ async def _engage_one(
                     pid,
                     pid,
                 )
+            outcome("wedged")
             return False
         # Only the conditions we just cleared: reaching here means the session
         # is no longer skipped for a live/ghost/wedged/stale reason. Whether
@@ -798,6 +887,7 @@ async def _engage_one(
             await asyncio.to_thread(
                 _note_failure, config_dir, session_id, due_ms, str(exc), overdue_s
             )
+            outcome("failed")
             return False
         # RECOVERED: the failure keys are cleared only once an engage actually
         # succeeds, so the next failure after a working run is announced at
@@ -823,6 +913,7 @@ async def _engage_one(
             overdue_s,
             time.monotonic() - started,
         )
+        outcome("started")
         return True
 
 
@@ -1032,9 +1123,35 @@ class _Sweeper:
             return False
 
         async def _run() -> bool:
+            def _outcome(reason: str) -> None:
+                """Report one engagement's outcome to the spooled-turn walk.
+
+                ROUND 2 (R2-1) IS WHY THIS EXISTS AND WHY IT IS A NAMED LOCAL.
+                The callback was added to ``_engage_one``'s signature in round 1
+                and then never passed at the one call site that matters, so the
+                walk was inert: no outcome word arrived, ``note_attempt`` was
+                never called, ``next_attempt_ms`` stayed unset, and a session the
+                supervisor could not raise was re-engaged on every 10 s slice
+                (``_MAX_CONCURRENT_ENGAGES`` = 2 slots, each wedged probe a full
+                ``registry.scan``) instead of walking 15 s/30 s/…/1 h apart. The
+                store's whole churn argument lived at a call site that was not
+                wired.
+
+                A local rather than an inline lambda so the belt below can use
+                it too: an unanticipated raise out of ``_engage_one`` is a raise
+                that did not happen, which is exactly what ``failed`` means.
+                """
+                _note_spooled_attempt(config_dir, session_id, reason=reason)
+
             try:
                 started = await _engage_one(
-                    config_dir, session_id, cwd, due_ms, moment, self._semaphore
+                    config_dir,
+                    session_id,
+                    cwd,
+                    due_ms,
+                    moment,
+                    self._semaphore,
+                    on_outcome=_outcome,
                 )
             except asyncio.CancelledError:
                 # Shutdown, not a failure: `shutdown()` cancels in-flight work
@@ -1058,6 +1175,12 @@ class _Sweeper:
                         exc,
                         exc_info=True,
                     )
+                # AND IT IS AN ATTEMPT (round 2, R2-1): this is a raise the
+                # sweeper could not attribute. Without it the walk would be silent
+                # on exactly the shape that repeats most cheaply — an exception
+                # thrown before `_engage_one` could report anything of its own.
+                # `raised`, not `failed` (round 3, R3-1): see the constant.
+                _outcome("raised")
                 return False
             finally:
                 # Popped in the task itself rather than in a done-callback so
@@ -1108,10 +1231,13 @@ class _Sweeper:
         moment: int,
         *,
         deliveries: Mapping[str, dict[str, Any]] | None = None,
+        spooled: Mapping[str, dict[str, Any]] | None = None,
     ) -> int:
         """Start an engagement for every due session. Returns how many started."""
         launched = 0
-        for session_id, cwd, due_ms in _due_sessions(index, moment, deliveries=deliveries):
+        for session_id, cwd, due_ms in _due_sessions(
+            index, moment, deliveries=deliveries, spooled=spooled
+        ):
             if self.engage(config_dir, session_id, cwd, due_ms, moment):
                 launched += 1
         return launched
@@ -1126,9 +1252,9 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
     the loop (see that class for why).
     """
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
-    index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
+    index, deliveries, spooled = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
     sweeper = _Sweeper()
-    sweeper.sweep(config_dir, index, moment, deliveries=deliveries)
+    sweeper.sweep(config_dir, index, moment, deliveries=deliveries, spooled=spooled)
     return await sweeper.drain()
 
 
@@ -1138,6 +1264,7 @@ def _has_fireable_wakes(
     config_dir: Path | None = None,
     now_ms: int | None = None,
     deliveries: Mapping[str, dict[str, Any]] | None = None,
+    spooled: Mapping[str, dict[str, Any]] | None = None,
 ) -> bool:
     """Whether anything in the index could ever cause THIS process to fire.
 
@@ -1172,8 +1299,35 @@ def _has_fireable_wakes(
     ``config_dir`` is optional so the pure index-shape callers need not have
     one; the ghost check is then skipped, which errs towards STAYING UP rather
     than retiring on a wake that might be real.
+
+    ``spooled`` is the second kind of work this process can do, and it is checked
+    FIRST because it does not depend on the index at all: a session owing a turn
+    has no schedules, so every rule below would retire the process that is the
+    only thing that will ever raise the runtime its spool is waiting for.
+
+    THE DORMANT SKIP APPLIES HERE TOO (review round 1, R1-6). ``_due_sessions``
+    honours the kill switch for a spooled turn — a stopped session's work must not
+    fire — and this predicate has to agree with it, or a stopped session with an
+    owed turn keeps the supervisor resident forever waiting to fire something it
+    will never fire. That is the exact leak this function's own docstring says it
+    was written to close for the index's dormant entries, reached through the new
+    door.
+
+    A record IS fireable work otherwise, at whatever cadence its backoff has
+    walked to (≤ :data:`spooled.RETRY_CAP_S`): "still owed a turn" is still work,
+    which is why there is no attempt cap to end it.
     """
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
+    if spooled:
+        for session_id, record in spooled.items():
+            if not isinstance(record, dict):
+                continue
+            entry = index.get(session_id)
+            if isinstance(entry, dict) and entry.get("stopped_at"):
+                continue
+            if config_dir is not None and not _session_exists(config_dir, session_id):
+                continue
+            return True
     for session_id, entry in index.items():
         if not isinstance(entry, dict) or entry.get("stopped_at"):
             continue
@@ -1199,6 +1353,79 @@ def _has_fireable_wakes(
             continue
         return True
     return False
+
+
+#: Which engagement outcomes COUNT against a spooled turn's attempt walk.
+#:
+#: The rule is "an attempt is a raise that was TRIED and could not happen", and
+#: the two members are the shapes that qualify:
+#:
+#: * ``wedged`` — a runtime holds the transcript lease and is not answering, so
+#:   this process cannot raise its successor no matter how often it tries.
+#:   Repeating it every slice would be pure churn, and the backoff is what makes
+#:   the retry cost bounded.
+#: * ``failed`` — the engage itself could not start a runtime (a cold-start
+#:   failure, a refusal).
+#: * ``raised`` — the engage RAISED out of the sweeper's belt, which is NOT the
+#:   same thing (review round 3, R3-1): ``_engage_one`` can raise after
+#:   ``engage_runtime`` has already returned (the ``_note_delivered`` hop below
+#:   it), so a runtime may well have started. Counting it is right — the walk
+#:   must not retry immediately — but calling it ``failed`` would put a word in
+#:   ``last_error`` that can be false, and the store's records are read by people
+#:   asking what happened.
+#:
+#: ``live`` IS DELIBERATELY ABSENT (review round 1, R1-1, major). A live record
+#: means the session is SERVED — the handover has not begun, nothing was tried,
+#: and the passes before a draining owner exits are not this walk's failures.
+#: Counting them ended the walk ≈7.75 min after the record was written (six
+#: refusals at 15/30/60/120/240 s), so a handover whose owner took longer than
+#: that — a clean exit measured in minutes, or exactly the wedged owner above —
+#: was left with no successor at all: requirement (4) failing on the path this
+#: change exists to close. ``ghost`` is absent for a different reason: the
+#: reconciler drops a record whose session directory is gone, so there is
+#: nothing to walk.
+_SPOOLED_ATTEMPT_REASONS = frozenset({"wedged", "failed", "raised"})
+
+
+def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> None:
+    """Record an attempt on ``session_id``'s spooled turn, when it has one.
+
+    Never raises, and a no-op for the overwhelmingly common case (a session with
+    no obligation, which is every session on a healthy machine): reading the
+    record first is cheaper than writing one, and it keeps the attempt walk
+    scoped to spooled turns — an ordinary wake's bookkeeping is the ledger's job,
+    not this one's (see :mod:`local_operator.wakes.deliveries`).
+
+    ``reason`` is an outcome word — ``_engage_one``'s own, or the belt's
+    ``raised`` (see the constant) — and only
+    :data:`_SPOOLED_ATTEMPT_REASONS` move the walk. A ``started`` engage is the
+    success case: the record is then cleared by the drain that discharges it
+    (``inbox.settle_owed_turn``), never here — the supervisor must not decide that
+    a message it did not deliver has been delivered.
+    """
+    if reason not in _SPOOLED_ATTEMPT_REASONS:
+        return
+    # ON THE LOOP, DELIBERATELY (review round 3, R3-4; premises corrected in
+    # R4-1, which was right to check them). The sibling ledger write beside this
+    # one goes through ``asyncio.to_thread`` and this does not, on the only
+    # argument that survives reading both: this is ONE small atomic write — one
+    # ~200-byte JSON file, flushed and fsynced by ``spooled._write`` — and it
+    # happens at most once per attempted raise for a session, never closer than
+    # ``spooled.RETRY_BASE_S`` apart, against a process whose slice is ten
+    # seconds. The earlier version of this comment argued from a contrast with
+    # the ledger that does not exist (that write reads one record too); the
+    # decision does not need it. Threading this would also make the callback
+    # awaitable, which the engage's own call sites are not.
+    try:
+        from local_operator.wakes.spooled import note_attempt, read_spooled_turn
+
+        if read_spooled_turn(config_dir, session_id) is None:
+            return
+        note_attempt(config_dir, session_id, error=reason)
+    except Exception:  # noqa: BLE001 — bookkeeping must never stop an engagement
+        logger.warning(
+            "could not record the spooled-turn attempt for %s", session_id, exc_info=True
+        )
 
 
 def _retirement_reason(config_dir: Path) -> str:
@@ -1275,8 +1502,10 @@ async def _should_retire(config_dir: Path) -> bool:
     genuinely empty index is still prompt.
     """
     await asyncio.sleep(min(SLICE_S, MAX_SLEEP_S))
-    index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
-    return not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries)
+    index, deliveries, spooled = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
+    return not _has_fireable_wakes(
+        index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
+    )
 
 
 async def serve(config_dir: Path, *, once: bool = False) -> int:
@@ -1300,8 +1529,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     residency = _ResidencySweep(config_dir)
     try:
         while True:
-            index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
-            if not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries):
+            index, deliveries, spooled = await asyncio.to_thread(
+                _load_and_reconcile_state, config_dir
+            )
+            if not _has_fireable_wakes(
+                index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
+            ):
                 if once:
                     # `--once` IS THE DIAGNOSTIC, so it must not be the quiet
                     # one (round 2, D15): a stale-only store made `lop wake
@@ -1340,7 +1573,9 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 logger.info("a wake was armed during the retirement grace; staying up")
                 continue
 
-            sweeper.sweep(config_dir, index, int(time.time() * 1000), deliveries=deliveries)
+            sweeper.sweep(
+                config_dir, index, int(time.time() * 1000), deliveries=deliveries, spooled=spooled
+            )
             if once:
                 await sweeper.drain()
                 return 0
@@ -1348,8 +1583,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # Recomputed from the index AFTER the sweep started, so a schedule
             # an already-finished runtime advanced is reflected rather than
             # re-read stale.
-            index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
-            if not _has_fireable_wakes(index, config_dir=config_dir, deliveries=deliveries):
+            index, deliveries, spooled = await asyncio.to_thread(
+                _load_and_reconcile_state, config_dir
+            )
+            if not _has_fireable_wakes(
+                index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
+            ):
                 continue  # retirement is decided at the top, with its grace
 
             upcoming = _next_wake_ms(index)
