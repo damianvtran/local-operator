@@ -244,6 +244,15 @@ def _record_dict(record: SecretRecord) -> dict[str, Any]:
 # --- verbs ------------------------------------------------------------------
 
 
+#: Exit code for "this call may not print a value". Deliberately distinct:
+#: argparse uses 2, the store's own failures are mapped to 2 by :func:`dispatch`,
+#: and 1 already means "the audit chain is broken" to ``audit --verify``. A
+#: scripted caller needs to tell "you are using a form this store will not print
+#: for you" apart from "the secret is missing" and from "the store is damaged",
+#: or the refusal becomes one more generic failure worth retrying.
+REVEAL_REFUSED = 3
+
+
 def _get(args: argparse.Namespace) -> int:
     """Write the exact stored bytes to stdout and nothing else.
 
@@ -260,11 +269,116 @@ def _get(args: argparse.Namespace) -> int:
     tells agents to write — so it is the one that most needs the value already
     registered for redaction by the time it can be printed. Nothing about the
     stdout contract changes: same bytes, no trailing newline.
+
+    ``--reveal`` selects a separate path (:func:`_reveal`) that writes the same
+    bytes after asking a human; it is ADDITIVE. The unqualified form above is
+    byte-for-byte and audit-row-for-audit-row what it was before, because
+    changing what ``get`` means by default is a decision about a documented
+    contract (``local_operator/secrets/cli.py``'s module docstring) that belongs
+    to the operator, not to a pipeline this verb is in the middle of.
     """
+    if args.reveal:
+        return _reveal(args)
     value = retrieve_secret(args.name)
     sys.stdout.buffer.write(value)
     sys.stdout.buffer.flush()
     return 0
+
+
+def _reveal(args: argparse.Namespace) -> int:
+    """Print a value to the terminal a human is looking at, and audit it.
+
+    The opt-in for the case where somebody genuinely has to SEE the bytes. Three
+    things make it an opt-in rather than a synonym for ``get``:
+
+    * **It asks, and it cannot be asked in a non-interactive call.** The gate is
+      a prompt on stdin, so a caller with no terminal — every ``bash`` call an
+      agent makes, every script, every pipeline — is refused with rc=3 and an
+      EMPTY stdout, which is the same fail-closed shape ``access.py`` documents
+      for a live broker's refusal: the answer is believed, and unreachability of
+      the human is not permission. There is deliberately no flag, env var or
+      config key that stands in for the prompt: a setting the model can write in
+      the same call it uses is not an opt-in, it is a default with extra steps.
+    * **stdout must be a terminal too.** The reveal's whole contract is "the
+      bytes go to the human's screen". Piping or redirecting them is what the
+      unqualified ``get`` is for, and that keeps working unchanged — so there is
+      nothing this stricter test costs the operator, and it removes "reveal into
+      a file or a pipe" as a shape an agent can write at all.
+    * **It is a distinct audit event.** :meth:`SecretStore.reveal` records
+      ``reveal``/``tty`` instead of ``get``/``ok``, so a deliberate reveal is
+      never lost among the routine rows scripts write, and a refusal is visible
+      as such.
+
+    The refusal is recorded best-effort and the reveal itself is recorded
+    before any byte reaches stdout, matching ``get``: the audit trail must not
+    be able to say a value was printed when it was not, or miss one that was.
+    """
+    if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
+        return _refuse_reveal(
+            args.name,
+            outcome="refused",
+            reason="stdin and stdout are not both a terminal, so there is nobody to ask",
+        )
+
+    _err(f"Reveal {args.name} to this terminal, in plain text? [y/N] ")
+    try:
+        answer = input()
+    except EOFError:
+        # A terminal that went away is not consent. `_remove` reads its prompt
+        # unguarded; here the failure would be a traceback on the one path whose
+        # subject is a value, so it fails closed instead.
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        _err("cancelled")
+        _note_reveal_refusal(args.name, outcome="cancelled")
+        return 1
+
+    value = open_store().reveal(args.name, session_id=session_id())
+    sys.stdout.buffer.write(value)
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def _refuse_reveal(name: str, *, outcome: str, reason: str) -> int:
+    """Refuse a reveal, say what to write instead, and record the refusal.
+
+    The message goes to stderr in full and stdout stays EMPTY: a refused reveal
+    is consumed by ``$( )`` in exactly the same way a successful one is, and a
+    diagnostic on stdout would be handed to the consumer as the credential.
+    """
+    _err(f"lop secret get --reveal: refusing to reveal {name} — {reason}.")
+    _err("  To USE it without printing it:")
+    _err(f"      lop secret run --secret {name} -- <command…>")
+    _err(f"      lop secret file {name} -- <command…>          (file-shaped secrets)")
+    _err("  To IDENTIFY it without reading it:")
+    _err(f"      lop secret describe {name} --length --fingerprint")
+    _err("  To send the bytes somewhere (unchanged, audited as an ordinary get):")
+    _err(f"      lop secret get {name} | …")
+    _err(f"  At a terminal, a human can: lop secret get {name} --reveal")
+    _note_reveal_refusal(name, outcome=outcome)
+    return REVEAL_REFUSED
+
+
+def _note_reveal_refusal(name: str, *, outcome: str) -> None:
+    """Record a reveal that did NOT happen; never fail the refusal over it.
+
+    The refusal is the safety property here — it must hold whether or not the
+    store is reachable — while the audit row is evidence about it. So a store
+    that cannot be opened (no store yet, a damaged one, a hardened store with no
+    live broker) degrades to a warning instead of turning a refusal into a
+    different error. It is a warning rather than silence because "the refusal,
+    and where it was aimed, was not recorded" is something the operator may need
+    to know; it is not propagated because it is not the failure that matters.
+
+    ``name`` is carried for the message only. The column it could populate is
+    the record ID, and resolving one would be a value read in the path whose
+    point is that no value was read (see
+    :meth:`SecretStore.note_reveal_refusal`).
+    """
+    try:
+        open_store().note_reveal_refusal(outcome=outcome, session_id=session_id())
+    except (SecretStoreError, OSError, UnicodeError, sqlite3.DatabaseError) as exc:
+        _err(f"warning: the refused reveal of {name} was not recorded ({exc})")
 
 
 def _set(args: argparse.Namespace) -> int:
@@ -360,16 +474,43 @@ def _warn_damaged(damaged: list[str]) -> None:
 
 
 def _describe(args: argparse.Namespace) -> int:
-    # Default `role="agent"`: this is the operator's ordinary CLI surface, and a
-    # provider-class row (`LOP_PROVIDER_*`) is refused here exactly as the agent
-    # tool's `describe` refuses it — an agent or a misdirected script must not be
-    # able to enumerate which provider keys a host holds. The provider-side
-    # readers (`registry.provider_secret_value`, the qwencloud ticket) pass
-    # `role="provider"` and are unaffected.
-    record = open_store().describe(args.name)
+    """Metadata for one secret, optionally its identity. Never its value.
+
+    ``--length`` and ``--fingerprint`` answer "which secret is this?" — they let
+    a value be recognised and compared WITHOUT being read, which is the point:
+    the guide's existing round-trip check (``lop secret get NAME | shasum -a
+    256``) hashes the value in a pipeline, and this returns the same answer with
+    no value-bearing pipeline to get wrong. Neither flag, and no future one,
+    prints the bytes; there is no flag anywhere on this verb that does.
+
+    Default ``role="agent"``, and the value-bearing path keeps it: this is the
+    operator's ordinary CLI surface, and a provider-class row
+    (``LOP_PROVIDER_*``) is refused here exactly as the agent tool's `describe`
+    refuses it — an agent or a misdirected script must not be able to enumerate
+    which provider keys a host holds, nor fingerprint one. The provider-side
+    readers (`registry.provider_secret_value`, the qwencloud ticket) pass
+    `role="provider"` and are unaffected.
+    """
+    store = open_store()
+    identities = args.length or args.fingerprint
+    if identities:
+        # One decrypt, one audit row: the record and its identity come from the
+        # same read, so `--length` cannot describe one record while the
+        # fingerprint belongs to another.
+        record, length, fingerprint = store.describe_fingerprint(args.name)
+    else:
+        # The metadata-only path, unchanged: no audit row, no value field used.
+        record, length, fingerprint = store.describe(args.name), 0, ""
+
     if args.json:
-        print(json.dumps(_record_dict(record), indent=2))
+        details = _record_dict(record)
+        if args.length:
+            details["length_bytes"] = length
+        if args.fingerprint:
+            details["fingerprint"] = fingerprint
+        print(json.dumps(details, indent=2))
         return 0
+
     print(f"name         {record.name}")
     print(f"id           {record.record_id}")
     print(f"kind         {record.kind}")
@@ -378,6 +519,10 @@ def _describe(args: argparse.Namespace) -> int:
     print(f"updated      {_format_time(record.updated_at)}")
     print(f"last used    {_format_time(record.last_used_at)}")
     print(f"key gen      {record.key_generation}")
+    if args.length:
+        print(f"length       {length} bytes")
+    if args.fingerprint:
+        print(f"fingerprint  {fingerprint}")
     return 0
 
 

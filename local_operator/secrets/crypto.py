@@ -64,9 +64,17 @@ MAX_NAME_LENGTH = 256
 #: that holds a handful of generations, short enough to sit in a meta row.
 KEY_FINGERPRINT_BYTES = 16
 
+#: Truncation length of a VALUE fingerprint (:func:`value_fingerprint`), in
+#: bytes of HMAC tag, rendered as hex. 128 bits for the same reason the blind
+#: index takes 128: what this bound has to survive is two DIFFERENT secrets
+#: colliding in a store of a few hundred records, while a shorter display would
+#: make the identity harder to compare by eye.
+VALUE_FINGERPRINT_BYTES = 16
+
 _SUBKEY_INFO_PREFIX = b"local-operator/secret-store/record/v1/gen="
 _NAME_INDEX_INFO = b"local-operator/secret-store/name-index/v1"
 _FINGERPRINT_INFO = b"local-operator/secret-store/key-fingerprint/v1"
+_VALUE_FINGERPRINT_INFO = b"local-operator/secret-store/value-fingerprint/v1"
 
 
 def normalize_name(name: str) -> str:
@@ -165,6 +173,61 @@ def name_index(master_key: bytes, name: str) -> bytes:
         hashlib.sha256,
     ).digest()
     return digest[:NAME_INDEX_BYTES]
+
+
+def derive_value_fingerprint_key(master_key: bytes) -> bytes:
+    """The HMAC key behind a value fingerprint.
+
+    Derived through HKDF with its own ``info`` label, exactly as the blind-index
+    key is, so it shares no key material with the record subkeys or with the
+    index key: the three are independent in the sense HKDF gives that word.
+
+    **This key is never persisted and never returned.** It exists in the memory
+    of the process computing a fingerprint and nowhere else — unlike
+    :func:`key_fingerprint`, whose output is deliberately written into the
+    store's ``meta`` table. That is what makes an emitted fingerprint safe to
+    print: the artifact that could be brute-forced against it is on disk only
+    for someone who already holds the master key, and such a holder opens the
+    store's ciphertext directly and gains nothing from the digest.
+    """
+    return _hkdf(master_key, _VALUE_FINGERPRINT_INFO)
+
+
+def value_fingerprint(master_key: bytes, value: bytes) -> str:
+    """A stable, non-reversible identity for one secret VALUE.
+
+    Answers "is this the same secret I compared a moment ago / in another
+    session?" without handing anyone the bytes, which is the whole point: the
+    safe inspection surface is one that cannot be turned back into a value.
+
+    **Why keyed rather than a bare ``sha256(value)``.** An unkeyed digest of a
+    secret is a *search*: a low-entropy value (a 4-digit PIN, a short password,
+    a value from a leaked corpus) is recoverable by hashing the candidates, and
+    the digest of a value that appears anywhere else — a Git history, a pasted
+    config — is computable by whoever has that copy. Keyed on
+    :func:`derive_value_fingerprint_key`, neither is possible without the master
+    key, which is not stored beside the value but is the key the store itself is
+    sealed under. **Stated honestly, because the guide repeats it: a keyed
+    digest is a confirmation oracle for a holder of that key.** They can decrypt
+    the store anyway, so the fingerprint tells them nothing the ciphertext does
+    not — it is an identity, not a barrier, and it must not be described as
+    proof that a value is secret or unguessable.
+
+    **Stable within one store, and only within one store.** Deterministic (no
+    per-call salt), so two calls agree and a value compared across sessions or
+    after a restart fingerprints equal. The key it is derived from is the one
+    the store is sealed under, so the same value fingerprints DIFFERENTLY in a
+    store with a different master key, and after ``rotate`` — a fingerprint is
+    not comparable between two stores and does not survive a key rotation. Both
+    facts are documented in the credentials guide, because "it changed" is the
+    observation that would otherwise be misread as "the secret changed".
+
+    The ``hmac-sha256:`` prefix is part of the returned identity: it is what a
+    future algorithm change shows up as, instead of two generations silently
+    producing incomparable hex that look like a mismatch.
+    """
+    digest = hmac.new(derive_value_fingerprint_key(master_key), value, hashlib.sha256).digest()
+    return "hmac-sha256:" + digest[:VALUE_FINGERPRINT_BYTES].hex()
 
 
 def _hkdf(master_key: bytes, info: bytes) -> bytes:

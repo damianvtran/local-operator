@@ -41,6 +41,7 @@ from local_operator.secrets.crypto import (
     open_record,
     seal,
     validate_name,
+    value_fingerprint,
 )
 from local_operator.secrets.errors import (
     IncompatibleStore,
@@ -882,6 +883,152 @@ class SecretStore:
         with closing(self._open(for_write=False)) as connection:
             record, _ = self._decode(self._row_for(connection, canonical))
         return record
+
+    def describe_fingerprint(
+        self, name: str, *, role: str = "agent", session_id: str | None = None
+    ) -> tuple[SecretRecord, int, str]:
+        """Metadata, the value's byte length, and its stable fingerprint.
+
+        The inspection surface that answers "which secret is this?" without
+        answering "what is it?". Three properties make that true, and all three
+        are load-bearing:
+
+        * **The value never leaves this method.** Only its length and a keyed,
+          truncated digest are returned; no flag anywhere turns either back
+          into bytes.
+        * **The fingerprint is keyed, not a bare hash.** See
+          :func:`~local_operator.secrets.crypto.value_fingerprint` for why a
+          plain digest of a secret is a search rather than an identity.
+        * **Nothing about it is stored.** No column, no meta row: the digest is
+          computed on demand from the same ciphertext :meth:`describe` already
+          decrypts, so a stolen store carries no value-derived artifact to
+          brute-force, and adding this needed no schema migration.
+
+        **This is a decrypting call, and saying otherwise would be the easy
+        lie.** The name and description live inside the ciphertext
+        (:func:`_payload`), so ``describe`` has always opened the record to
+        answer at all. What changes here is only that the plaintext is *used* —
+        for two derived fields — rather than discarded, which is why it appends
+        its own audit row instead of looking like a metadata read.
+
+        **Audited as ``describe``/``fingerprint``, distinct from ``get``.** The
+        chain has to answer "has anyone read this value?" with a fingerprint
+        computation neither indistinguishable from a scripted retrieval nor
+        silently unaudited. A plain ``describe`` (no fingerprint requested) is
+        untouched: it reads no value field, writes no row, and behaves exactly
+        as it did before.
+
+        ``last_used_at`` is deliberately NOT moved. It answers "when was this
+        value last handed to a consumer", and a fingerprint hands it to nobody;
+        bumping it here would make an identity check look like a use in the one
+        field an operator watches for unexpected access.
+        """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
+        now = time.time()
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                record, value = self._decode(self._row_for(connection, canonical))
+                audit.append(
+                    connection,
+                    event="describe",
+                    ts=now,
+                    outcome="fingerprint",
+                    secret_id=record.record_id,
+                    session_id=session_id,
+                    pid=os.getpid(),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        return record, len(value), value_fingerprint(self._master_key, value)
+
+    def reveal(self, name: str, *, role: str = "agent", session_id: str | None = None) -> bytes:
+        """Return a value for a TTY REVEAL, audited as ``reveal``, not ``get``.
+
+        Same bytes, same transaction shape and the same ``last_used_at`` bump as
+        :meth:`get` — a reveal IS a use of the value — but a different event, so
+        ``lop secret audit`` distinguishes "a human asked to see this" from
+        "something retrieved this". That distinction is the whole reason an
+        audited reveal is worth having while the unqualified ``get`` keeps its
+        old behaviour: without it, every reveal would be lost among the routine
+        rows a scripted pipeline writes.
+
+        Which is also why this does NOT route through the broker's ``retrieve``
+        op the way ``get`` does. That op exists to announce the value to the
+        owning session and wait for its acknowledgement, so the session can
+        register it for redaction before it reaches a model-visible channel, and
+        it writes its own ``get`` row — which would sit under the reveal row and
+        blur exactly the distinction above. The notify step's product ("this
+        value may be in a transcript") does not describe a path whose contract
+        is "the bytes go to the terminal a human is looking at", and the
+        hardened tier's authorization is still applied here: ``open_store``
+        reaches the broker for the key itself, so a locked store still refuses.
+
+        ``role`` re-asserts the namespace rule, because this is a VALUE read: a
+        reveal of a ``LOP_PROVIDER_*`` row would hand a provider credential to
+        the same surface the prefix exists to keep out of it.
+        """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
+        now = time.time()
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                record, value = self._decode(self._row_for(connection, canonical))
+                connection.execute(
+                    "UPDATE secrets SET last_used_at = ? WHERE id = ?", (now, record.record_id)
+                )
+                audit.append(
+                    connection,
+                    event="reveal",
+                    ts=now,
+                    outcome="tty",
+                    secret_id=record.record_id,
+                    session_id=session_id,
+                    pid=os.getpid(),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        return value
+
+    def note_reveal_refusal(self, *, outcome: str, session_id: str | None = None) -> None:
+        """Append the audit row for a reveal this process REFUSED.
+
+        No value is read and no record is resolved — a refusal is precisely the
+        case where the store was not consulted for bytes — so ``secret_id`` is
+        left NULL. Recording the targeted NAME instead is not possible by
+        design: names are blind-indexed, and resolving one would be a decrypt of
+        that record's payload, i.e. a value read in the very path whose purpose
+        is that no value was read. The name is in the command line the operator
+        can see, and this row's job is "a reveal attempt happened, from this
+        pid, and was denied".
+
+        ``outcome`` is the caller's because the two refusals mean different
+        things and the operator's question about them differs: ``refused`` is
+        "nobody could be asked" — the shape an agent's non-interactive call
+        takes — while ``cancelled`` is a human at a terminal declining the
+        prompt they were shown.
+        """
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                audit.append(
+                    connection,
+                    event="reveal",
+                    ts=time.time(),
+                    outcome=outcome,
+                    session_id=session_id,
+                    pid=os.getpid(),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
 
     def list(self) -> list[SecretRecord]:
         """Every readable record's metadata, name-sorted. Never returns values.

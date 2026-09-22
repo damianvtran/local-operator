@@ -46,7 +46,11 @@ def cli(tmp_path: Path):
     home.mkdir()
     config.mkdir()
 
-    def run(*arguments: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    def run(
+        *arguments: str,
+        stdin: bytes | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
         environment = {
             key: value for key, value in os.environ.items() if not key.startswith("CMUX_")
         }
@@ -60,6 +64,12 @@ def cli(tmp_path: Path):
             TERM="xterm-256color",
         )
         environment.pop("NO_COLOR", None)
+        # Callers pass the settings a test needs to prove do NOT act as an
+        # opt-in (`LOP_REVEAL`), so they are added rather than inherited: a
+        # variable that only exists because it leaked in from the host would
+        # make the assertion depend on the machine it ran on.
+        if extra_env:
+            environment.update(extra_env)
         return subprocess.run(
             [sys.executable, "-m", "local_operator.cli", "secret", *arguments],
             input=stdin,
@@ -177,6 +187,226 @@ def test_describe_shows_metadata_but_no_value(cli) -> None:
     described = cli("describe", "TOKEN")
     assert b"a note" in described.stdout
     assert b"the-secret-value" not in described.stdout
+
+
+def _secret_events(cli) -> list[dict[str, object]]:
+    """Audit rows this suite CAUSED, without the broker's own deny/fallback rows.
+
+    A plain terminal has no ``lop`` session among its ancestors, so the broker
+    denies the key and the retrieval and the store falls back to a local decrypt
+    (design §13; the rows are real and asserted in the broker's own tests). They
+    are noise for a question about which of OUR verbs ran, and they are not
+    guaranteed to be there at all on a host where a broker grants, so a test
+    that indexed the last row would be asserting about the environment.
+    """
+    entries = json.loads(cli("audit", "--json").stdout)
+    return [entry for entry in entries if not entry["event"].startswith("deny:")]
+
+
+def test_describe_fingerprint_identifies_a_value_without_printing_it(cli) -> None:
+    """The value-free comparison surface, end to end through the real CLI.
+
+    Three secrets: A and B hold the SAME bytes under different names, C holds
+    different bytes of the SAME length. Equal values must fingerprint equal (or
+    the digest is useless for comparison), C must differ (or two same-length
+    secrets would be indistinguishable), and the length must be right. The value
+    bytes must appear in neither stdout nor stderr on any of the runs.
+    """
+    value_a = b"alpha-synthetic-token-0001"
+    value_c = b"alpha-synthetic-token-0002"
+    cli("set", "SYN_ALPHA", stdin=value_a + b"\n")
+    cli("set", "SYN_BETA", stdin=value_a + b"\n")
+    cli("set", "SYN_GAMMA", stdin=value_c + b"\n")
+
+    def identity(name: str) -> subprocess.CompletedProcess[bytes]:
+        result = cli("describe", name, "--length", "--fingerprint")
+        assert result.returncode == 0, result.stderr
+        return result
+
+    alpha = identity("SYN_ALPHA")
+    beta = identity("SYN_BETA")
+    gamma = identity("SYN_GAMMA")
+
+    def fingerprint(result: subprocess.CompletedProcess[bytes]) -> str:
+        line = next(row for row in result.stdout.splitlines() if row.startswith(b"fingerprint"))
+        return line.split()[1].decode()
+
+    assert b"length       26 bytes" in alpha.stdout
+    assert fingerprint(alpha) == fingerprint(beta)
+    assert fingerprint(alpha) != fingerprint(gamma)
+    assert fingerprint(alpha).startswith("hmac-sha256:")
+    for result in (alpha, beta, gamma):
+        assert value_a not in result.stdout and value_a not in result.stderr
+        assert value_c not in result.stdout and value_c not in result.stderr
+
+
+def test_describe_fingerprint_json_carries_only_what_was_asked_for(cli) -> None:
+    """``--json`` gains fields per flag, and never a value field.
+
+    ``list --json`` and ``describe --json`` are machine-parsed, so the keys are
+    part of the surface: an identity is added when it is requested and not
+    otherwise, and no key here is ever a value.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+
+    plain = json.loads(cli("describe", "SYN_ALPHA", "--json").stdout)
+    assert "fingerprint" not in plain and "length_bytes" not in plain
+
+    length_only = json.loads(cli("describe", "SYN_ALPHA", "--json", "--length").stdout)
+    assert length_only["length_bytes"] == 26
+    assert "fingerprint" not in length_only
+
+    both = json.loads(cli("describe", "SYN_ALPHA", "--json", "--length", "--fingerprint").stdout)
+    assert both["length_bytes"] == 26
+    assert both["fingerprint"].startswith("hmac-sha256:")
+    assert "value" not in " ".join(both)
+
+
+def test_describe_fingerprint_refuses_a_provider_row(cli) -> None:
+    """The value-bearing describe keeps the agent namespace boundary.
+
+    ``--fingerprint`` is a confirmation oracle for a value an agent cannot read:
+    it would let a guessed provider key be checked without ever being retrieved.
+    The role assertion therefore runs on this path too, on the same ``role="agent"``
+    default as the metadata-only ``describe``.
+    """
+    cli("set", "PLAIN", stdin=b"v\n")
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=cli.config)
+
+    refused = cli("describe", "LOP_PROVIDER_OPENROUTER_API_KEY", "--length", "--fingerprint")
+    assert refused.returncode == 2, refused.stdout
+    assert b"reserved" in refused.stderr
+    assert refused.stdout == b""
+
+
+def test_a_plain_describe_is_unchanged(cli) -> None:
+    """No new fields, no new audit rows: the metadata path is what it was.
+
+    The additive claim in the PR description is asserted rather than asserted
+    about: the same command, the same output shape, and an audit trail that a
+    fingerprint did not write to.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+    described = cli("describe", "SYN_ALPHA")
+    assert described.returncode == 0
+    assert b"fingerprint" not in described.stdout
+    assert b"length" not in described.stdout
+
+    events = [entry["event"] for entry in _secret_events(cli)]
+    assert "describe" not in events
+
+
+# --- the audited reveal path -------------------------------------------------
+
+
+def test_reveal_is_refused_without_a_terminal(cli) -> None:
+    """Fail closed with EMPTY STDOUT and a code a script can branch on.
+
+    This is the shape every agent's ``bash`` call takes — no tty on stdin — so it
+    is the refusal that has to be true: exit 3 (distinct from argparse's 2 and
+    from the store's own failures), nothing on stdout that ``$( )`` could hand to
+    a consumer as if it were the credential, and a message that says what to
+    write instead. The value stays retrievable by the unchanged ``get``.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+
+    refused = cli("get", "SYN_ALPHA", "--reveal", stdin=b"")
+    assert refused.returncode == 3, refused.stderr
+    assert refused.stdout == b""
+    assert b"terminal" in refused.stderr
+    assert b"lop secret run" in refused.stderr
+    assert b"alpha-synthetic-token-0001" not in refused.stderr
+
+    assert cli("get", "SYN_ALPHA").stdout == b"alpha-synthetic-token-0001"
+
+
+def test_reveal_records_its_refusal_in_the_audit_chain(cli) -> None:
+    """A refused reveal is visible afterwards, and the chain still verifies.
+
+    The refusal is the safety property; the row is what makes an attempt
+    attributable. It carries no secret id by design (resolving one would be a
+    value read on the path that must not read a value), so the assertion is
+    about the event and outcome.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+    cli("get", "SYN_ALPHA", "--reveal", stdin=b"")
+
+    entries = _secret_events(cli)
+    assert (entries[-1]["event"], entries[-1]["outcome"]) == ("reveal", "refused")
+    assert entries[-1]["secret_id"] is None
+    verified = cli("audit", "--verify")
+    assert verified.returncode == 0
+    assert b"intact" in verified.stdout
+
+
+def test_no_environment_variable_stands_in_for_the_prompt(cli) -> None:
+    """An opt-in the caller can set itself is a default with extra steps.
+
+    ``LOP_REVEAL=1`` (and the whole class of them — a config key, a --force)
+    would be settable by the model in the same call that uses it, which is
+    precisely what the constraint forbids. Asserted as a behaviour, not as an
+    absence of code: with the variable exported, the call is still refused.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+    refused = cli("get", "SYN_ALPHA", "--reveal", stdin=b"", extra_env={"LOP_REVEAL": "1"})
+    assert refused.returncode == 3
+    assert refused.stdout == b""
+
+
+def test_reveal_prints_the_value_at_a_terminal(cli) -> None:
+    """The human path, on a REAL pty, with the value audited as a reveal.
+
+    The value is printed exactly (no trailing newline, as ``get`` does), the
+    prompt is answered at the terminal, and the audit records ``reveal``/``tty``
+    — distinguishable from the ``get``/``ok`` a pipeline writes, which is the
+    requirement this whole path exists to satisfy.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+
+    code, captured = _typed_cli(
+        cli.config, ["get", "SYN_ALPHA", "--reveal"], ["y"], answer_when=b"Reveal"
+    )
+    assert code == 0, captured
+    assert "alpha-synthetic-token-0001" in captured
+
+    entries = _secret_events(cli)
+    assert (entries[-1]["event"], entries[-1]["outcome"]) == ("reveal", "tty")
+    assert [entry["event"] for entry in entries] == ["set", "reveal"]
+    assert cli("audit", "--verify").returncode == 0
+
+
+def test_a_declined_prompt_reveals_nothing(cli) -> None:
+    """The prompt is a gate, not a formality: answering ``n`` shows no bytes."""
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+
+    code, captured = _typed_cli(
+        cli.config, ["get", "SYN_ALPHA", "--reveal"], ["n"], answer_when=b"Reveal"
+    )
+    assert code != 0
+    assert "alpha-synthetic-token-0001" not in captured
+    assert "cancelled" in captured
+    entries = _secret_events(cli)
+    assert (entries[-1]["event"], entries[-1]["outcome"]) == ("reveal", "cancelled")
+
+
+def test_get_without_reveal_is_byte_identical_and_unchanged_in_audit(cli) -> None:
+    """The contract the PR must not move, asserted on both halves.
+
+    Bytes: exact, no trailing newline. Trail: an ordinary ``get`` is still
+    ``get``/``ok``, with no reveal row beside it, so a verifier that counts
+    events reads exactly what it read before.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+    got = cli("get", "SYN_ALPHA")
+    assert got.returncode == 0
+    assert got.stdout == b"alpha-synthetic-token-0001"
+    assert not got.stdout.endswith(b"\n")
+
+    entries = _secret_events(cli)
+    assert [entry["event"] for entry in entries] == ["set", "get"]
+    assert entries[-1]["outcome"] == "ok"
 
 
 def test_describe_refuses_a_provider_row_and_names_no_namespace(cli) -> None:
@@ -548,14 +778,21 @@ def test_secret_help_does_not_promise_a_vault(cli) -> None:
         assert overclaim not in text
 
 
-def _typed_cli(config: Path, arguments: list[str], answers: list[str]) -> tuple[int, str]:
+def _typed_cli(
+    config: Path,
+    arguments: list[str],
+    answers: list[str],
+    *,
+    answer_when: bytes = b"assphrase",
+) -> tuple[int, str]:
     """Run ``lop secret ...`` on a real pty, typing ``answers`` at each prompt.
 
-    ``harden`` and ``unlock`` read through ``getpass``, which opens
-    ``/dev/tty``: without a pty they take the "no terminal" refusal branch and
-    the success path is never exercised. That is exactly why CI missed QA's Q2
-    — the only ``unlock`` test asserted the keyfile rejection, which returns
-    before the broker is contacted.
+    ``harden``, ``unlock`` and ``get --reveal`` read the terminal: without a pty
+    they take the "no terminal" refusal branch and the success path is never
+    exercised. That is exactly why CI missed QA's Q2 — the only ``unlock`` test
+    asserted the keyfile rejection, which returns before the broker is
+    contacted. ``answer_when`` is the text that opens a prompt, so a caller can
+    wait for the reveal prompt rather than for the passphrase one.
     """
     environment = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
     environment.update(
@@ -584,7 +821,7 @@ def _typed_cli(config: Path, arguments: list[str], answers: list[str]) -> tuple[
         captured += chunk
         # Answer as each prompt appears, and keep draining meanwhile: a pty
         # buffer that fills while nobody reads blocks the child on write.
-        if pending and b"assphrase" in chunk:
+        if pending and answer_when in chunk:
             os.write(handle, (pending.pop(0) + "\n").encode())
     _, status = os.waitpid(pid, 0)
     return os.waitstatus_to_exitcode(status), captured.decode(errors="replace")
