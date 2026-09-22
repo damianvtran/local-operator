@@ -21,17 +21,24 @@ covered by the three-relay run over loopback in the evidence directory, which is
 where the end-to-end claim belongs. What is pinned here is the code path that made
 that hang fatal (QA round 2, Q-R2-2).
 
-TWO WAYS THIS FILE ITSELF WENT FLAKY UNDER XDIST, both fixed at the source rather
+THREE WAYS THIS FILE ITSELF WENT FLAKY UNDER XDIST, all fixed at the source rather
 than by loosening an assertion, because a test that cannot fail is not evidence:
 
 * an address made "refused" by binding port 0 and closing it can be re-bound by a
   PARALLEL worker's own ``bind(0)``, which turns it into a live listener and makes
   ``winner`` nondeterministic — so the unraceable fixture is a privileged port
-  nothing unprivileged can claim (``_refused_endpoint``); and
+  nothing unprivileged can claim (``_refused_endpoint``);
 * ``attempts`` on the EARLY-RETURN path is only what the collector had heard when
   the first address answered, so a candidate can read ``no_answer`` while being
   perfectly reachable — the test that asserts every address's own answer therefore
-  asks for ``wait_all=True`` and asserts ``complete`` before reading it.
+  asks for ``wait_all=True`` and asserts ``complete`` before reading it; and
+* a candidate "still in flight" cannot be ordered up by handing the probe a
+  deadline 100 µs out (QA round 14, Q14-1): on warm loopback the dial itself
+  frequently reports inside that window — measured in one process, 430 of 600
+  runs (71.7%) answered ``connect_failed:ConnectionRefusedError`` with
+  ``complete=True``, against 12/12 ``no_answer`` in a cold process — so the cell
+  that names an unreported candidate hands the probe an ALREADY-EXPIRED deadline
+  instead, which reaches the same naming pass with one deterministic answer.
 """
 
 from __future__ import annotations
@@ -158,18 +165,34 @@ def test_a_candidate_the_deadline_never_reached_is_reported_as_not_attempted() -
 
 
 def test_a_candidate_that_never_reported_is_named_rather_than_dropped() -> None:
-    """Every declared address appears in the result, even one still in flight.
+    """Every declared address appears in the result, even one that reported nothing.
 
     A missing row reads as "fine" to whoever renders the table, which is the one
     thing a probe result must never say about an address nobody got an answer from.
+    The row asserted here is the one the prober SYNTHESISES in its closing pass for
+    an endpoint that produced no result of its own, and the claim is that the row
+    exists, is spelled as the member declared it, and carries a reason pointing at
+    that missing answer rather than at a dial that never happened.
+
+    THE DEADLINE IS ALREADY SPENT, DELIBERATELY (QA round 14, Q14-1). Asking for an
+    attempt "still in flight" by handing this probe ``deadline=time.monotonic() +
+    0.0001`` does not ask for that state — it asks for whichever of three real
+    answers wins a 100 µs window, measured in one process as 430 of 600 runs
+    (71.7%) reporting ``connect_failed:ConnectionRefusedError`` — whose ``complete``
+    is True, so the fast refusal broke the ``complete is False`` assertion too —
+    against 169 ``no_answer``, so the cell was a coin flip in any warm shard.
+    An expired deadline is what makes the answer single: nothing is dialled, so the
+    closing pass names the endpoint ``not_attempted`` — the same pass, deterministic
+    — and that is the production shape the neighbouring cell exists for as well (a
+    listing whose budget the earlier members spent before this one's turn).
     """
     probe = relay.probe_candidates(
-        ["127.0.0.1:1"], deadline=time.monotonic() + 0.0001, connect_cap=30.0
+        ["127.0.0.1:1"], deadline=time.monotonic() - 1.0, connect_cap=30.0
     )
     assert len(probe.attempts) == 1
     assert probe.attempts[0].endpoint == "127.0.0.1:1"
     assert probe.attempts[0].connected is False
-    assert probe.attempts[0].detail in ("not_attempted", "no_answer")
+    assert probe.attempts[0].detail == "not_attempted"
     assert probe.complete is False
     assert probe.reason == probe.attempts[0].detail
 
