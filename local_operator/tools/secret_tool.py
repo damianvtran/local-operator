@@ -155,6 +155,7 @@ async def execute_secret(
 
     from local_operator.secrets.access import open_store, session_id
     from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.store import is_provider_secret_name
 
     if params.op != "list" and not (params.name or "").strip():
         return _error(tool_call_id, "secret", f"'{params.op}' requires a secret name.")
@@ -265,11 +266,25 @@ async def execute_secret(
                 details={"op": "delete", "name": name},
             )
         records = store.list()
+        # PROVIDER ROWS ARE NOT THE AGENT'S TO ENUMERATE (round-2 review, R2,
+        # PATCH C). `LOP_PROVIDER_*` names are written by the provider preflight
+        # and describe *machine* credentials; the operator manages them through
+        # `lop secret list`, which still shows them. The agent surface is the
+        # one a model drives, so it is filtered here rather than at the store:
+        # a model that cannot see the row cannot ask for it, and a name it
+        # never learns is not one it can name back into the destructive verbs.
+        records = [r for r in records if not is_provider_secret_name(r.name)]
         if not records:
+            # Distinguish "you have stored nothing" from "everything stored is
+            # a provider row you cannot see": the first asks the agent to store
+            # a credential, the second must not, or the guidance to check before
+            # asking would loop the model into offering to re-store a machine
+            # credential it is deliberately not shown.
             return _text(
                 tool_call_id,
                 "secret",
-                "No secrets are stored yet.",
+                "No agent-visible secrets are stored. Provider credentials "
+                "(LOP_PROVIDER_*) are managed outside this tool.",
                 details={"op": "list", "count": 0},
             )
         width = max(len(record.name) for record in records)

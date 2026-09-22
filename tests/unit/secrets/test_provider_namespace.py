@@ -20,6 +20,7 @@ here can reach the operator's live store or their real ``credentials.env``.
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -208,6 +209,69 @@ def test_a_provider_may_describe_its_own_row(store: SecretStore) -> None:
     store.set(name, b"provider-key", role="provider")
 
     assert store.describe(name, role="provider").name == name
+
+
+def test_an_agent_delete_by_id_of_a_provider_row_is_refused(store: SecretStore) -> None:
+    """The boundary must hold on the BY-ID verb too (round-2 review, R2).
+
+    ``delete`` looks a row up by blind index and checks the role; ``delete_record_id``
+    removes by primary key and checked nothing — so an agent surface that read an id
+    off ``list --json`` could destroy a ``LOP_PROVIDER_*`` credential without ever
+    having named it. The row is decoded here (its name is sealed in the ciphertext)
+    so the same predicate governs this path. Paired with an existence check: a refusal
+    that still removed the row would be the defect one step later.
+    """
+    name = provider_secret_name("OPENROUTER_API_KEY")
+    record = store.set(name, b"provider-key", role="provider")
+
+    with pytest.raises(InvalidSecretName):
+        store.delete_record_id(record.record_id)
+
+    assert store.get(name, role="provider") == b"provider-key"
+    assert store.damaged_records() == []
+
+
+def test_a_provider_may_delete_its_own_row_by_id(store: SecretStore) -> None:
+    """``role="provider"`` still works by id, or the guard would be a regression."""
+    name = provider_secret_name("OPENROUTER_API_KEY")
+    record = store.set(name, b"provider-key", role="provider")
+
+    assert store.delete_record_id(record.record_id, role="provider") is True
+    assert store.list() == []
+
+
+def test_a_damaged_row_is_still_removable_by_id_under_the_agent_role(
+    store: SecretStore,
+) -> None:
+    """The repair path must survive the boundary (round-2 review, R2).
+
+    ``delete_record_id`` exists for the row whose ciphertext will not open: its name
+    is unreadable, so it carries no provider identity to protect and it is already
+    unusable — refusing it would remove the only tool the operator has for clearing
+    a row that breaks enumeration. So an undecodable row is permitted for any role,
+    and this pins that the role check did not swallow it.
+    """
+    store.set("GOOD_ONE", b"a")
+    damaged = store.set("BROKEN", b"b")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE secrets SET ciphertext = ? WHERE id = ?",
+            (b"\x00" * 64, damaged.record_id),
+        )
+    assert store.damaged_records() == [damaged.record_id]
+
+    assert store.delete_record_id(damaged.record_id) is True
+    assert store.damaged_records() == []
+    assert [record.name for record in store.list()] == ["GOOD_ONE"]
+
+
+def test_delete_by_id_of_an_absent_row_still_reports_false(store: SecretStore) -> None:
+    """The lookup added for the boundary must not turn "no such row" into an error.
+
+    The CLI reports a missing id as a non-zero exit with its own message; that is a
+    different outcome from a refusal, and the two must not be conflated.
+    """
+    assert store.delete_record_id("no-such-record-id") is False
 
 
 def test_the_two_namespaces_are_disjoint_so_shadowing_is_impossible(

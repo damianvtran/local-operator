@@ -399,7 +399,10 @@ def _remove(args: argparse.Namespace) -> int:
         # ciphertext will not open has no readable name and no valid blind
         # index, so deleting by primary key is the only way out short of
         # hand-editing SQLite.
-        if not open_store().delete_record_id(args.id, session_id=session_id()):
+        # `role="agent"` by default: an id read off `list --json` must not let the
+        # agent surface remove a provider row, the same boundary the name-keyed
+        # `delete` below enforces. Provider-class repair is a provider-side call.
+        if not open_store().delete_record_id(args.id, role="agent", session_id=session_id()):
             _err(f"no record with id {args.id} in this store")
             return 2
         _err(f"deleted record {args.id}")

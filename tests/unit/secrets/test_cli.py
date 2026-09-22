@@ -221,6 +221,36 @@ def test_rm_refuses_a_provider_row_and_leaves_it_intact(cli) -> None:
     assert provider_secret_value("OPENROUTER_API_KEY", base=cli.config) == "sk-secret"
 
 
+def test_rm_by_id_refuses_a_provider_row_and_leaves_it_intact(cli) -> None:
+    """The R2 rerun of the boundary on the BY-ID verb (round-2 review).
+
+    This is the reported repro: `lop secret list --json` emits provider row ids,
+    and `rm --id <id>` removed a row without ever naming it — the name-keyed guard
+    on `rm NAME` never ran. The id is read off `list --json` here exactly as the
+    report did, so the test drives the surface the defect was filed against rather
+    than spelling an id it chose. Paired with a value check: a refusal that still
+    removed the row would be the defect one step later.
+    """
+    import json
+
+    from local_operator.providers.registry import (
+        provider_secret_value,
+        store_provider_key,
+    )
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=cli.config)
+
+    listed = cli("list", "--json")
+    payload = json.loads(listed.stdout)
+    provider_row = next(row for row in payload if row["name"].startswith("LOP_PROVIDER_"))
+
+    refused = cli("rm", "--id", provider_row["id"], "--yes")
+    assert refused.returncode == 2, refused.stdout
+    assert b"reserved" in refused.stderr
+
+    assert provider_secret_value("OPENROUTER_API_KEY", base=cli.config) == "sk-secret"
+
+
 def test_set_confirmation_does_not_echo_the_value(cli) -> None:
     """The confirmation goes to stderr and names the size, never the bytes."""
     stored = cli("set", "TOKEN", stdin=b"the-secret-value\n")

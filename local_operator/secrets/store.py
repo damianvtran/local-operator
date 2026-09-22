@@ -933,7 +933,13 @@ class SecretStore:
                 damaged.append(str(row[0]))
         return sorted(records, key=lambda record: record.name), sorted(damaged)
 
-    def delete_record_id(self, record_id: str, *, session_id: str | None = None) -> bool:
+    def delete_record_id(
+        self,
+        record_id: str,
+        *,
+        role: str = "agent",
+        session_id: str | None = None,
+    ) -> bool:
         """Remove a row by its id, without needing to decrypt it.
 
         The repair path for a damaged record. :meth:`delete` looks a row up by
@@ -950,6 +956,28 @@ class SecretStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._guard_key_epoch(connection)
+                # THE BOUNDARY HOLDS ON THIS VERB TOO (round-2 review, R2). A row
+                # removed by primary key bypassed the name-keyed check `delete`
+                # applies, and `list --json` hands out ids — so the agent surface
+                # could destroy a `LOP_PROVIDER_*` credential without ever naming
+                # it. The row is DECODED here (the name is sealed in its ciphertext)
+                # so the same `_validate_role` predicate governs this path.
+                #
+                # A DAMAGED row is permitted: its name cannot be read, it carries
+                # no provider identity to protect, and it is already unusable —
+                # refusing it would break the repair path this verb exists for.
+                row = connection.execute(
+                    f"SELECT {_RECORD_COLUMNS} FROM secrets WHERE id = ?", (record_id,)
+                ).fetchone()
+                if row is None:
+                    connection.execute("COMMIT")
+                    return False
+                try:
+                    decoded_name = self._decode(row)[0].name
+                except (SecretCorrupt, IncompatibleStore):
+                    decoded_name = None
+                if decoded_name is not None:
+                    _validate_role(decoded_name, role)
                 cursor = connection.execute("DELETE FROM secrets WHERE id = ?", (record_id,))
                 removed = cursor.rowcount > 0
                 if removed:
