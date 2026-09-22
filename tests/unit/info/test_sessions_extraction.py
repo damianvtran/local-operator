@@ -379,6 +379,26 @@ GLYPH_FIXTURE: list[tuple[Any, str]] = [
         ),
         "live",
     ),
+    (
+        # THE ROW THAT KEEPS THE WHY COLUMN ON THIS FIXTURE. The two rows above
+        # carry a ``pending`` value as oversized-glyph data for the NEEDS
+        # column's clamp, which also makes them parked rows — and a parked row's
+        # stale outcome is now suppressed, so seeding them alone would drop the
+        # WHY column entirely and take the cell arithmetic under test with it.
+        # This row is idle and ungated, so its reason prints; the clamp is the
+        # column's, not the row's, so it measures the same sequences either way.
+        _Record(
+            pid=5152,
+            kind="exec",
+            session_id="facedeadf00d",
+            conversation_name=FAMILY * 13,
+            cwd="/tmp/probe/idle",
+            model_label=FAMILY * 15,
+            started_at=NOW - 60.0,
+            heartbeat_at=NOW - 1.0,
+        ),
+        "live",
+    ),
 ]
 
 
@@ -879,9 +899,11 @@ def test_the_table_explains_a_session_only_when_it_has_something_to_explain(
     healthy = capsys.readouterr().out
     assert "WHY" not in healthy, healthy
 
+    # Seeded on the IDLE row, not the parked one: a session that is currently
+    # working or gated describes itself by that, and the case below pins it.
     _seed_outcome(
         tmp_path,
-        "a3f9c21b7e40",
+        WHY_ROW_SESSION_ID,
         kind="interrupted",
         reason=_deliberate_stop_reason(),
         cause="user-stop",
@@ -894,7 +916,7 @@ def test_the_table_explains_a_session_only_when_it_has_something_to_explain(
     assert "WHY" in explained.splitlines()[0], explained
     # The table names a row by its conversation, not by its id (that is the
     # CONVERSATION column's own truncation), so the row is found by the name.
-    stopped_line = next(line for line in explained.splitlines() if "Investigate" in line)
+    stopped_line = next(line for line in explained.splitlines() if WHY_ROW_NAME in line)
     assert "killed by /stop --all" in stopped_line, stopped_line
 
     # `--json` carries the whole stored sentence, not the column's slice.
@@ -903,8 +925,77 @@ def test_the_table_explains_a_session_only_when_it_has_something_to_explain(
     )
     assert code == 0
     payload = _json.loads(capsys.readouterr().out)
-    row = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
+    row = next(item for item in payload if item["session_id"] == WHY_ROW_SESSION_ID)
     assert "killer pid 40609" in row["completion_reason"]
+
+
+def test_a_parked_row_is_not_explained_by_the_stop_that_preceded_its_resume(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """A live gate outranks the stored receipt of an earlier turn.
+
+    THE REPORTED ROW. An operator with several sessions open saw two of them sit
+    for hours and could not tell why from `lop sessions`: each printed ``NEEDS
+    approval`` next to ``WHY the session was stopped by the user``. Both cells
+    were individually accurate and together they were misleading — the stop was
+    real but OLD, the session had since been resumed, and what it was doing at
+    that moment was holding a turn open on an approval nobody had answered. One
+    of the two had been alive for six hours past the stop its WHY described.
+
+    The store is not rewritten on resume (``completions`` is append-only and a
+    receipt is cleared by being READ, not by the session coming back), so the
+    stale sentence stays until the next turn completes — which is precisely what
+    a parked gate prevents. The column that exists to answer "why is this not
+    progressing" therefore spent its width on the one answer that was no longer
+    true, while the live answer sat unprinted a column away.
+
+    Pinned on the rendered table rather than on the predicate, because the
+    mismatch was only ever visible in the composed row: both inputs were correct
+    on their own.
+    """
+    import argparse
+    import json as _json
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+
+    # The fixture's first row is parked AND working (`pending="approval"`,
+    # `busy=True`) — the shape the operator was looking at.
+    _seed_outcome(
+        tmp_path,
+        "a3f9c21b7e40",
+        kind="interrupted",
+        reason=_deliberate_stop_reason(),
+        cause="user-stop",
+    )
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    parked = next(line for line in out.splitlines() if "Investigate" in line)
+
+    # NEEDS still names the gate: suppressing the stale WHY must not cost the
+    # reader the fact that somebody is blocked on this row.
+    assert "approval" in parked, parked
+    # And the superseded sentence is gone from it.
+    assert "killed by /stop --all" not in parked, parked
+    assert "stopped" not in parked, parked
+
+    # THE OUTCOME IS SUPPRESSED, NOT LOST. `--json` is the scripted surface and
+    # still carries both fields verbatim, so a consumer reading the outcome
+    # rather than the table is unaffected by the display rule.
+    code = cli.sessions_command(
+        argparse.Namespace(json=True, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    payload = _json.loads(capsys.readouterr().out)
+    row = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
+    assert row["completion_kind"] == "interrupted"
+    assert "killer pid 40609" in row["completion_reason"]
+    assert row["pending"] == "approval"
 
 
 def _why_cell(line: str) -> str:
@@ -928,6 +1019,30 @@ def _why_cell(line: str) -> str:
     raise AssertionError(f"no {WHY_COLUMN_WIDTH}-cell suffix in {line!r}")
 
 
+#: The fixture row the WIDTH cases render through, and why it is not the first
+#: row in the fixture.
+#:
+#: These cases pin the WHY column's cell arithmetic — clamping, the ellipsis
+#: marker, wide-glyph measurement, header alignment. They need a row that
+#: actually PRINTS a stored reason, and any such row will do; the reason's
+#: content is the variable under test and the row is only its vehicle.
+#:
+#: ``a3f9c21b7e40`` (`Investigate request latency`) can no longer be that
+#: vehicle. It is the fixture's parked-and-working row (``pending="approval"``,
+#: ``busy=True``), which is exactly the shape whose live state now suppresses a
+#: stale stored outcome — the row that read ``NEEDS approval`` beside ``WHY the
+#: session was stopped by the user``. Rendering the width cases through it would
+#: assert the superseded cell these tests are not about, and would have to be
+#: un-asserted again the moment the suppression is right.
+#:
+#: ``beef1234cafe`` (`Mobile relay`) is live, idle and ungated, so its stored
+#: outcome is the newest thing known about it and printing it is correct. The
+#: arithmetic is identical either way: the column does not know which row it is
+#: filling.
+WHY_ROW_SESSION_ID = "beef1234cafe"
+WHY_ROW_NAME = "Mobile relay"
+
+
 def _rendered_why_row(monkeypatch: Any, tmp_path: Any, capsys: Any) -> tuple[str, str]:
     """The rendered header and the live row, for the table's width invariant."""
     import argparse
@@ -939,7 +1054,7 @@ def _rendered_why_row(monkeypatch: Any, tmp_path: Any, capsys: Any) -> tuple[str
     )
     assert code == 0
     lines = capsys.readouterr().out.splitlines()
-    return lines[0], next(row for row in lines if "Investigate" in row)
+    return lines[0], next(row for row in lines if WHY_ROW_NAME in row)
 
 
 def _rendered_why_cell(monkeypatch: Any, tmp_path: Any, capsys: Any) -> str:
@@ -993,7 +1108,7 @@ def test_a_reason_wider_than_the_column_is_marked_not_silently_sliced(
     # A cause token this build does not know, which is the real shape that
     # paints this sentence: a newer runtime's token reaching an older viewer.
     _seed_outcome(
-        tmp_path, "a3f9c21b7e40", kind="error", reason=CUT_OFF_UNKNOWN, cause="future-cause"
+        tmp_path, WHY_ROW_SESSION_ID, kind="error", reason=CUT_OFF_UNKNOWN, cause="future-cause"
     )
 
     code = cli.sessions_command(
@@ -1001,7 +1116,7 @@ def test_a_reason_wider_than_the_column_is_marked_not_silently_sliced(
     )
     assert code == 0
     out = capsys.readouterr().out
-    line = next(row for row in out.splitlines() if "Investigate" in row)
+    line = next(row for row in out.splitlines() if WHY_ROW_NAME in row)
     cell = _why_cell(line)
 
     assert len(cell) == cli.WHY_COLUMN_WIDTH, repr(cell)
@@ -1015,7 +1130,7 @@ def test_a_reason_wider_than_the_column_is_marked_not_silently_sliced(
     )
     assert code == 0
     payload = _json.loads(capsys.readouterr().out)
-    full = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
+    full = next(item for item in payload if item["session_id"] == WHY_ROW_SESSION_ID)
     assert full["completion_reason"] == CUT_OFF_UNKNOWN, full["completion_reason"]
 
 
@@ -1042,7 +1157,7 @@ def test_a_reason_that_fits_the_column_is_untouched(
     _install_fixture(monkeypatch)
     monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
     fitting = "x" * width
-    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=fitting, cause="future-cause")
+    _seed_outcome(tmp_path, WHY_ROW_SESSION_ID, kind="error", reason=fitting, cause="future-cause")
 
     cell = _before_rendered_why_cell(monkeypatch, tmp_path, capsys, fitting)
     assert cell == fitting, repr(cell)
@@ -1068,7 +1183,9 @@ def test_a_reason_over_the_column_gains_the_marker(
     _install_fixture(monkeypatch)
     monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
     overflowing = "y" * width
-    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=overflowing, cause="future-cause")
+    _seed_outcome(
+        tmp_path, WHY_ROW_SESSION_ID, kind="error", reason=overflowing, cause="future-cause"
+    )
 
     cell = _rendered_why_cell(monkeypatch, tmp_path, capsys)
     assert cell == overflowing[: cli.WHY_COLUMN_WIDTH - 1] + "…", repr(cell)
@@ -1128,7 +1245,7 @@ def test_a_wide_glyph_reason_is_clamped_by_cells_not_characters(
         len(reason),
         cell_len(reason),
     )
-    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=reason, cause="future-cause")
+    _seed_outcome(tmp_path, WHY_ROW_SESSION_ID, kind="error", reason=reason, cause="future-cause")
 
     header, row = _rendered_why_row(monkeypatch, tmp_path, capsys)
     cell = _why_cell(row)
@@ -1154,7 +1271,7 @@ def test_a_wide_glyph_reason_is_clamped_by_cells_not_characters(
     )
     assert code == 0
     payload = _json.loads(capsys.readouterr().out)
-    full = next(item for item in payload if item["session_id"] == "a3f9c21b7e40")
+    full = next(item for item in payload if item["session_id"] == WHY_ROW_SESSION_ID)
     assert full["completion_reason"] == reason, full["completion_reason"]
 
 
@@ -1178,7 +1295,7 @@ def test_a_wide_glyph_reason_that_fits_the_column_still_pads_by_cells(
     monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
     fitting = "模" * (cli.WHY_COLUMN_WIDTH // 2)
     assert cell_len(fitting) == cli.WHY_COLUMN_WIDTH
-    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=fitting, cause="future-cause")
+    _seed_outcome(tmp_path, WHY_ROW_SESSION_ID, kind="error", reason=fitting, cause="future-cause")
 
     header, row = _rendered_why_row(monkeypatch, tmp_path, capsys)
     assert _why_cell(row) == fitting, repr(_why_cell(row))
@@ -1210,7 +1327,7 @@ def test_a_wide_glyph_reason_lands_on_the_full_budget_when_its_glyphs_allow_it(
         cell_len(_widest_prefix_of_cells(reason, cli.WHY_COLUMN_WIDTH - 1))
         == cli.WHY_COLUMN_WIDTH - 1
     ), "this reason was built to reach the budget exactly"
-    _seed_outcome(tmp_path, "a3f9c21b7e40", kind="error", reason=reason, cause="future-cause")
+    _seed_outcome(tmp_path, WHY_ROW_SESSION_ID, kind="error", reason=reason, cause="future-cause")
 
     header, row = _rendered_why_row(monkeypatch, tmp_path, capsys)
     cell = _why_cell(row)
@@ -1514,8 +1631,9 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
     _install_fixture(monkeypatch)
     monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
     monkeypatch.setattr(registry, "scan", lambda root=None: GLYPH_FIXTURE)
-    _seed_outcome(tmp_path, "facedeadbeef", kind="error", reason=VS16 * 30, cause="future-cause")
-    _seed_outcome(tmp_path, "facedeadcafe", kind="error", reason=FAMILY * 30, cause="future-cause")
+    # Seeded on the idle row: the two gated rows above suppress a stale outcome
+    # by design, and this case is about the column's cell arithmetic.
+    _seed_outcome(tmp_path, "facedeadf00d", kind="error", reason=FAMILY * 30, cause="future-cause")
 
     code = cli.sessions_command(
         argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
@@ -1535,7 +1653,7 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
 
     # Each clamped cell is inside its column, and the sequences are whole ones —
     # a clamp may not split a VS16 selection from its base or a family cluster.
-    selection, family = lines
+    selection, family, idle = lines
     assert _cells_span(selection, conversation_at, cli.CONVERSATION_COLUMN_WIDTH) == VS16 * 12
     assert _cells_span(selection, model_at, cli.MODEL_COLUMN_WIDTH) == KEYCAP * 12
     assert _cells_span(selection, needs_at, cli.NEEDS_COLUMN_WIDTH) == VS16 * 4
@@ -1545,10 +1663,13 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
     # and padded by the column's remaining CELLS: 6 cells of family plus 2.
     assert _cells_span(family, needs_at, cli.NEEDS_COLUMN_WIDTH) == FAMILY * 3 + "  "
 
-    for line in lines:
-        # The span covers the padded column, so the padding comes off before the
-        # cell's own shape is asserted.
-        reason_cell = _cells_span(line, why_at, cli.WHY_COLUMN_WIDTH).rstrip()
-        assert reason_cell.endswith("…"), repr(reason_cell)
-        assert cell_len(reason_cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(reason_cell), reason_cell)
-        assert not reason_cell[:-1].endswith("\u200d"), repr(reason_cell)
+    # The clamp is asserted on the row that CARRIES a reason. The two gated rows
+    # render an empty WHY cell by the supersession rule, and an empty cell has
+    # no sequence to split — their contribution to this case is the header-width
+    # invariant above, which every row still pays.
+    reason_cell = _cells_span(idle, why_at, cli.WHY_COLUMN_WIDTH).rstrip()
+    assert reason_cell.endswith("…"), repr(reason_cell)
+    assert cell_len(reason_cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(reason_cell), reason_cell)
+    assert not reason_cell[:-1].endswith("\u200d"), repr(reason_cell)
+    for gated in (selection, family):
+        assert _cells_span(gated, why_at, cli.WHY_COLUMN_WIDTH).strip() == "", repr(gated)
