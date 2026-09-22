@@ -320,11 +320,19 @@ def min_bound_seconds() -> float:
 #: short enough that "overdue" and "fires now" are the same thing to a reader.
 MIN_REARM_S = 0.05
 
-#: The samples one window is divided into, and so the shortest run the progress
-#: leg can call a stall. A run is only ever declared after this many CONSECUTIVE
-#: agreeing samples, which is what makes the leg a claim about a SUSTAINED state
-#: rather than about the instant of one reading — and it is also the narrowest
-#: run that can fire, so a two-sample blip cannot.
+#: How many times one window is LOOKED AT, which is the leg's resolution and
+#: nothing more: the decision is a claim about the whole run (see
+#: :data:`PROGRESS_CPU_FLOOR`), so the look count gates nothing and a run of two
+#: samples a window apart is judged on the same terms as one of twenty. This was
+#: the "twelve CONSECUTIVE agreeing samples" requirement until agent review round
+#: 1 measured what a single scheduled-out sample did to it — do not restore it as
+#: a gate, and do not read a shorter run here as weaker evidence: a mean over a
+#: long window and a mean over a short one are the same statistic.
+#:
+#: It sizes the sampler's cadence (``_sample_interval``), which is why it is a
+#: divisor of the bound rather than a fixed number of seconds: a 1 s bound sampled
+#: every 15 s could never accumulate any run at all, and a 300 s bound sampled
+#: every 0.05 s would wake 6000 times to learn nothing new.
 PROGRESS_SAMPLES_PER_WINDOW = 12
 
 #: The share of ONE core this process must have burned **over the whole run** for
