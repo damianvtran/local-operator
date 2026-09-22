@@ -36,10 +36,13 @@ hold, so the legitimate shapes pass untouched:
    or a known-heavy directory (``node_modules``, ``.git``, ``out``, ...).
 
 A single named file, a scoped directory (``grep -rn PATTERN src/``), a piped
-stage (``... | grep -v node_modules``) and a quoted mention (``echo "grep -rn x ."``)
-all pass. Those are exactly the false-positive classes the tests pin, and the
-segment splitter is quote- and escape-aware so shell syntax the model writes
-never reads as a second command.
+stage that reads stdin (``... | grep -v node_modules``, ``... | rg PATTERN``) and
+a quoted mention (``echo "grep -rn x ."``) all pass. So does ``find``/``fd``
+against a NAMED directory (``find ~/Downloads -name '*.png'``) — the author chose
+that scope, and only ``.``/``/``/``~``/a known-heavy dir counts as unbounded.
+Those are exactly the false-positive classes the tests pin, and the segment
+splitter is quote- and escape-aware so shell syntax the model writes never reads
+as a second command.
 
 Escape hatch: prepend ``LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1`` to the command
 to run it as written. That is a per-call grant read off the command itself, so
@@ -90,7 +93,7 @@ _RECURSIVE_LONG_RE = re.compile(r"(?<![\w-])--recursive(?![\w-])")
 #: A find/fd predicate that means "walk for these files" (as opposed to a bare
 #: `find .`), paired with the absence of ``-maxdepth`` below.
 _FIND_PREDICATE_RE = re.compile(r"(?<![\w-])-(?:name|iname|path|ipath|type|regex)(?![\w-])")
-_MAXDEPTH_RE = re.compile(r"(?<![\w-])-(?:maxdepth|mindepth)(?![\w-])")
+_MAXDEPTH_RE = re.compile(r"(?<![\w-])-maxdepth(?![\w-])")
 #: A token that is only glob metacharacters (``*``, ``*.ts`` is NOT bare — it
 #: has a stem — but ``*`` and ``**`` are).
 _BARE_GLOB_RE = re.compile(r"^[*?]+$")
@@ -101,9 +104,16 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _UNRESOLVED_RE = re.compile(r"[`$]|\$\(")
 
 #: Search programs that recurse BY DEFAULT, so the absence of a `-r` flag says
-#: nothing about the scope. `rg`/`ag`/`ack` walk the cwd unless given a path, so
-#: they are always treated as recursive.
+#: nothing about the scope. `rg`/`ag`/`ack` walk the cwd unless given a path;
+#: `fd`/`locate` walk the cwd (fd) or the whole filesystem index (locate) with
+#: no path at all. `find` is deliberately NOT here — `find` needs a path or its
+#: own predicate to do anything, which the predicate branch below handles.
 _IMPLICITLY_RECURSIVE = frozenset({"rg", "ripgrep", "ag", "ack"})
+
+#: Walkers that are recursive with no path operand and must not be exempted as a
+#: pipe filter: `fd`/`locate` always walk. `find` is added to this reasoning by
+#: its own predicate branch rather than the flag scan.
+_ALWAYS_RECURSIVE = frozenset({"fd", "locate"})
 
 #: A heredoc opener: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -114,37 +124,70 @@ def _strip_heredocs(command: str) -> str:
 
     `cat <<EOF … grep -rn x . … EOF` is one command whose body is data; a
     splitter that reads the body sees a second segment and blocks a shell that
-    would never run it. Each body is replaced by a single space, and the
-    delimiter line is kept as a harmless word.
+    would never run it. Each body is replaced by a single space.
+
+    Quote-aware, and FAIL-CLOSED. Quote tracking matters because `<<` inside a
+    quoted string is not an operator: `git commit -m 'fix << a' && grep -rn p .`
+    is a normal command, and a scanner that treated the quoted `<<` as an opener
+    would swallow everything after it — silently dropping the unbounded grep
+    (review M3). An opener with no terminating delimiter line is left IN PLACE
+    rather than truncated, so the worst case is a command the guard still sees.
     """
     out: list[str] = []
     i = 0
     n = len(command)
+    quote: str | None = None
     while i < n:
-        m = _HEREDOC_RE.search(command, i)
-        if m is None:
-            out.append(command[i:])
-            break
-        out.append(command[i : m.end()])
-        delim = m.group(2)
-        # Skip to the start of the line after the opener, then to the
-        # delimiter line (a line whose stripped content is the delimiter).
-        nl = command.find("\n", m.end())
-        if nl == -1:
-            break
-        pos = nl + 1
-        while pos <= n:
-            line_end = command.find("\n", pos)
-            line = command[pos : line_end if line_end != -1 else n]
-            if line.strip() == delim:
-                out.append(" ")
-                pos = line_end if line_end != -1 else n
-                break
-            if line_end == -1:
-                pos = n
-                break
-            pos = line_end + 1
-        i = pos
+        ch = command[i]
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(command[i + 1])
+            i += 2
+            continue
+        if ch == "<" and command[i + 1 : i + 2] == "<":
+            m = _HEREDOC_RE.match(command, i)
+            if m is not None:
+                delim = m.group(2)
+                nl = command.find("\n", m.end())
+                if nl != -1:
+                    pos = nl + 1
+                    delim_at = -1
+                    while pos <= n:
+                        line_end = command.find("\n", pos)
+                        line = command[pos : line_end if line_end != -1 else n]
+                        if line.strip() == delim:
+                            delim_at = line_end if line_end != -1 else n
+                            break
+                        if line_end == -1:
+                            break
+                        pos = line_end + 1
+                    if delim_at != -1:
+                        # Keep the opener, drop the body, resume at the delimiter.
+                        out.append(command[i : nl + 1])
+                        out.append(" ")
+                        i = delim_at
+                        continue
+                # No terminator: leave the opener verbatim (fail closed).
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
     return "".join(out)
 
 
@@ -282,17 +325,32 @@ def _program(segment: str) -> str | None:
 
 
 def _is_unbounded_root(path: str) -> bool:
-    """Is ``path`` a search root that reaches the whole tree rather than a part of it?"""
+    """Is ``path`` a search root that reaches the whole tree rather than a part of it?
+
+    A single named FILE is never a tree walk, even under a heavy directory:
+    ``grep -rn foo build/notes.txt`` and ``grep -rn foo .worktrees/wt/src/x.py``
+    read one file, and the fleet reads worktrees by path every day (review M1).
+    A file is recognised by a filename suffix on the last segment, so a bare
+    directory name (``node_modules``) and a trailing slash (``node_modules/``)
+    still read as directories.
+    """
     p = _unquote(path).strip()
     if not p or _UNRESOLVED_RE.search(p):
         # No path, or one that does not resolve here ($VAR, $(...), backticks):
         # what it points at cannot be vouched for, so it is treated as unbounded.
         return True
-    if p in (".", "./", "..", "../", "/", "~", "~/", "."):
+    if p in (".", "./", "..", "../", "/", "~", "~/"):
         return True
     if _BARE_GLOB_RE.match(p):
         return True
     parts = [seg for seg in re.split(r"[/\\]", p) if seg and seg != "."]
+    if not parts:
+        return True
+    # A filename (a dot in the final segment, and not a dotfile) is a FILE, so it
+    # is read rather than walked — never a tree walk regardless of its directory.
+    last = parts[-1]
+    if re.search(r"\.[A-Za-z0-9]{1,6}$", last) and not last.startswith("."):
+        return False
     return any(part in HEAVY_DIRS for part in parts)
 
 
@@ -312,11 +370,14 @@ def _search_reason(segment: str) -> str | None:
         # Bare `grep` with no arguments reads stdin / errors — not a tree walk.
         return None
 
-    if program in _IMPLICITLY_RECURSIVE:
-        # `--files` lists what WOULD be searched rather than searching it; it is
-        # a cheap enumeration, not a content walk, so it is never blocked.
-        if "--files" in _words(rest):
-            return None
+    if program in _IMPLICITLY_RECURSIVE or program in _ALWAYS_RECURSIVE:
+        # Enumeration flags list what WOULD be searched (or a regex-type table)
+        # rather than searching content — a cheap listing, never a walk. The set
+        # is matched as a whole token, so `--files-with-matches` (`-l`) is caught
+        # too (QA Q2). (`fd`/`locate` have no such flag; the scan is harmless.)
+        for word in _words(rest):
+            if _RG_ENUMERATION_RE.match(word) or word in ("-l", "-L"):
+                return None
         recursive = True
     else:
         recursive = bool(_RECURSIVE_SHORT_RE.search(rest) or _RECURSIVE_LONG_RE.search(rest))
@@ -328,7 +389,9 @@ def _search_reason(segment: str) -> str | None:
     # Operand tokens after the pattern: flags and their arguments are skipped.
     paths = _path_operands(rest, program)
     unbounded = [p for p in paths if _is_unbounded_root(p)]
-    # A recursion with NO explicit path operand searches the cwd (`.`).
+    # A recursion with NO explicit path operand searches the cwd (`.`); for `fd`
+    # and `locate`, which default to a whole-disk / index scan, that is worse
+    # still, so the same substitution applies (QA Q3).
     if not paths:
         unbounded = ["."]
     if not unbounded:
@@ -337,13 +400,42 @@ def _search_reason(segment: str) -> str | None:
 
 
 #: Short flags that take a value as the NEXT token; that token is not a path.
-_FLAGS_WITH_VALUE = frozenset(
-    {"e", "f", "m", "A", "B", "C", "d", "D", "t", "T", "g", "P", "E", "w", "l", "L"}
-)
+#: NOT `g P E w l L` — for grep those select the engine or flip a boolean and
+#: consume nothing, so listing them made `grep -rn -E 'a|b' src/` swallow the
+#: pattern and lose `src/` (review B1). The set is deliberately small and every
+#: member is a flag whose value is genuinely a separate token.
+_FLAGS_WITH_VALUE = frozenset({"e", "f", "m", "A", "B", "C", "d", "D", "t", "T"})
 _LONG_FLAGS_WITH_VALUE_RE = re.compile(
     r"^--(?:include|exclude|exclude-dir|include-dir|glob|iglob|type|max-depth|maxdepth|depth|"
     r"max-count|context|after-context|before-context|regexp|file|label|encoding|color|colour)="
 )
+
+#: Long flags that RECURSE BY DEFAULT and are named in the message rather than
+#: the reason string; kept here so the enumeration/one-off set has one home.
+_RG_ENUMERATION_RE = re.compile(r"^--(?:files|type-list|type-list|files-with-matches)$")
+
+
+def _short_flag_bundle_takes_value(bundle: str) -> bool:
+    """Does a short-flag bundle like ``-m5``/``-C3``/``-e foo`` consume a value?
+
+    Three cases, and the third is what review B1 caught:
+
+    * the bundle's final letter takes a value and nothing follows (``-m``) —
+      the NEXT token is the value;
+    * the bundle's final letter takes a value and the rest is a non-alphabetic
+      tail (``-m5``) — the value is INLINE, nothing is consumed;
+    * any EARLIER letter takes a value (``-rn -e`` is a separate token, but
+      ``-ePATTERN`` bundles the value) — only the final letter can be followed
+      by a value here, so no earlier letter consumes the next token.
+    """
+    letters = [c for c in bundle[1:] if c.isalpha()]
+    if not letters:
+        return False
+    last = bundle[-1]
+    if last.isdigit() or not last.isalpha():
+        # `-m5` / `-C3`: the value is inline on the final letter.
+        return False
+    return letters[-1] in _FLAGS_WITH_VALUE
 
 
 def _path_operands(rest: str, program: str) -> list[str]:
@@ -353,17 +445,22 @@ def _path_operands(rest: str, program: str) -> list[str]:
     could be a flag argument is skipped, and a flag that takes a value consumes
     the next token. ``include``/``type``/``glob`` filter arguments are never
     roots.
+
+    The pattern is the first bare word UNLESS it arrived via ``-e``/``-f``/
+    ``--regexp``/``--file``, in which case the first bare word is already a
+    path — the distinction that made `grep -rn -e P src/` look like an unbounded
+    search (review B1, QA Q1).
     """
     words = _words(rest)
     out: list[str] = []
     if not words:
         return out
-    # The pattern is the first non-flag word for grep-family; for find it is the
-    # path list itself, so there is no leading pattern to skip.
+    # The pattern is the first non-flag word for grep-family and for `fd`/`locate`
+    # (both take `PATTERN [PATH...]`), unless a pattern flag supplied it. `find`
+    # takes no pattern, so its first bare word is already a path.
     skip_next = False
-    pattern_consumed = program in ("find", "fd", "locate")
-    for idx, w in enumerate(words):
-        raw = w
+    pattern_consumed = program == "find"
+    for raw in words:
         if skip_next:
             skip_next = False
             continue
@@ -371,31 +468,52 @@ def _path_operands(rest: str, program: str) -> list[str]:
             continue
         if raw.startswith("--"):
             # `--include=...` carries its value inline; a bare `--type` consumes
-            # the next token.
-            if "=" in raw or _LONG_FLAGS_WITH_VALUE_RE.match(raw + "="):
+            # the next token. `--regexp`/`--file` supply the PATTERN, so they
+            # also mark the pattern consumed.
+            if "=" in raw:
+                name, _, _val = raw.partition("=")
+                if name in ("--regexp", "--file"):
+                    pattern_consumed = True
                 continue
             name = raw[2:]
-            if len(name) == 1 or name in (
+            if name in ("regexp", "file"):
+                pattern_consumed = True
+                skip_next = True
+                continue
+            if _LONG_FLAGS_WITH_VALUE_RE.match(raw + "=") or name in (
                 "include",
                 "exclude",
                 "exclude-dir",
                 "include-dir",
                 "glob",
+                "iglob",
                 "type",
                 "max-count",
                 "context",
-                "e",
+                "after-context",
+                "before-context",
+                "label",
+                "encoding",
+                "color",
+                "colour",
+                "max-depth",
+                "maxdepth",
+                "depth",
             ):
                 skip_next = True
             continue
         if raw.startswith("-") and len(raw) > 1:
-            # A short-flag bundle: if any flag needs a value and none is inline
-            # (`-e PATTERN`), the next token is that value.
+            # A short-flag bundle. `-e`/`-f` supply the pattern; any other
+            # value-taking FINAL letter consumes the next token.
             letters = [c for c in raw[1:] if c.isalpha()]
-            if letters and letters[-1] in _FLAGS_WITH_VALUE:
+            if letters and letters[-1] in ("e", "f"):
+                pattern_consumed = True
+                skip_next = True
+                continue
+            if _short_flag_bundle_takes_value(raw):
                 skip_next = True
             continue
-        # A bare word: for grep-family the first one is the pattern.
+        # A bare word: the pattern unless it was supplied by a flag.
         if not pattern_consumed:
             pattern_consumed = True
             continue
@@ -449,6 +567,19 @@ def _is_git_grep(segment: str) -> bool:
     return False
 
 
+#: Programs that read STDIN instead of walking when they are the downstream of a
+#: pipe and no path operand is given. `rg` filters stdin (verified: `printf x |
+#: rg needle` prints the stdin line); `grep -r` does NOT — it still recurses the
+#: cwd — which is why this is a per-program set and not a blanket pipe exemption
+#: (review M2).
+_STDIN_FILTER_PROGRAMS = frozenset({"rg", "ripgrep", "ag", "ack"})
+
+#: Programs that walk the filesystem for FILES rather than searching content
+#: stdin. A piped `find`/`fd`/`locate` still walks, so it is never exempted as a
+#: stream filter.
+_WALK_PROGRAMS = frozenset({"find", "fd", "locate"})
+
+
 def check_search_interception(
     command: str,
     *,
@@ -465,22 +596,43 @@ def check_search_interception(
     if not enabled:
         return None
     for segment, piped in _segments(command):
-        if piped:
-            # Reads the previous stage's stdout — a dedicated file-search tool
-            # cannot replace a stream filter.
-            continue
         if _is_git_grep(segment):
             continue
         stripped, assigns = _strip_env_assignments(segment)
-        if _truthy(assigns.get(ALLOW_ENV)) or _truthy(os.environ.get(ALLOW_ENV)):
-            continue
         if not stripped:
+            continue
+        program = _program(stripped)
+        if piped and program in _STDIN_FILTER_PROGRAMS and not _has_path_operand(stripped):
+            # A ripgrep stage with no path operand reads the previous stage's
+            # stdout — a stream filter no file-search tool can replace, so it is
+            # exempt. This is deliberately NOT a blanket pipe exemption: a piped
+            # `grep -r` and a piped `find` still walk the cwd, and a piped stage
+            # that names a path walks that path (review M2).
+            continue
+        # The inline grant is read PER SEGMENT, so it applies to the command the
+        # agent wrote and never leaks to another. The process-environment arm is
+        # deliberately NOT consulted: an inherited value would make the grant
+        # silently global and invisible in the transcript (review m1).
+        if _truthy(assigns.get(ALLOW_ENV)):
             continue
         reason = _search_reason(stripped)
         if reason is None:
             continue
         return _block_message(reason, command, blocked=block_unbounded)
     return None
+
+
+def _has_path_operand(segment: str) -> bool:
+    """Does this segment name a path for the search tool to walk?
+
+    Used only to decide whether a PIPED stage is a stream filter or a real walk:
+    `... | grep -v node_modules` has no operand, `cat f | grep -rn p .` does.
+    """
+    program = _program(segment)
+    if program is None or program not in SEARCH_PROGRAMS:
+        return False
+    _, rest = _read_word(segment)
+    return bool(_path_operands(rest, program))
 
 
 def _truthy(value: str | None) -> bool:
