@@ -70,6 +70,7 @@ from local_operator.mobile.types import (
 from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_category, session_created_at
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import reported_subagent_count
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,15 @@ def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | 
     already follows (an older runtime that has no such field, a durable-only
     row with no live entry): one unknown, one rendering, on every path.
     """
+    # ``ended`` IS DEFENSIVE, and kept deliberately rather than dropped as dead
+    # code: the ONLY caller today filters ended entries while building ``active``
+    # (``_merge_summaries``: ``if entry.ended: continue``), so this arm cannot
+    # fire from there. It stays because the gate's contract is "the counts this
+    # daemon can vouch for", and an ended conversation is the clearest case of
+    # one it cannot — a reader should not have to find the caller's filter to
+    # learn that. The cost is one comparison on a path that runs once per row per
+    # repaint; the alternative is a helper whose safety silently depends on a
+    # filter three hundred lines away staying there (review round 2, NIT 1).
     if entry is None or entry.ended or entry.degraded:
         return None, None
     record = entry.record
@@ -341,9 +351,15 @@ def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | 
     beat = float(getattr(record, "heartbeat_at", 0.0) or 0.0)
     if beat <= 0.0 or time.time() - beat > registry.HEARTBEAT_TIMEOUT_S:
         return None, None
+    # THE SHARED RULE, applied here too: this summary is a fourth consumer of the
+    # two fields, and a foreign or damaged record is exactly the population the
+    # rule exists for. Returning the raw field would let ``4.5`` reach the wire,
+    # where the client's ``typeof … === "number"`` accepts it and the chip prints
+    # ``4.5 subagents`` as measured fact — the incident
+    # ``reported_subagent_count``'s docstring records (review round 2, MINOR 1).
     return (
-        getattr(record, "subagents_running", None),
-        getattr(record, "subagents_queued", None),
+        reported_subagent_count(getattr(record, "subagents_running", None)),
+        reported_subagent_count(getattr(record, "subagents_queued", None)),
     )
 
 

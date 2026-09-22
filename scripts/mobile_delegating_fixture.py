@@ -42,7 +42,7 @@ import uvicorn
 
 import scripts.probe_isolation  # noqa: F401  -- must be the first local import
 from local_operator.mobile.daemon import MobileDaemon, SessionEntry, build_app
-from local_operator.mobile.types import SessionProjection
+from local_operator.mobile.types import SessionProjection, SubagentRow
 from local_operator.session.runtime.types import SessionRecord
 
 #: ``(session_id, pid, name, counts, flags)``. ``counts`` is empty for the row
@@ -77,6 +77,22 @@ ROWS: list[tuple[str, int, str, dict[str, int], dict[str, bool]]] = [
         "Parent working in its own turn",
         {"subagents_running": 2},
         {"streaming": True},
+    ),
+    # THE DEPTH-2 ROW (design round 2, D1's deferral). The record's count is the
+    # WHOLE TREE — the runtime counts over ``comms.nodes()``, which already holds
+    # every nested descendant — while the session view's roster header counts
+    # DIRECT children only (``SubagentsPanel`` passes ``parentJobId={null}`` and
+    # ``AgentRoster`` filters on it). Two direct children, one of which spawned two
+    # of its own, is therefore ``4 subagents`` on this list and ``2/2 running`` on
+    # the view one tap later. BOTH numbers are real and neither is a bug: they
+    # count two populations, which is the deferred finding this row exists to draw
+    # in one rig (see the design record's "Not in scope" section).
+    (
+        "nested",
+        910009,
+        "Parent with nested descendants",
+        {"subagents_running": 4},
+        {"nested": True},
     ),
 ]
 
@@ -139,6 +155,20 @@ async def main() -> None:
                 conversation_name=name,
                 streaming=True,
                 activity="working",
+            )
+        elif flags.get("nested"):
+            entry.projection = SessionProjection(
+                session_id=session_id,
+                pid=pid,
+                kind="tui",
+                conversation_name=name,
+                activity="waiting",
+                subagents=[
+                    SubagentRow(job_id="job-a", label="first child"),
+                    SubagentRow(job_id="job-b", label="second child"),
+                    SubagentRow(job_id="job-a1", label="nested one", parent_job_id="job-a"),
+                    SubagentRow(job_id="job-a2", label="nested two", parent_job_id="job-a"),
+                ],
             )
         daemon.table.entries[pid] = entry
         if flags.get("unseen"):

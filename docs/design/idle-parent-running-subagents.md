@@ -173,6 +173,11 @@ carries the noun (a count-only chip left the reader guessing WHAT was queued, U3
 so three digits cannot `shrink-0` the row's name away at 360px (U4) — the exact figure is one tap away
 in that same roster header.
 
+> **"One population" holds at DEPTH 1, and that is the whole of the claim.** The chip counts this
+> session's whole subtree; the roster header counts its direct children. Past depth 1 they diverge by
+> design (`4 subagents` beside `2/2 running`), which is pre-existing and deferred with both
+> populations named in "Not in scope" below — read that bullet before repeating this sentence.
+
 **And it is not the sidebar's `⌥N` chip.** Two delegated-work numbers can appear on one TUI frame:
 `⌥14` in the sidebar's footer is the store's GLOBAL hidden-run population (`catalog.subagent_population`,
 newest-first and capped, across every session), while this rung counts THIS session's children. Both
@@ -274,3 +279,29 @@ THAT population rather than this one's (see §5) so the two surfaces agree acros
 itself is a projection/presentation question with its own blast radius (every roster, every platform
 client, and the `parked` literal's meaning), not a row-vocabulary one, so it is recorded on the PR as
 `deferred — <reason>` with the anchors above rather than changed here.
+
+**A third, also pre-existing, divergence is NAMED here rather than left in the code's head: the two
+numbers this change is about count two populations, and they part company past depth 1.** The chip
+(and the catalogue label) reads the RECORD, whose count is this session's WHOLE SUBTREE — the runtime
+counts over ``comms.nodes()``, "already contains every nested descendant"
+(``session/runtime/types.py::SessionRecord.subagents_running``) — while the session view's roster
+header counts DEPTH 1 ONLY (``SubagentsPanel`` passes ``parentJobId={null}`` and ``AgentRoster``
+filters ``agent.parent_job_id === parentJobId``, so ``{running}/{direct.length}`` is direct children by
+construction). A parent with two direct children, one of which spawned two of its own, is therefore
+``4 subagents`` on the list and ``subagents 2/2 running`` on the view one tap later. Both numbers are
+true and neither surface is broken: they answer different questions about the same session.
+
+PRE-EXISTING, measured at the merge base ``dad3b92ff6ef0e166f5e0caed0ffa8dcd3539402`` — the anchor is
+the pre-change chip itself: ``sum(1 for subagent in (p.subagents if p else []) if subagent.status ==
+"running")`` (``local_operator/mobile/daemon.py:631-633`` at that ref) walked the projection's FULL node
+list, i.e. the same whole-tree population, and the roster's ``direct.length`` was depth 1 then too. So
+what this change fixed is which population the chip reads at depth 1 (the record's, so ``1 running +
+1 parked`` stops reading ``1 subagent``) and the word for a parked child — not the depth divergence,
+which is a decision about which question each surface answers (round the chip down to direct children,
+or teach the header the tree total with the direct count secondary), not a bug fix in a row vocabulary.
+
+THE RIG CAN NOW DRAW BOTH: ``scripts/mobile_delegating_fixture.py`` carries the depth-2 row (two direct
+children, one of which spawned two of its own) and `scripts/mobile_delegating_shot.py` taps it and
+captures the view it lands on, composing ``nested-list-vs-view-{390x844,360x640}.png`` — the list's
+``4 subagents`` beside the view's ``subagents 2/2 running`` in one image. Deferred by the manager's
+ruling on design round 2's D1, with this bullet and that row as the recording.
