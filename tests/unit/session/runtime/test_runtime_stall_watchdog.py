@@ -181,6 +181,24 @@ def _dump_for(config_dir: Path, pid: int) -> Path:
     return config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
 
 
+def _fired_seconds(text: str) -> float:
+    """The value ``faulthandler`` printed on its own fired line, in seconds.
+
+    The one number that says HOW the timer was last armed, and therefore which class of
+    fire a reader is holding (see ``HOW_TO_READ_THE_FIRED_VALUE``) — so the cells that
+    tell the classes apart read it here rather than matching a formatted string.
+    """
+    line = next(line for line in text.splitlines() if line.startswith(stall_watchdog.FIRED_MARKER))
+    hours, minutes, seconds = line[len(stall_watchdog.FIRED_MARKER) :].split(")")[0].split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _deadline_record(directory: Path, pid: int) -> tuple[float, str]:
+    """The sibling as a reader of it gets it: ``(epoch deadline, leg that pinned it)``."""
+    epoch, leg = stall_watchdog.deadline_path(pid, directory).read_text(encoding="utf-8").split()
+    return float(epoch), leg
+
+
 def _stamp_ages(stdout: str) -> tuple[list[float], list[float]]:
     """The ``ages`` samples a dead-beater child printed, as (workload, serving).
 
@@ -444,6 +462,196 @@ def test_a_parked_workload_plane_trips_the_bound_while_the_serving_plane_is_heal
     text = dump.read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, text
     assert "parked_child.py" in text, f"the dump does not name the parked plane: {text}"
+
+
+# ============================================================================
+# WHAT THE ARTIFACT RECORDS ABOUT A FIRE: which plane, how the timer was armed
+# ============================================================================
+#
+# WHY THIS SECTION EXISTS. A fire's own record carried the arm epoch and nothing else,
+# so the first two questions anyone asks of one were unanswerable from it: which loop
+# stopped reporting, and when. Measured over 26 retained fires, 6 carried a full
+# ``0:05:00``-style value (arm's own bound, no beat ever re-arming it — the
+# never-engaged class) and 19 a small one, 0.4-17 s (a beat's recomputed remainder,
+# pinned by the OTHER plane's stale stamp). The number was there; nothing said which
+# it was; and the stamps that decide it die with the process. The cells below pin the
+# two records that fix that — the transition written into the dump, and the deadline
+# sibling — and each is proven to fail when its line is removed (see the mutation
+# notes in the docstrings; they were run, not imagined).
+
+
+def test_a_beat_records_the_deadline_and_disarm_removes_the_sibling(tmp_path: Path) -> None:
+    """The sibling is the ONE number that turns a wedge from inference into measurement.
+
+    "Last beat 04:26:31 -> deadline 04:31:31, so something pre-empted the bound by 16 s"
+    is answerable from it, and so is the reading that says 86 s OVERDUE and silent: the
+    same two fields, and the comparison a reader can actually make. It is rewritten by
+    every beat, so this drives one and reads what landed — the epoch deadline the timer
+    is armed for, and the leg whose stamp pinned it (``workload``, because only the
+    serving plane beat and the workload plane's ARM stamp is therefore the oldest).
+    ``disarm`` then takes it away beside the dump: a runtime that left on its own terms
+    must not leave a deadline behind for a reader to find.
+
+    MUTATION THIS CELL CATCHES: drop ``_record_deadline(armed)`` from ``beat`` — nothing
+    writes the sibling, and this is the cell that goes red.
+    """
+    # A NAMED STARTING STATE, because `_ARMED` is module-global and `arm` returns early
+    # when something has left the process armed: without this, a leaked arm would make
+    # the call below a no-op and the cell would then fail on a missing FILE rather than
+    # on the record it means to check. `disarm` is documented as unconditionally safe.
+    stall_watchdog.disarm()
+    assert stall_watchdog.arm(seconds=30.0, directory=tmp_path) is True
+    try:
+        stall_watchdog.beat(stall_watchdog.SERVING)
+        epoch, leg = _deadline_record(tmp_path, os.getpid())
+        assert leg == stall_watchdog.WORKLOAD, (
+            f"the sibling names {leg!r} as the pin; only the serving plane beat, so the "
+            f"workload plane's arm stamp is the older one the timer is armed from"
+        )
+        # THE SIBLING ENCODES A RELATIONSHIP, so this compares it with the bound this
+        # process armed for rather than with zero, and the window is one heartbeat either
+        # side of it: an epoch is a WALL clock and the line below re-reads one, so a step
+        # must not fail the cell — while the two bugs that matter (recording the stamp
+        # instead of the deadline, or the monotonic deadline instead of the epoch) put
+        # the value near zero, not near the bound.
+        remaining = epoch - time.time()
+        assert 15.0 < remaining <= 45.0, (
+            f"the sibling's deadline is {remaining:.2f}s away, which is not the 30s bound "
+            f"this process armed for (nor one heartbeat either side of it)"
+        )
+    finally:
+        stall_watchdog.disarm()
+
+    assert not stall_watchdog.deadline_path(
+        os.getpid(), tmp_path
+    ).exists(), "a clean exit left the deadline sibling behind"
+    assert not stall_watchdog.dump_path(
+        os.getpid(), tmp_path
+    ).exists(), "a clean exit left the dump behind"
+
+
+def test_a_runtime_that_never_engaged_fires_at_the_armed_value_with_no_sibling(
+    tmp_path: Path,
+) -> None:
+    """THE OTHER CLASS, told apart by ABSENCE: no beat ever re-armed this timer.
+
+    ``arm`` seeds both planes to the arm instant, so a runtime whose loops never start
+    reaches its bound with no stamp of its own behind it, and the value on the fired line
+    is the bound arm set rather than a recomputed remainder. Nothing writes the sibling at
+    ``arm``, deliberately: that is what makes a MISSING
+    ``runtime-stall-<pid>.deadline`` mean "no beat ever re-armed this timer" rather than
+    "the writer was unlucky", and it is the only structural difference between the two
+    classes a reader has.
+
+    MUTATION THIS CELL CATCHES: write the sibling in ``arm`` as well — the file now
+    advertises a deadline for a process that never beat, and the absence signal is lost.
+    """
+    result = _run_script(
+        _PARKED_CHILD,
+        tmp_path,
+        args=(str(tmp_path / "resumed.txt"), str(SHORT_BOUND_S)),
+    )
+    assert result.returncode == 1, f"the bound did not fire: {result.stdout!r} {result.stderr!r}"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+
+    assert stall_watchdog.FIRED_MARKER in text, text
+    assert _fired_seconds(text) == pytest.approx(float(SHORT_BOUND_S)), (
+        f"the fired value is not the value arm() set — no beat re-armed this timer, so "
+        f"nothing recomputed it: {text[:400]!r}"
+    )
+    assert (
+        stall_watchdog.REARM_MARKER not in text
+    ), f"a runtime that never reported was still named as a quiet plane: {text[:400]!r}"
+    assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
+        "a sibling exists for a runtime that never beat, so its absence cannot mean "
+        "'no beat ever re-armed the timer'"
+    )
+
+
+def test_a_quiet_plane_is_named_in_the_dump_alongside_the_deadline_that_came_due(
+    tmp_path: Path,
+) -> None:
+    """THE SMALL-VALUE CLASS, and the two records that explain it.
+
+    19 of 26 retained fires carried a value far below their bound, and the reason was a
+    phase, not a number: a beat had recomputed the deadline from the OTHER plane's stale
+    stamp, so the last arming was a remainder. Nothing in the file said so, and nothing
+    said WHICH plane. Here the serving plane keeps beating every 0.2 s — asserted, so the
+    cell cannot pass on a wholly frozen process — while the workload plane never reports,
+    and the records are cross-checked against each other: the dump's quiet line names the
+    workload plane, and the sibling's epoch sits one BOUND past the arm (the workload
+    plane's stamp plus the bound, i.e. the deadline that came due), while the fired value
+    is the small remainder the last beat armed for.
+
+    MUTATION THIS CELL CATCHES: drop ``_note_quiet_plane(armed, now)`` from ``beat`` — the
+    dump goes back to saying nothing about which plane went quiet.
+    """
+    finished = tmp_path / "finished.txt"
+    result = _run_script(
+        _TWO_PLANE_CHILD,
+        tmp_path,
+        args=(str(finished), str(SHORT_BOUND_S)),
+    )
+    assert result.returncode == 1, (
+        f"the workload plane parked and the bound never fired: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    assert "serving-stamp:" in result.stdout, (
+        f"the serving plane never reported, so this run says nothing about one plane's "
+        f"stamps carrying the other's deadline: {result.stdout!r}"
+    )
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+
+    quiet = [line for line in text.splitlines() if line.startswith(stall_watchdog.REARM_MARKER)]
+    assert quiet, f"no quiet plane is named in the dump: {text[:800]!r}"
+    assert stall_watchdog.WORKLOAD in quiet[0], quiet[0]
+    assert text.index(stall_watchdog.REARM_MARKER) < text.index(stall_watchdog.FIRED_MARKER), (
+        "the quiet line was written after the fire, so a reader cannot attribute one to "
+        f"the other: {text[:800]!r}"
+    )
+
+    arm_epoch = float(text.split(" armed for ", 1)[1].split(" at ", 1)[1].split()[0])
+    epoch, leg = _deadline_record(tmp_path / "logs", pid)
+    assert (
+        leg == stall_watchdog.WORKLOAD
+    ), f"the deadline was pinned by {leg!r}, not the quiet plane"
+    assert abs((epoch - arm_epoch) - float(SHORT_BOUND_S)) < 0.5, (
+        f"the sibling's deadline is {epoch - arm_epoch:.2f}s past the arm, not the "
+        f"{SHORT_BOUND_S}s bound the workload plane's stamp implies, so it is not the "
+        f"deadline that came due: {text[:400]!r}"
+    )
+    assert _fired_seconds(text) < float(SHORT_BOUND_S), (
+        f"the last arming was the bound itself, so this run does not show the remainder "
+        f"class the small values belong to: {text[:400]!r}"
+    )
+
+
+def test_the_header_says_how_to_read_a_fired_value_and_the_deadline_sibling(
+    tmp_path: Path,
+) -> None:
+    """A fire's numbers are useless to a reader who does not know what armed them.
+
+    This is the clause that makes the two classes readable FROM THE FILE — the bound when
+    no beat re-armed the timer (a runtime that never engaged), a smaller remainder when a
+    beat recomputed it from the oldest plane's stamp — and that points the reader at the
+    sibling, whose absence means the first of those and whose mtime is the last beat. It
+    is written at ARM time, so it is present whether or not this runtime ever fires.
+
+    MUTATION THIS CELL CATCHES: drop ``{HOW_TO_READ_THE_FIRED_VALUE}`` from the header in
+    ``arm`` — the fired value goes back to being a number with no stated meaning.
+    """
+    assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
+    try:
+        text = stall_watchdog.dump_path(os.getpid(), tmp_path).read_text(encoding="utf-8")
+    finally:
+        stall_watchdog.disarm()
+
+    assert stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE in text, text[:600]
+    assert (
+        f"{stall_watchdog.DUMP_PREFIX}-<pid>{stall_watchdog.DEADLINE_SUFFIX}" in text
+    ), f"the header does not name the sibling a reader has to go and open: {text[:600]!r}"
 
 
 # -- the debug dump's default -------------------------------------------------

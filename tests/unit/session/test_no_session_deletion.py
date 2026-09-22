@@ -1504,6 +1504,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/runtime/stall_watchdog.py::disarm",
         "<path>.unlink",
         "log_dir()+pid FILE of a CLEAN exit; surviving means the process died disarmed",
+        2,
     ),
 )
 
