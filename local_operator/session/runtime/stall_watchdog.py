@@ -213,16 +213,19 @@ WHY AN ``unlink`` HERE IS ALLOWED, AND WHERE THE ARGUMENT LIVES.
 twice a "safe" reaper deleted a real session's files. Its docstring states the
 route for a call site that must exist: *"Adding a call site therefore means adding
 a row HERE with a reason a reviewer can check — the point is not that the list is
-short, it is that every entry was argued for."* That is what this module does,
-three times (``arm``'s tidy-up of a header it just failed to arm, and ``disarm``'s
-removal of a clean runtime's dump and of its deadline sibling), and the reason in
-each row is the checkable part: :func:`dump_path` and :func:`deadline_path` compose
-their paths from ``paths.log_dir()`` and an int pid ALONE — never from a session id,
-a session directory, or any other caller input — so no call here can name a session
-file. Leaving the file behind instead (its
-content, not its existence, carrying the outcome) was implemented first and
-rejected on review: it accumulates one file per runtime process with nothing to
-prune them, and the existence signal is worth keeping.
+short, it is that every entry was argued for."* That is what this module does, at
+the sites named here: ``arm``'s tidy-up of a header it just failed to arm AND of a
+deadline sibling an earlier holder of this pid left (a pid is RECYCLED, and these
+files are keyed by pid alone — see :func:`deadline_path`), ``disarm``'s removal of a
+clean runtime's dump and of its deadline sibling, and ``_record_deadline``'s removal
+of its own sidecar temp after a failed atomic replace. The reason in each row is the
+checkable part: :func:`dump_path` and :func:`deadline_path` compose their paths from
+``paths.log_dir()`` and an int pid ALONE — never from a session id, a session
+directory, or any other caller input — so no call here can name a session file.
+Leaving the file behind instead (its content, not its existence, carrying the
+outcome) was implemented first and rejected on review: it accumulates one file per
+runtime process with nothing to prune them, and the existence signal is worth
+keeping.
 
 NO CREDENTIAL CAN LAND IN IT. ``faulthandler`` prints frames — file, line and
 function name — and never local variables, which is the property this file
@@ -377,10 +380,14 @@ HOW_TO_READ_THE_FIRED_VALUE = (
     "engaged, its main thread idle from boot. It is a SMALLER value when a beat recomputed it "
     "from the oldest plane's stamp, which is how a plane that went quiet shows up as a number "
     f"below the bound. {DUMP_PREFIX}-<pid>{DEADLINE_SUFFIX} holds the deadline the timer is "
-    "currently armed for and the leg that pinned it, rewritten by every beat: its ABSENCE means "
-    "no beat ever re-armed this timer, and its mtime is the last beat. Compare that epoch with "
-    "the fire to say whether the bound came due or was pre-empted. A line below carrying the "
-    "word 're-arm' names the plane that had gone quiet, and for how long.\n"
+    "currently armed for and the leg that pinned it, rewritten by every beat THAT RE-ARMED, and "
+    "removed when a runtime arms -- so it describes the runtime holding this pid NOW, never an "
+    "earlier one (a pid is recycled). Its ABSENCE means no beat ever re-armed this timer, and "
+    "its mtime is the last SUCCESSFUL re-arm: read any line below carrying the word 're-arm' "
+    "with it, because where such a line says the re-arm FAILED the number and the mtime are "
+    "both behind the last beat, and where it names a plane that had gone quiet it says how "
+    "long. Compare that epoch with the fire to say whether the bound came due or was "
+    "pre-empted.\n"
 )
 
 #: The planes whose progress this bound tracks. Named rather than spelled at
@@ -503,6 +510,25 @@ QUIET_FRACTION = 0.5
 #: test these as substrings, so a header quoting the marker would make every armed
 #: file read as a runtime with a quiet plane.
 REARM_MARKER = "[stall watchdog] re-arm: "
+
+#: Written by a BEAT whose RE-ARM RAISED -- the one case where the deadline sibling's
+#: mtime is not the last beat, which is the reading :data:`HOW_TO_READ_THE_FIRED_VALUE`
+#: sends a reader to it for.
+#:
+#: THE SIBLING CANNOT SAY THIS ABOUT ITSELF: its whole content is the deadline that IS
+#: in force, and a failed re-arm leaves exactly that one in force (``faulthandler``
+#: keeps the previous timer when a re-arm raises, argued at :func:`_record_deadline`),
+#: so the beat that failed is the only witness and the dump is the only artifact that
+#: outlives the process. Without it a reader takes a frozen mtime for "this process
+#: stopped beating" -- an inference, on a file whose whole purpose here is to be a
+#: measurement.
+#:
+#: NOT :data:`REARM_MARKER`, deliberately: the reader for the quiet-plane line takes
+#: lines that START WITH that marker, and this line states a different fact about a
+#: different file. NOT SPELLED IN THE HEADER, for the reason that constraint exists at
+#: all: readers test these as substrings, so a header quoting the marker would make
+#: every armed file read as a runtime with a failed re-arm.
+REARM_FAILED_MARKER = "[stall watchdog] re-arm failed: "
 
 #: What the first sample of a progress clock holds before it has anything to
 #: compare against. A sentinel rather than ``None`` because a probe is free to
@@ -791,18 +817,41 @@ def deadline_path(pid: int | None = None, directory: Path | None = None) -> Path
     """Where the CURRENT deadline goes: ``<log dir>/runtime-stall-<pid>.deadline``.
 
     THE SIBLING OF THE DUMP, one number and one name on a line (~24 bytes), rewritten
-    by every :func:`beat` -- so a reader with a dead pid has, without opening anything
-    else: the deadline the timer was armed for (compare it with the fire to say whether
-    the bound came due or something else pre-empted it), the leg whose stamp pinned it
-    (subtract ``bound_s`` from the deadline to place that plane's last report), and, in
-    the mtime, the last beat. A sibling rather than a line in the dump because a beat
-    runs for the process's whole life: appended, it would grow the artifact without
-    bound and answer nothing the last number does not (see :data:`DEADLINE_SUFFIX`).
+    by every :func:`beat` THAT RE-ARMED -- so a reader with a dead pid has, without
+    opening anything else: the deadline the timer was armed for (compare it with the
+    fire to say whether the bound came due or something else pre-empted it), the leg
+    whose stamp pinned it (subtract ``bound_s`` from the deadline to place that plane's
+    last report), and, in the mtime, the last SUCCESSFUL re-arm (a beat whose re-arm
+    raised leaves the previous number in place and writes a line saying so -- see
+    :data:`REARM_FAILED_MARKER`). A sibling rather than a line in the dump because a
+    beat runs for the process's whole life: appended, it would grow the artifact
+    without bound and answer nothing the last number does not (see
+    :data:`DEADLINE_SUFFIX`).
 
     ITS ABSENCE IS A SIGNAL, not a gap: nothing writes it at :func:`arm`, so a missing
     sibling means no beat ever re-armed this timer -- the never-engaged class, whose
     fire carries the ARMING value rather than a recomputed remainder
     (:data:`HOW_TO_READ_THE_FIRED_VALUE`).
+
+    ARM CLEARS IT, AND THAT IS NOT A CONTRADICTION OF THE PARAGRAPH ABOVE. A PID IS
+    RECYCLED, so a sibling in this directory may be the previous holder's, and it would
+    then be read as a beat of the life in front of the reader -- a leg naming a plane of
+    a life that is over, an mtime BEFORE this process's own arm epoch, on a fire whose
+    own value says no beat ever re-armed the timer. :func:`arm` therefore unlinks it, so
+    the rule above holds for the holder of the pid the reader is looking at (the dump is
+    truncated per life for the same reason; truncating only one of the pair was the
+    defect QA round 1 drove as Q1).
+
+    WRITTEN THROUGH A SIDECAR TEMP AND ``os.replace``, never in place: ``Path.write_text``
+    is open(O_TRUNC) + write + close, so a reader concurrent with a beat observes a
+    TRUNCATED file -- measured at 398 beats/s, 2500 of 28,922 reads returned zero bytes
+    (QA round 1, Q4), and a fire landing in that window leaves a zero-byte sibling for a
+    post-mortem that has no rule for one. The replacement is atomic, so a reader sees the
+    previous deadline or the new one and never a mixture of the two. The temp is
+    ``<sibling>.tmp`` and lives only for the microseconds between the two calls -- a
+    surviving one means the process died inside a beat, and :func:`disarm` does not remove
+    it, because a process that dies mid-beat is exactly the case the sibling itself is
+    left for.
 
     Composed from :func:`dump_path` rather than from ``log_dir()`` and a pid a second
     time, so the two files cannot drift apart, and named the same way for the same
@@ -894,12 +943,26 @@ def arm(
             logger.info("stall watchdog disabled by %s", ENV_SECONDS)
             return False
         target = dump_path(pid, directory)
+        inherited = deadline_path(pid, directory)
         try:
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             handle = target.open("w", encoding="utf-8")
         except OSError:
             logger.warning("stall watchdog could not open %s; no dump will be written", target)
             return False
+        # NO INHERITED STATE, and this is the same argument as the "w" above rather than a
+        # second one: a pid is RECYCLED and these files are keyed by pid alone, so a sibling
+        # left by the life that held this pid BEFORE would outlive it into this one. Left
+        # there it reads as a beat of THIS life -- an mtime BEFORE this process's own arm
+        # epoch, a leg naming a plane of a dead life, on a fire whose own value says no beat
+        # ever re-armed the timer -- and that presence/absence is the ONE thing a reader has
+        # for telling the never-engaged class from a stale plane (see :func:`deadline_path`),
+        # so a stale file must not be able to fake it. Best-effort: a file that cannot be
+        # removed must not stop the bound being armed.
+        try:
+            inherited.unlink()
+        except OSError:
+            pass
         try:
             # THE HEADER IS WRITTEN BEFORE THE TIMER IS ARMED, never deferred:
             # faulthandler writes with a raw descriptor from a C thread, so the
@@ -988,12 +1051,23 @@ def _record_deadline(armed: "_Armed") -> None:
     NEVER RAISES. This runs inside :func:`beat`, on a serving loop's thread, and a
     diagnostic that cannot write its own number must not take that loop down.
     """
+    # WRITE-THEN-RENAME, so a reader concurrent with this beat never observes a half-written
+    # sibling (see :func:`deadline_path`): the temp is this process's own pid-keyed name in
+    # the same directory, and every caller holds ``_LOCK``, so the name is not contended.
+    # A failure takes the temp with it, because a file per failed beat is the accumulation
+    # this artifact's sibling design exists to avoid.
+    temp = armed.deadline_path.with_name(armed.deadline_path.name + ".tmp")
     try:
         leg, deadline = armed.pin()
         epoch = time.time() + (deadline - time.monotonic())
-        armed.deadline_path.write_text(f"{epoch:.3f} {leg}\n", encoding="utf-8")
+        temp.write_text(f"{epoch:.3f} {leg}\n", encoding="utf-8")
+        os.replace(temp, armed.deadline_path)
     except (OSError, ValueError) as exc:
         logger.debug("stall watchdog could not record its deadline: %s", exc)
+        try:
+            temp.unlink()
+        except OSError:
+            pass
 
 
 def _note_quiet_plane(armed: "_Armed", now: float) -> None:
@@ -1082,6 +1156,22 @@ def beat(plane: str) -> None:
             # timer is still armed — from the previous beat, or from ``arm`` — so
             # the worst case is a bound that expires sooner than intended.
             logger.warning("stall watchdog could not re-arm its timer", exc_info=True)
+            # AND THE SIBLING IS NOW BEHIND THE LAST BEAT: a failed re-arm leaves the
+            # previous deadline in force, so ``_record_deadline`` is not called and the
+            # file keeps the number AND the mtime of an earlier beat -- while a reader is
+            # told (HOW_TO_READ_THE_FIRED_VALUE) to read that mtime as the last beat. The
+            # sibling cannot carry the correction itself (its content is the deadline in
+            # force, which is exactly right), so this beat says it in the dump, beside the
+            # stacks it will be read with. An unwritable dump leaves the warning above.
+            if not _write_dump_line(
+                armed,
+                f"{REARM_FAILED_MARKER}the timer could not be re-armed at this beat, so "
+                f"{DUMP_PREFIX}-<pid>{DEADLINE_SUFFIX} still holds the PREVIOUS deadline and "
+                f"its mtime is behind this process's last beat\n",
+            ):
+                logger.warning(
+                    "stall watchdog could not record a failed re-arm for pid %s", armed.pid
+                )
         else:
             # AFTER a successful arm, and only then: the deadline this process is now
             # armed for, for a reader who arrives after the process is gone.
