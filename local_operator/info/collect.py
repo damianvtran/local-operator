@@ -1015,17 +1015,25 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
 
 
 def _credential_key_names(root: Path) -> tuple[str, ...]:
-    """Credential KEY NAMES from the store, read WITHOUT creating it.
+    """Credential KEY NAMES from the encrypted store, read WITHOUT creating it.
 
-    ``CredentialManager.__init__`` calls ``_ensure_config_exists()``, which makes
-    the config directory and an empty ``credentials.env`` (and tightens the mode
-    of a loose file it finds). On this path that is a WRITE on a read: ``/info``
-    exists to describe a host — including a broken one — and leaving new state
-    on it is the same fault class as ``check_latest()`` rewriting the cache,
-    which this module's docstring bans outright. The read-only construction and
-    the "only ``ENOENT`` means the store is absent, every other failure raises"
-    policy both live on the class now (``CredentialManager.read_key_names``);
-    what is left here is the collector's own policy about the ROOT.
+    The store is the consolidated home for credentials — an operator's agent
+    secrets and the provider-class rows a login or ``lop credential update``
+    writes — so this probe reads it directly (the same enumeration ``lop secret
+    list`` performs) and unions the legacy ``credentials.env`` names during the
+    transition, which is what a host that has not run ``lop secret migrate-env``
+    still holds. Provider rows are reported in their env-key spelling
+    (``LOP_PROVIDER_OPENROUTER_API_KEY`` → ``OPENROUTER_API_KEY``), matching the
+    credentials route, so the name answers the diagnostic question directly.
+
+    Nothing here is created or rewritten. ``CredentialManager.__init__`` calls
+    ``_ensure_config_exists()``, which makes the config directory and an empty
+    ``credentials.env`` (and tightens the mode of a loose file it finds). On this
+    path that is a WRITE on a read: ``/info`` exists to describe a host —
+    including a broken one — and leaving new state on it is the same fault class
+    as ``check_latest()`` rewriting the cache, which this module's docstring bans
+    outright. The legacy read is therefore the class's own read-only
+    ``read_key_names``, and the store is opened only when it already exists.
 
     ``_require_root`` FIRST, and it is load-bearing rather than defensive. The
     previous form short-circuited on ``is_file()``, which is False on the
@@ -1037,7 +1045,28 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     """
     from local_operator.credentials import CredentialManager
 
-    return tuple(CredentialManager.read_key_names(_require_root(root)))
+    resolved = _require_root(root)
+    names: set[str] = set()
+    # The encrypted store, when there is one. An absent store is "no secrets
+    # recorded" and returns nothing rather than being created here.
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+
+    if store_path(resolved).exists():
+        try:
+            for record in open_store(resolved).list():
+                name = record.name
+                if name.startswith(PROVIDER_SECRET_PREFIX):
+                    name = name[len(PROVIDER_SECRET_PREFIX) :]
+                names.add(name)
+        except (SecretStoreError, OSError, ValueError):
+            # A damaged store is still a host that has one; fall through to the
+            # legacy names rather than reporting an empty credential picture.
+            pass
+    names.update(CredentialManager.read_key_names(resolved))
+    return tuple(sorted(names))
 
 
 #: Stand-in config root for when `config_dir()` itself cannot be resolved.
