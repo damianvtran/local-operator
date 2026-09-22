@@ -1328,7 +1328,7 @@ class AgentLoop:
                                     # model learns the call did not run and may
                                     # re-issue it, which is strictly more
                                     # information than the call having vanished.
-                                    self._append_results(
+                                    await self._append_results(
                                         context,
                                         [
                                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
@@ -1668,7 +1668,7 @@ class AgentLoop:
                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
                             for call in assistant.tool_calls
                         ]
-                        self._append_results(
+                        await self._append_results(
                             context,
                             placeholders,
                             new_messages,
@@ -1867,7 +1867,7 @@ class AgentLoop:
                                     },
                                 )
                             )
-                        self._append_results(
+                        await self._append_results(
                             context,
                             placeholders,
                             new_messages,
@@ -1878,7 +1878,7 @@ class AgentLoop:
                             assistant.tool_calls, context, config, signal, tool_results
                         ):
                             yield event
-                        self._append_results(
+                        await self._append_results(
                             context,
                             tool_results,
                             new_messages,
@@ -3153,19 +3153,20 @@ class AgentLoop:
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
-                        with tool_source(name, planned.args):
-                            result = result.model_copy(
-                                update={
-                                    "content": [
-                                        (
-                                            TextContent(text=config.redact_tool_result(block.text))
-                                            if isinstance(block, TextContent)
-                                            else block
-                                        )
-                                        for block in result.content
-                                    ]
-                                }
-                            )
+                        # The same off-loop seam the history path uses: this
+                        # result crosses back into arbitrary Python, and the
+                        # scan over it is C-level work that must not run on the
+                        # loop thread (see ``_redact_content``).
+                        result = result.model_copy(
+                            update={
+                                "content": await self._redact_content(
+                                    list(result.content),
+                                    config.redact_tool_result,
+                                    name,
+                                    planned.args,
+                                )
+                            }
+                        )
                     result.duration_s = time.monotonic() - started
                     queue.put_nowait(
                         ToolExecutionEndEvent(
@@ -3964,7 +3965,7 @@ class AgentLoop:
             details={**(details or {}), "__synthetic": True},
         )
 
-    def _append_results(
+    async def _append_results(
         self,
         context: LoopContext,
         results: list[ToolResult],
@@ -3977,20 +3978,12 @@ class AgentLoop:
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
-                # Publish WHICH call these bytes belong to for the duration of
-                # the hook. The hook is called with text alone (see
-                # ``harness/redaction.py``), and a host that has to report a
-                # shape-masked result needs the tool name and the arguments it
-                # was given — neither of which can be read off the text.
-                with tool_source(result.tool_name, _call_arguments(context, result.tool_call_id)):
-                    content = [
-                        (
-                            TextContent(text=redact(item.text))
-                            if isinstance(item, TextContent)
-                            else item
-                        )
-                        for item in content
-                    ]
+                content = await self._redact_content(
+                    content,
+                    redact,
+                    result.tool_name,
+                    _call_arguments(context, result.tool_call_id),
+                )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results
@@ -4011,6 +4004,57 @@ class AgentLoop:
             message = Message.tool_result(result.model_copy(update={"content": content}))
             context.messages.append(message)
             new_messages.append(message)
+
+    @staticmethod
+    async def _redact_content(
+        content: list[Content],
+        redact: Callable[[str], str],
+        tool_name: str,
+        arguments: Mapping[str, Any] | None,
+    ) -> list[Content]:
+        """Mask one result's text blocks OFF the event loop.
+
+        The host's hook is a pure function of text for the whole duration of the
+        call — ``Session._redact_tool_result_text`` reads the store and queues a
+        report, and neither is observable to anyone else until this returns — so
+        the STALL is the only thing the loop thread owns here, and it is 300 ms
+        to 5 s per multi-MB result (measured). Moving it to a worker thread is
+        the whole change: the numbers do not move, the OTHER children and the
+        TUI do. This is C-level work under the GIL, so while it ran on the loop
+        every concurrent child and the frame were parked.
+
+        The tool identity rides ``tool_source`` EXPLICITLY rather than relying on
+        the context being inherited: ``asyncio.to_thread`` does copy the calling
+        context (verified — the worker sees the published name), but that copy is
+        an implementation detail of that one helper, and a switch to
+        ``run_in_executor`` would silently drop it (verified — a bare executor
+        call reads ``("", "")``). Publishing INSIDE the worker makes the seam
+        correct for either spelling.
+
+        Cancellation is deliberately NOT plumbed through: ``asyncio.to_thread``
+        has no cancellation, so an abort mid-scan leaves one pool thread
+        finishing a pure function the loop is no longer waiting on. PR #1422
+        accepted exactly this cost for the same function on the bash stream; an
+        abort channel here would put a signal into a table every caller shares.
+        """
+        texts = [item.text for item in content if isinstance(item, TextContent)]
+        if not texts:
+            return content  # decided ON THE LOOP: imagery/empty pays no hop
+
+        def _run() -> list[str]:
+            with tool_source(tool_name, arguments):
+                return [redact(text) for text in texts]
+
+        masked = await asyncio.to_thread(_run)
+        out: list[Content] = []
+        index = 0
+        for item in content:
+            if isinstance(item, TextContent):
+                out.append(TextContent(text=masked[index]))
+                index += 1
+            else:
+                out.append(item)
+        return out
 
     @staticmethod
     def _drain_pending(pending: list[AgentMessage], context: LoopContext) -> int:
