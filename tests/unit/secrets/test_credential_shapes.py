@@ -76,6 +76,7 @@ from tests.unit.secrets.credential_shape_corpus import (
     FIXTURE_VALUE,
     NEGATIVE_CASES,
     POSITIVE_CASES,
+    PRE_ESCAPED_LINE,
     Case,
 )
 
@@ -297,6 +298,60 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
     assert "agent_runtime_model_worker" in scrubbed, "the user must stay readable"
     assert "mongodb-prod.example.net" in scrubbed, "the host must stay readable"
     assert scrubbed.startswith("MONGO_DSN=mongodb+srv://agent_runtime_model_worker:")
+
+
+def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
+    """The rendering a tool call is JOURNALLED in is a surface, and it has escapes.
+
+    Four claims, each measured on the incident that motivated the fix — a ``write``
+    of ordinary Python source whose file on disk holds no shape at all, whose
+    arguments are scrubbed in their JSON spelling where every newline is the two
+    characters ``\\`` and ``n``:
+
+    * the escape's own letter is not part of the NAME, so the count trap still
+      counts (the first two assertions, and the escalation assertion beside them);
+    * the value does not cross an ESCAPED line either, so an ordinary constant is
+      not a 13-character value (the third);
+    * and the narrowing did not make the rendering a blind spot: a real key that
+      arrives in it is still masked, and still only up to the line it is on.
+
+    Kept as its own test rather than only corpus rows because the corpus pins the
+    SPELLINGS while this pins the two INVARIANTS they rest on — a future edit can
+    satisfy every row by widening a rule somewhere else and still move this.
+    """
+    # The escape's letter is the newline's, not the name's: the count trap applies.
+    # The prefix matters and is not decoration: a name the count trap covers is
+    # spared by ``is_count_shaped``, which keys on the name's FIRST segment, so only
+    # a name with something glued to its front can be a false positive here — and
+    # the only thing that glues itself there is the escape letter of the line break
+    # before it. The same three constructs WITHOUT the prefix are untouched on
+    # origin/main as well, which is the shape a vacuous case has.
+    for text in (
+        PRE_ESCAPED_LINE
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\n" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+        PRE_ESCAPED_LINE + "context_tokens=12345678" + "\\n" * 3 + "def run() -> None:",
+        PRE_ESCAPED_LINE + "API" + "_KEY = PLACEHOLDER" + "\\n" * 3 + "def run() -> None:",
+    ):
+        assert scrub_shapes(text) == text, f"an escaped newline invented a credential in {text!r}"
+        assert match_shape_names(text) == []
+        assert redaction_shapes.shape_report(scrub_shapes_with_hits(text)[1]).reached_model is False
+
+    # ...and the value does not cross one either.
+    undelimited = "OPENROUTER_API_KEY=" + "QA-fixture-9c1f4a" + "\\n" + "next"
+    scrubbed = scrub_secrets(undelimited)
+    assert "QA-fixture-9c1f4a" not in scrubbed, "the key must still be masked"
+    assert scrubbed.startswith("OPENROUTER_API_KEY=[redacted]")
+    assert scrubbed.endswith("\\nnext"), "the next line is not part of the value"
+
+    # The escape is not the name's, so an assignment that begins right after one is
+    # still an assignment — judged on the name the escape actually belongs to.
+    after_an_escape = PRE_ESCAPED_LINE + "OPENROUTER_API_KEY=" + "QA-fixture-9c1f4a"
+    scrubbed = scrub_secrets(after_an_escape)
+    assert "QA-fixture-9c1f4a" not in scrubbed
+    assert scrubbed.startswith(PRE_ESCAPED_LINE), "the escaped rendering must round-trip"
 
 
 # --- the pattern pass alone --------------------------------------------------
@@ -2487,7 +2542,25 @@ def _corpus_grading() -> str:
 #: byte, and 346 produce the value below. The row closes the combination agent review R1-3
 #: named — the reported family's dash join CARRYING a value, the one spelling #1399 moved,
 #: which the four rows beside it covered only by intersection.
-_CORPUS_GRADING_DIGEST = "886301f87ca385b1ae23b705efbe31a30bd08b604ad9b770095c2752b7058690"
+#:
+#: Moved on 2026-09-21 a SIXTH time, by the second-wave false-positive fix, and the
+#: argument is the same measurement rather than a claim. The 346 rows the constant
+#: above covered produce that digest BYTE FOR BYTE under the fixed module —
+#: recomputed through this very function with the eleven added rows filtered out, so
+#: not a masked text, not a label, not a value, not a window, not a severity moved;
+#: and a second, independent check agrees: origin/main's module and this branch's
+#: grade all 346 pre-existing rows identically, field for field. The digest moves
+#: because the corpus grew to 357, and the added rows are the specification of the
+#: fix. Eight negatives: the count trap one ESCAPED newline away (three spellings,
+#: the JSON rendering's own), an identifier assigned to another identifier (two
+#: rows verbatim from the file whose ``read`` reported them), the guide's
+#: two-part secret-renaming form, and a vendor-looking prefix in front of an
+#: org/repo PATH — the slash spelling of a string the ``_`` and ``-`` spellings
+#: already spared. Three positives, because a narrowing that also stopped masking
+#: the credentials arriving IN an escaped rendering would be a leak: a real key one
+#: escaped newline after its name, a real key whose line ends where the rendering
+#: says it does, and a slash-joined tail that is a token (case plus a digit).
+_CORPUS_GRADING_DIGEST = "d4b9ae95c40d15b2d600d1cecc33ebc619f5e75d86cf1ae8753b3a2ce201f6d3"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:

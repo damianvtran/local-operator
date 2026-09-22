@@ -105,6 +105,15 @@ COUNT_TAIL_RELEASED_NAMES: tuple[str, ...] = (
 #: long enough to clear the assignment rule's seven-character floor.
 FIXTURE_VALUE = "QA-fixture-9c1f4a"
 
+#: One line's worth of escaped rendering, as a JSON payload spells a line break:
+#: the two characters ``\`` and ``n``. It is load-bearing rather than cosmetic.
+#: A name the count-trap exclusion covers is spared by ``is_count_shaped``, which
+#: keys on the FIRST segment of the name — so a count name only becomes a false
+#: positive when something is glued to its front, and the only thing that glues
+#: itself there is the escape letter of the line break before it. A case written
+#: without this prefix is a case origin/main passes too, i.e. no evidence at all.
+PRE_ESCAPED_LINE = "RESULTS = os.path.join(HERE)" + "\\n"
+
 #: Credential NAMES whose qualifier carries a word that also names a QUANTITY.
 #:
 #: The other direction of the count judgement, and the one that leaks when the
@@ -517,6 +526,22 @@ POSITIVE_CASES: tuple[Case, ...] = (
         )
         for name in COUNT_QUALIFIER_NAMES
     ),
+    # --- 2026-09-21, second wave: the escapes must not hide a real assignment --
+    # The two narrowings those negatives pinned are about the RENDERING, and a
+    # narrowing that also stopped masking the credentials arriving IN that
+    # rendering would be a leak rather than a fix. Same construct, real value.
+    Case(
+        "line" + "\\n" + "OPENROUTER_API_KEY=" + FIXTURE_VALUE,
+        "a real key one escaped newline after its name: the escape is not the name",
+    ),
+    Case(
+        "OPENROUTER_API_KEY=" + FIXTURE_VALUE + "\\n" + "next",
+        "a real key whose line ends where the rendering says it does",
+    ),
+    Case(
+        "xai" + "-Org/" + "Grok-Build9",
+        "a slash-joined tail that is NOT a name: case and a digit make it a token",
+    ),
 )
 
 
@@ -878,6 +903,93 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         '{"command": "grep -rn \'MONGO_DSN=[redacted]\' notes/"}',
         "the marker inside a JSON tool argument: the shape a bash call journals",
     ),
+    # --- 2026-09-21, second wave: the ESCAPED rendering is a surface too ------
+    # An assignment is scrubbed on more than one surface, and a tool call's
+    # journaled spelling is its JSON payload: every newline inside the string
+    # arrives as the two characters ``\`` and ``n``. Two defects came out of
+    # that one fact, both measured on a ``write`` of ordinary Python source whose
+    # file on disk has no shape in it at all (the incident that named them).
+    #
+    # (1) The escape's OWN LETTER was absorbed by the name group. The count-trap
+    #     exclusion keys on the FIRST segment of a name, so a name beginning
+    #     immediately after an escaped newline arrives with the newline's letter
+    #     glued to its front — and stops being a count. The two blank lines before
+    #     the next ``def`` supplied the second escape.
+    # (2) The value ran ACROSS those escapes: ``[^\s]`` "already cannot cross a
+    #     line" everywhere except in a rendering, where the line is two
+    #     non-whitespace characters, so a constant became a 13-character value.
+    # Built from its parts, like the other rows this file cannot spell: the joined
+    # spelling is exactly what the pass rewrites, and this file is read through it.
+    Case(
+        PRE_ESCAPED_LINE
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\n" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+        "the count trap one escaped newline away, as a JSON payload spells it",
+    ),
+    Case(
+        PRE_ESCAPED_LINE + "context_tokens=12345678" + "\\n" * 3 + "def run() -> None:",
+        "the same trap with a value long enough to clear the value floor",
+    ),
+    Case(
+        PRE_ESCAPED_LINE + "API" + "_KEY = PLACEHOLDER" + "\\n" * 3 + "def run() -> None:",
+        "the same run under a name the count trap does not cover",
+    ),
+    # --- an IDENTIFIER value is a NAME, whatever name it sits under ------------
+    # The identifier clause required a LEADING underscore, so a value that is
+    # plainly the name of another local — spelled the way this tree spells locals
+    # — was masked, and when the same identifier appeared again anywhere in the
+    # file the mask graded EXPOSED and escalated. Both rows are verbatim from
+    # ``local_operator/providers/clients.py``, whose ``read`` filed a rotation
+    # notice for them on 2026-09-21.
+    Case(
+        "reasoning_tokens=" + "thought_tokens",
+        "a usage counter assigned another local: an identifier, not a secret",
+    ),
+    Case(
+        "extra_native_tokens=" + "echo_turns" + " * reasoning_echo_placeholder_tokens()",
+        "the same, in the expression that reported it",
+    ),
+    # --- a flag that NAMES a stored secret, in the guide's own spelling --------
+    # ``--secret NAME=VAR`` is the documented way to rename a stored secret for a
+    # child, and the clause that exempts a NAME tested the value as a SINGLE
+    # token, so the two-part form fell straight through it and masked. The
+    # harness's own ``guide://credentials`` carries this line verbatim; reading the
+    # guide masked it and filed an escalated incident naming no shape at all.
+    Case(
+        "lop secret run --secret "
+        + "GITHUB"
+        + "_"
+        + "TOKEN"
+        + " --secret "
+        + "NPM"
+        + "_"
+        + "TOKEN"
+        + "="
+        + "NODE"
+        + "_"
+        + "AUTH"
+        + "_"
+        + "TOKEN"
+        + " -- npm publish",
+        "a flag NAMING a stored secret under a second NAME, as the guide spells it",
+    ),
+    # --- a path is a NAME, and a slash is one of its separators -----------------
+    # The tail after an issuer-looking prefix is a lowercase org/repo path: a NAME
+    # by the same predicate that already spares the ``_`` and ``-`` spellings of
+    # the identical string. ``/`` was simply missing from the separator class, so
+    # only the spelling a path is ACTUALLY written with masked. Prose from a
+    # docstring in ``local_operator/providers/clients.py`` (line 2298), which is
+    # what a ``read`` of that file reported as ``vendor-prefixed-token``.
+    Case(
+        "xai" + "-org/" + "grok" + "-build",
+        "a vendor-looking prefix in front of an org/repo PATH: a slash-joined NAME",
+    ),
+    Case(
+        "and " + "xai" + "-org/" + "grok" + "-build" + " sends it on every request.",
+        "the same slug in the docstring prose that reported it",
+    ),
 )
 
 
@@ -1025,4 +1137,24 @@ DUMP_COMMAND_CASES: tuple[DumpCase, ...] = (
     DumpCase("cd /app && cat .env", True, "a chained read of an env file is a read"),
     DumpCase("tail -c 120 .env | tr -d '\\n'", True, "flags, then the file"),
     DumpCase("head -c 200 ~/tmp/openrouter_key.env", True, "a key file read through head"),
+    # --- a paren is not a command position on its own (2026-09-21) -------------
+    # Measured on a peer session's own count-only scan, and it is the circular
+    # case this table is here to make explicit: the guard matched the shape of
+    # the SEARCH QUERY the agent had just written rather than anything the
+    # command read. ``set`` is a shell builtin that dumps variables AND a Python
+    # builtin; only the shell reading is a dump, and the paren before it was the
+    # only thing saying "shell".
+    DumpCase(
+        "where=collections.defaultdict(set)",
+        False,
+        "a Python call: the paren is not a shell command position",
+    ),
+    DumpCase("x = set()", False, "the same builtin with no paren before it"),
+    DumpCase(
+        "hits=collections.Counter(); where=collections.defaultdict(set)",
+        False,
+        "the peer session's own scan, verbatim",
+    ),
+    DumpCase("( env )", True, "a real subshell: the spaced spelling still fires"),
+    DumpCase("x=$(set)", True, "a command substitution still dumps"),
 )
