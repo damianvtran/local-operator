@@ -446,3 +446,37 @@ def test_a_start_event_still_validates_without_the_new_fields() -> None:
     assert SubagentEndEvent(job_id="j", label="l", status="completed").cut_off_cause == ""
     assert SubagentEndEvent(job_id="j", label="l", status="completed").cut_off == ""
     assert _Start(job_id="j", label="l", agent_id="a", model="m").type == "subagent_start"
+
+
+def test_a_settled_cut_off_child_keeps_its_cause_across_a_restore() -> None:
+    """The case the writer ACTUALLY produces: a child that settled on the guard.
+
+    Reviewer MAJOR-2. A child the loop cuts off does not restore as
+    ``interrupted`` — the runner settles it ``failed`` with the cause, so the
+    record's ``outcome`` IS set, and that arm of the restore builder cleared
+    ``cut_off_cause`` to "". The cause was therefore lost on a restart for
+    exactly the child it was added to explain, and the row read as an ordinary
+    provider failure. This drives the SETTLED shape (an outcome the writer
+    produces), not the ``outcome: None`` shape the earlier test used, which no
+    cut-off child ever produces.
+    """
+    from local_operator.harness.jobs import AsyncJob
+    from local_operator.session.restored_rows import restored_job_row
+
+    job = AsyncJob.model_construct(
+        id="job-6", type="task", label="child", status="failed", queued=False, cut_off_cause=""
+    )
+    record = {
+        "job_id": "job-6",
+        "label": "child",
+        "outcome": "failed",
+        "session_dir": None,
+        "cut_off_cause": CUT_CAUSE,
+    }
+    row = restored_job_row(job, record)
+    assert row.status == "failed"
+    assert row.cut_off_cause == CUT_CAUSE, "a settled cut-off child lost its cause on restore"
+
+    # The negative arm still holds: a settled child with no recorded cause is
+    # NOT relabelled as cut off.
+    assert restored_job_row(job, dict(record, cut_off_cause="")).cut_off_cause == ""

@@ -5426,3 +5426,142 @@ def test_the_continuation_limit_cause_is_a_named_involuntary_token():
     assert is_cut_off_cause(CONTINUATION_LIMIT_CAUSE)
     assert not is_deliberate_cause(CONTINUATION_LIMIT_CAUSE)
     assert render_cut_off_reason(CONTINUATION_LIMIT_CAUSE)
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
+    """A parent note arriving WITH a still-moving todo list must not cut the run.
+
+    Reviewer MAJOR-1, and the regression that made the first cut of this fix
+    wrong: the collector appends steering, then asides, then follow-ups, so a
+    boundary that carries an ASIDE *and* a follow-up was charged to whichever
+    producer happened to be first in the list — the bounded 8-budget — and a
+    parent's hub note could therefore still spend the allowance a child's own
+    moving todo list needs, which is the exact defect per-producer budgets were
+    introduced to close. The charge must follow the producer whose budget
+    actually bounds this re-entry: a follow-up in the batch WINS.
+
+    Discriminating shape: the follow-up producer reports progress on EVERY
+    yield (always a fresh list, as the real ``Session._todo_continuation`` does
+    — it latches on a byte-identical fingerprint), while the aside producer
+    fires far more than the 8-budget in total. Before the fix, the ninth such
+    boundary ends the run on a bare success; after it, the run keeps going.
+    """
+
+    class FreshReminder:
+        """A follow-up whose fingerprint changes every call, like a moving list."""
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def __call__(self) -> list[Any]:
+            self.n += 1
+            return [
+                CustomMessage(
+                    custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                    attribution="system",
+                    details={
+                        "text": f"<system-reminder>still open: step {self.n}</system-reminder>"
+                    },
+                )
+            ]
+
+    reminder = FreshReminder()
+
+    async def get_asides():
+        # One parent note on every yield — 12 of them, well past the 8-budget.
+        return [lambda: Message.user("parent asks: how is it going?")]
+
+    def convert(messages):
+        out = []
+        for message in messages:
+            if isinstance(message, Message):
+                out.append(message)
+            elif getattr(message, "custom_type", None) == TODO_REMINDER_MESSAGE_TYPE:
+                out.append(Message.user(message.details["text"]))
+        return out
+
+    # Enough model turns that, were the aside budget charged, the run would die.
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="working"), StreamEndEvent(stop_reason="stop")] for _ in range(12)]
+    )
+    context = LoopContext(tools=[])
+    config = make_config(
+        stream,
+        convert_to_llm=convert,
+        get_aside_messages=get_asides,
+        get_follow_up_messages=reminder,
+    )
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    # The run went past the aside budget: the fix charged the follow-up budget.
+    assert len(stream.requests) > 8
+    # And it did NOT end as a continuation cut-off.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert getattr(end, "cut_off_cause", "") != "continuation-limit"
+
+
+@pytest.mark.asyncio
+async def test_a_runaway_follow_up_still_ends_the_run_as_a_named_cut_off():
+    """The other arm: a producer that never stops is still bounded, and NAMED.
+
+    The anti-runaway guard is why the budget exists at all; per-producer budgets
+    must not remove it, and the follow-up producer now carries its OWN (larger)
+    budget, so its bound has to be pinned independently of the shared one
+    (review minor: the 8->64 change was verified by hand but had no test). A
+    follow-up that reports progress on EVERY yield — a fresh fingerprint, as a
+    genuinely moving todo list does — is bounded by
+    ``max_follow_up_continuations``, and the end is an involuntary, NAMED cut-off
+    (``aborted=True`` + ``CONTINUATION_LIMIT_CAUSE``), never the bare success it
+    used to be, which every surface read as a completed answer.
+    """
+    from local_operator.incidents import CONTINUATION_LIMIT_CAUSE
+
+    counter = {"n": 0}
+
+    async def get_follow_ups():
+        counter["n"] += 1
+        return [
+            CustomMessage(
+                custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                details={
+                    "text": f"<system-reminder>still open: step {counter['n']}</system-reminder>"
+                },
+            )
+        ]
+
+    def convert(messages):
+        out = []
+        for message in messages:
+            if isinstance(message, Message):
+                out.append(message)
+            elif getattr(message, "custom_type", None) == TODO_REMINDER_MESSAGE_TYPE:
+                out.append(Message.user(message.details["text"]))
+        return out
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="working"), StreamEndEvent(stop_reason="stop")] for _ in range(30)]
+    )
+    context = LoopContext(tools=[])
+    config = make_config(
+        stream,
+        convert_to_llm=convert,
+        get_follow_up_messages=get_follow_ups,
+        max_follow_up_continuations=3,
+    )
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.cut_off_cause == CONTINUATION_LIMIT_CAUSE
+    assert end.aborted is True
+    # Bounded: the guard fired rather than the pipeline spinning to the cap.
+    assert len(stream.requests) <= 6

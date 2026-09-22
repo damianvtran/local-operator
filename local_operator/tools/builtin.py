@@ -18289,6 +18289,20 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
+        # WHY it stopped, when it was not a clean completion: a child the loop
+        # cut off carries a cause token (``ChildInfo.cut_off_cause``) and without
+        # this line the roster printed only ``failed — resumable``, so a parent
+        # scanning the list could not tell a cut-off child from an ordinary
+        # provider failure — the recorded cause reached no surface (design D4).
+        # Rendered through the same ``render_cut_off_reason`` every other
+        # surface uses, so the words cannot drift.
+        if row.cut_off_cause:
+            # FUNCTION-LOCAL import: this module is a denied-module boundary and
+            # must not import ``incidents`` at module scope (see the denied-module
+            # note above). ``update.py`` reaches the same helper the same way.
+            from local_operator.incidents import render_cut_off_reason
+
+            lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
         # The session id only where it can be acted on. It is the id
         # ``--resume`` takes (NOT the job id on the line above), and this
         # roster is the only surface that shows it now that children are kept

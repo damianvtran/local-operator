@@ -979,9 +979,14 @@ class SubagentComms:
         record.outcome = status
         record.result_text = result_text
         record.error_text = error_text
-        # The cause belongs to the WINNING fact: a later, vaguer write must not
-        # overwrite the specific reason with "". Precedence is already decided
-        # above, so this line inherits it rather than repeating the rule.
+        # The cause belongs to the WINNING fact, and precedence was decided
+        # above — so this line inherits it rather than repeating the rule. Stated
+        # plainly, because an earlier draft of this comment claimed a property
+        # the code does not have (review minor): a higher-precedence write (a
+        # genuine ``completed``) that carries NO cause WILL clear a cause recorded
+        # by the write it supersedes, and that is intended — a child that
+        # completed was not cut off. A cause-less write that LOSES on precedence
+        # never reaches this line, which is the case the race actually produces.
         record.cut_off_cause = cut_off_cause
         return status, error_text, result_text
 
