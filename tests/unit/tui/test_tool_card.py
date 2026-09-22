@@ -1248,8 +1248,15 @@ def test_on_click_drives_the_toggle() -> None:
     """The mouse path, not just the method: a click is the whole affordance."""
 
     class _Click:
-        def __init__(self) -> None:
+        # `x`/`y` because a real `Click` always carries the cell it landed on,
+        # and `on_click` reads them to ask whether a URL was under the pointer
+        # (`TranscriptBlock.link_at`) before it treats the click as a toggle.
+        # A double without them is not a stand-in for the event, it is a
+        # stand-in for an event that cannot exist.
+        def __init__(self, x: int = 0, y: int = 0) -> None:
             self.stopped = False
+            self.x = x
+            self.y = y
 
         def stop(self) -> None:
             self.stopped = True
@@ -1277,8 +1284,13 @@ def test_activating_an_inert_card_answers_instead_of_ignoring_the_click() -> Non
     """
 
     class _Click:
-        def __init__(self) -> None:
+        # See the sibling double above: a real `Click` carries the cell it
+        # landed on, and `on_click` reads it before deciding what the click
+        # meant.
+        def __init__(self, x: int = 0, y: int = 0) -> None:
             self.stopped = False
+            self.x = x
+            self.y = y
 
         def stop(self) -> None:
             self.stopped = True
