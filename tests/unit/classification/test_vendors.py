@@ -694,10 +694,10 @@ async def test_a_leg_still_resolves_an_exported_environment_key(bare_manager, mo
     """
     monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
     assert not (bare_manager / "auth.db").exists()
-    assert not (bare_manager.config_dir / "secrets").exists()
+    assert not (bare_manager / "secrets").exists()
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "env-key"
     # Resolving did not create a store: the env tier needs no row.
-    assert not (bare_manager.config_dir / "secrets").exists()
+    assert not (bare_manager / "secrets").exists()
 
 
 async def test_the_login_row_wins_over_the_environment_key(bare_manager, monkeypatch) -> None:

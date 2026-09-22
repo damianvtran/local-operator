@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sqlite3
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -61,10 +62,33 @@ if TYPE_CHECKING:
 
 
 class FakeConfigManager:
-    """ConfigManager stand-in backed by a plain dict."""
+    """ConfigManager stand-in backed by a plain dict, plus ``config_dir``.
 
-    def __init__(self, values: dict[str, Any] | None = None) -> None:
+    ``config_dir`` is here because the composition root reads the config ROOT off
+    the manager since PR2b deleted the ``CredentialManager`` that used to carry
+    it: ``_attach_classification``, ``AuthStore(config_dir=…)`` and the
+    ``configure_model`` call all take ``config_manager.config_dir``, so a double
+    without the attribute fails there before reaching the behaviour under test.
+
+    Its default root is a distinct path UNDER the temp root that is deliberately
+    never created — an isolated host with no store is exactly what these doubles
+    model, and the store readers degrade to their env leg on it
+    (``provider_secret_value`` returns ``None`` for an absent store without
+    creating one). Allocating a directory at construction would instead leak a
+    scratch dir per construction site for a store no test ever writes — the
+    bare-``mkdtemp()`` leak ``tests/unit/tui/conftest.py`` already has to sweep.
+    A test that asserts on the root passes one explicitly.
+    """
+
+    def __init__(
+        self, values: dict[str, Any] | None = None, config_dir: Path | None = None
+    ) -> None:
         self.values = dict(values or {})
+        self.config_dir = (
+            config_dir
+            if config_dir is not None
+            else Path(tempfile.gettempdir()) / "fake-config-manager-no-store"
+        )
 
     def get_config_value(self, key: str, default=None):
         return self.values.get(key, default)
@@ -4309,7 +4333,10 @@ async def test_the_classification_seam_is_closed_on_dispose(
     built: list[Any] = []
 
     class _RecordingService:
-        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+        # ``config_dir`` and not ``manager``: PR2b deleted the
+        # ``CredentialManager`` the seam used to take, and the recorder must
+        # accept the signature the composition root now calls it with.
+        def __init__(self, *, config_dir: Any, settings: Any = None) -> None:
             self.closed = False
             self.timeout_s = 1.5
             built.append(self)

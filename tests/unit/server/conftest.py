@@ -296,18 +296,22 @@ def mock_config_manager(temp_dir):
 
 
 @pytest.fixture
-def mock_credential_manager():
+def mock_credential_manager(temp_dir):
     """The config manager the store-first readers resolve their root through.
 
     The fixture name is kept because the server tests depend on it by name; what
     it yields is the ``ConfigManager`` whose ``config_dir`` the readers take,
     now that PR2b deleted the ``CredentialManager`` this used to hand back (and
     the ``app.state.credential_manager`` slot it used to fill).
-    """
-    from local_operator.config import ConfigManager
-    from local_operator.paths import config_dir
 
-    return ConfigManager(config_dir())
+    ``temp_dir`` and NOT the HOME-derived ``paths.config_dir()``: the tests arm
+    their rows through this manager (``_store_key``) and the app under test is
+    given ``ConfigManager(config_dir=temp_dir)``, so the same root has to be on
+    both sides or a row is written under one root and looked up under another.
+    A HOME-derived root is the worse failure of the two — an unisolated run then
+    writes into the operator's real store.
+    """
+    return ConfigManager(config_dir=temp_dir)
 
 
 @pytest.fixture
