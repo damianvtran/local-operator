@@ -66,7 +66,6 @@ async def main() -> int:
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.subagent import _build_child_session
     from local_operator.session_factory import create_session
 
@@ -83,7 +82,7 @@ async def main() -> int:
     built = await create_session(
         _args(),
         ConfigManager(config_dir),
-        CredentialManager(config_dir),
+        config_dir,
         AgentRegistry(config_dir),
     )
     # create_session may hand back a AttachedSession when attaching to an owned

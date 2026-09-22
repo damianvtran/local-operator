@@ -242,7 +242,6 @@ async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.types import StreamTextDelta
     from local_operator.session_factory import create_session, warm_session_imports
 
@@ -270,7 +269,7 @@ async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
     session = await create_session(
         args,
         ConfigManager(config_dir),
-        CredentialManager(config_dir),
+        config_dir,
         AgentRegistry(config_dir),
         cwd=str(cwd),
     )

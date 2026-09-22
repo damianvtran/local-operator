@@ -461,7 +461,6 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.types import Message
     from local_operator.session import transcript as transcript_module
     from local_operator.session.creation import session_created_at
@@ -478,7 +477,7 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -514,7 +513,6 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     (tmp_config_dir / "config.yml").write_text(
         "version: 0.0.0\n"
@@ -526,7 +524,7 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     chosen = await create_session(
         _args(hosting="anthropic", model="claude-opus-5", birth_effort="max"),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -538,7 +536,7 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     default = await create_session(
         _args(hosting="anthropic", model="claude-opus-5"),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -566,7 +564,6 @@ async def test_dict_compaction_config_flows_through_prompt(
     )
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     config_manager = ConfigManager(tmp_config_dir)
     raw = config_manager.get_config_value("compaction", None)
@@ -575,7 +572,7 @@ async def test_dict_compaction_config_flows_through_prompt(
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         config_manager,
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -611,12 +608,11 @@ async def test_trigger_knobs_are_settable_in_config_yml(tmp_config_dir: Path) ->
     from local_operator.agents import AgentRegistry
     from local_operator.compaction.thresholds import resolve_threshold_tokens
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     settings = cast(Session, session)._compaction_settings
@@ -640,12 +636,11 @@ async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Pat
     from local_operator.agents import AgentRegistry
     from local_operator.compaction.thresholds import CompactionSettings, should_compact
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     # No block in the file: the session runs on the shipped defaults.
@@ -720,7 +715,6 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     agent dir transcript is replayed and appended."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session.transcript import Transcript
 
     config_dir = tmp_config_dir
@@ -750,13 +744,12 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     )
     config_manager = ConfigManager(config_dir)
     config_manager.update_config({"hosting": "test", "model_name": "test-model"}, write=False)
-    credential_manager = CredentialManager(config_dir)
 
     def make_args(train: bool) -> argparse.Namespace:
         return _args(agent_name="roster", train=train)
 
     # First run WITHOUT train: the agent dir transcript stays empty.
-    session = await create_session(make_args(False), config_manager, credential_manager, registry)
+    session = await create_session(make_args(False), config_manager, registry)
     await session.prompt("secret first run")
     await session.dispose()
     agent_dir = config_dir / "agents" / str(agent.id)
@@ -764,13 +757,13 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     assert len(agent_transcript.entries()) == 0  # nothing appended
 
     # Second run WITHOUT train: history is NOT replayed from the agent dir.
-    session2 = await create_session(make_args(False), config_manager, credential_manager, registry)
+    session2 = await create_session(make_args(False), config_manager, registry)
     assert isinstance(session2, Session)
     assert len(session2._transcript.entries()) == 0  # fresh start
     await session2.dispose()
 
     # Third run WITH train: the transcript lives in the agent dir.
-    session3 = await create_session(make_args(True), config_manager, credential_manager, registry)
+    session3 = await create_session(make_args(True), config_manager, registry)
     assert isinstance(session3, Session)
     assert session3._transcript.directory == agent_dir
     await session3.prompt("train me")
@@ -1628,9 +1621,6 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
 
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
-
     captured: dict[str, object] = {}
 
     def reaping_sweep(cfg_mgr, config_dir, *, live_dir=None):
@@ -1707,7 +1697,6 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
         plan = await _prepare(
             _args(hosting="test", model="test-model"),
             cast("ConfigManager", config_manager),
-            credential_manager,
             cast("AgentRegistry", registry),
             has_ui=False,
         )
@@ -1774,13 +1763,9 @@ async def test_dispose_closes_auth_store(
 
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
-
     session = await create_session(
         _args(hosting="test", model="test-model"),
         cast("ConfigManager", config_manager),
-        credential_manager,
         cast("AgentRegistry", registry),
     )
     # Use the store actually wired into this session's stream, not the first
@@ -1826,13 +1811,9 @@ async def test_build_initial_blocks_without_turn(tmp_config_dir: Path) -> None:
     """CL-18: initial blocks render with no turn executed (benchmark hook)."""
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
-
     blocks = await build_initial_blocks(
         _args(hosting="test", model="test-model"),
         cast("ConfigManager", config_manager),
-        credential_manager,
         cast("AgentRegistry", registry),
     )
     assert len(blocks) >= 1
@@ -2243,13 +2224,11 @@ async def test_configured_variables_reach_a_real_tool_call(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import create_session
 
     session = await create_session(
         args=argparse.Namespace(),
         config_manager=ConfigManager(config_dir=tmp_config_dir),
-        credential_manager=CredentialManager(config_dir=tmp_config_dir),
         agent_registry=AgentRegistry(config_dir=tmp_config_dir),
         has_ui=True,
     )
@@ -2368,12 +2347,11 @@ async def test_a_real_session_carries_the_operators_instructions(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -2397,7 +2375,6 @@ async def test_a_subagent_inherits_the_operators_instructions(
     the subagent's ``build_system_blocks`` call also left the suite green."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.subagent import _build_child_session
 
     (tmp_config_dir.parent / "system_prompt.md").write_text(
@@ -2407,7 +2384,7 @@ async def test_a_subagent_inherits_the_operators_instructions(
     parent = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(parent, Session)
@@ -3030,7 +3007,6 @@ async def test_a_real_session_carries_imported_instructions(
     reads the blocks the provider actually returns."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     # The fixture points LOCAL_OPERATOR_CONFIG_DIR at tmp_path while returning
     # tmp_path/.local-operator; HOME follows it so the imported path resolves
@@ -3041,7 +3017,7 @@ async def test_a_real_session_carries_imported_instructions(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -3067,7 +3043,6 @@ async def test_a_subagent_inherits_imported_instructions(
     standing rules than their parent, with the suite green."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.subagent import _build_child_session
 
     monkeypatch.setenv("HOME", str(tmp_config_dir.parent))
@@ -3076,7 +3051,7 @@ async def test_a_subagent_inherits_imported_instructions(
     parent = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(parent, Session)
@@ -3113,7 +3088,6 @@ async def test_a_non_utf8_agent_prompt_does_not_kill_startup(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     registry = AgentRegistry(tmp_config_dir)
     agent = registry.create_agent(_agent_fields("latin1"))
@@ -3128,7 +3102,7 @@ async def test_a_non_utf8_agent_prompt_does_not_kill_startup(
     session = await create_session(
         _args(hosting="test", model="test", agent_name="latin1", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         registry,
     )
     await session.dispose()
@@ -3148,7 +3122,6 @@ async def test_the_composition_root_guard_covers_decode_errors(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     registry = AgentRegistry(tmp_config_dir)
     registry.create_agent(_agent_fields("boom"))
@@ -3161,7 +3134,7 @@ async def test_the_composition_root_guard_covers_decode_errors(
     session = await create_session(
         _args(hosting="test", model="test", agent_name="boom", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         registry,
     )
     await session.dispose()
@@ -3260,7 +3233,6 @@ async def test_an_unreadable_profile_says_so_in_the_log(
     The reason has to be findable."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     registry = AgentRegistry(tmp_config_dir)
     registry.create_agent(_agent_fields("noisy"))
@@ -3274,7 +3246,7 @@ async def test_an_unreadable_profile_says_so_in_the_log(
         session = await create_session(
             _args(hosting="test", model="test", agent_name="noisy", yolo=True),
             ConfigManager(tmp_config_dir),
-            CredentialManager(tmp_config_dir),
+            tmp_config_dir,
             registry,
         )
     await session.dispose()
@@ -3724,13 +3696,12 @@ async def test_store_maintenance_does_not_block_session_construction(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await asyncio.wait_for(
         create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_config_dir),
-            CredentialManager(tmp_config_dir),
+            tmp_config_dir,
             AgentRegistry(tmp_config_dir),
             has_ui=True,
             defer_mcp_wiring=True,
@@ -3797,12 +3768,11 @@ async def test_store_maintenance_waits_until_create_session_can_return(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
         has_ui=True,
         defer_mcp_wiring=True,
@@ -3851,17 +3821,14 @@ async def test_store_maintenance_runs_once_per_process(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     config_manager = ConfigManager(tmp_config_dir)
     registry = AgentRegistry(tmp_config_dir)
-    credential_manager = CredentialManager(tmp_config_dir)
 
     for _ in range(3):
         session = await create_session(
             _args(hosting="test", model="test-model", yolo=True),
             config_manager,
-            credential_manager,
             registry,
             has_ui=True,
             defer_mcp_wiring=True,
@@ -3897,12 +3864,11 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
         has_ui=True,
         defer_mcp_wiring=True,
@@ -4090,13 +4056,10 @@ async def _prepare_effort_plan(config_manager, tmp_config_dir: Path, **arg_overr
     from local_operator.session_factory import _prepare
 
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
     args = _args(**{"hosting": "anthropic", "model": "claude-opus-5", **arg_overrides})
     return await _prepare(
         args,
         cast("ConfigManager", config_manager),
-        credential_manager,
         cast("AgentRegistry", registry),
         has_ui=False,
     )
@@ -4358,7 +4321,6 @@ async def test_the_classification_seam_is_closed_on_dispose(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     built: list[Any] = []
 
@@ -4378,7 +4340,7 @@ async def test_the_classification_seam_is_closed_on_dispose(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -4417,7 +4379,6 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     captured: list[Any] = []
     real_attach = session_factory.attach_classification_dispose
@@ -4433,7 +4394,7 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert captured, "the composition root registers the seam's dispose hook"
@@ -4509,7 +4470,6 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     from local_operator.agents import AgentRegistry
     from local_operator.classification import ClassificationService
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     warmed: list[str] = []
     monkeypatch.setattr(ClassificationService, "warm_up", lambda self: warmed.append("warm"))
@@ -4520,7 +4480,7 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     on_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         on_config,
-        CredentialManager(on_dir),
+        on_dir,
         AgentRegistry(on_dir),
     )
     try:
@@ -4534,7 +4494,7 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     off_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         off_config,
-        CredentialManager(off_dir),
+        off_dir,
         AgentRegistry(off_dir),
     )
     try:
@@ -4559,7 +4519,6 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
     from local_operator.agents import AgentRegistry
     from local_operator.classification import ClassificationService
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     built: list[Any] = []
 
@@ -4574,7 +4533,7 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        CredentialManager(tmp_path),
+        tmp_path,
         AgentRegistry(tmp_path),
     )
     try:
@@ -4620,7 +4579,6 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.providers.auth_store import AuthStore
 
     order: list[str] = []
@@ -4647,7 +4605,7 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -4743,7 +4701,6 @@ async def _composition_root_session(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     monkeypatch.setattr("local_operator.model.configure.create_stream_fn", lambda *a, **kw: stream)
 
@@ -4759,7 +4716,7 @@ async def _composition_root_session(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
+        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     return cast(Session, session)

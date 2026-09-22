@@ -3960,7 +3960,6 @@ def _list_models() -> list[dict[str, Any]]:
     from contextlib import closing
 
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.model.configure import _openai_use_max_context_window
     from local_operator.paths import config_dir
     from local_operator.providers.auth_store import AuthStore
@@ -4001,7 +4000,7 @@ def _list_models() -> list[dict[str, Any]]:
         )
         return _model_rows(cached_rows)
     with closing(store):
-        controller = ProviderController(store, CredentialManager.readonly(config_dir=directory))
+        controller = ProviderController(store, directory)
         admitted = controller.persisted_providers()
         statuses: dict[str, str] = {}
         if admitted is None:

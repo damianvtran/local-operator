@@ -196,7 +196,6 @@ def build_a_session(workdir: Path) -> None:
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import build_initial_blocks
 
     args = argparse.Namespace(
@@ -208,7 +207,7 @@ def build_a_session(workdir: Path) -> None:
         train=False,
     )
     cm = ConfigManager(workdir)
-    cred = CredentialManager(workdir / ".local-operator")
+    cred = workdir / ".local-operator"
     reg = AgentRegistry(workdir / ".local-operator")
     import asyncio
 

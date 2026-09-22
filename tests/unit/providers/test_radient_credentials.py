@@ -5,7 +5,6 @@ import time
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
     resolve_radient_credential,
@@ -21,10 +20,10 @@ async def test_canonical_precedence_and_explicit_gateway_fallback(tmp_path, monk
 
     # ``readonly`` + a provider-class store row (PR2a): the plaintext file leg is
     # gone, so a static key lives in the store or in the environment.
-    manager = CredentialManager.readonly(tmp_path)
+    manager = tmp_path
     store_provider_key("RADIENT_API_KEY", "legacy-fixture", base=tmp_path)
     monkeypatch.setenv("RADIENT_API_KEY", "environment-fixture")
-    store = AuthStore(tmp_path / "auth.db", credential_manager=manager)
+    store = AuthStore(tmp_path / "auth.db", config_dir=manager)
     try:
         key = store.upsert_credential(
             "radient", {"type": "api_key", "source": "login", "key": "login-fixture"}
@@ -74,7 +73,7 @@ def test_cli_sync_reader_uses_same_store_and_preserves_legacy_key(tmp_path, monk
     from local_operator.providers.registry import store_provider_key
 
     monkeypatch.delenv("RADIENT_API_KEY", raising=False)
-    manager = CredentialManager.readonly(tmp_path)
+    manager = tmp_path
     store_provider_key("RADIENT_API_KEY", "legacy-fixture", base=tmp_path)
     store = AuthStore(tmp_path / "auth.db")
     row = store.upsert_credential(
@@ -98,8 +97,8 @@ def test_cli_sync_reader_uses_same_store_and_preserves_legacy_key(tmp_path, monk
 async def test_parallel_legacy_readers_share_one_refresh_lock(tmp_path, monkeypatch):
     from local_operator.providers.oauth import radient
 
-    manager = CredentialManager.readonly(tmp_path)
-    store = AuthStore(tmp_path / "auth.db", credential_manager=manager)
+    manager = tmp_path
+    store = AuthStore(tmp_path / "auth.db", config_dir=manager)
     row = store.upsert_credential(
         "radient",
         {"type": "oauth", "access": "expired-fixture", "refresh": "refresh-fixture", "expires": 1},

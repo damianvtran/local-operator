@@ -34273,7 +34273,6 @@ class OperatorApp(App[None]):
         clear text and hand it to the model on the next turn.
         """
         from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
         from local_operator.paths import config_dir
         from local_operator.web_search.models import (
             PROVIDER_IDS,
@@ -34295,12 +34294,12 @@ class OperatorApp(App[None]):
         )
 
         manager = ConfigManager(config_dir())
-        credentials = CredentialManager.readonly(config_dir())
+        config_dir_path = config_dir()
         words = arg.split()
         try:
             if not words:
                 settings = load_search_settings(manager)
-                statuses = provider_statuses(settings, credentials)
+                statuses = provider_statuses(settings, config_dir_path)
                 labels = {status.id: status.label for status in statuses}
                 strategy = settings.strategy.replace("_", " ").title()
                 order = " → ".join(labels[value] for value in settings.providers)
@@ -34400,7 +34399,7 @@ class OperatorApp(App[None]):
                     row = next(
                         (
                             status
-                            for status in provider_statuses(settings, credentials)
+                            for status in provider_statuses(settings, config_dir_path)
                             if status.id == provider
                         ),
                         None,
@@ -34444,7 +34443,7 @@ class OperatorApp(App[None]):
                     "search order: "
                     + ", ".join(providers)
                     + " "
-                    + provider_order_note(providers, settings, credentials)
+                    + provider_order_note(providers, settings, config_dir_path)
                 )
                 return
             if command == "setup" and len(words) == 2:

@@ -735,7 +735,7 @@ def test_a_broken_submodule_degrades_instead_of_escaping() -> None:
 def test_a_degraded_collect_writes_nothing_into_the_current_directory(tmp_path: Path) -> None:
     """`/info` READS. It must never leave a file behind on the host.
 
-    Found for real: the B1 fallback was `Path(".")`, and `CredentialManager`
+    Found for real: the B1 fallback was `Path(".")`, and the retired `CredentialManager`
     CREATES its store on construction, so probing a machine whose `config_dir()`
     could not be resolved wrote a `credentials.env` into whatever directory the
     user was standing in. The probe now reads the encrypted store and creates

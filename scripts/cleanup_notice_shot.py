@@ -89,7 +89,6 @@ async def main() -> None:
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     def args_ns() -> argparse.Namespace:
         return argparse.Namespace(
@@ -105,7 +104,7 @@ async def main() -> None:
         return await create_session(
             args_ns(),
             ConfigManager(root),
-            CredentialManager(root),
+            root,
             AgentRegistry(root),
             has_ui=True,
             defer_mcp_wiring=True,

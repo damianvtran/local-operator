@@ -6710,14 +6710,12 @@ async def spawn_owned_session(
     # function-local form is what keeps that future change cheap.
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
     from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session_factory import create_session
 
     config_directory = config_dir()
     config_manager = ConfigManager(config_dir=config_directory)
-    credential_manager = CredentialManager.readonly(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
     # The publication latch the deferred MCP wiring parks on. Created HERE, on
@@ -6761,7 +6759,6 @@ async def spawn_owned_session(
     session = await create_session(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=False,
         cwd=cwd,

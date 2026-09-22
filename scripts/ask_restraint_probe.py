@@ -233,12 +233,11 @@ async def main() -> int:
 
     # Auth resolves through the harness's own store, so whatever credential
     # this machine already has for the provider (OAuth included) is used.
-    from local_operator.credentials import CredentialManager
     from local_operator.model.configure import configure_model, create_stream_fn
     from local_operator.providers.auth_store import AuthStore
 
     config_root = Path(os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", Path.home() / ".local-operator"))
-    credential_manager = CredentialManager(config_root)
+    credential_manager = config_root
     # NAME THE PROBE'S SPEND. Every provider call is recorded to the shared
     # analytics ledger, and ``create_stream_fn`` with no ``session_id`` records
     # them under the empty string — so this probe's runs landed in the

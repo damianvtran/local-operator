@@ -15,7 +15,6 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration
@@ -191,8 +190,6 @@ def test_app_client(temp_dir):
     # These clients bypass lifespan. A shared provider store must follow this
     # fixture's config root rather than survive into the next test's managers.
     app.state.desktop_auth = None
-    if hasattr(app.state, "credential_manager"):
-        original_state["credential_manager"] = app.state.credential_manager
     if hasattr(app.state, "config_manager"):
         original_state["config_manager"] = app.state.config_manager
     if hasattr(app.state, "agent_registry"):
@@ -205,7 +202,6 @@ def test_app_client(temp_dir):
         original_state["env_config"] = app.state.env_config
 
     # Set up test-specific state
-    mock_credential_manager = CredentialManager.readonly(config_dir=temp_dir)
     mock_config_manager = ConfigManager(config_dir=temp_dir)
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
@@ -222,7 +218,6 @@ def test_app_client(temp_dir):
         agent_registry=mock_agent_registry,
         job_manager=mock_job_manager,
         config_manager=mock_config_manager,
-        credential_manager=mock_credential_manager,
         env_config=mock_env_config,
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
@@ -239,7 +234,6 @@ def test_app_client(temp_dir):
     open_store(temp_dir, create=True)
     store_provider_key("RADIENT_API_KEY", "test-credential", base=temp_dir)
 
-    app.state.credential_manager = mock_credential_manager
     app.state.config_manager = mock_config_manager
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
@@ -286,22 +280,6 @@ def mock_create_operator(monkeypatch):
 
 
 @pytest.fixture
-def mock_credential_manager(temp_dir):
-    """Create a mock credential manager for testing.
-
-    Args:
-        temp_dir: pytest fixture that provides a temporary directory
-
-    Returns:
-        CredentialManager: A credential manager instance using the temporary directory
-    """
-    credential_manager = CredentialManager(config_dir=temp_dir)
-    app.state.credential_manager = credential_manager
-    yield credential_manager
-    app.state.credential_manager = None
-
-
-@pytest.fixture
 def mock_config_manager(temp_dir):
     """Create a mock config manager for testing.
 
@@ -315,6 +293,21 @@ def mock_config_manager(temp_dir):
     app.state.config_manager = config_manager
     yield config_manager
     app.state.config_manager = None
+
+
+@pytest.fixture
+def mock_credential_manager():
+    """The config manager the store-first readers resolve their root through.
+
+    The fixture name is kept because the server tests depend on it by name; what
+    it yields is the ``ConfigManager`` whose ``config_dir`` the readers take,
+    now that PR2b deleted the ``CredentialManager`` this used to hand back (and
+    the ``app.state.credential_manager`` slot it used to fill).
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    return ConfigManager(config_dir())
 
 
 @pytest.fixture

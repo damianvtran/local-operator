@@ -74,7 +74,8 @@ from local_operator.providers.usage_cache import (
 )
 
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
+
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
@@ -286,13 +287,18 @@ class ProviderController:
     def __init__(
         self,
         auth_store: ControllerAuthStore,
-        credential_manager: "CredentialManager | None" = None,
+        config_dir: "Path | None" = None,
         *,
         login_callbacks: LoginCallbackFactory | None = None,
         usage_cache: UsageCacheStore | None = None,
     ) -> None:
         self.auth_store = auth_store
-        self.credential_manager = credential_manager
+        # The config ROOT the store-first readers resolve under. Only the path is
+        # kept: PR2b deleted the ``CredentialManager`` whose ``config_dir`` this
+        # used to be read off, and a second carrier of a path ``ConfigManager``
+        # already owns is the "second way of doing things" the working
+        # principles call a defect.
+        self.config_dir = config_dir
         # Terminal-bound login callbacks. The CLI's print/input callbacks are
         # used by default; an embedding host (e.g. a Textual app) injects
         # callbacks that yield the terminal before the flow runs.
@@ -457,11 +463,10 @@ class ProviderController:
         # rung list ``credential_file_names`` returns. This is the consolidated
         # source; the plaintext file it used to union is gone.
         #
-        # Through the manager's OWN root (R4): a controller built against a
-        # non-default ``credential_manager`` must consult the store that manager
-        # reads its other state from, not the HOME-derived default.
-        manager = self.credential_manager
-        legacy: set[str] = set(stored_provider_env_keys(getattr(manager, "config_dir", None)))
+        # Through the controller's OWN root (R4): a controller built against a
+        # non-default config root must consult the store under that root, not the
+        # HOME-derived default.
+        legacy: set[str] = set(stored_provider_env_keys(self.config_dir))
         persisted: set[str] = set()
         for definition in PROVIDER_REGISTRY:
             storage = credential_provider_id(definition.id)

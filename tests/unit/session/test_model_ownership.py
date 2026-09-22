@@ -150,7 +150,6 @@ async def test_factory_resolves_birth_off_loop_with_arguments_captured_before_ho
 
     from local_operator import session_factory
     from local_operator.agents import AgentRegistry
-    from local_operator.credentials import CredentialManager
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     config = ConfigManager(tmp_path)
@@ -190,7 +189,7 @@ async def test_factory_resolves_birth_off_loop_with_arguments_captured_before_ho
         session_factory.create_session(
             args,
             config,
-            CredentialManager(tmp_path),
+            tmp_path,
             AgentRegistry(tmp_path),
             has_ui=False,
             cwd=str(tmp_path),

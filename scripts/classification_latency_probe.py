@@ -102,7 +102,6 @@ async def main() -> int:
 
     from local_operator import session_factory
     from local_operator.classification.service import ClassificationService
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
     from local_operator.skills.api import default_skill_roots, discover_skills
     from local_operator.skills.embeddings import LocalEmbedder
@@ -126,7 +125,7 @@ async def main() -> int:
             # A fresh service each time: the client is memoized per service, and the
             # question this answers is what the FIRST construction costs a session.
             fresh = ClassificationService(
-                manager=CredentialManager(config_dir()),
+                manager=config_dir(),
                 settings={"classification": {"auto": True}},
             )
             started = time.perf_counter()
@@ -144,7 +143,7 @@ async def main() -> int:
     off = [await timed(off_hooks, query, f"off-{i}") for i, query in enumerate(QUERIES)]
 
     service = ClassificationService(
-        manager=CredentialManager(config_dir()),
+        manager=config_dir(),
         settings={"classification": {"auto": True}},
     )
     on_hooks = hooks(classifier=service)
