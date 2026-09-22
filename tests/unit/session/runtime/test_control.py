@@ -1729,6 +1729,9 @@ async def test_the_escape_hatch_reaches_a_runtime_wedged_in_a_c_call(
         stderr=subprocess.DEVNULL,
         text=True,
     )
+    # Bound BEFORE the rig reads it, so the ``finally`` below can reap without
+    # narrowing on a name that a failure inside the ``try`` never assigned.
+    pid: int | None = None
     try:
         assert launcher.stdout is not None
         pid = int(launcher.stdout.readline().strip())
@@ -1755,5 +1758,5 @@ async def test_the_escape_hatch_reaches_a_runtime_wedged_in_a_c_call(
         assert await control._signal_and_confirm(record, procstate.hard_kill_signal(), 10.0) is True
         assert not registry.pid_alive(pid), "the killed wedged process is still in the table"
     finally:
-        if registry.pid_alive(pid):
+        if pid is not None and registry.pid_alive(pid):
             os.kill(pid, signal_mod.SIGKILL)
