@@ -103,9 +103,11 @@ unnoticed — while the same write through `write`/`edit` IS resolved against th
 working directory and does fire. Spell the whole path and both channels see it.
 
 A scratch-named directory inside a temp directory is not this advisory's business:
-`/tmp` and `$TMPDIR` are the system's own area, the line about them is the one that
-names the three-day clock, and anything deeper in there is a build or rig folder
-rather than scratch.
+`/tmp` and `$TMPDIR` are the system's own area, and anything deeper in there is a
+build or rig folder rather than scratch. Only a file DIRECTLY in one of them gets a
+line of its own, and the two say different things — `/tmp` is the directory macOS
+reaps, so its line names the cleaner, while `$TMPDIR` is not on that list and its
+line says only that it is not this session's own area.
 
 Three things are wrong with it, and only the first is obvious:
 
