@@ -14,10 +14,19 @@ residual risk, §13 compatibility and failure modes) and `guide://credentials`
 both are quoted below rather than paraphrased.
 
 **Evidence.** Every claim about current behaviour below carries a `file:line`.
-Three of them I re-derived by reading the code and, where the claim was about
-behaviour rather than structure, by driving the real functions — the probes and
-their raw output are in Appendix A. Three of the handoff's claims did not survive
-that: they are corrected in §1.3, and the corrections change what PR C has to do.
+**Every `file:line` is against `origin/main` at `0caf7a32`** — the same ref the
+probes in Appendix A were run against, so a reading and its citation belong to one
+tree; where a citation is to an unmerged branch it names the PR and that branch's
+head instead (`#1428` `f111faac`, `#1429` `90d02d6c`, `#1430` `43ce30ae`). The
+first pass of this document was read out of a checkout that had diverged from
+`origin/main` (an older revision, with unrelated staged work in its tree), so its
+line numbers were wrong for the ref it claimed; they were re-derived against
+`0caf7a32` in review round 1, and every number below is that re-derivation.
+
+Three of the handoff's claims did not survive reading the code: they are corrected
+in §1.3, and the corrections change what PR C has to do. Three further
+corrections came out of review round 1 and are marked where they land (§2.3, §6.1,
+§6.6).
 
 ---
 
@@ -47,15 +56,15 @@ contract for every caller, not only for the harness path**:
 * it would change the meaning of the operator's own documented forms in
   `guides/credentials/GUIDE.md` — `lop secret get NAME > /tmp/token`
   (`GUIDE.md:50-54`) and `lop secret get NAME | shasum -a 256`
-  (`GUIDE.md:120-123`) — and the brief for this programme requires the documented
+  (`GUIDE.md:125-128`) — and the brief for this programme requires the documented
   consumer form to keep working.
 
 Changing a CLI contract that the operator's documentation and tooling depend on is
 the operator's decision. **The default-changing half therefore ships only on their
 word**, and the recommendation is preserved in full — §2.2's option table and
 §2.3's semantics (exit 3, the refusal text, the `describe` descriptor, the audit
-events of §2.3(5)) — so a follow-up can start from it without re-deriving
-anything. The constraint that binds any opt-in, whichever shape it takes, and the
+events of §2.3(5) — whose names are now pinned to what #1430 shipped) — so a
+follow-up can start from it without re-deriving anything. The constraint that binds any opt-in, whichever shape it takes, and the
 reason A1 was chosen over a flag or an environment variable, is unchanged: **it
 must not be silently settable by the agent in the same call it uses.**
 
@@ -65,7 +74,7 @@ must not be silently settable by the agent in the same call it uses.**
 |---|---|---|---|---|
 | **B** — pre-execution refusal | `feat/secret-sink-scan` | **#1429** | §3, as designed: keys on the data FLOW (a secret-bearing source reaching a printing sink) and refuses the `bash`/`eval` call before any child exists, naming the rule, the span and the rewrite | §3.4's tainted-path ledger (scoped out, recorded as its own gap), a script invoked by name, flow across calls |
 | **C** — the scrubber's deterministic holes | `fix/redaction-transform-hardening` | **#1428** | §5.2's transform normalisation (wider family list, 12-character floor) and the eval worker's streamed frames | the multi-line release-point defect — measured still live on its head; see the amendment in §5.1 |
-| **A** (additive) | `feat/secret-identity-surface` | **#1430** | `lop secret describe NAME --length --fingerprint` (value-free identity; equal values fingerprint equal) and `lop secret get NAME --reveal`, which prints bytes only when stdin and stdout are both a terminal, audited as `reveal` | **R1** — `get`'s default is unchanged (0.1) |
+| **A** (additive) | `feat/secret-identity-surface` | **#1430** | `lop secret describe NAME --length --fingerprint` (value-free identity; equal values fingerprint equal) and `lop secret get NAME --reveal`, which prints bytes only when stdin and stdout are both a terminal, audited as `reveal`; it also ships the audited describe event (`describe`) and the refusal surface `REVEAL_REFUSED = 3` — the names §2.3(5) now pins the deferred work to | **R1** — `get`'s default is unchanged (0.1) |
 
 Each of those PRs carries its own gap list and this record does not restate them
 all: **#1429** records gaps 1, 3, 6 and 8 — the tainted-path ledger, the
@@ -158,7 +167,7 @@ for k in A B C D; do v=$(lop secret get "$k") && echo "$k = $v" || echo "$k = MI
 and the values reached the model's context. `guide://credentials` names this exact
 form as forbidden (`GUIDE.md:37-43`, "the transcript is the one place a value must
 never land, because the transcript is the model's context"), and the harness said
-so — the incident notice (`local_operator/incidents.py:1027`, the
+so — the incident notice (`local_operator/incidents.py:1091`, the
 `[credential redaction] rotate it — …` text) told the operator to rotate.
 
 Then, to read a hostname the mask kept replacing, the agent printed it reversed
@@ -169,7 +178,7 @@ defines the threat class this work must handle: not only the accident, but the
 ### 1.2 What the code does today, in its own terms
 
 * `lop secret get NAME` writes the exact stored bytes to `sys.stdout.buffer` and
-  adds no newline (`local_operator/secrets/handlers.py:239-259`), routed through
+  adds no newline (`local_operator/secrets/handlers.py:247-267`), routed through
   `local_operator/secrets/access.py:299` (`retrieve_secret`) so the §6 notice
   fires and is acknowledged before those bytes exist.
 * **The stdout contract is load-bearing and deliberate.** `local_operator/secrets/cli.py:1-38`
@@ -185,15 +194,15 @@ defines the threat class this work must handle: not only the accident, but the
   construct before it runs. What exists is
   `local_operator/secrets/runtime.py:93-141`'s process-wide `_RedactionLedger`
   (registered values, longest first, `str.replace`), the exact-value half of
-  `local_operator/variables.py:491-556` (`redact`/`redact_with_report`), the
+  `local_operator/variables.py:491-562` (`redact`/`redact_with_report`), the
   spelling-based shape pass (`local_operator/redaction_shapes.py`), and the
-  per-chunk pipe filter `local_operator/tools/builtin.py:2150` (`_PipeRedactor`).
+  per-chunk pipe filter `local_operator/tools/builtin.py:2379` (`_PipeRedactor`).
 * The agent's other surfaces already refuse to carry a value:
-  `handlers._list` (`handlers.py:287-293`) has no flag that prints values, by
+  `handlers._list` (`handlers.py:295-301`) has no flag that prints values, by
   design ("a `--values` flag here would turn a single audit entry into a bulk
-  export"); `tools/secret_tool.py:228-243` answers `op="retrieve"` with
+  export"); `tools/secret_tool.py:225-246` answers `op="retrieve"` with
   `describe`, not with bytes, "misreporting the one trail the operator relies on"
-  being the stated reason; `store.py:118-134`'s `SecretRecord` is value-free by
+  being the stated reason; `store.py:205-221`'s `SecretRecord` is value-free by
   construction ("there is no field here to print").
 * The remainder of this document calls things `get`, and `get`'s stdout is the
   only value-returning surface an agent has.
@@ -205,17 +214,17 @@ of them changes PR C's implementation.
 
 **(a) "Chunk boundaries: a value split across two chunks is in neither" — not
 true in general.** `_PipeRedactor` holds back a lookbehind sized from the longest
-known value (`builtin.py:2207-2210`), re-reads the value set per chunk
-(`builtin.py:2211-2223`, called at `builtin.py:2901-2904`), and
-`_release_point` (`builtin.py:2325-2363`) explicitly refuses to cut through a
+known value (`builtin.py:2491-2494`), re-reads the value set per chunk
+(`builtin.py:2495-2507`, called at `builtin.py:3370-3373`), and
+`_release_point` (`builtin.py:2620-2673`) explicitly refuses to cut through a
 known value — a loop that pulls the cut back to the value's start
-(`builtin.py:2351-2362`, comment: "Never cut through a KNOWN value"). Probe A.2
+(`builtin.py:2647-2672`, comment: "Never cut through a KNOWN value"). Probe A.2
 confirms it for a single-line value split mid-value across two writes: released
 `b'prefix [redacted] suffix\n'`.
 
 **The hole is narrower than "chunk boundaries" and more embarrassing than that:
 it is every value containing a newline.** The cut is placed after the last
-newline in the accumulated text (`builtin.py:2333`), and the "never cut through a
+newline in the accumulated text (`builtin.py:2628`), and the "never cut through a
 known value" loop can only see a value that is *fully present* — `text.find(secret)`
 returns `-1` while the value's tail has not arrived. So the prefix before that
 newline is released raw, and the remainder is released raw in the following
@@ -231,10 +240,10 @@ and no `replace` can match anything. Probe A.2 reproduces it:
 
 This is not a rare shape. The store's own file-shaped secrets — a service-account
 JSON, a PEM — are multi-line by definition, and `lop secret set --from-file`
-(`GUIDE.md:106-123`) and `DEFAULT_FILE_ENV_VAR` (`cli.py:41-46`) exist precisely
+(`GUIDE.md:111-128`) and `DEFAULT_FILE_ENV_VAR` (`cli.py:41-46`) exist precisely
 for them. What the leaked bytes reach is scoped in §5.3 and §6.4; the settled
 tool-result path still masks a registered value, so the leak is to the live
-surfaces and the retention/spill buffer (`builtin.py:2905-2917`, `sink.append(safe)`
+surfaces and the retention/spill buffer (`builtin.py:3374-3386`, `sink.append(safe)`
 — the spill holds filter *output*, so a filter leak is a spill leak).
 
 **(b) "Transformations pass through untouched" — true of the exact-value pass,
@@ -261,7 +270,7 @@ assignment-spelled. This is the case PR C's transform normalisation exists for,
 and it is worth being precise about: it is a *detection* control, not a barrier.
 
 **(c) The broker is not an enforcement point in the default tier, so PR A's gate
-cannot live only there.** `access.py:360-388` degrades on `BrokerUnavailable`
+cannot live only there.** `access.py:367-395` degrades on `BrokerUnavailable`
 (availability, not policy, §13) but also — and this is the part that matters —
 falls through to `open_store(base).get(...)` on `BrokerDenied` unless the tier is
 `passphrase`. Verified live against an isolated default-tier store: the audit log
@@ -276,8 +285,8 @@ the broker applies is bypassed by the store's own documented fallback the first
 time the broker is not there to answer.
 
 **(d) The §6 notice is not what failed.** `retrieve_secret` announces and waits
-for the ack *before* the value exists (`access.py:299-330`, and the broker's
-denial is "believed" rather than degraded, `access.py:366-372`), so the notice
+for the ack *before* the value exists (`access.py:299-337`, and the broker's
+denial is "believed" rather than degraded, `access.py:373-379`), so the notice
 firing in the incident means the ordering worked and the agent read a notice that
 said "rotate it". The gap is that nothing stopped the *printing construct* from
 being written in the first place, and no filter can, because a filter sees the
@@ -313,11 +322,11 @@ to be told what that layer decided. Every option below is a different answer to
 ### 2.2 The options
 
 **A1 — harness supplies the bytes (recommended).** The pre-execution scan (PR B)
-runs over the command text in `execute_bash` (`builtin.py:2589`) before the
+runs over the command text in `execute_bash` (`builtin.py:2976`) before the
 spawn. Where it proves that every `$(lop secret get NAME)` occurrence flows into
 a consumer sink, the harness **retrieves the value itself, in the session
 process**, injects it into the child's environment under a per-secret variable
-(the mechanism session credentials already use: `builtin.py:2624-2633` builds
+(the mechanism session credentials already use: `builtin.py:3028-3037` builds
 `injections` from `store.credential_env()`, design §5.4), and rewrites the
 occurrence to that variable — `"$(lop secret get X)"` becomes `"$LOP_SECRET_X"`,
 unquoted becomes unquoted, so word-splitting behaviour is preserved. An
@@ -333,7 +342,7 @@ bytes.
 harness involvement.
 
 **A4 — approval-gated reveal only**: raw bytes need an interactive approval via
-`local_operator/harness/approval.py:105-120` (`ask_approval`); non-interactive
+`local_operator/harness/approval.py:126-141` (`ask_approval`); non-interactive
 fails closed.
 
 **A5 — keep `get` exactly as it is**, re-point the guide's recommended consumer
@@ -377,8 +386,8 @@ store already has one. So:
 |---|---|---|---|---|
 | the harness supplied the bytes for this call (A1) → in that call the CLI is not reached at all; the substitution was rewritten | n/a | n/a | n/a | the harness records `get-for-consumer` (see (5)) |
 | a human at a TTY asks for a reveal (`--reveal`) | exact bytes, no newline | 0 | — | `reveal` outcome `tty` |
-| `--reveal` with no TTY and no harness authorisation | empty | 3 | why, and the sanctioned forms | `reveal` outcome `refused` |
-| no `--reveal`, no harness authorisation (any caller) | empty | 3 | why, and the sanctioned forms | `get` outcome `refused` |
+| `--reveal` without a terminal on both stdin and stdout | empty | 3 | why, and the sanctioned forms | `reveal` outcome `refused` |
+| no `--reveal`, and not rewritten by the harness (any caller) | empty | 3 | why, and the sanctioned forms | `get` outcome `refused` |
 
 Exit `3` is new and distinct from argparse's `2` and the store's failure codes, so
 a script can tell "you are using a form this store will not print" from "the
@@ -399,8 +408,24 @@ with the note explaining that the `$( )` form is honoured only when the harness
 can prove the sink, which is the honest thing to say and doubles as the model's
 instruction to re-spell the command into a shape the scan can approve.
 
+**There is no CLI-side "harness authorisation" state, and the follow-up must not
+invent one** (review finding R1-5 / QA Q-6). Under A1 the authorisation *is* the
+rewrite: the harness retrieves the value itself and the rewritten occurrence never
+reaches the CLI — the table's first row — so there is nothing for the CLI to
+consult. Earlier drafting of this table left two rows qualified "no harness
+authorisation" as though a token or variable existed; it does not, and the
+qualifier is now the plain "not rewritten by the harness". Only A2 (§2.2) needs a
+channel, and it is the minted per-call nonce bound to the minting process tree and
+its TTL; A2 is not selected. What the CLI *does* need is the refusal surface that
+already ships, so the follow-up reuses it rather than inventing a second one:
+`--reveal` exists on `feat/secret-identity-surface` (`43ce30ae`, PR #1430) with
+`REVEAL_REFUSED = 3` (`handlers.py:253`), its both-streams-are-a-terminal test
+(`handlers.py:288`), and its rendered refusal (`_refuse_reveal`, `handlers.py:342`).
+`get` itself keeps `rc 2` with empty stdout (`secrets/cli.py:15-27`), so exit `3`
+belongs to reveals and to the deferred refusal, not to the value path.
+
 **(2) The descriptor lives on `describe`, extended.** `lop secret describe NAME`
-(`handlers.py:336-349`) already prints name / id / kind / description / timestamps
+(`handlers.py:362-381`) already prints name / id / kind / description / timestamps
 and never a value. Extend it with the two fields that make it an *identity*:
 
 ```
@@ -418,14 +443,14 @@ fingerprint  hmac-sha256:4f9c…        (keyed; stable; not reversible)
   cannot be brute-forced from the descriptor, and so that the descriptor is not a
   searchable artifact on disk.
 * `length` requires the plaintext, and `describe` already decrypts it: name and
-  description live *inside* the ciphertext (`store.py:203-217` `_payload`,
-  `store.py:540-553`), so `describe` is a decrypting call today. Worth knowing
+  description live *inside* the ciphertext (`store.py:290-304` `_payload`,
+  `store.py:627-640`), so `describe` is a decrypting call today. Worth knowing
   before anyone claims the descriptor is "the path that never decrypts" — a
   `value_len` column would be needed to make that true, and I recommend *not*
   adding one until something asks for it.
 * The same three fields are what the `secret` tool's `describe` op
-  (`tools/secret_tool.py:244-256`) and the harness's `retrieve` receipt
-  (`tools/secret_tool.py:228-243`) should carry, so the agent's "what is this
+  (`tools/secret_tool.py:247-259`) and the harness's `retrieve` receipt
+  (`tools/secret_tool.py:225-246`) should carry, so the agent's "what is this
   secret?" surface and the operator's agree.
 
 **(3) What the opt-in IS, and who can set it.**
@@ -433,7 +458,7 @@ fingerprint  hmac-sha256:4f9c…        (keyed; stable; not reversible)
 * **`--reveal` at a TTY.** A human at a terminal is the case `docs/design/secret-store.md`
   §13 already treats as authorised (residual 4: "the terminal you unlock in is
   authorized for as long as it lives"), and the idiom is already in the tree:
-  `handlers._remove` (`handlers.py:352-358`) asks at a TTY and requires an
+  `handlers._remove` (`handlers.py:384-390`) asks at a TTY and requires an
   explicit flag when there is none. `--reveal` mirrors it: a prompt, not a flag
   that means "just do it", and an audit row either way. A non-TTY caller is
   refused, which is (c) — fail closed with nobody to ask.
@@ -447,14 +472,14 @@ fingerprint  hmac-sha256:4f9c…        (keyed; stable; not reversible)
   request it, grant it to itself, or carry it to a later call, and the variable
   it produces is valid only inside the child that call spawned. This is the same
   principle the tree already ships for gate loosening —
-  `local_operator/harness/approval.py:132-140`: *"a model tool's own file write
+  `local_operator/harness/approval.py:153-161`: *"a model tool's own file write
   (the party being gated is not the authority that may lower its own gate — the
   reason this predicate exists)"* — applied to the credential path.
 * **What is deliberately NOT an opt-in:** an environment variable, a config key,
   or a `--force`. Each is either writable by the model (`LOP_REVEAL=1 lop secret
   get X` is one call, and the constraint in the brief is exactly that this must
   not work), or it is a second approval prompt on a tool whose design says there
-  must not be one (`builtin.py:2616-2621`: "A second gate here made the user
+  must not be one (`builtin.py:3020-3025`: "A second gate here made the user
   answer twice per action, with the tier name rendered as the tool").
 
 **(4) Denial is possible, and is the normal answer for an unapproved call.** Two
@@ -465,22 +490,32 @@ A denial never degrades to an unnotified silent read, because the gate is in
 (§1.3(c)).
 
 **(5) The audit trail, which is where "distinguishable from a normal `get`" is
-settled.** The `audit` table's `event` column is free text (`store.py:105-109`)
-inside the hash chain (`local_operator/secrets/audit.py:92-190`), and today a
-retrieval is `event="get"` (`store.py:742`). The programme adds:
+settled.** The `audit` table's `event` column is free text (`store.py:131-135`)
+inside the hash chain (`local_operator/secrets/audit.py:92-187`), and today a
+retrieval is `event="get"` (`store.py:857`). What the programme adds is below —
+but read the correction immediately after it first, because part of that vocabulary
+already shipped under different names:
+
+**#1430 already shipped part of this vocabulary, and the shipped names win**
+(review finding R1-4 / QA Q-5). A plain `describe` writes **no** audit row at all;
+`describe --fingerprint` records `describe`; a reveal records `reveal` with
+outcome `tty`, or `reveal` with `refused` (or `cancelled`) and `rc 3` with empty
+stdout — never `get`. The earlier draft of this table assigned `get`/`ok` to the
+descriptor read, which the shipped `describe` contradicts; that is corrected here.
+What the deferred work adds, in the shipped names rather than new ones:
 
 | event | outcome | written when |
 |---|---|---|
-| `get` | `ok` | descriptor/metadata read — i.e. `describe`; **not** a value read |
-| `get` | `refused` | an unapproved `get` was asked to print a value |
-| `reveal` | `tty` | a TTY reveal produced raw bytes on stdout |
-| `reveal` | `refused` | `--reveal` with no TTY and no authorisation |
-| `get-for-consumer` | `ok` | the harness retrieved on the child's behalf and injected it (A1) |
+| `get` | `ok` | **unchanged**: the unqualified retrieval path, exactly as today |
+| `get` | `refused` | an unapproved `get` was asked to print a value (new) |
+| `describe` | `ok` | shipped by #1430, for `describe --fingerprint` |
+| `reveal` | `tty` / `refused` / `cancelled` | shipped by #1430; a refusal carries `rc 3` and empty stdout |
+| `get-for-consumer` | `ok` | the harness retrieved on the child's behalf and injected it (A1; new) |
 
 `get-for-consumer` is the row that closes the §6 case-2 blind spot, and it is the
 one worth arguing for: today the `$()` form's retrieval is audited from the
 *child's* pid, and the session only learns of it through the broker's
-notify-and-ack dance (`access.py:299-330`). Under A1 the retrieval happens in the
+notify-and-ack dance (`access.py:299-337`). Under A1 the retrieval happens in the
 session process, so the row names the session, the value is registered for
 redaction directly (§6 case 1 instead of case 2), the notice fires on the
 session's own path, and the audit says *why* the bytes were handed out. Row
@@ -510,9 +545,9 @@ rule, because the non-revealing forms are strictly better and already exist:
 ### 3.1 Where the scan runs, and why there
 
 **In the tool, beside argument validation, before the spawn — not at the loop,
-and not as an approval.** `execute_bash` (`builtin.py:2589`) already refuses
-malformed calls inline (`builtin.py:2604-2610`) and already has a pre-abort
-branch (`builtin.py:2612-2621`); the scan is the same kind of thing: a validation
+and not as an approval.** `execute_bash` (`builtin.py:2976`) already refuses
+malformed calls inline (`builtin.py:2991-3014`) and already has a pre-abort
+branch (`builtin.py:3016-3025`); the scan is the same kind of thing: a validation
 refusal that returns an error `ToolResult` before any process exists. The
 justification for *that* seam rather than the loop's:
 
@@ -520,7 +555,7 @@ justification for *that* seam rather than the loop's:
   per-language (`sh` command text vs a Python cell), and only the tool knows
   which it is holding;
 * `execute_bash`'s deliberate lack of a second approval gate
-  (`builtin.py:2616-2621`) means the scan must not be implemented as an approval
+  (`builtin.py:3020-3025`) means the scan must not be implemented as an approval
   question — it refuses, it never prompts;
 * one seam covers every harness that runs a command: the interactive TUI, `lop
   exec`, headless runs, forks and subagents all reach the same tool, whereas a
@@ -528,7 +563,7 @@ justification for *that* seam rather than the loop's:
   and `exec_session.py` start sessions rather than commands, so they are covered
   by construction.)
 * the eval surface is a *different* tool with a *different* language:
-  `execute_eval` (`local_operator/tools/eval.py:1055`) scans the cell with the
+  `execute_eval` (`local_operator/tools/eval.py:1078`) scans the cell with the
   Python rules.
 
 **Module.** A new `local_operator/harness/secret_sinks.py`, stdlib-only, no
@@ -618,7 +653,7 @@ makes (iv) a *counterexample* instead of a special case.
   a variable already tainted by either in this command (`v=$(lop secret get X)`;
   the A1-supplied `$LOP_SECRET_*` namespace), and the session-credential
   namespace (`$NAME` for names the session injected — the same values
-  `builtin.py:2624-2633` puts in the child environment);
+  `builtin.py:3028-3037` puts in the child environment);
 * eval: `secrets["NAME"]` / `secrets.get(...)`, and a name assigned from one.
 
 **Sinks that refuse** (each is a rule):
@@ -643,7 +678,7 @@ makes (iv) a *counterexample* instead of a special case.
 * **(ii) `${#VAR}` and `lop secret get X | wc -c`** — `allow`. Length-only sinks
   are an explicit allowlist (`wc -c`, `wc -m`, `shasum -a 256`, `sha256sum`,
   `md5`-family, `cmp`), and there is shipped precedent for treating a length as
-  safe: `handlers._set` prints `len(value)` deliberately (`handlers.py:271-274`).
+  safe: `handlers._set` prints `len(value)` deliberately (`handlers.py:279-282`).
   Keep the list tight: a hash is fine, a `diff` is not (its output is bytes of
   the subject).
 * **(iii) `lop secret list`, `lop secret get --help`, `lop secret describe`** —
@@ -791,12 +826,20 @@ negotiable:**
 * **Fail mode:** unavailable classifier ⇒ A+B unchanged and the call is refused
   (never allowed). That is the only fail mode consistent with §3.6's asymmetry.
 
-**What would change this recommendation:** a measurement, not an argument. Count
-`lop secret`-bearing commands the scanner leaves `unresolved` or refuses (a local
-counter in the rule module, no egress). If a meaningful share of real usage lands
-there, a model becomes worth its cost as a *second* refusal on exactly those spans
-— and the first thing to try is still not a model: it is a better rule or a
-better lexer.
+**What would change this recommendation:** a measurement, not an argument — and
+**there is no instrument for it today** (review finding R1-6). #1429 ships no
+counter and no reporting surface (verified on `90d02d6c`: the module's outputs are
+a verdict and its refusal text, nothing cumulative), and "a meaningful share of
+real usage" names no denominator, so the gate as first written could not be run.
+Stated plainly: **until an instrument exists, D's gate is unmeasurable and D is
+not built.** The cheapest one that would make it measurable, if it is wanted: a
+bounded in-process counter in the rule module, keyed by rule label and by the
+`unresolved` verdict, reported once per session alongside the existing session
+incident rows, with **the denominator = every `bash` call or `eval` cell whose text
+carries a `lop secret` source** (the scanner's own prefilter gate). That makes
+"share of secret-bearing steps that reached `unresolved` or a refusal" computable.
+Even then the first thing to try is not a model: it is a better rule or a better
+lexer.
 
 ---
 
@@ -804,19 +847,19 @@ better lexer.
 
 ### 5.1 The chunk-boundary hole: exact location
 
-`local_operator/tools/builtin.py::_PipeRedactor._release_point` (`builtin.py:2325-2363`),
-called from `_feed_scrubbed` (`builtin.py:2243-2258`) which masks *after* the cut;
-the retention and mirror callers are `_pump` at `builtin.py:2859-2920`
+`local_operator/tools/builtin.py::_PipeRedactor._release_point` (`builtin.py:2620-2673`),
+called from `_feed_scrubbed` (`builtin.py:2527-2553`) which masks *after* the cut;
+the retention and mirror callers are `_pump` at `builtin.py:3325-3389`
 (`safe = redactor.feed(chunk)`, `sink.append(safe)`, `_mirror(safe)`).
 
-*What is already right:* the lookbehind (`builtin.py:2207-2210`), the per-chunk
-value refresh (`builtin.py:2211-2223`), and the "never cut through a KNOWN value"
-loop (`builtin.py:2351-2362`).
+*What is already right:* the lookbehind (`builtin.py:2491-2494`), the per-chunk
+value refresh (`builtin.py:2495-2507`), and the "never cut through a KNOWN value"
+loop (`builtin.py:2647-2672`).
 *The defect:* that loop's `text.find(secret, …)` can only match a value that is
 **entirely present in the accumulated text**, while the cut is placed after the
-last newline in the chunk (`builtin.py:2333`) — so a value containing a newline is
+last newline in the chunk (`builtin.py:2628`) — so a value containing a newline is
 released raw, prefix first, exactly as reproduced in §1.3(a). The same partial-value
-blindness applies to the deferral cap (`builtin.py:2345-2350`), whose subsequent
+blindness applies to the deferral cap (`builtin.py:2640-2646`), whose subsequent
 hold-back loop is the same present-value check.
 *Fix direction (no code here):* hold back the longest suffix of the accumulated
 text that is a **proper prefix** of any known value, independently of whether the
@@ -828,11 +871,11 @@ after it.
 
 *Exactly what the leaked bytes reach, stated narrowly because it is easy to
 overclaim:* the settled tool result goes through `redact_tool_result` →
-`VariableStore.redact_with_report` (`session.py:9314+`, `variables.py:525-556`),
+`VariableStore.redact_with_report` (`session.py:9546+`, `variables.py:525-562`),
 which replaces whole strings, so a value the session has **registered** is masked
 there. What is *not* covered: the live stream card, `jobs(op='peek')`'s buffer
-(`builtin.py:2841-2856` `_mirror`), the abort receipt, and the **spill file's
-bytes on disk** (`builtin.py:2905-2917`) — the last of which is a plaintext
+(`builtin.py:3307-3322` `_mirror`), the abort receipt, and the **spill file's
+bytes on disk** (`builtin.py:3374-3386`) — the last of which is a plaintext
 credential in a readable file, i.e. exactly the containment failure the
 `redaction_shapes` docstring says the harness treats as *not* compromised only
 because it is not in the model's context. It is in the model's context again the
@@ -870,7 +913,7 @@ spill://`".
 ### 5.2 Transform normalisation: one home, and it is the shape module
 
 The transform hole (§1.3(b)) is a property of the *exact-value* pass
-(`variables.py:545` `scrub_secrets_with_hits(text, self.redaction_values())`,
+(`variables.py:551` `scrub_secrets_with_hits(text, self.redaction_values())`,
 `runtime.py:136-141` `_RedactionLedger.scrub`). The risk of fixing it where it
 lives is obvious: a second copy of the mask policy, in a second module, drifting
 from the first — which is the failure `redaction_shapes.py:18-27` says it exists
@@ -957,21 +1000,29 @@ closed and the remainder is named; *open* — nothing shipped covers it; *guide-
 — no control of this shape can cover it, so the only honest remedy is a change to
 `guide://credentials` rather than a mechanism.
 
-**6.1 The file on disk, read back later (the biggest one).** `lop secret get X >
+**6.1 The file on disk, read back later.** `lop secret get X >
 /tmp/token` is sanctioned (`GUIDE.md:50-54`, and the brief requires the redirect
 to be allowed). Under A1 the *harness* supplies those bytes, which means the
 harness knows the path — hence §3.4's ledger. With the ledger: closed inside the
 session, still open across sessions, resumes, sibling agents and subagents; and
 the plaintext file itself is what anything outside the session reads.
-*Without* the ledger: open by default, and the only net is the shape pass, which
-is spelling-based (6.2). **Status: open — and now the largest one.** PR #1429
-scoped §3.4's ledger **out** and recorded it as its own gap ("only a write *and*
-read in the same call"), so today the redirect is allowed, the result tells the
-model to delete the copy unread, and a later `cat` of that path hits only the
-shape pass in-session — nothing at all across sessions, resumes and sibling
-agents. **Partly guide-only:** the in-session, same-call case is a real control
-waiting to be built; the rest is words in `GUIDE.md`, which #1429 and #1430 both
-already touch.
+**Status: open, and the largest *mechanical* one** — a control is waiting to be
+built, and the guide already documents the form (`GUIDE.md:50-54`). What is open,
+and what is not, in one place (QA Q-1, corrected): **in-session, a later read of
+the sanctioned path IS masked**, by the exact-value pass — the retrieval that wrote
+the file registered the value with the session (the broker notifies the owning
+session and waits for its ack before the value exists, `access.py:299-337`, and
+that registration is what `VariableStore.redaction_values` reads,
+`variables.py:461`), so a `cat` of that path in the same session is masked. The
+earlier drafting of this item said the opposite and that was wrong. What *is* open:
+**(a)** any session that did not perform the retrieval — a resume, a sibling agent,
+a subagent with its own store view — where nothing registers the value and only the
+shape pass applies (6.2); **(b)** the plaintext copy itself, which sits outside the
+store and outlives the session; and **(c)** the cross-call taint §3.4's ledger would
+track, which PR #1429 scoped out and recorded as its own gap 1 ("only a write *and*
+read in the same call"). **Partly guide-only:** (a) and (b) are addressed by
+instruction — delete the copy without reading it — while (c) is a real control
+waiting to be built.
 
 **6.2 Values that never went through the seam.** A value the session never
 retrieved is invisible to the exact-value pass by definition: the remote
@@ -1025,23 +1076,29 @@ says never to write one into the repo) and, for the operator, to treat any
 credential that has ever sat in a tracked file as exposed.
 
 **6.6 Surfaces the model reads that are only partly on the hook path.** The
-loop's hook covers tool results (`loop.py:3090-3096`, `session.py:9314+`) and
-scrubs tool-call arguments in stored history (`loop.py:1474`). What is thinner:
-the per-line live text path (`builtin.py:2366-2385` `_bash_progress_line` →
+loop's hook covers tool results (`loop.py:3119-3125`, `session.py:9546+`) and
+scrubs tool-call arguments in stored history (`loop.py:1491`). What is thinner:
+the per-line live text path (`builtin.py:2727-2746` `_bash_progress_line` →
 `_redact_tool_text`), which cannot match a value spanning a line; and a
 subagent's or peer's own transcript on disk, which is a separate session artifact.
 I did **not** verify the scrub coverage of every non-tool channel (a `send`/`hub`
 peer message, an `ask` question's text, a notice row) and I am not going to assert
 it either way: the evidence that would settle it is a value-typed probe through
 `ask` and `send` with a registered value, and that belongs in QA's matrix, not in
-a design claim. **Status: narrowed / partly unverified.** #1429 refuses the
-in-command printing shapes on these surfaces' inputs (a `lop secret get` in a
-`send` argument is a source reaching a printing sink), and #1428's windowed
-maskers cover the bash live path and the eval frames; the per-line text path and
-the cross-channel question above are unchanged, and this document still declines
-to claim either way.
+a design claim. **Status: open, except the surfaces it can actually see — and the first draft
+overstated this, which is review finding R1-2 / QA Q-3.** PR #1429's scanner has
+**exactly two call sites** (`tools/builtin.py:3055`, `tools/eval.py:1115` on
+`90d02d6c`); nothing scans a `send`/`ask` argument, and the module has no
+peer-message sink at all, so the sentence "a `lop secret get` in a `send` argument
+is refused" was false and has been removed. Measured on that head, `lop` is not a
+member of the scanner's `_EMITTERS` (`secret_sinks.py:1108`), so a stage whose
+command word it does not recognise falls to its consumer default and is *allowed*
+— the same default that keeps `curl -H "…$v"` legal (`secret_sinks.py:1769-1773`).
+What did narrow is the pair #1428 covers: the bash live path and the eval frames,
+both now windowed maskers. The per-line text path and the cross-channel question
+are unchanged, and this document still declines to claim either way.
 
-**6.7 The default tier enforces nothing.** `access.py:360-388` plus design §8:
+**6.7 The default tier enforces nothing.** `access.py:367-395` plus design §8:
 a broker *denial* falls through to a local decrypt in the `keyfile` tier, and the
 tier is the security boundary. Everything this programme calls "gate-able" is
 harness-enforced; the store's own boundary is only real after `lop secret harden`.
@@ -1050,7 +1107,7 @@ This is the reason §1.3(c) exists as a constraint rather than a footnote.
 (`lop secret harden`) is the operator's.
 
 **6.8 A TTY reached through a pty.** `--reveal` is refused without a TTY, and the
-`console` tool drives a real TTY (`builtin.py:13750-13787`, whose description
+`console` tool drives a real TTY (`builtin.py:15318-15355`, whose description
 explicitly invites the agent to *read* surfaces the user opened). So an agent can
 reach a reveal by typing into a console surface. It is visible (the operator's own
 console tab) and audited (`reveal`, outcome `tty`, with pid and executable), which
@@ -1074,7 +1131,7 @@ pre-execution scan can close.
 **6.10 The model already holding the value.** Once a value is in context (by any
 of the above, or by the user pasting it), nothing in this programme gates its
 re-use, re-spelling or retyping into a response, a peer message, a scratchpad, a
-commit message. The guide forbids it (`GUIDE.md:151-166`); no mechanism enforces
+commit message. The guide forbids it (`GUIDE.md:156-171`); no mechanism enforces
 it. This is the ceiling of a control built on top of "the model does not have the
 value". **Status: open, guide-only** — and it is the reason the programme's other
 items matter: every closed path above is one fewer way to *get* here.
@@ -1089,20 +1146,58 @@ across separate calls. So the incident's *form* still works from those routes:
 the value is fetched raw, and the nets behind it are the exact-value pass (only
 for a session that registered the value) and the shape pass (only for spellings
 it knows). **Status: open, and it is the price of the deferral** — stated so the
-deferral is a decision rather than an oversight. The remedy is the R1 follow-up in
+deferral is a decision rather than an oversight.
+
+**And one shape the guard cannot see at all, measured on #1429's head
+`90d02d6c`**: a **backtick substitution inside a double-quoted word**. Driven
+against the module directly (`scan_command`, loaded from that head — it is
+stdlib-only), `echo "`lop secret get X`"` returns `verdict='none'` with **no
+findings**, and so do `echo "a `lop secret get X` b"`,
+`printf "%s" "`lop secret get X`"` and `x="`lop secret get X`"; echo "$x"`. The
+same shapes with `$( )` are refused (`printing`, rule `shell.print-of-source`), and
+an *unquoted* backtick form is refused as `unresolved`
+(`shell.unresolved-source-region`) — so the hole is specific to a backtick inside
+double quotes, where the value is printed and nothing fires. This is the shape
+#1429's own round records as a live blocker; it is recorded here because it is a
+printing path the guard silently allows, which is this section's subject. Until it
+is closed, a `subprocess`-free one-liner in the shell is still a way to print a
+stored value. The remedy is the R1 follow-up in
 §0.1, which needs the operator's word; until then the honest position is the one
 `GUIDE.md` already takes, that the harness refuses what it can prove and the rest
 is the operator's residual risk. **Guide-only in the meantime.**
+
+**6.12 The `lop exec` job ledger: a stored prompt, re-emitted and kept in
+plaintext.** `lop exec --background` stores the caller's raw command as the job's
+`prompt`: `exec_mode.py` writes `"prompt": prompt` into `logs/jobs.jsonl`
+(`exec_mode.py:242-264`) and `# prompt: {command}` into the job's own log file
+(`exec_mode.py:530`). `lop exec --status JOB_ID` folds those rows back into a state
+document (`job_status`, `exec_mode.py:370`), which `local_operator/cli.py:8587`
+prints as JSON — so the caller's tool result carries **the entire stored prompt
+verbatim**. No `lop secret` appears in the text `lop exec --status <id>`, so
+neither of #1429's two call sites sees it; nothing on that path scrubs at all
+(`grep -c "redact\|scrub" local_operator/exec_mode.py` → 0, verified at
+`0caf7a32`); and the two copies on disk are plaintext and durable, which is 6.4's
+class reached by another route. A redaction notice has been reported on this route
+— what was verified here is the mechanism (store, fold, print), not the notice.
+**Status: open, and nothing in A/B/C can see it** (review finding R1-1 / QA Q-2).
+The fix is a scrub on the status read plus a decision about what the ledger may
+keep, and both are outside this programme's scope, so they are named here rather
+than implied away.
 
 **Direct answer to the operator's question.** *Yes.* After everything that
 shipped (B, C, and the additive half of A — §0.2), a value can still reach the
 model's context with no explicit, audited, gate-able opt-in, through:
 
+* **6.12** — `lop exec --status` re-emits a job's whole stored prompt, and the
+  ledger keeps it in plaintext. **The most concrete one**: nothing in A/B/C is on
+  that path, and a notice has been reported on it;
 * **6.11** — `get` still prints raw bytes for a caller the scan cannot see (the
-  consequence of deferring R1). The largest one, and the only one a *decision*
-  rather than a bug fixes;
-* **6.1** — a sanctioned plaintext copy read back later: closed in-session by the
-  ledger §3.4 (not shipped), open across sessions, resumes and sibling agents;
+  consequence of deferring R1), plus the double-quoted-backtick shape the scan
+  silently allows. **The largest by breadth, and the only one a *decision* rather
+  than a bug fixes**;
+* **6.1** — a sanctioned plaintext copy read back later: masked in-session (the
+  exact-value pass), open for a session that did not perform the retrieval, and the
+  copy itself is on disk until it is deleted;
 * **6.2** — a value the store never saw;
 * **6.3** — a transform outside the shipped list, or any transform of a value
   below the 12-character floor;
@@ -1118,13 +1213,21 @@ interim state** — no control of this programme's shape reaches them (the store
 never asked; the file is not the session's; the value is already in context; the
 caller is outside the harness). Those belong in `GUIDE.md`'s "What this actually
 protects against" section, stated plainly, rather than left for the programme's
-success to imply otherwise. **6.1, 6.3 and 6.4 are mechanical and remain worth
-building** (the ledger, the remaining transforms, the proper-prefix hold), and
-**6.11** is the operator's call per §0.1.
+success to imply otherwise. **6.1, 6.3, 6.4 and 6.12 are mechanical and remain
+worth building** (the ledger, the remaining transforms, the proper-prefix hold, and
+the status-read scrub), and **6.11** is the operator's call per §0.1. **No path
+here is "closed" — the tag exists in the legend and no item carries it, which is
+the honest state.**
 
 ---
 
 ## 7. PR split, sequencing, and what each PR's evidence must show
+
+> **Pre-decision plan, kept for the record** (QA Q-7). This table is the split as
+> designed. **§0 supersedes it for what actually ships**: A's default-changing half
+> is deferred (§0.1), and D's home is decided (§0.3) with the build still gated on
+> a measurement §4 now describes as unavailable. Read §0 for state and this table
+> for the reasoning behind the split.
 
 Ordering matters: A's default is what makes B's misses survivable, and C is the
 accident net underneath both.
@@ -1168,7 +1271,7 @@ changed); a version bump on any of these branches.
    the gate in the broker because that is where §6's ack already lives. §1.3(c)
    says why that is not a gate in the default tier.
 7. **The notice must keep telling the truth.** A refusal is not a redaction, and
-   `incidents.format_shape_incident_message` (`incidents.py:1008-1044`) has two
+   `incidents.format_shape_incident_message` (`incidents.py:1072-1108`) has two
    carefully-different texts; a third ("refused before it ran") must not be
    worded as either, or an operator will rotate a credential that was never read,
    or not rotate one that was.
