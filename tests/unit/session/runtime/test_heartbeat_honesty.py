@@ -150,8 +150,13 @@ async def test_the_beat_publishes_the_gap_it_measured_and_the_cpu_it_burned(
         # republish itself. Nothing in the product is pinned to make it pass — the
         # floor keeps beating and keeps reverting the bit; the cell simply stops
         # sampling across it.
+        # The runtime's own loop, named once and narrowed: ``_loop`` is ``None``
+        # until the thread runner installs it, and the hop below must not be handed
+        # a foreign loop — see the assertion beside it.
+        runtime_loop = runtime._loop
+        assert runtime_loop is not None, "the runtime published before its own loop existed"
         assert (
-            runtime._loop is not asyncio.get_running_loop()
+            runtime_loop is not asyncio.get_running_loop()
         ), "the hop below must target the runtime's own loop or it deadlocks the caller"
 
         def _transition_then_read() -> SessionRecord | None:
@@ -165,7 +170,7 @@ async def test_the_beat_publishes_the_gap_it_measured_and_the_cpu_it_burned(
         deadline = time.monotonic() + TRANSITION_DEADLINE_S
         republished = None
         while time.monotonic() < deadline:
-            hop = asyncio.run_coroutine_threadsafe(_one_step(_transition_then_read), runtime._loop)
+            hop = asyncio.run_coroutine_threadsafe(_one_step(_transition_then_read), runtime_loop)
             republished = await asyncio.wait_for(
                 asyncio.wrap_future(hop), timeout=TRANSITION_DEADLINE_S
             )
