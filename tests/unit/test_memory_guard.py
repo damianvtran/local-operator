@@ -76,30 +76,52 @@ def _pin_host(
     monkeypatch.setattr(mg, "_free_swap_mb", lambda runner: free_swap_mb)
 
 
-def test_budget_on_a_36gib_host_matches_the_contract_worked_numbers(
+def test_budget_on_a_36gib_host_exceeds_the_command_floor_at_sampled_pressure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """36 GiB / 7,109 MB available: ceiling 3,554 MB, soft 2,843 MB (§3.2)."""
-    # available = 455000 pages x 16 KiB = 7109 MB; total = 36864 MB; the reserve
-    # is min(2048, 36864//8) = 2048, so ceiling = min(3554, 7109-2048) = 3554.
-    _pin_host(monkeypatch, available_mb=7109, total_mb=36864, free_swap_mb=1192)
+    """3,675 MB available yields a dynamic 2,651 MB limit, not a fixed cap."""
+    _pin_host(monkeypatch, available_mb=3675, total_mb=36864, free_swap_mb=1192)
     budget = mg.compute_budget()
     assert budget.source == "auto"
     assert budget.total_mb == 36864
-    assert budget.available_mb == 7109
-    assert budget.reserve_mb == 2048
-    assert budget.ceiling_mb == 3554
-    assert budget.soft_mb == int(3554 * mg._SOFT_FRACTION)
+    assert budget.available_mb == 3675
+    assert budget.reserve_mb == 1024
+    assert budget.ceiling_mb == 2651
+    assert budget.ceiling_mb > 1100
+    assert budget.soft_mb == int(2651 * mg._SOFT_FRACTION)
+    assert "0.75 x 3675 MB available" in budget.reason
 
 
-def test_budget_on_a_32gib_device_keeps_the_reserve_floor(
+def test_budget_on_a_small_host_tracks_pressure_but_keeps_command_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """32 GiB with 8 GiB available: reserve = min(2048, 4096) = 2048; ceiling
-    = min(4096, 8192-2048) = 4096 MB (§3.2)."""
-    _pin_host(monkeypatch, available_mb=8192, total_mb=32768, free_swap_mb=3000)
+    """An 8 GiB host preserves the 64 MB minimum for ordinary commands."""
+    _pin_host(monkeypatch, available_mb=1050, total_mb=8192, free_swap_mb=800)
     budget = mg.compute_budget()
-    assert budget.ceiling_mb == 4096
+    assert budget.reserve_mb == 512
+    assert budget.ceiling_mb == 538  # min(787, 1050-512, 2048)
+
+    _pin_host(monkeypatch, available_mb=500, total_mb=8192, free_swap_mb=400)
+    pressured = mg.compute_budget()
+    assert pressured.reserve_mb == 512
+    assert pressured.ceiling_mb == mg._MIN_CEILING_MB
+    assert "64 MB floor" in pressured.reason
+
+    # Even a consumer-specific floor cannot defeat the physical host bound.
+    capped_floor = mg.compute_budget(floor_mb=4096)
+    assert capped_floor.ceiling_mb == 2048
+    assert "requested floor 4096 MB limited by physical cap" in capped_floor.reason
+
+
+def test_budget_on_a_roomy_host_stops_at_physical_memory_fraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A very idle 36 GiB host still limits one command to 25% of physical RAM."""
+    _pin_host(monkeypatch, available_mb=36864, total_mb=36864, free_swap_mb=1192)
+    budget = mg.compute_budget()
+    assert budget.reserve_mb == 1024
+    assert budget.ceiling_mb == 9216
+    assert "0.25 x 36864 MB physical cap" in budget.reason
 
 
 def test_the_darwin_available_arm_counts_free_speculative_and_file_backed(
@@ -169,9 +191,9 @@ def test_small_device_floor_keeps_ordinary_commands_alive(
 ) -> None:
     """An 8 GiB host at ~1 GiB available resolves below the floor; the floor
     keeps it usable (§10's small-device risk)."""
-    # available 1050 MB, total 8192 MB -> reserve 1024, so available - reserve =
-    # 26 MB, below the 64 MB floor.
-    _pin_host(monkeypatch, available_mb=1050, total_mb=8192, free_swap_mb=800)
+    # available 500 MB, total 8192 MB -> reserve 512, so available - reserve is
+    # negative and the 64 MB floor keeps an ordinary command alive.
+    _pin_host(monkeypatch, available_mb=500, total_mb=8192, free_swap_mb=400)
     budget = mg.compute_budget()
     assert budget.ceiling_mb == mg._MIN_CEILING_MB
     assert "floor" in budget.reason
@@ -191,7 +213,7 @@ def test_the_floor_is_the_callers_judgement_not_a_constant(
     ONE owner; this pins that the arithmetic itself is untouched and that only the
     bar it may not fall below moves.
     """
-    _pin_host(monkeypatch, available_mb=1050, total_mb=8192, free_swap_mb=800)
+    _pin_host(monkeypatch, available_mb=500, total_mb=8192, free_swap_mb=400)
     default = mg.compute_budget()
     assert default.ceiling_mb == mg._MIN_CEILING_MB
     raised = mg.compute_budget(floor_mb=256)

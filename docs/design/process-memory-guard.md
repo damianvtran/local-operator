@@ -49,8 +49,9 @@ What already exists, and is reused rather than rebuilt:
   L129).
 - The "reserve" concept — take a fraction of *available* memory, hold a floor out
   of it so the OS and the other sessions survive — is already implemented and
-  titrated in `conftest.py:1156-1212`. This design reuses its arithmetic and its
-  constants rather than inventing a second budget vocabulary.
+  titrated in `conftest.py:1156-1212`. This design follows the same pressure-aware
+  shape, but keeps command-specific constants so worker-pool tuning cannot silently
+  alter a live command's budget.
 
 `psutil` remains deliberately **not** a dependency. Nothing here adds it.
 
@@ -116,36 +117,43 @@ Confirmed on this host (2026-09-21): `hw.memsize` = 38,654,705,664 (36 GiB),
 
 ### 3.2 The ceiling for one command
 
-The arithmetic mirrors `conftest.py:1156-1182` exactly — same two-armed shape,
-same constants — so a reader who understands one understands the other, and there
-is one reserve vocabulary on this machine, not two.
+The arithmetic keeps the same pressure-sensitive shape as the worker cap, but
+uses command-specific values and a physical-RAM backstop. These values are kept
+next to this consumer rather than shared with pytest: changing worker-pool tuning
+must not silently change the safety budget of a live command.
 
 ```text
 available_mb = <§3.1 available arm>
 total_mb     = <§3.1 physical RAM>
 
-budget_mb  = available_mb * _MEMORY_SHARE                    # 0.5
-reserve_mb = min(_MEMORY_RESERVE_CAP_MB,                     # 2,048
-                 total_mb // _MEMORY_RESERVE_FRACTION)       # // 8
-budget_mb  = max(0, min(budget_mb, available_mb - reserve_mb))
+effective_available = available_mb                         # lower under swap pressure
+reserve_mb = min(_MEMORY_RESERVE_CAP_MB,                     # 1,024
+                 total_mb // _MEMORY_RESERVE_FRACTION)       # // 16
+budget_mb = min(_MEMORY_SHARE * effective_available,         # 0.75
+                effective_available - reserve_mb,
+                _MEMORY_PHYSICAL_CAP_FRACTION * total_mb)    # 0.25
+ceiling_mb = max(0, int(budget_mb))                           # auto mode
 
-ceiling_mb = budget_mb                                       # auto mode
+# Existing command-specific floor applies after arithmetic (64 MB by default).
 soft_mb    = int(ceiling_mb * _SOFT_FRACTION)                # 0.8
 ```
 
-`_MEMORY_SHARE`, `_MEMORY_RESERVE_CAP_MB` and `_MEMORY_RESERVE_FRACTION` are
-copied from `conftest.py:512-676` with the same values and the same comments. The
-command is a *single* consumer of the budget, so unlike the worker cap there is no
-further division by a worker count: `ceiling = budget`.
+The ceiling is for a single command group; unlike the pytest worker cap it is not
+divided by a worker count, and it is **not** a machine-wide aggregate governor.
+Concurrent commands independently compute their own limits and their combined
+memory use can exceed physical RAM. The available-memory share, reserve, and swap
+pressure arm reduce a command's limit when the sampled host is constrained, while
+the physical cap bounds a command on an unusually idle host.
 
-**Worked numbers.** On this 36 GiB host at ~6.5 GiB available: budget =
-6,656 × 0.5 = 3,328 MB; reserve = min(2,048, 4,831) = 2,048; available − reserve
-= 4,608; ceiling = **3,328 MB**, soft at **2,662 MB**. On a **32 GiB** device
-(total 32,768): reserve = min(2,048, 4,096) = 2,048. At a healthy 8 GiB available
-the ceiling is **4,096 MB**; on a pressured 4.5 GiB-available box (this fleet's
-chronic state) it is `min(2,304, 2,560)` = **2,304 MB** — i.e. the ceiling backs
-off on its own when the device is already tight, which is the whole point of
-budgeting from *available* rather than *total*.
+**Worked numbers.** On a **36 GiB** host with 3,675 MB available, reserve =
+`min(1,024, 36,864//16)` = 1,024 MB; the three terms are 2,756 MB (75% of
+available), 2,651 MB (available less reserve), and 9,216 MB (25% physical cap),
+so the ceiling is **2,651 MB**. At abundant availability, a 36 GiB host's limit
+is capped at **9,216 MB** per command. On an **8 GiB** host with 500 MB available,
+the arithmetic result is zero because the 512 MB reserve exceeds available memory;
+the 64 MB default floor keeps ordinary commands viable but does not allow a large
+job to run unbounded. As availability falls further the computed ceiling remains
+pressure-sensitive, except for that deliberately small floor.
 
 ### 3.3 Swap, compression, and how they enter
 
@@ -212,11 +220,11 @@ see the group:
   line; a command killed one tick late is still killed well below the device
   cliff because the reserve held headroom back.
 - **A fast allocator can outrun a 250 ms poll.** One tick can be one allocation
-  burst. Mitigation is the same margin: `ceiling = budget`, and `budget` is 0.5 ×
-  available minus a reserve, so a command that blows past the ceiling inside one
-  tick still has roughly the reserve of real RAM before the kernel's own OOM
-  killer looks at the box. State explicitly in the code comment: this guard
-  reduces the blast radius, it does not make allocation safe.
+  burst. The per-command ceiling is the minimum of a responsive 0.75 × available
+  term, available less the reserve, and a 0.25 × physical-RAM cap. That reserve
+  leaves margin, but a burst can still outrun the guard; this reduces the blast
+  radius and does not make allocation safe. Concurrent command groups are not
+  aggregated, so their independent ceilings do not guarantee a host-wide bound.
 - **Polling must never block the loop.** The `ps` read and the footprint read run
   in `asyncio.to_thread`; the tick is added to the existing `asyncio.wait(...,
   timeout=min(0.25, remaining))` loop, never a new blocking call on the loop
@@ -342,12 +350,12 @@ probe) so its tests never fork a real `ps`.
 from dataclasses import dataclass
 from typing import Callable, Iterable, Protocol
 
-#: Default constants, next to the code that reads them (the
-#: `_consumer_defaults()` rule). Values copied from conftest.py's reserve
-#: constants so the machine keeps ONE budget vocabulary.
-_MEMORY_SHARE = 0.5
-_MEMORY_RESERVE_CAP_MB = 2048
-_MEMORY_RESERVE_FRACTION = 8
+#: Auto-mode defaults; separate from pytest's worker-pool tuning because this
+#: consumer bounds one command group, not a concurrent pool.
+_MEMORY_SHARE = 0.75
+_MEMORY_RESERVE_CAP_MB = 1024
+_MEMORY_RESERVE_FRACTION = 16
+_MEMORY_PHYSICAL_CAP_FRACTION = 0.25
 _SOFT_FRACTION = 0.8
 _SWAP_FLOOR_MB = 256
 
@@ -496,7 +504,7 @@ class Guard:
 | # | failure mode | mitigation |
 |---|---|---|
 | F1 | Sampler under-reads on macOS (compression) | prefer `ri_phys_footprint` near the line; ceiling below device limit by the reserve (§4.3) |
-| F2 | Fast allocator outruns one poll window | ceiling = 0.5 × available − reserve, so a burst still has the reserve of RAM before the kernel OOM killer looks |
+| F2 | Fast allocator outruns one poll window or concurrent groups exceed aggregate RAM | Per-group ceiling is `min(0.75 × effective-available, effective-available − reserve, 0.25 × physical-RAM)`; it reduces a group's blast radius but neither catches every burst nor aggregates concurrent groups |
 | F3 | Sample blocks the event loop | all probes through `asyncio.to_thread`; tick rides the existing `asyncio.wait` timeout |
 | F4 | Guard fights timeout/abort/steering | third branch beside the two existing ones; same `_kill()`; same drain/reap tail; re-installed in the bg runner |
 | F5 | Guard kills the runtime or a sibling session | bound to the captured `spawned_pgid`; never discovers a group; never samples `os.getpid()` |
