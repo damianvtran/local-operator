@@ -64,6 +64,87 @@ a synchronous step is indistinguishable from a wedge from outside the process,
 so the bound is also a CEILING ON ONE SILENT SYNCHRONOUS STEP: a step that takes
 tens of seconds passes, one that never returns is cut.
 
+AND THAT CEILING WAS BEING APPLIED TO RUNTIMES THAT WERE DEMONSTRABLY WORKING,
+WHICH IS WHAT THE EXECUTION OBSERVATION BELOW FIXES
+----------------------------------------------------------------
+Measured on this machine's own ``runtime-stall-*.log`` store (2026-09-22, 40 dumps:
+37 fired, 3 header-only): in 20 of the 37 fired dumps the loop thread's stack runs
+through the runtime's own per-event subagent projection path — ``session._run_turn
+-> _emit -> handler -> _refresh_state -> set_subagent_details`` and the
+``serving._notify -> _publish_busy -> _publish_subagents -> subagent_counts ->
+nodes -> node -> _describe`` walk — i.e. the loop was EXECUTING this tree's code
+at the instant the deadline expired, not parked in a call it never returned from.
+The other fires are parked-frame cases: the loop sitting in ``selectors.select``
+(12, of which 11 carry a full ``0:05:00``-class arm — a plane that never stamped,
+with its main thread idle since boot), or inside a GIL-holding scan
+(``tools.builtin._mask_open_key_block``, 2), which is the class this bound exists
+for.
+
+A STAMP IS NOT THE ONLY SIGN OF LIFE, and that is the whole of the fix. The
+liveness leg's question is "is anything running at all", and it was answering it
+with one instrument — a beat — so a loop that could not deliver a beat was read as
+a loop that had stopped. It had not: the WORKLOAD tick is an ``asyncio`` task on
+the very loop whose frames were moving, so a single long synchronous stretch (or a
+stretch of individually-costly callbacks) starves the stamp by starvation rather
+than by wedging. The sampler thread runs either way, so it now also takes a second
+observation per interval — the top frame of each plane's loop, as
+``(filename, lineno, function)`` — and a frame that CHANGED since the previous look
+is recorded as a sign of life (:meth:`_Armed.observe_execution`), extending that
+plane's deadline instead of firing on it. WHICH LOOP IS WATCHED is learned, not
+guessed: a beat is issued from the loop it reports for, so the THREAD OBJECT that
+stamped is kept and the frame is read only while that thread ``is_alive()``. The
+object rather than its ident is a correctness requirement — idents are recycled
+once a thread ends (measured on this host: six sequential short-lived threads
+collapsed to one ident), so a stored ident would end up naming whatever thread
+holds it next and this plane would be watched through a stranger's frames.
+
+WHY THIS DOES NOT UNBOUND ANYTHING, the argument to read before changing it. The
+two legs partition the state space: the liveness leg owns "this loop never came back
+from a call" and the progress leg owns "this loop is running while its work stands
+still". A loop whose frames move is in the SECOND class by construction, so
+abstaining on the first leg HANDS THE RUNTIME OVER rather than dropping it, to a leg
+that answers on the same bound and with the same ``_exit(1)``. Three properties keep
+that hand-off honest: (a) the extension is refused unless a probe was supplied AND
+answered on that very sample, so a runtime whose progress leg is inert or unevaluable
+keeps today's behaviour rather than becoming unbounded; (b) the deadline is always
+``sign_of_life + bound`` and ``sign_of_life`` only moves on an extension GRANTED by
+the sample in hand — the timestamp behind it has exactly ONE writer, the granted
+path, so an observation alone can never move a deadline a sibling plane's ``beat``
+re-arms the shared timer from — and nothing accumulates, so no counter can be left
+raised; and
+(c) a FROZEN frame is never extended, which is the incident this bound was written
+for — a C-level matcher holding one frame for hours still fires exactly as before,
+and :func:`executing_planes` is the reader that tells the two apart in the artifact.
+
+WHAT THE SECOND OBSERVATION CANNOT SEE, MEASURED RATHER THAN ASSUMED. It sees CALLS,
+not instruction-level progress: ``frame.f_lineno`` read off a FOREIGN frame is only
+refreshed at a call or a suspension, so a body of bare arithmetic reads as one frozen
+line however fast it runs. Measured on this host (2026-09-22, CPython 3.14.3, sampled
+every 20 ms from another thread for 2 s per shape, top frame triple read through
+``sys._current_frames``): a body of repeated ``total += 1`` with no call in it changed
+the triple on 0 of 60 reads; ``while not stop.is_set()``, one call per iteration, on 11
+of 54; a call-heavy loop on 38 of 58; and the projection walk's own shape
+(``project -> describe -> describe_one -> live_twin -> <genexpr>``) on 35 of 55 — about
+two reads in three. Two consequences are stated rather than papered over: the target
+case (the 20 fires with the loop inside this tree's projection path) is comfortably
+inside what this can see, and a RUNNING loop holding one CALL-FREE frame is still read
+as silent and still cut by the liveness leg. That residual is a runaway shape rather
+than a working one, and the PROGRESS leg already bounds it — it burns a core with its
+work standing still — so its outcome is a fire carrying the progress marker instead of
+this one. A legitimate in-memory computation that holds a single frame past the bound
+while its work moves is the one case still cut that this change does not rescue; it was
+cut before the change too.
+
+THE FAILURE MODE THIS OPENS, named rather than hidden: a loop that executes AND
+whose work is moving (or which holds a tool batch in flight) is bounded by neither
+leg, since both legs use exactly those facts to abstain. That class is not created
+here — the progress leg's in-flight clause already spares an in-process tool that
+burns a core for an hour — but this change WIDENS it to any turn that keeps its
+transcript or roster moving while it walks frames. The module's stated preference is
+to spare a working runtime past any bound rather than cut a dead one late, and the
+compensating fact is that a runtime satisfying both clauses is one whose work is
+advancing by this process's own definition of advancing.
+
 A SECOND LEG: TICKING IS NOT ADVANCING, AND ONE FLEET SESSION WAS BOTH ALIVE AND
 MAKING NO PROGRESS FOR SEVEN MINUTES
 --------------------------------------------------------
@@ -125,6 +206,37 @@ a lane parked in private CPU work with no step boundary for longer than the
 window is cut with its parent. Widening the probe to every child session is its
 own change — ``comms._records`` holds those sessions privately today — and is NOT
 in this one.
+
+IT ALSO CANNOT TELL A PARKED CHILD LANE FROM A SPIN, and that gap is the same
+false-positive class the liveness leg was just taught to see, one layer out. The
+shape: a parent driving subagents IN PROCESS, every child parked in a long model
+call, so no lane closes a step and ``_subagent_roster_generation`` does not move
+(the roster bumps on a completed assistant message, a model change or a lifecycle
+event — not on a call being outstanding), while the PARENT's own loop burns CPU in
+the same per-event projection walk the fires above were caught in. All three legs
+then hold and the process is cut while it is working. The measured cost of that
+walk is superlinear in the roster: ``nodes()`` calls ``node()`` per record and
+``_describe()`` calls ``_live_twin()``, which re-scans ``_records`` for each one, so
+the walk is O(N^2) in the lane count, and ``MAX_RECORDS`` is 256 — measured AT the
+cap on this machine on 2026-09-22 (one session's ``subagent-roster.v1.json`` holds
+exactly 256 records, four more hold 146-243). The coordinator on this change
+measured one ``_refresh_state``'s subagent work at 46 ms at 64 records, 113 ms at
+128, 165 ms at 192 and 422 ms at 256 on an idle box against the real
+``SubagentComms`` (this change's own synthetic re-measurement, on bare records with
+no ``child`` or job state, gives 0.5 ms at 64 and 2.0 ms at 256 — the shape is the
+same and the constant is the real records', so quote the ordering, not the
+constant).
+
+THIS CHANGE DOES NOT RELAX THAT LEG, and no part of the fix above depends on the
+mechanism behind those fires being settled: the abstention rests on an OBSERVED
+moving frame, not on a theory of why the stamp was late. What would close this gap
+is a probe field that reads "this session has a child lane with a model call
+outstanding", and it is NOT cheap: it means reading every child session's own
+context off the sampler's foreign thread, behind ``comms._records``, at every
+sample — the same cross-thread live-state read this change is REDUCING (see
+:func:`_read_probe` on why the probe no longer runs under ``_LOCK``). Adding a
+second reader of that state to save a bound is the wrong trade until the
+bookkeeping walk is linear; that work is a separate change.
 
 THE TICK ITSELF CAN DIE, AND UNTIL THIS ITS DEATH WAS INVISIBLE
 --------------------------------------------------------------
@@ -263,6 +375,7 @@ from __future__ import annotations
 import faulthandler
 import logging
 import os
+import sys
 import threading
 import time
 from collections import deque
@@ -488,7 +601,6 @@ PROGRESS_MARKER = "[stall watchdog] no progress: "
 #: readers test these as substrings, so a header quoting one would make every
 #: armed file read as a fired bound or as a dead tick.
 TICK_DEATH_MARKER = "[stall watchdog] tick died: "
-
 #: The line a beat writes into the dump when a plane has gone quiet for this fraction
 #: of the bound or more, naming that plane and how long it has been quiet.
 #: A REPORTING POINT AND NOT A FIRING ONE: the bound still fires at the bound, this
@@ -530,11 +642,40 @@ REARM_MARKER = "[stall watchdog] re-arm: "
 #: every armed file read as a runtime with a failed re-arm.
 REARM_FAILED_MARKER = "[stall watchdog] re-arm failed: "
 
+#: Written when the liveness leg OBSERVES a plane's loop executing Python and therefore
+#: abstains from firing on that plane's silence: ``[stall watchdog] loop executing: <plane>
+#: in <file>:<line>:<function>``.
+#:
+#: WHY IT IS IN THE DUMP RATHER THAN ONLY IN THIS PROCESS. A fire is the artifact an
+#: operator reads to find out why a runtime left, and the fairness fix makes the
+#: interesting case one where the bound did NOT fire — so the line has to be written
+#: when the ABSTENTION happens and not at the fire, or the evidence for the decision
+#: would only exist in the runs where nothing needed explaining. It also has to survive
+#: the sampler, because the loop it describes is by construction not running: this is
+#: written by the SAMPLER thread, under the same lock that serialises the deadline.
+#:
+#: The frame is included because "which line was the loop walking" is the question this
+#: line exists to answer, and a reader cannot ask the process afterwards — it is gone.
+#: It is the TOP frame of that thread's stack, so it names the innermost call, not the
+#: turn above it.
+#:
+#: NOT SPELLED IN THE HEADER, for the reason that constraint exists at all: readers
+#: test these as substrings, so a header quoting the marker would make every armed file
+#: read as a runtime whose loop was executing.
+EXECUTING_MARKER = "[stall watchdog] loop executing: "
+
 #: What the first sample of a progress clock holds before it has anything to
 #: compare against. A sentinel rather than ``None`` because a probe is free to
 #: return ``None`` as its own motion value, and "no previous sample" and "the
 #: previous sample was None" must not be the same state.
 _NO_SAMPLE = object()
+
+#: A caller that has NOT evaluated the probe passes this, and
+#: :func:`_sample` then reads it itself; :data:`_NO_SAMPLE` and ``None`` are the two
+#: answers that mean "there is no live progress leg for this sample". The three are
+#: distinct on purpose: "nobody asked me to decide" (this), "the probe is absent"
+#: (``None`` from :func:`_read_probe`), and "the probe is there and useful".
+_UNSET = object()
 
 
 class _ProgressClock:
@@ -645,6 +786,11 @@ class _Armed:
         "clock",
         "stop",
         "thread",
+        "loop_thread",
+        "last_frame",
+        "last_move",
+        "executing_at",
+        "executing_noted",
     )
 
     def __init__(
@@ -680,9 +826,65 @@ class _Armed:
         #: the case that made this artifact a body count -- and a line per 15 s beat
         #: would grow the dump without bound. The LIVE number is the sibling.
         self.quiet_noted: set[str] = set()
+        #: Which THREAD owns each plane's loop, learned from the beat itself: a
+        #: plane's tick is called FROM the loop it reports for, so
+        #: ``threading.current_thread()`` at stamp time IS the thread whose frame
+        #: says whether that loop is executing (see
+        #: :meth:`_Armed.observe_execution`). Learned rather than assumed —
+        #: hardcoding the main thread would be wrong for the serving plane, whose
+        #: heartbeat runs its own loop.
+        #:
+        #: THE OBJECT AND NOT ITS IDENT, and that is a correctness requirement rather
+        #: than a convenience. ``get_ident()`` values are RECYCLED by CPython once a
+        #: thread ends — measured on this host: six sequential short-lived threads
+        #: collapsed to ONE distinct ident — so an ident kept past its thread's death
+        #: starts naming a DIFFERENT, LIVE thread, whose moving frames would then be
+        #: read as this plane still executing. A plane whose reporter is gone must be
+        #: ended one deadline after its last stamp, and the ident shape defeats exactly
+        #: that. Holding the object lets :meth:`_Armed.observe_execution` ask
+        #: ``is_alive()`` instead, which is the fact the ident cannot carry.
+        #:
+        #: A PLANE THAT NEVER STAMPED HAS NO ENTRY, and that is load-bearing rather
+        #: than an empty case: an unlearned plane means this loop can never be
+        #: OBSERVED executing, so it cannot be extended either. The
+        #: never-engaged class (a runtime whose main thread never reported at all)
+        #: therefore behaves exactly as it did before this
+        #: (``test_a_runtime_that_never_engaged_fires_at_the_armed_value_with_no_sibling``).
+        self.loop_thread: dict[str, threading.Thread] = {}
+        #: Each plane's loop frame as of the previous observation, as
+        #: ``(filename, lineno, function)``, or :data:`_NO_SAMPLE` before the
+        #: first look. A frame that DIFFERS from this is a loop executing Python.
+        self.last_frame: dict[str, object] = {}
+        #: When each plane's frame was last SEEN to move — the observation, and
+        #: nothing more. It drives the per-STRETCH record in the dump
+        #: (:attr:`executing_noted`); it is deliberately NOT what the deadline is
+        #: measured from, because an observation is not a decision. See
+        #: :attr:`executing_at`.
+        self.last_move: dict[str, float] = {}
+        #: When each plane's execution was last GRANTED as a sign of life, which is
+        #: the whole of the fairness fix (see the module docstring): the plane's
+        #: liveness deadline is measured from the later of this and its last beat.
+        #: WRITTEN ONLY BY :func:`_extend_for_execution`, ON THE SAMPLES IT GRANTS —
+        #: the single writer, so a sample that did not earn the extension cannot move
+        #: the deadline a sibling's :func:`beat` re-arms the shared C timer for. That
+        #: split is the fix for the refused hand-off still extending: an unevaluable
+        #: probe used to move the deadline through the observation alone, which made
+        #: an executing loop with a broken probe unbounded on a runtime whose other
+        #: plane kept stamping. Absent until an extension has been granted, so nothing
+        #: is ever extended on a plane whose loop has not been observed executing.
+        self.executing_at: dict[str, float] = {}
+        #: The planes whose execution is already written into the dump: a TRANSITION
+        #: rather than every observation, for the reason :attr:`quiet_noted` gives — a
+        #: loop that executes for hours would otherwise grow the artifact one line per
+        #: sample. Emptied for a plane when its loop stamps again, which is what makes a
+        #: later stretch its own transition.
+        self.executing_noted: set[str] = set()
         #: The progress leg's probe, or ``None`` when no runtime supplied one (an
         #: in-process host, a test of the liveness leg alone, an older spawner).
-        #: ``None`` means the progress leg is INERT, not that it is satisfied.
+        #: ``None`` means the progress leg is INERT, not that it is satisfied —
+        #: and it is also what REFUSES the liveness leg's abstention, because a
+        #: hand-off with nothing to hand to is just an unbounded loop (see
+        #: :func:`_extend_for_execution`).
         self.probe = probe
         #: The instant the progress leg has decided to fire at, or ``None`` while
         #: its predicate does not hold. Absolute ``time.monotonic``, like the
@@ -698,6 +900,135 @@ class _Armed:
         self.stop: threading.Event | None = None
         self.thread: threading.Thread | None = None
 
+    def sign_of_life(self, plane: str) -> float:
+        """The last moment this plane showed ANY sign of life: a beat, or a frame that MOVED.
+
+        THE FAIRNESS FIX LIVES IN THIS ONE ``max``. The liveness leg's question is
+        "is anything running at all", and a beat is not the only way a loop answers
+        it — a loop executing Python code is running, and the WORKLOAD tick is an
+        ``asyncio`` task on the very loop whose frames are moving, so the state a
+        starved tick produces is *indistinguishable from a parked loop* to anything
+        that only watches stamps. ``executing_at`` is that missing observation, and
+        taking the later of the two is how a moving frame stands in for the stamp
+        the loop could not deliver.
+
+        ABSENT MEANS NO EXTENSION, deliberately: ``0.0`` rather than the seed time,
+        so a plane whose loop has never been OBSERVED executing is measured from its
+        beat exactly as before. The seed is not usable as a default here — it would
+        grant every plane a full bound of extension on its first sample, which is
+        the unbounded reading this module must not have.
+
+        ``executing_at`` IS WRITTEN ONLY BY THE GRANT, so this ``max`` can only move
+        on a sample that EARNED the extension — a probe supplied, answering, and a
+        frame that moved, all on that same sample. Reading a timestamp the
+        OBSERVATION had written would let a refused hand-off move this deadline
+        anyway, through the ``pin``/``deadline`` a sibling plane's :func:`beat`
+        re-arms the shared timer from: the process would live on with a deadline that
+        never counted down, which is the unbounded reading arriving by a side door.
+        """
+        return max(self.last_beat[plane], self.executing_at.get(plane, 0.0))
+
+    def observe_execution(self, now: float) -> "tuple[tuple[str, ...], tuple[str, ...]]":
+        """Look at each known plane's loop frame; name the planes whose frame MOVED.
+
+        THE SECOND OBSERVATION THE LIVENESS LEG WAS MISSING, and the reason it needs
+        the sampler to carry it: the whole starved state is one where the loop cannot
+        stamp, so nothing that runs ON that loop can report for it. This runs on the
+        sampler's own thread, which is exactly why it can still see the answer.
+
+        THE DISCRIMINATOR IS MOVEMENT, NOT WEDGEDNESS, and that is the only claim made
+        here. A loop parked in a call it never returns from holds ONE frame for the
+        whole wait — a C-level matcher (``_sre_SRE_Pattern_search``, the 2026-09-20
+        incident), ``select``, ``flock``, a child's ``wait`` — so its frame repeats and
+        this reports nothing. A loop EXECUTING Python reaches this through its CALLS, so
+        the top frame's ``(filename, lineno, function)`` differs from the last look. Both
+        halves are load-bearing: the frozen case is the incident this bound exists for and
+        must keep firing, and the moving case is the false positive that killed sessions
+        which were demonstrably working.
+
+        WHAT IT SEES IS CALLS, NOT INSTRUCTION-LEVEL PROGRESS, and that is a MEASURED
+        property of CPython rather than a design choice — see the module docstring's
+        paragraph on it. ``f_lineno`` on a FOREIGN frame is only refreshed at a call or a
+        suspension, so a body of bare arithmetic reads as one frozen line however fast it
+        runs, while a body that calls something (the projection walk is all calls) shows a
+        change on about two reads in three. The limit that follows is stated there with
+        the numbers, and it is why this is a conservative half of the fix.
+
+        Returns ``(moved, noted)``. ``moved`` is every plane whose frame changed on THIS
+        look, which is what the abstention needs. ``noted`` is the subset that STARTS a
+        stretch — a plane whose execution was not already recorded — which is what the
+        dump line needs, so the artifact grows per stretch rather than per sample. A
+        stamp NEWER than the last observation ends a stretch: the loop reported for
+        itself again, so what follows is a new one. That is decided from the stamps
+        rather than from a still look, because the top frame alternates between a call
+        and its caller and a rule keyed on one still look re-records the SAME stretch
+        several times a second — measured as 8 identical dump lines across a 6 s
+        stretch, which is the artifact growth this avoids.
+
+        IT IS AN OBSERVATION AND NOT A DECISION, and the split is structural rather
+        than stylistic: this method writes :attr:`_Armed.last_move` (which drives the
+        dump's per-stretch record) and never :attr:`_Armed.executing_at` (which is
+        what the deadline is measured from). The only writer of the latter is
+        :func:`_extend_for_execution`, on the samples where the hand-off is GRANTED.
+        See :attr:`_Armed.executing_at` for the defect that split exists to close.
+
+        Does the state update and the dump transition under the caller's ``_LOCK``:
+        :meth:`sign_of_life` reads ``executing_at`` while deciding the deadline a beat
+        re-arms, so a write that was not serialised against that read could arm the
+        timer one way and describe it another.
+        """
+        if not self.loop_thread:
+            return (), ()
+        # One snapshot for every plane rather than one lookup each: this is a
+        # foreign-thread read of interpreter state, so it is taken once per sample.
+        frames = sys._current_frames()
+        moved: list[str] = []
+        noted: list[str] = []
+        for plane, thread in self.loop_thread.items():
+            # A THREAD THAT HAS ENDED IS NOT A SIGN OF LIFE, and the check has to be on
+            # the OBJECT: an ident outlives the thread that owned it (CPython recycles
+            # them), so ``frames.get(ident)`` would hand back some OTHER live thread's
+            # frames and this plane would read as executing forever. A plane whose
+            # reporter is gone is exactly the case the tick supervision promises the
+            # bound will end, one deadline after its last stamp.
+            #
+            # THE RESIDUAL IS ONE SAMPLE WIDE, stated rather than hidden: a thread can
+            # die between this check and the snapshot below, and if its ident is
+            # recycled inside that window one look reads the wrong thread. The next
+            # sample re-checks and skips, so the extension that can be granted this way
+            # is bounded by one sample interval and then counts down — it cannot become
+            # the open-ended abstention the ident-keyed lookup produced.
+            if thread is None or not thread.is_alive():
+                continue
+            ident = thread.ident
+            if ident is None:
+                # A LIVE thread always has an ident, so this cannot be reached for a
+                # running loop; it is here because ``Thread.ident`` is typed optional,
+                # and a ``None`` key would look up nothing (or, worse, read as an
+                # unmatched plane). Skipping is the same answer either way.
+                continue
+            frame = frames.get(ident)
+            seen: object = _NO_SAMPLE
+            if frame is not None:
+                seen = (frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name)
+            previous = self.last_frame.get(plane, _NO_SAMPLE)
+            self.last_frame[plane] = seen
+            if self.last_beat[plane] >= self.last_move.get(plane, 0.0):
+                # The loop stamped for itself since the last look, so the stretch this
+                # note describes is over and a later one is its own transition.
+                self.executing_noted.discard(plane)
+            # No frame at all is NOT movement: the sample caught an interpreter state
+            # that cannot be read. Extending on that would be inventing a sign of life,
+            # so the plane falls back to its stamp and the bound keeps counting.
+            if seen is _NO_SAMPLE or previous is _NO_SAMPLE or seen == previous:
+                continue
+            self.last_move[plane] = now
+            if plane not in self.executing_noted:
+                self.executing_noted.add(plane)
+                noted.append(plane)
+            moved.append(plane)
+        return tuple(moved), tuple(noted)
+
     def pin(self) -> tuple[str, float]:
         """Which leg's deadline the timer is armed for, and when: ``(leg, monotonic)``.
 
@@ -707,8 +1038,8 @@ class _Armed:
         be two chances for the sibling and the file to disagree about which plane was
         quiet, which is the fact the two files exist to establish.
         """
-        plane = min(self.last_beat, key=self.last_beat.__getitem__)
-        deadline = self.last_beat[plane] + self.seconds
+        plane = min(self.last_beat, key=self.sign_of_life)
+        deadline = self.sign_of_life(plane) + self.seconds
         if self.progress_deadline is not None and self.progress_deadline < deadline:
             return LEG_PROGRESS, self.progress_deadline
         return plane, deadline
@@ -1134,6 +1465,16 @@ def beat(plane: str) -> None:
 
     A no-op when nothing is armed, which is what keeps this safe to call from an
     in-process host (a TUI or a test) that never armed the process timer.
+
+    AND IT LEARNS WHICH THREAD TO WATCH, which is the one fact the liveness leg's
+    fairness fix cannot get any other way. A beat is issued FROM the loop it
+    reports for, so this call site IS the identification: for the WORKLOAD plane
+    that is the runtime's own event loop (``process._beat_stall_watchdog`` is an
+    ``asyncio`` task on it), and for SERVING it is the serving plane's own loop
+    thread. Assuming the main thread instead would mis-name the serving plane, and
+    assuming nothing (leaving the field empty) would silently disable the fix on a
+    runtime whose loop is on a thread this module never guessed — so it is
+    observed here, where it is definitionally true.
     """
     if plane not in PLANES:
         # A typo must not conjure a third plane that no one ever stamps: that
@@ -1147,6 +1488,20 @@ def beat(plane: str) -> None:
             return
         now = time.monotonic()
         armed.last_beat[plane] = now
+        # The THREAD OBJECT rather than its ident, and the difference is not
+        # cosmetic: idents are recycled once a thread ends, so a stored ident starts
+        # naming whoever holds it next and this plane would be watched through
+        # another thread's frames. Keeping the object is what lets the observation ask
+        # ``is_alive()`` — see :attr:`_Armed.loop_thread`.
+        thread = threading.current_thread()
+        if armed.loop_thread.get(plane) is not thread:
+            # A NEW LOOP THREAD FOR THIS PLANE, and the recorded baseline goes with the
+            # old one: the previous thread's last frame says nothing about where this
+            # one is, so comparing across the change would report a movement that never
+            # happened — a sign of life invented out of a thread swap, which is exactly
+            # what ``observe_execution`` must never do.
+            armed.loop_thread[plane] = thread
+            armed.last_frame.pop(plane, None)
         try:
             faulthandler.dump_traceback_later(
                 max(MIN_REARM_S, armed.deadline() - now), file=armed.handle, exit=True
@@ -1241,6 +1596,146 @@ def _start_sampler(armed: "_Armed") -> None:
     thread.start()
 
 
+def _read_probe(probe: "ProgressProbe | None") -> "tuple[object, bool] | None":
+    """Read the injected probe, or ``None`` when there is no LIVE answer for this sample.
+
+    TWO ``None`` SOURCES, ONE MEANING. There is no probe at all (an in-process host,
+    a test of the liveness leg alone, an older spawner), or the probe RAISED. Both
+    mean the progress leg cannot speak for this sample, which matters beyond the
+    progress leg: :func:`_extend_for_execution` refuses to abstain when there is no
+    live second leg to hand the process to, so an unevaluable sample must not read as
+    an evaluated one.
+
+    CALLED OUTSIDE :data:`_LOCK`, and that is the point of it existing separately
+    from :func:`_sample`: the production probe reaches LIVE session state from a
+    thread that is not the session's — transcript footprints, job rows, the
+    tool-batch tail of a context another thread is appending to — and it can be slow
+    for as long as that state is contended. Holding ``_LOCK`` across it makes every
+    :func:`beat` queue behind a diagnostic read, so a slow probe delays the stamp
+    that is supposed to prove the runtime is alive. What stays under the lock is the
+    DECISION, because that is what has to be serialised against a beat's re-arm.
+    """
+    if probe is None:
+        return None
+    try:
+        return probe()
+    except Exception:  # noqa: BLE001 — an unevaluable probe must not end a process
+        logger.debug("stall watchdog: progress probe failed", exc_info=True)
+        return None
+
+
+def _note_executing(armed: "_Armed", noted: "tuple[str, ...]") -> None:
+    """Record, in the dump, that these planes STARTED a stretch of executing code.
+
+    WRITTEN UNCONDITIONALLY when a stretch opens, including on runs where the hand-off
+    below is REFUSED: the question a reader of this file is asking is "what was the
+    loop doing when the bound ended it", and that question does not stop being worth
+    answering because no probe was supplied. :func:`executing_planes` is the reader, and
+    it means "observed executing", NOT "the abstention was granted" — the granting is
+    visible in whether the process left.
+
+    ``noted`` IS ALREADY THE TRANSITION SET, decided by
+    :meth:`_Armed.observe_execution` rather than here, because the rule that ends a
+    stretch is a property of the stamps: one line per STRETCH, not per sample.
+    """
+    for plane in noted:
+        frame = armed.last_frame.get(plane)
+        if isinstance(frame, tuple):
+            where = ":".join(str(part) for part in frame)
+        else:  # pragma: no cover - a moved plane always has a frame to name
+            where = "unknown frame"
+        _write_dump_line(
+            armed,
+            f"{EXECUTING_MARKER}{plane} in {where} -- this plane's loop is executing code, "
+            f"so its silence is not a park; the bound abstains for it while its frames "
+            f"keep moving, and the progress leg still bounds a loop that runs without "
+            f"advancing.\n",
+        )
+
+
+def _extend_for_execution(armed: "_Armed", now: float, moved: "tuple[str, ...]") -> None:
+    """Do NOT fire on a plane whose loop was just observed EXECUTING; re-arm instead.
+
+    THE ABSTENTION, and the one place this module deliberately declines to enforce its
+    own bound. The liveness leg's question is "is anything running at all"; a plane
+    whose frames are moving has answered that question YES without a stamp, and the
+    state that starves a stamp (the loop busy in its own code, which is what the
+    2026-09-22 fires show: the loop inside the session's per-event subagent projection
+    at the instant the deadline expired) is a loop that is WORKING. Firing there kills
+    a session that was making progress, which is a strictly worse failure than a late
+    bound.
+
+    WHY THIS DOES NOT UNBOUND A RUNAWAY, which is the argument to read before changing
+    it. The two legs partition the state space: the liveness leg owns "this loop never
+    came back from a call" and the progress leg owns "this loop is running while its
+    work stands still". A loop whose frames move is in the second class by
+    definition, and the second leg judges it on the same 300 s and with the same
+    ``_exit(1)`` — so abstaining here HANDS OVER rather than drops. The hand-off is
+    why the extension is refused outright unless the progress leg can actually speak
+    (see below), and why nothing here touches the CPU floor or the motion tuple: a
+    frames-moving runaway that burns a core with no work moving still fires, on the
+    other leg, with its own marker naming it.
+
+    THE EXTENSION IS BOUNDED, and by structure rather than by a number, because a
+    second magic constant is the failure mode this module has already paid for twice:
+    the deadline is always ``sign_of_life + bound``, and ``sign_of_life`` is only ever
+    moved by an observation made ON THIS SAMPLE. So the bound can be pushed no more
+    than one interval past the last moment the loop was SEEN to execute, and it is
+    re-derived rather than accumulated — there is no counter that a stuck sample could
+    leave raised. Concretely, extending requires, on the same sample: a probe supplied,
+    a probe that ANSWERED, and a frame that MOVED. Any one of them failing leaves the
+    deadline counting down from the last observation, and the bound fires within
+    ``bound`` of it.
+
+    ITS FAILURE MODE, stated rather than hidden: a loop that executes AND whose work is
+    moving (or which holds a tool batch in flight) is bounded by neither leg, since
+    both legs use exactly those two facts to abstain. That class is not created here —
+    an in-process tool that burns a core for an hour is already spared by the progress
+    leg's second clause, by design — but this change WIDENS it to any turn that keeps
+    its transcript or roster moving while it walks frames. The compensating fact is
+    that such a runtime is doing work, and the module's stated preference is to spare
+    a working runtime past any bound rather than cut a dead one late.
+
+    A PLANE WITH NO LEARNED THREAD IS NEVER EXTENDED (``observe_execution`` returns
+    nothing for it), so the never-engaged class and every plane that never stamped
+    behave exactly as before.
+
+    AND THIS IS THE ONE WRITER OF THE EXTENSION ITSELF: ``moved`` is an OBSERVATION
+    that ``_sample`` has already gated (a probe supplied and answering on this same
+    sample) before passing it here, and the timestamp that moves the deadline is
+    written below and nowhere else. The observation must not write it: a refused
+    hand-off that had already moved the deadline would leave an executing loop with a
+    broken probe unbounded on any runtime whose OTHER plane kept stamping, since
+    ``beat`` re-arms the shared timer from ``pin``/``deadline`` for the whole
+    process. Gating the observation's write is what makes the refusal total.
+    """
+    if not moved:
+        return
+    if armed.probe is None:
+        # No receiver for the hand-off, so no hand-off: with the progress leg inert,
+        # abstaining would leave the process bounded by NOTHING, and a moving frame
+        # alone is not a claim that the work is advancing. The observation has still
+        # been recorded by ``_note_executing``. NOTHING IS WRITTEN HERE — not the
+        # extension, not the deadline — which is the whole of the refusal.
+        return
+    for plane in moved:
+        # BEFORE the re-arm, because the re-arm reads it back through ``deadline()``.
+        armed.executing_at[plane] = now
+    try:
+        faulthandler.dump_traceback_later(
+            max(MIN_REARM_S, armed.deadline() - now), file=armed.handle, exit=True
+        )
+    except (OSError, ValueError, RuntimeError):
+        # A re-arm that cannot happen leaves the timer on its previous deadline, which
+        # is SHORTER than this extension. That direction is safe — the bound fires
+        # early rather than late — so it is reported and not escalated, and the line
+        # ``_note_executing`` wrote is what keeps the run from being silent. Driven by
+        # ``test_a_failed_re_arm_leaves_the_timer_on_the_shorter_deadline``.
+        logger.warning("stall watchdog: could not re-arm for an executing loop", exc_info=True)
+    else:
+        _record_deadline(armed)
+
+
 def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
     """Sample the progress predicate until it holds for a window, or we are disarmed.
 
@@ -1254,17 +1749,32 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
     questions every interval and keeps the answer. That is what lets the leg be
     tested against a fake probe without a runtime, and it is why an unevaluable
     probe errs toward NOT firing — see :func:`_sample`.
+
+    AND IT IS ALSO THE LIVENESS LEG'S ONLY WITNESS, which is why the interval is
+    the right cadence for the frame observation too: this thread runs whatever the
+    loop is doing, so a loop too busy to stamp is exactly the loop this thread is
+    still able to look at.
+
+    THE PROBE IS READ BETWEEN TWO LOCK HOLDS, not inside one (see
+    :func:`_read_probe` for why the read must not hold ``_LOCK``). The armed-ness is
+    re-checked after the unlocked section rather than trusted from before it: that
+    section can take arbitrarily long, and ``disarm`` can run inside it.
     """
     interval = _sample_interval(armed.seconds)
     while not stop.wait(interval):
         with _LOCK:
             if _ARMED is not armed:
                 return
-            if _sample(armed):
+            probe = armed.probe
+        observation = _read_probe(probe)
+        with _LOCK:
+            if _ARMED is not armed:
+                return
+            if _sample(armed, observation):
                 return
 
 
-def _sample(armed: "_Armed") -> bool:
+def _sample(armed: "_Armed", observation: object = _UNSET) -> bool:
     """One progress sample. True when the bound was FIRED, so the sampler is done.
 
     Called with :data:`_LOCK` held, and it must be: it reads and writes the same
@@ -1275,16 +1785,45 @@ def _sample(armed: "_Armed") -> bool:
     EVERY LEG IS EVALUATED ON THE SAMPLE IT ARRIVES, all three to the same
     instant: reading the CPU rate at one moment and the motion at another is how
     a legitimate tool boundary gets read as a spin.
+
+    ``observation`` is the probe's answer, already read OUTSIDE the lock by
+    :func:`_progress_sampler`; leaving it at :data:`_UNSET` makes this read the probe
+    itself, which is what the predicate cells that drive ``_sample`` directly want.
+    The default is not a second implementation of the leg — :func:`_read_probe` is the
+    one reader either way — it is where the read happens, and the sampler's cell proves
+    the production path does not hold the lock across it.
     """
     clock = armed.clock
     now = time.monotonic()
     cpu = time.process_time()
-    probe = armed.probe
-    try:
-        motion, in_flight = probe() if probe is not None else (_NO_SAMPLE, True)
-    except Exception:  # noqa: BLE001 — an unevaluable probe must not end a process
-        logger.debug("stall watchdog: progress probe failed", exc_info=True)
-        motion, in_flight = _NO_SAMPLE, True
+    # THE FRAME OBSERVATION COMES FIRST, before any leg can decide to leave: its
+    # result is what the abstention below needs. THE INSTANTS ARE NOT ALWAYS THE SAME
+    # ONE, and it is worth saying rather than implying: on the production path the
+    # MOTION below was read before this sample took ``_LOCK`` (the probe is
+    # deliberately allowed to be slow — see :func:`_progress_sampler`), so the run is
+    # judged on an answer that may be older than this frame read. The direction is
+    # safe — a stale motion or in-flight answer is the run's state as of an earlier
+    # instant, which can only DELAY the progress leg, the leg that ends a runtime —
+    # but the claim is "no earlier than", never "the same instant".
+    executing, noted = armed.observe_execution(now)
+    # Recorded BEFORE the progress leg can decide to leave, and regardless of whether
+    # the hand-off below is granted: the reader's question is what the loop was DOING
+    # (see :func:`_note_executing`). Only planes that OPENED a stretch are written.
+    # A REFUSED HAND-OFF STILL WRITES IT, so this line can appear on a run that then
+    # FIRES at the bound: it is a record of an observation, and
+    # :func:`executing_planes` reads it as one — "this loop was seen executing", never
+    # "this runtime was spared".
+    _note_executing(armed, noted)
+    if observation is _UNSET:
+        read: object = _read_probe(armed.probe)
+    else:
+        read = observation
+    # A LIVE ANSWER IS A TUPLE. An unevaluable read (``None``) and an absent probe
+    # collapse to the same thing here — "no live second leg for this sample" — which is
+    # why the abstention's refusal (see :func:`_extend_for_execution`) keys on this
+    # rather than on the probe merely being present.
+    probe_answered = isinstance(read, tuple)
+    motion, in_flight = read if probe_answered else (_NO_SAMPLE, True)
     moved = clock.motion is not _NO_SAMPLE and motion != clock.motion
     if in_flight or moved:
         # A disagreeing sample ends the run outright: a leg that is not true NOW
@@ -1292,6 +1831,7 @@ def _sample(armed: "_Armed") -> bool:
         # sample where the process was working would fire on a runtime that had
         # done legitimate work inside it.
         clock.restart(motion)
+        _extend_for_execution(armed, now, executing if probe_answered else ())
         return False
     clock.motion = motion
     clock.observe(now, cpu, armed.seconds)
@@ -1307,6 +1847,7 @@ def _sample(armed: "_Armed") -> bool:
     if mean is not None and mean >= PROGRESS_CPU_FLOOR:
         _fire_progress(armed, now)
         return True
+    _extend_for_execution(armed, now, executing if probe_answered else ())
     return False
 
 
@@ -1531,6 +2072,29 @@ def tick_deaths(pid: int | None = None, directory: Path | None = None) -> tuple[
         line[len(TICK_DEATH_MARKER) :].split(":", 1)[0].strip()
         for line in text.splitlines()
         if line.startswith(TICK_DEATH_MARKER)
+    )
+
+
+def executing_planes(pid: int | None = None, directory: Path | None = None) -> tuple[str, ...]:
+    """Which planes' loops this artifact recorded as EXECUTING, oldest first.
+
+    The reader for :data:`EXECUTING_MARKER`, and it answers the one question a fired
+    dump raises about this module's own fairness fix: *did the leg know this loop was
+    running?* A ``silence`` verdict beside a plane named here is a bound that fired on
+    a loop its own sampler had already observed executing — which is the state
+    :func:`_extend_for_execution` writes the line for, so finding one means the
+    abstention did not carry (an unevaluable probe, a missing plane entry, or a
+    deadline that expired between two moving samples). The recovery for those is not
+    the same, and without this reader they are indistinguishable in the file.
+
+    Empty when the file is missing, unreadable, or carries no such line — the same
+    quiet direction as :func:`tick_deaths`.
+    """
+    text = _dump_text(dump_path(pid, directory))
+    return tuple(
+        line[len(EXECUTING_MARKER) :].split(" ", 1)[0].strip()
+        for line in text.splitlines()
+        if line.startswith(EXECUTING_MARKER)
     )
 
 
