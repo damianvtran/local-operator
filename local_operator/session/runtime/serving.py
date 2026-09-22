@@ -6743,7 +6743,7 @@ async def spawn_owned_session(
 
     config_directory = config_dir()
     config_manager = ConfigManager(config_dir=config_directory)
-    credential_manager = CredentialManager(config_dir=config_directory)
+    credential_manager = CredentialManager.readonly(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
     # The publication latch the deferred MCP wiring parks on. Created HERE, on

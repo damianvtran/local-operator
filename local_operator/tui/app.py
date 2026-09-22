@@ -34297,7 +34297,7 @@ class OperatorApp(App[None]):
         )
 
         manager = ConfigManager(config_dir())
-        credentials = CredentialManager(config_dir())
+        credentials = CredentialManager.readonly(config_dir())
         words = arg.split()
         try:
             if not words:

@@ -3699,20 +3699,23 @@ def test_persisted_providers_includes_a_stored_login(controller, store, monkeypa
         ("ANTHROPIC_API_KEY", "anthropic"),
     ],
 )
-def test_persisted_providers_includes_a_legacy_credential_manager_key(
+def test_persisted_providers_includes_a_provider_store_row(
     controller, monkeypatch, tmp_path, key_name, provider_id
 ) -> None:
-    """``lop credential update`` writes the legacy file, ``/login`` writes auth.db.
+    """``lop credential update`` writes a provider-class store ROW (PR2a).
 
-    A reader consulting only one of the two hides every provider configured
-    through the other, and both are sanctioned flows.
+    The plaintext file it used to write is no longer read, so the row is the
+    source ``persisted_providers`` must see alongside the auth.db login rows; a
+    reader consulting only auth.db hides every API-key provider configured by
+    hand, and both are sanctioned flows.
     """
     from local_operator.credentials import CredentialManager
+    from local_operator.providers.registry import store_provider_key
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    manager = CredentialManager(tmp_path)
-    manager.set_credential(key_name, "sk-persisted")
+    manager = CredentialManager.readonly(tmp_path)
+    store_provider_key(key_name, "row-value", base=tmp_path)
     controller.credential_manager = manager
 
     persisted = controller.persisted_providers()
@@ -3720,18 +3723,19 @@ def test_persisted_providers_includes_a_legacy_credential_manager_key(
     assert provider_id in persisted
 
 
-def test_persisted_providers_ignores_an_empty_legacy_value(
+def test_persisted_providers_ignores_a_provider_with_no_row(
     controller, monkeypatch, tmp_path
 ) -> None:
-    """A key present but blank is not a credential; the legacy file keeps such
-    rows, and treating one as a login sends the picker fetching anonymously."""
+    """A provider with no store row and no login row is not a credential.
+
+    ``lop credential delete`` removes the row, and treating an absence as a login
+    sends the picker fetching anonymously.
+    """
     from local_operator.credentials import CredentialManager
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    manager = CredentialManager(tmp_path)
-    manager.set_credential("OPENROUTER_API_KEY", "")
-    controller.credential_manager = manager
+    controller.credential_manager = CredentialManager.readonly(tmp_path)
 
     persisted = controller.persisted_providers()
     assert persisted is not None

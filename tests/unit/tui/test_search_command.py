@@ -135,6 +135,10 @@ def test_chain_markers_carry_the_shared_ink(tmp_path) -> None:
     from rich.style import Style
 
     from local_operator.credentials import CredentialManager
+
+    # A provider-class store ROW (PR2a): the plaintext file leg is gone, so the
+    # row is what the resolver and the status rows read.
+    from local_operator.providers.registry import store_provider_key
     from local_operator.tui import theme as theme_mod
     from local_operator.tui.app import _search_chain_text
     from local_operator.web_search.models import WebSearchSettings
@@ -145,8 +149,8 @@ def test_chain_markers_carry_the_shared_ink(tmp_path) -> None:
         provider_statuses,
     )
 
-    credentials = CredentialManager(tmp_path / "config")
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    credentials = CredentialManager.readonly(tmp_path / "config")
+    store_provider_key("DEEPSEEK_API_KEY", "stored", base=tmp_path / "config")
     settings = WebSearchSettings(providers=["duckduckgo", "brave", "deepseek"])
     statuses = provider_statuses(settings, credentials)
 
@@ -193,10 +197,9 @@ def test_every_state_word_has_its_own_ink() -> None:
 async def test_search_order_notice_names_the_paid_landing(monkeypatch, tmp_path) -> None:
     """Round-2 U2-1 on this surface: the receipt is derived, not hardcoded."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    from local_operator.credentials import CredentialManager
-    from local_operator.paths import config_dir
+    from local_operator.providers.registry import store_provider_key
 
-    CredentialManager(config_dir()).set_credential("DEEPSEEK_API_KEY", "stored")
+    store_provider_key("DEEPSEEK_API_KEY", "stored")
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
 

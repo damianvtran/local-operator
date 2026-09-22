@@ -1783,7 +1783,15 @@ class _FakeClock:
     def time(self) -> float:
         return 1_700_000_000.0
 
-    def strftime(self, _fmt: str) -> str:
+    def localtime(self, _timestamp: float) -> str:
+        # ``_note_quiet_plane`` formats the instant a plane last reported, and it is
+        # reached from ``beat`` — which the cells in the executing-loop section drive
+        # directly, so this pair has to exist for them. A fixed string is enough: the
+        # assertion those cells make is about the DEADLINE, and what this renders is a
+        # human-readable echo of it.
+        return "2026-01-01 00:00:00"
+
+    def strftime(self, _fmt: str, _stamp: object = None) -> str:
         return "2026-01-01 00:00:00"
 
 
@@ -3271,6 +3279,932 @@ def test_the_supervisors_attempts_are_spaced_by_the_tick_itself() -> None:
         f"cost two heartbeats: every grace and deadline figure in its docstring would be "
         f"wrong again"
     )
+
+
+# ============================================================================
+# PARKED vs EXECUTING: the liveness leg tells them apart by the loop's FRAME
+# ============================================================================
+#
+# WHY THIS SECTION EXISTS. Measured on this machine's own dump store on 2026-09-22
+# (40 files, 37 fired): in 20 of the 37 the workload loop's stack ran through this
+# tree's per-event subagent projection path -- `_run_turn -> _emit -> handler ->
+# _refresh_state -> set_subagent_details` and the `_publish_busy -> _publish_subagents
+# -> subagent_counts -> nodes -> node -> _describe` walk -- i.e. the loop was EXECUTING
+# the runtime's own code when the deadline expired, not parked in a call it never
+# returned from. The bound cannot see "the loop is running" from a stamp, because the
+# stamp is what a loop busy in its own code fails to deliver, so the sampler now
+# watches the loop's frame as a second sign of life.
+#
+# THE CELLS BELOW ARE THE TWO HALVES OF THE CLAIM, and neither can stand alone:
+# a FRAME THAT MOVES must not be cut (or the fairness fix is decorative) and a FRAME
+# THAT FROZEN must still be cut (or the 2026-09-20 incident the bound was written for
+# goes unbounded). The second half is the one a naive reading of the fix breaks, so it
+# is tested in BOTH of the shapes it really occurs in: a GIL-releasing park, where the
+# sampler keeps looking and must DECLINE to abstain, and a GIL-HOLDING C call, where no
+# Python thread runs at all.
+
+
+class _Frame:
+    """Just enough of a frame for the observation: the three fields it reads."""
+
+    def __init__(self, filename: str, lineno: int, function: str) -> None:
+        self.f_code = SimpleNamespace(co_filename=filename, co_name=function)
+        self.f_lineno = lineno
+
+
+class _FakeSys:
+    """A ``sys`` whose ``_current_frames`` a cell can drive, keyed by thread ident."""
+
+    def __init__(self) -> None:
+        self.frames: dict[int, _Frame] = {}
+
+    def _current_frames(self) -> dict[int, _Frame]:
+        return dict(self.frames)
+
+
+def _observed_dump(tmp_path: Path, pid: int) -> tuple[Path, Any]:
+    """A dump under the directory the READERS resolve, so ``executing_planes`` sees it."""
+    dump = stall_watchdog.dump_path(pid, tmp_path)
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    handle = dump.open("w", encoding="utf-8")
+    handle.write(f"{stall_watchdog.ARM_MARKER}test header\n")
+    handle.flush()
+    return dump, handle
+
+
+def _watch_this_thread(armed: Any, plane: str, frames: dict[int, "_Frame"], frame: "_Frame") -> int:
+    """Learn THIS thread as a plane's loop, with ``frame`` visible under a fake sys.
+
+    The production learn site is ``beat`` (see ``_Armed.loop_thread``); the cells in
+    this section drive the observation directly, so they perform the same two steps
+    it does. THE THREAD HAS TO BE REAL AND LIVE: the observation asks ``is_alive()``
+    before it reads a frame, so a stand-in object here would be testing the fixture
+    rather than the module.
+    """
+    thread = threading.current_thread()
+    armed.loop_thread[plane] = thread
+    ident = thread.ident
+    assert ident is not None, "the test thread has no ident, so no frame can be read"
+    frames[ident] = frame
+    return ident
+
+
+def test_a_moving_frame_is_observed_and_a_still_one_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The observation itself, on a controlled frame: movement, not wedgedness.
+
+    Driven through ``sys._current_frames`` rather than by parking a real thread,
+    because the claim is about the DISCRIMINATOR and a real parked thread can only
+    ever show one of its two answers. Each assertion is a different reason the frame
+    might not read as movement, and each has to fall on the correct side:
+    the first look has nothing to compare against, an unchanged frame is a park, a
+    changed line or a changed function is execution, and a frame that cannot be read
+    is not movement either — inventing a sign of life from an unreadable frame would
+    extend the bound on exactly the runtime that cannot be looked at.
+
+    AND THE OBSERVATION IS NOT THE EXTENSION, which is what the closing assertion
+    pins: none of this moves ``sign_of_life``. The timestamp the deadline is measured
+    from has exactly ONE writer, the granted path in ``_extend_for_execution``, so a
+    reader may see movement recorded in the dump on a run that was then cut at the
+    bound — the refused hand-off. Letting the observation move the deadline is the
+    defect ``test_a_raising_probe_does_not_move_the_deadline_a_sibling_beats_on``
+    exists for.
+    """
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+    dump, handle = _observed_dump(tmp_path, 4243)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4243, lambda: ("still", True))
+    # THE SIBLING IS PARKED FAR OUT, and it has to be stated rather than left to the
+    # seed: ``_Armed.__init__`` stamps the SERVING plane with the host's own
+    # ``time.monotonic()``, whose ORIGIN differs by machine (seconds since boot on a CI
+    # runner, hours on a long-lived host). Leaving it implicit made the closing
+    # deadline assertion depend on which of the two stamps was earlier, which is how it
+    # passed here and failed on the runner (``assert 502.78 == (507.0 + 4.0)``).
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+
+    # THE FIRST LOOK: nothing to compare against, so nothing is executing. This is
+    # what keeps a moment of silence after a beat from reading as a moving loop.
+    assert armed.observe_execution(500.0) == ((), ())
+    assert armed.last_move == {}, "the first look claimed movement out of nothing"
+    # THE SAME FRAME: a park, in the one shape the bound exists for.
+    assert armed.observe_execution(501.0) == ((), ())
+    assert (
+        armed.sign_of_life(stall_watchdog.WORKLOAD) == 100.0
+    ), "an unchanged frame moved the plane's sign of life"
+    # A DIFFERENT LINE: executing, and the observation is dated.
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    assert armed.observe_execution(502.0) == (
+        (stall_watchdog.WORKLOAD,),
+        (stall_watchdog.WORKLOAD,),
+    )
+    assert armed.last_move[stall_watchdog.WORKLOAD] == 502.0
+    assert (
+        armed.sign_of_life(stall_watchdog.WORKLOAD) == 100.0
+    ), "the observation alone moved the deadline, so a refused hand-off would too"
+    # A DIFFERENT FUNCTION, same line: still executing — the triple, not the line.
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "other_walk")
+    moved, noted = armed.observe_execution(503.0)
+    assert moved == (stall_watchdog.WORKLOAD,)
+    assert moved and not noted, (
+        "the SAME stretch opened a second record, so the artifact grows per look "
+        "rather than per stretch"
+    )
+    assert armed.last_move[stall_watchdog.WORKLOAD] == 503.0
+    # A FRAME THAT CANNOT BE READ is not movement.
+    del fake_sys.frames[ident]
+    assert armed.observe_execution(504.0) == ((), ())
+    assert (
+        armed.last_move[stall_watchdog.WORKLOAD] == 503.0
+    ), "a frame that could not be read was counted as a sign of life"
+    # A FRAME THAT COMES BACK IS A NEW BASELINE, not a movement: there is nothing to
+    # compare it against, exactly as on the first look. Inventing a sign of life from
+    # a gap would be claiming progress on the strength of being unable to look.
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    assert armed.observe_execution(505.0) == ((), ())
+    assert armed.last_move[stall_watchdog.WORKLOAD] == 503.0
+    # ...AND A STRETCH ENDS WHEN THE LOOP STAMPS FOR ITSELF AGAIN, not when a single
+    # look happens to catch the same line twice: the top frame alternates between a
+    # call and its caller, so a rule keyed on one still look would re-record the same
+    # stretch several times a second. This is the stamp, and the next movement after
+    # it is therefore a NEW stretch.
+    fake_sys.frames[ident] = _Frame("loop.py", 13, "walk")
+    moved, noted = armed.observe_execution(506.0)
+    assert moved == (stall_watchdog.WORKLOAD,)
+    assert not noted, "a gap in readability ended the stretch, but nothing reported"
+    armed.last_beat[stall_watchdog.WORKLOAD] = 507.0
+    fake_sys.frames[ident] = _Frame("loop.py", 14, "walk")
+    moved, noted = armed.observe_execution(508.0)
+    assert moved == (stall_watchdog.WORKLOAD,)
+    assert noted == (
+        stall_watchdog.WORKLOAD,
+    ), "a stretch after the loop reported for itself was not recorded as its own"
+    # A PLANE WITH NO LEARNED THREAD IS NEVER OBSERVED — the never-engaged class, and
+    # why the fix cannot reach it.
+    assert stall_watchdog.SERVING not in armed.loop_thread
+    # AND NOTHING ABOVE GRANTED AN EXTENSION: the observation is complete and the
+    # deadline is still the plane's own stamp plus the bound.
+    assert armed.executing_at == {}, "an observation moved the deadline without a grant"
+    assert (
+        armed.deadline() == armed.last_beat[stall_watchdog.WORKLOAD] + 4.0
+    ), "the observation moved the deadline the bound fires on"
+    handle.close()
+
+
+def test_a_recycled_ident_does_not_extend_a_plane_whose_loop_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DEAD PLANE IS CUT EVEN WHEN ITS IDENT IS TAKEN BY A LIVE THREAD.
+
+    The observation used to key on ``threading.get_ident()``, which CPython RECYCLES:
+    on this host six sequential short-lived threads collapsed to one distinct ident.
+    Once the plane's loop thread had ended, ``sys._current_frames()[ident]`` began
+    returning some OTHER live thread's frames, so an executing stranger read as the
+    dead plane still working — ``executing_at`` advanced and the liveness leg abstained
+    on a plane with no reporter, indefinitely. That is precisely the fail-safe the tick
+    supervision documents (``_watch_stall_beats``: a plane whose reporter is gone is
+    ended one deadline after its last stamp), so the module was defeating its own
+    promise. The old cells only covered the shape where the ident is ABSENT from the
+    frame map, which is the wrong shape for a recycled one — hence this cell.
+
+    THE CELL ASSERTS ITS OWN PRECONDITION: the live thread must really hold the dead
+    thread's ident, or the recycling it exists to exercise did not happen and the
+    rest of the assertions would pass vacuously.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump, handle = _observed_dump(tmp_path, 4251)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4251, lambda: ("still", True))
+    # The learn site itself, not a hand-written field: the plane is learned by a beat
+    # ISSUED FROM the short-lived thread, exactly as a runtime learns it.
+    monkeypatch.setattr(stall_watchdog, "_ARMED", armed)
+    ended = threading.Thread(
+        target=lambda: stall_watchdog.beat(stall_watchdog.WORKLOAD), name="dead-loop", daemon=True
+    )
+    ended.start()
+    ended.join(timeout=5)
+    assert not ended.is_alive(), "the plane's loop thread did not end, so nothing is dead"
+    assert armed.loop_thread[stall_watchdog.WORKLOAD] is ended
+    dead_ident = ended.ident
+    assert dead_ident is not None
+
+    # A LIVE THREAD TAKES THE SAME IDENT. Spawned one at a time and joined unless it
+    # reused the dead thread's ident, because that reuse is the whole mechanism.
+    live: threading.Thread | None = None
+    for _ in range(64):
+        candidate = threading.Thread(target=lambda: time.sleep(30), name="ident-thief", daemon=True)
+        candidate.start()
+        if candidate.ident == dead_ident:
+            live = candidate
+            break
+        candidate.join(timeout=5)
+    assert live is not None, (
+        "no short-lived thread reused the dead loop's ident, so this cell cannot say "
+        "anything about the recycled-ident shape"
+    )
+    assert live.is_alive()
+
+    # Its frames, under the SAME ident the dead plane is keyed by, and moving between
+    # the two looks below — which is what an ident-keyed lookup would read as the dead
+    # plane executing.
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    fake.wall = 101.0
+    monkeypatch.setattr(stall_watchdog, "_ARMED", armed)
+    fake_sys.frames[dead_ident] = _Frame("stranger.py", 11, "moving")
+    try:
+        assert armed.observe_execution(500.0) == ((), ())
+        fake_sys.frames[dead_ident] = _Frame("stranger.py", 12, "moving")
+        assert armed.observe_execution(501.0) == (
+            (),
+            (),
+        ), "a live stranger's frames were read as the dead plane executing"
+        # THE ASSERTION THE FINDING ASKS FOR: the plane is CUT, not abstained. Its
+        # deadline is its own last stamp plus the bound, untouched by the stranger.
+        assert armed.executing_at == {}, "the dead plane was granted an extension"
+        assert armed.sign_of_life(stall_watchdog.WORKLOAD) == 100.0
+        assert armed.pin() == (stall_watchdog.WORKLOAD, 104.0), (
+            "the deadline a sibling's beat would re-arm from moved for a plane whose "
+            "loop is gone"
+        )
+        # ...and the sibling's own beat re-arms the SHARED timer from that same
+        # unchanged deadline, which is the path the extension would have travelled.
+        spy.armed.clear()
+        stall_watchdog.beat(stall_watchdog.SERVING)
+        assert spy.armed, "the sibling's beat did not reach the timer"
+        assert spy.armed[-1][0] == pytest.approx(
+            104.0 - fake.wall, abs=1e-9
+        ), "a beat re-armed the shared timer for an extension a dead plane never earned"
+    finally:
+        if live is not None:
+            live.join(timeout=0)
+        handle.close()
+
+
+def test_a_raising_probe_does_not_move_the_deadline_a_sibling_beats_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE REFUSAL IS TOTAL: an unevaluable probe cannot move the shared deadline.
+
+    Property (a) is stated in three places — the module docstring,
+    ``_extend_for_execution`` and ``_read_probe``: the extension is refused unless a
+    probe was supplied AND answered on that very sample, so a runtime whose progress
+    leg is inert or unevaluable keeps today's behaviour rather than becoming
+    unbounded. THE REFUSAL USED TO GATE ONLY THE SAMPLER'S OWN RE-ARM: the timestamp
+    was written by the OBSERVATION, before any leg decided, and ``pin``/``deadline`` —
+    which a ``beat`` on the OTHER plane re-arms the shared C timer from — read it
+    unconditionally. So an executing loop with a raising probe survived on a runtime
+    whose sibling kept stamping: the deadline never counted down.
+
+    The discriminating assertion is therefore on ``pin()`` and on the duration a
+    sibling's ``beat`` actually hands the C timer, not on whether the sampler armed
+    anything: ``spy.armed == []`` was already true and stayed true, which is why the
+    pre-fix cell was green while the process was unbounded.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    def broken() -> tuple[object, bool]:
+        raise RuntimeError("the probe cannot read live session state right now")
+
+    dump, handle = _observed_dump(tmp_path, 4252)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4252, broken)
+    monkeypatch.setattr(stall_watchdog, "_ARMED", armed)
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    fake.wall = 101.0
+
+    # Two samples with the loop's frames MOVING, which is the state the extension
+    # exists for — and the probe raises for both, so neither earns one.
+    assert stall_watchdog._sample(armed) is False
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    fake.wall += 1.0
+    assert stall_watchdog._sample(armed) is False
+
+    assert armed.executing_at == {}, "the refused hand-off still wrote the extension"
+    assert armed.pin() == (
+        stall_watchdog.WORKLOAD,
+        104.0,
+    ), "an unevaluable probe moved the deadline, so the runtime is unbounded"
+    # THE SIBLING IS THE CARRIER, and this is the number it hands the C timer.
+    spy.armed.clear()
+    stall_watchdog.beat(stall_watchdog.SERVING)
+    assert spy.armed, "the sibling's beat did not reach the timer"
+    assert spy.armed[-1][0] == pytest.approx(104.0 - fake.wall, abs=1e-9), (
+        f"the sibling's beat re-armed for {spy.armed[-1][0]}s instead of counting down "
+        f"from the plane's own stamp plus the bound"
+    )
+    handle.close()
+
+
+def test_a_failed_re_arm_leaves_the_timer_on_the_shorter_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ONE BRANCH THAT DECIDES "fire early rather than late", exercised.
+
+    An extension that cannot be handed to ``faulthandler`` leaves the timer on its
+    PREVIOUS deadline, which is shorter than the extension would have been — the safe
+    direction, and a claim that was only commented before this cell existed. What must
+    NOT happen is the alternative reading, that a failed re-arm withdraws the bound:
+    the deadline the extension recorded stays in force, so every later beat and the
+    progress leg still measure from it.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+
+    class _RaisingFaulthandler(_FakeFaulthandler):
+        """A C timer that refuses every arming, which is the branch under test."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            #: What the extension TRIED to hand the timer, so "did it try" and "did it
+            #: land" stay separate facts.
+            self.attempts: list[float] = []
+
+        def dump_traceback_later(self, seconds: float, **kwargs: Any) -> None:
+            self.attempts.append(seconds)
+            raise OSError("the C timer refused this arming")
+
+    spy = _RaisingFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump, handle = _observed_dump(tmp_path, 4253)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4253, lambda: ("still", True))
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    fake.wall = 101.0
+
+    assert stall_watchdog._sample(armed) is False
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    fake.wall += 1.0
+    assert stall_watchdog._sample(armed) is False, "a failed re-arm fired the bound"
+    assert spy.attempts, "the extension never reached the C timer at all"
+    # The extension is IN FORCE even though the arming failed: a later beat measures
+    # from it, which is what keeps a transient arming failure from being a way for the
+    # hand-off to be silently withdrawn.
+    assert armed.executing_at == {stall_watchdog.WORKLOAD: fake.wall}
+    assert armed.deadline() == fake.wall + 4.0
+    handle.close()
+
+
+def test_the_abstention_records_the_observation_and_re_arms_the_timer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extension, its record, and the refusal that keeps it bounded.
+
+    Two things have to hold at once and only one of them is visible from the
+    deadline: the timer is pushed out (so the process is not cut), and the dump says
+    why (so a reader is not left inferring it from an absence). The third assertion
+    is the bound's teeth — with NO probe there is no progress leg to hand the runtime
+    to, so the observation is recorded and the deadline is NOT pushed out.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump, handle = _observed_dump(tmp_path, 4244)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4244, lambda: ("still", True))
+    # The OTHER plane kept stamping, so the deadline in play is the executing one's.
+    # Without this the serving plane's own silence is the earliest deadline and the
+    # sibling names IT, which is correct behaviour and not what this cell is about.
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+    assert stall_watchdog._sample(armed) is False, "the first look fired"
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    fake.wall += 1.0
+    assert stall_watchdog._sample(armed) is False, "an executing loop was cut"
+    assert spy.armed, "the abstention never reached the C timer, so the bound still ran out"
+    assert stall_watchdog.executing_planes(4244, tmp_path) == (
+        stall_watchdog.WORKLOAD,
+    ), f"the dump does not say the loop was executing: {dump.read_text(encoding='utf-8')!r}"
+    # THE SIBLING NAMES THE DEADLINE THE TIMER NOW HOLDS, so a reader with no dump open
+    # can still see which plane's silence the re-arm was measured against.
+    _epoch, leg = _deadline_record(tmp_path, 4244)
+    assert leg == stall_watchdog.WORKLOAD, leg
+
+    # THE REFUSAL. Same observation, no probe: the record still lands (the file's
+    # reader is asking what the loop was doing), and nothing re-arms — which is the
+    # only thing standing between a moving frame and an unbounded process.
+    bare_dump, bare_handle = _observed_dump(tmp_path, 4245)
+    bare = stall_watchdog._Armed(bare_dump, bare_handle, 4.0, 4245, None)
+    bare.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    bare.last_beat[stall_watchdog.SERVING] = 9_999.0
+    bare_ident = _watch_this_thread(
+        bare, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+    assert stall_watchdog._sample(bare) is False
+    spy.armed.clear()
+    fake_sys.frames[bare_ident] = _Frame("loop.py", 13, "walk")
+    fake.wall += 1.0
+    assert stall_watchdog._sample(bare) is False
+    assert spy.armed == [], (
+        "the bound abstained with no progress leg to hand the runtime to, so a "
+        "frames-moving loop would now be unbounded"
+    )
+    assert bare.executing_at == {}, "the refused hand-off moved the deadline anyway"
+    assert bare.deadline() == 104.0
+    assert stall_watchdog.executing_planes(4245, tmp_path) == (stall_watchdog.WORKLOAD,)
+    handle.close()
+    bare_handle.close()
+
+
+def test_the_observation_sees_calls_rather_than_instruction_level_progress() -> None:
+    """WHY THE RIGS LOOK THE WAY THEY DO: the discriminator's reach, measured.
+
+    ``frame.f_lineno`` read off a FOREIGN frame is refreshed at a CALL, not per
+    instruction, so a loop of bare arithmetic reads as one frozen line however fast it
+    runs while a loop that calls something does not. That is a property of CPython
+    rather than of this module, and it decides which shapes the abstention can rescue —
+    so it is pinned here rather than left implied by a rig that happens to have calls in
+    it. The bounds are deliberately loose (the measurement behind them is 0 of 60
+    against 35 of 55): what this asserts is the DIRECTION, and a loaded host must not be
+    able to turn that into a flake.
+
+    THE CONSEQUENCE IS PART OF THE CLAIM, and it is not an exemption: a running loop
+    that holds one call-free frame is still read as silent and is still cut by the
+    liveness leg. See the module docstring — the PROGRESS leg is what bounds that shape,
+    because it burns a core with its work standing still.
+    """
+
+    def leaf(value: int) -> int:
+        return value + 1
+
+    def bare(running: list[bool]) -> None:
+        # NO CALL IN THE LOOP AT ALL: `running[0]` is a subscript, and using
+        # `running[0]` rather than an Event is the whole point — an `is_set()` in the
+        # condition would be a call and would make this the other shape.
+        total = 0
+        while running[0]:
+            total += 1
+            total += 2
+            total += 3
+
+    def calling(running: list[bool]) -> None:
+        total = 0
+        while running[0]:
+            total += leaf(1)
+            total += leaf(2)
+            total += leaf(3)
+
+    def changes_seen(worker: Any) -> int:
+        """How often the top frame triple differs between two 20 ms looks.
+
+        SIXTY LOOKS AND NOT TWENTY, because the assertion is a COUNT of differences
+        and the count is a sampled statistic: measured under fleet load, a 20-look run
+        once came back with 2 where the same code returned 3-5 unloaded
+        (``assert 2 >= 3``), which is a flake in the CELL and not a thinner
+        discriminator — the underlying measurement is 42/65 against 0/53. The extra
+        ~0.8 s of runtime is what buys a margin the host's load cannot close.
+        """
+        running = [True]
+        thread = threading.Thread(target=worker, args=(running,), daemon=True)
+        thread.start()
+        ident = thread.ident
+        assert ident is not None, "the worker did not start, so nothing was sampled"
+        try:
+            time.sleep(0.1)
+            seen, previous = 0, None
+            for _ in range(60):
+                frame = sys._current_frames().get(ident)
+                if frame is not None:
+                    triple = (frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name)
+                    if previous is not None and triple != previous:
+                        seen += 1
+                    previous = triple
+                time.sleep(0.02)
+            return seen
+        finally:
+            running[0] = False
+            thread.join(timeout=5)
+
+    bare_changes = changes_seen(bare)
+    call_changes = changes_seen(calling)
+
+    assert call_changes >= 3, (
+        f"a call-heavy loop showed only {call_changes} frame changes in 60 looks, so "
+        f"the observation cannot see the projection walk it was added for"
+    )
+    assert bare_changes <= 4, (
+        f"a call-free loop showed {bare_changes} frame changes, which contradicts the "
+        f"measured property this design (and every rig here) is built on"
+    )
+    assert call_changes > bare_changes
+
+
+#: A synchronous stretch, as a child: no ``await`` and no beat FROM THE WORKLOAD LOOP,
+#: with a body long enough that the frame this thread is in differs between any two
+#: looks. A HEALTHY SERVING PLANE runs beside it, which is the shape the real fires
+#: have: a beat on one plane re-arms the timer toward the other's deadline (the two
+#: most recent dumps came due at 2.28 s and 12.29 s rather than at the bound, for
+#: exactly that reason), so the deadline in play here is the STARVED plane's and the
+#: abstention is able to move it. A child with no serving tick would fire on the
+#: never-engaged plane instead -- a different case, and a correct fire.
+#: ``in-flight`` is the progress leg's own second clause, and the pair of cells below
+#: adds it and removes it to separate the two ways this process can be spared.
+_EXECUTING_CHILD = """
+import os
+import pathlib
+import sys
+import threading
+import time
+
+from local_operator.session.runtime import stall_watchdog
+
+bound = float(sys.argv[1])
+sentinel = pathlib.Path(sys.argv[2])
+in_flight = sys.argv[3] == "in-flight"
+
+
+def stretch(seconds):
+    # A CALL per iteration, not bare arithmetic, and that is load-bearing rather than
+    # decorative: `frame.f_lineno` on a FOREIGN frame is refreshed at calls, so a body
+    # of pure `total += 1` reads as one frozen line however fast it runs (measured 0 of
+    # 60 reads changing) and this child would be testing the park case instead. The
+    # projection walk this models is all calls.
+    end = time.monotonic() + seconds
+    total = 0
+    while time.monotonic() < end:
+        total += leaf(1)
+        total += leaf(2)
+        total += leaf(3)
+        total += leaf(4)
+        total += leaf(5)
+        total += leaf(6)
+        total += leaf(7)
+        total += leaf(8)
+    return total
+
+
+def leaf(value):
+    return value + 1
+
+
+probe = (lambda: ("still", True)) if in_flight else (lambda: ("still", False))
+assert stall_watchdog.arm(seconds=bound, probe=probe), "the child could not arm the bound"
+print(f"armed:{os.getpid()}", flush=True)
+
+
+def serving_tick():
+    # A HEALTHY SERVING PLANE: a separate thread, reporting on its own cadence, so the
+    # timer is re-armed toward the WORKLOAD plane's deadline rather than never being
+    # re-armed at all.
+    while True:
+        time.sleep(bound / 10)
+        stall_watchdog.beat(stall_watchdog.SERVING)
+
+
+threading.Thread(target=serving_tick, name="serving-tick", daemon=True).start()
+# The stamp a starved tick leaves behind, and what teaches the bound WHICH thread's
+# frame to watch. Without it the plane has no loop thread and cannot be observed at
+# all, which is the behaviour the never-engaged cells already pin.
+stall_watchdog.beat(stall_watchdog.WORKLOAD)
+print(f"stretch:{stretch(bound * 3)}", flush=True)
+sentinel.write_text("the stretch returned", encoding="utf-8")
+sys.stdout.flush()
+# Exit WITHOUT disarming, so the artifact survives as the thing this cell reads: the
+# bound never fired, so nothing removed it (`os._exit` skips the clean-exit unlink).
+os._exit(0)
+"""
+
+
+def test_an_executing_loop_with_a_step_in_flight_is_not_cut(tmp_path: Path) -> None:
+    """THE FAIRNESS CASE: a loop past the bound, executing, and spared.
+
+    The shape the 2026-09-22 dumps caught: the workload loop inside its own code for
+    longer than the bound, so its tick cannot run and no stamp arrives, while the
+    work is legitimate — a step of this process's own is executing, which is the
+    progress leg's second clause and the reason both legs abstain here. Before the
+    fix this child is ``_exit(1)``d at the bound; the sentinel is what says it lived,
+    and the absence of a fired marker is what says WHY it lived rather than being a
+    stopwatch that happened to be generous.
+    """
+    sentinel = tmp_path / "returned.txt"
+    result = _run_script(
+        _EXECUTING_CHILD,
+        tmp_path,
+        args=(str(CHILD_BOUND_S), str(sentinel), "in-flight"),
+    )
+
+    assert result.returncode == 0, (
+        f"the bound cut a loop that was executing with a step in flight: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    assert sentinel.is_file(), "the stretch did not finish"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    dump = _dump_for(tmp_path, pid)
+    text = dump.read_text(encoding="utf-8")
+    assert (
+        stall_watchdog.FIRED_MARKER not in text
+    ), f"the bound fired on a working loop: {text[:2000]!r}"
+    assert stall_watchdog.executing_planes(pid, tmp_path / "logs") == (
+        stall_watchdog.WORKLOAD,
+    ), f"the dump does not record the loop executing: {text!r}"
+
+
+def test_the_executing_loop_hands_the_runaway_to_the_progress_leg(tmp_path: Path) -> None:
+    """THE BOUNDING ARGUMENT, EXERCISED: the abstention hands over, it does not drop.
+
+    Same child, one argument different: no step is in flight, so the progress leg has
+    a run to judge and fires on it — while the liveness leg, which would have cut the
+    same child a bound earlier, abstains. Both markers in the one artifact is the
+    whole claim: ``executing`` is the liveness leg declining, ``no progress`` is the
+    other leg answering, on the same bound and with the same exit.
+    """
+    sentinel = tmp_path / "returned.txt"
+    result = _run_script(
+        _EXECUTING_CHILD,
+        tmp_path,
+        args=(str(CHILD_BOUND_S), str(sentinel), "no-step"),
+    )
+
+    assert result.returncode == 1, (
+        f"a loop that ran without advancing was not ended at all: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    assert not sentinel.exists(), "the stretch finished, so nothing was judged"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+    assert (
+        stall_watchdog.PROGRESS_MARKER in text
+    ), f"the progress leg did not fire on a frames-moving runaway: {text[:2000]!r}"
+    assert stall_watchdog.executing_planes(pid, tmp_path / "logs") == (
+        stall_watchdog.WORKLOAD,
+    ), f"the liveness leg did not abstain for the executing loop: {text[:2000]!r}"
+
+
+#: A park that RELEASES the GIL, so the sampler keeps looking at a frame that never
+#: changes. This is the cell that catches an abstention which fires on "we have a
+#: frame" rather than on "the frame MOVED" — the difference between the halves of
+#: this section.
+_FROZEN_WAIT_CHILD = """
+import os
+import sys
+import threading
+import time
+
+from local_operator.session.runtime import stall_watchdog
+
+bound = float(sys.argv[1])
+assert stall_watchdog.arm(seconds=bound, probe=lambda: ("still", False)), (
+    "the child could not arm the bound"
+)
+print(f"armed:{os.getpid()}", flush=True)
+
+
+def serving_tick():
+    # A HEALTHY SERVING PLANE, so the ONLY silent plane is the frozen WORKLOAD one.
+    # Without it the bound would fire on the never-engaged serving plane's deadline
+    # and this cell would pass even if the abstention wrongly rescued a frozen frame.
+    while True:
+        time.sleep(bound / 10)
+        stall_watchdog.beat(stall_watchdog.SERVING)
+
+
+threading.Thread(target=serving_tick, name="serving-tick", daemon=True).start()
+stall_watchdog.beat(stall_watchdog.WORKLOAD)
+
+# PARKED, WITH THE SAMPLER STILL ALIVE: `Event.wait` releases the GIL, so the
+# sampler goes on sampling while this thread's frame sits on one line forever.
+threading.Event().wait(600)
+"""
+
+
+def test_a_frozen_frame_is_still_cut_while_the_sampler_keeps_sampling(tmp_path: Path) -> None:
+    """The park this bound exists for, in the shape where the observation RUNS.
+
+    ``_PARKED_CHILD`` (the GIL-holding park) covers the case where nothing in the
+    process can run; this covers the case where the sampler is running normally and
+    must nonetheless DECLINE to abstain, because a frame that has not moved is the
+    reading the bound was written for. A plane silent for the bound with a still frame
+    is the one state that is indistinguishable from the 2026-09-20 death from inside
+    the process, and it must keep firing.
+    """
+    result = _run_script(_FROZEN_WAIT_CHILD, tmp_path, args=(str(CHILD_BOUND_S),))
+
+    assert result.returncode == 1, f"a parked loop was spared: {result.stdout!r} {result.stderr!r}"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text[:2000]
+    assert (
+        stall_watchdog.executing_planes(pid, tmp_path / "logs") == ()
+    ), f"a frozen frame was recorded as an executing loop: {text[:2000]!r}"
+
+
+#: The 2026-09-20 shape in mechanism: a C call that holds the GIL for its whole
+#: duration, the stand-in for ``_sre_SRE_Pattern_search``. ``ctypes.PyDLL`` is the
+#: binding that does NOT release the GIL, so no Python thread in this process --
+#: the sampler included -- runs again, and the serving plane cannot report either.
+#: That is the shape's own property rather than a choice made here, and it is why
+#: this cell is the weaker of the two frozen ones: no implementation could rescue it,
+#: so what it guards is the ABSTENTION not lifting a hard park (`_FROZEN_WAIT_CHILD`
+#: is the cell that can fail on a wrong implementation).
+_FROZEN_MATCHER_CHILD = """
+import ctypes
+import os
+import sys
+
+from local_operator.session.runtime import stall_watchdog
+
+bound = float(sys.argv[1])
+assert stall_watchdog.arm(seconds=bound, probe=lambda: ("still", True)), (
+    "the child could not arm the bound"
+)
+print(f"armed:{os.getpid()}", flush=True)
+stall_watchdog.beat(stall_watchdog.WORKLOAD)
+
+lib = ctypes.PyDLL(None)
+lib.sleep.argtypes = [ctypes.c_uint]
+lib.sleep(600)
+sys.stdout.write("the parked call returned\\n")
+"""
+
+
+def test_a_frame_frozen_in_a_c_matcher_is_still_cut(tmp_path: Path) -> None:
+    """THE INCIDENT CELL: the frozen frame still fires with the abstraction in place.
+
+    The 2026-09-20 incident was 100% of the loop inside one C-level matcher for
+    1.5-7.2 h. Both legs abstain for different reasons here — no stamp can arrive and
+    the frame cannot move, so the liveness leg has nothing to extend; and a step is in
+    flight, so the progress leg has nothing to judge — which is exactly why the bound
+    has to fire on the stamp alone.
+    """
+    result = _run_script(_FROZEN_MATCHER_CHILD, tmp_path, args=(str(SHORT_BOUND_S),))
+
+    assert (
+        result.returncode == 1
+    ), f"a C-level freeze was spared: {result.stdout!r} {result.stderr!r}"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text[:2000]
+    assert stall_watchdog.executing_planes(pid, tmp_path / "logs") == ()
+
+
+#: A loop parked in its own selector, waiting on a child that never reports, with the
+#: workload tick running on the same loop — the manager-awaiting-subagents shape the
+#: operator asked about. NOT ``_AWAITING_CHILD`` above, which is the pre-existing
+#: long-await cell's rig: that one models the loop going quiet, this one models it
+#: waiting while the tick keeps running, and they are different questions.
+_AWAITING_AND_RUNNING_CHILD = """
+import asyncio
+import os
+import pathlib
+import sys
+
+from local_operator.session.runtime import stall_watchdog
+
+bound = float(sys.argv[1])
+sentinel = pathlib.Path(sys.argv[2])
+assert stall_watchdog.arm(seconds=bound, probe=lambda: ("still", False)), (
+    "the child could not arm the bound"
+)
+print(f"armed:{os.getpid()}", flush=True)
+
+
+async def beat_loop():
+    # The workload plane's tick, driven the way the runtime drives it: an asyncio
+    # task on this loop, woken by its own sleep. BOTH planes, because one silent
+    # plane is what the bound exists to catch -- a child reporting for the workload
+    # alone would be cut for the serving plane's silence and would be testing that
+    # instead of this.
+    while True:
+        await asyncio.sleep(0.15)
+        stall_watchdog.beat(stall_watchdog.WORKLOAD)
+        stall_watchdog.beat(stall_watchdog.SERVING)
+
+
+async def waiting_on_a_child():
+    # A child that never reports: the loop's own frame is parked in the selector for
+    # the whole wait, and this process burns no CPU at all.
+    await asyncio.Event().wait()
+
+
+async def main():
+    asyncio.ensure_future(beat_loop())
+    asyncio.ensure_future(waiting_on_a_child())
+    await asyncio.sleep(bound * 3)
+
+
+asyncio.run(main())
+sentinel.write_text("the wait returned", encoding="utf-8")
+print("survived", flush=True)
+stall_watchdog.disarm()
+"""
+
+
+def test_a_loop_awaiting_a_child_keeps_beating_and_is_never_cut(tmp_path: Path) -> None:
+    """THE OPERATOR'S CASE, answered: waiting on subagents is not a stall.
+
+    A manager's loop parked for three times the bound on a child that never reports,
+    burning no CPU, with its own frame still for the whole wait — spared, because an
+    ``await`` HANDS THE LOOP BACK, so the workload tick is the thing that cannot be
+    starved by a wait. This is the answer to "manager agents waiting on subagents where
+    the manager may have no activity over some period of time": a wait does not stop
+    the tick, and the tick is what the bound measures.
+
+    WHAT STILL FIRES is a loop that cannot run at all — see
+    ``test_a_frozen_frame_is_still_cut_while_the_sampler_keeps_sampling`` and
+    ``test_a_frame_frozen_in_a_c_matcher_is_still_cut``. The two together are the whole
+    design: the bound measures whether the loop can run, not whether it is busy.
+    """
+    sentinel = tmp_path / "returned.txt"
+    result = _run_script(
+        _AWAITING_AND_RUNNING_CHILD,
+        tmp_path,
+        args=(str(CHILD_BOUND_S), str(sentinel)),
+    )
+
+    assert (
+        result.returncode == 0
+    ), f"a loop awaiting a child was cut: {result.stdout!r} {result.stderr!r}"
+    assert sentinel.is_file(), "the wait did not finish"
+    assert "survived" in result.stdout, result.stdout
+    assert stall_watchdog.fired_pids(tmp_path / "logs") == set()
+
+
+def test_a_blocked_probe_does_not_hold_the_lock_a_beat_needs(tmp_path: Path) -> None:
+    """THE SECONDARY DEFECT'S REGRESSION CELL: the probe must not queue a stamp.
+
+    ``beat`` takes the same module lock the sampler does, and the production probe
+    reads LIVE session state from a foreign thread — transcript footprints, job rows,
+    a context another thread is appending to — so it can be slow for as long as that
+    state is contended. Holding the lock across it makes every stamp wait on a
+    diagnostic read, which turns a slow probe into a silent plane and a silent plane
+    into a killed runtime. THIS CELL BLOCKS: it drives the real sampler through
+    ``arm``, lets it enter a probe that waits on an Event, and requires a ``beat`` from
+    another thread to complete while that probe is still blocked. On the pre-fix code
+    the beat cannot complete until the probe returns, so the assertion is red there —
+    which is the only reason it is worth having.
+    """
+    spy = _FakeFaulthandler()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    entered, released, complete = (threading.Event() for _ in range(3))
+    worker: threading.Thread | None = None
+    try:
+
+        def probe() -> tuple[object, bool]:
+            # The shape the real one has when it is slow: it reached the state it
+            # needs and is waiting for it, with the lock NOT held around this.
+            #
+            # SEVERAL TIMES THE STAMP'S DEADLINE, and that margin is the cell's whole
+            # reliability: with both waits at 10 s the probe releases itself at the
+            # same instant the stamp's own wait expires, so whichever reaches the wire
+            # first decides a coin flip. Measured against the literal pre-fix module:
+            # 2 false greens in 8 runs, and 3 of 3 against an equivalent hand-written
+            # mutant. The pre-fix shape has the beat queued behind a lock this call
+            # holds, so it now loses deterministically instead of sometimes.
+            entered.set()
+            released.wait(60)
+            return "still", True
+
+        assert stall_watchdog.arm(
+            seconds=1.0, directory=tmp_path, pid=4246, probe=probe
+        ), "the child could not arm the bound"
+        assert entered.wait(10), "the sampler never reached the probe"
+
+        def stamp() -> None:
+            stall_watchdog.beat(stall_watchdog.WORKLOAD)
+            complete.set()
+
+        worker = threading.Thread(target=stamp, name="stamp-while-probing", daemon=True)
+        worker.start()
+        assert complete.wait(10), (
+            "a beat could not complete while the probe was running, so the probe is "
+            "holding the lock that stamps a plane"
+        )
+    finally:
+        released.set()
+        if worker is not None:
+            worker.join(timeout=10)
+        stall_watchdog.disarm()
+        monkeypatch.undo()
 
 
 # -- the EXIT LEG: a fire is not a death when work is in flight ----------------

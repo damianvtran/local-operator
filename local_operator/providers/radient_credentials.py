@@ -7,6 +7,7 @@ must nevertheless share provider precedence and the sole OAuth refresh store.
 from __future__ import annotations
 
 import asyncio
+import os
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
@@ -17,17 +18,19 @@ from local_operator.providers.registry import get_provider_definition
 
 
 def _radient_api_key(manager: CredentialManager) -> SecretStr:
-    """The `RADIENT_API_KEY` value, store-first then the legacy tier.
+    """The `RADIENT_API_KEY` value: the provider store row, then the environment.
 
-    Reads a `LOP_PROVIDER_RADIENT_API_KEY` provider-class row before
-    `CredentialManager.get_credential`, matching every other provider-key reader.
+    Store-first, matching every other provider-key reader. The legacy
+    ``credentials.env`` rung is GONE (PR2a): a name the store does not hold and
+    the environment does not export resolves to an EMPTY ``SecretStr`` rather
+    than to a file the consolidation no longer reads.
     """
     from local_operator.providers.registry import provider_secret_value
 
     stored = provider_secret_value("RADIENT_API_KEY", base=manager.config_dir)
     if stored:
         return SecretStr(stored)
-    return manager.get_credential("RADIENT_API_KEY")
+    return SecretStr(os.environ.get("RADIENT_API_KEY", ""))
 
 
 def canonical_radient_destination(base_url: str) -> bool:
@@ -56,8 +59,8 @@ async def resolve_radient_credential(
     if not canonical_radient_destination(base_url):
         # An explicit legacy gateway must not receive a centrally signed-in
         # account's bearer. Preserve its previous dedicated key lookup instead —
-        # store-first, so a RADIENT_API_KEY saved via the store outranks an
-        # ambient export and the plaintext file.
+        # store-first, so a RADIENT_API_KEY saved via the store is the only value
+        # this route resolves.
         return _radient_api_key(manager)
     owns_store = store is None
     store = store or AuthStore(manager.config_dir / "auth.db", credential_manager=manager)

@@ -25,7 +25,24 @@ from local_operator.web_search.providers import (
 
 
 def _credentials(tmp_path) -> CredentialManager:
-    return CredentialManager(tmp_path / "config")
+    """A read-only manager bound to the test's config root (PR2a).
+
+    ``readonly`` so a fixture that only reads never CREATES a
+    ``credentials.env``; keys are armed with ``_store_key`` below, which writes
+    the provider-class store row the transport actually resolves.
+    """
+    return CredentialManager.readonly(tmp_path / "config")
+
+
+def _store_key(credentials: CredentialManager, env_key: str, value: str) -> None:
+    """Arm ``env_key`` with a PROVIDER-CLASS STORE ROW under the manager's root.
+
+    The plaintext ``credentials.env`` leg is gone (PR2a), so the store row (or an
+    exported variable) is where a search transport now finds a key.
+    """
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key(env_key, value, base=credentials.config_dir)
 
 
 def test_duckduckgo_parser_unwraps_links_and_inline_markup() -> None:
@@ -84,7 +101,7 @@ async def test_tavily_uses_official_keyless_header_when_no_key_exists(tmp_path) 
 @pytest.mark.asyncio
 async def test_tavily_prefers_stored_key_over_keyless_mode(tmp_path) -> None:
     credentials = _credentials(tmp_path)
-    credentials.set_credential("TAVILY_API_KEY", "secret-key")
+    _store_key(credentials, "TAVILY_API_KEY", "secret-key")
     seen: httpx.Request | None = None
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -106,7 +123,7 @@ async def test_tavily_prefers_stored_key_over_keyless_mode(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_serpapi_accepts_legacy_serp_api_key_name(tmp_path) -> None:
     credentials = _credentials(tmp_path)
-    credentials.set_credential("SERP_API_KEY", "legacy-key")
+    _store_key(credentials, "SERP_API_KEY", "legacy-key")
     seen: httpx.Request | None = None
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -136,7 +153,7 @@ async def test_serpapi_accepts_legacy_serp_api_key_name(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_brave_uses_subscription_token_and_maps_extra_snippets(tmp_path) -> None:
     credentials = _credentials(tmp_path)
-    credentials.set_credential("BRAVE_API_KEY", "brave-key")
+    _store_key(credentials, "BRAVE_API_KEY", "brave-key")
     seen: httpx.Request | None = None
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -172,7 +189,7 @@ async def test_brave_uses_subscription_token_and_maps_extra_snippets(tmp_path) -
 @pytest.mark.asyncio
 async def test_exa_requests_query_summary_instead_of_full_page_text(tmp_path) -> None:
     credentials = _credentials(tmp_path)
-    credentials.set_credential("EXA_API_KEY", "exa-key")
+    _store_key(credentials, "EXA_API_KEY", "exa-key")
     seen: httpx.Request | None = None
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -406,7 +423,7 @@ def test_deepseek_availability_requires_env_key_or_login(tmp_path, monkeypatch) 
     monkeypatch.setattr(module, "_deepseek_login_present", lambda: True)
     assert module.provider_available("deepseek", credentials, WebSearchSettings()) is True
 
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
     assert module.provider_available("deepseek", credentials, WebSearchSettings()) is True
 
 
@@ -426,7 +443,7 @@ async def test_deepseek_transport_uses_server_tool_and_primes_balance_off_path(
         return httpx.Response(200, json=_deepseek_payload())
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         response = await PROVIDERS["deepseek"].search(
@@ -497,7 +514,7 @@ async def test_deepseek_transport_skips_on_a_cached_low_balance_verdict(tmp_path
     module._remember_deepseek_balance(False)
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     def handler(_request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("no search may be dispatched for an unfunded account")
@@ -618,7 +635,7 @@ async def test_deepseek_evidence_pass_runs_a_second_turn_and_replays_blocks(tmp_
         )
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         response = await PROVIDERS["deepseek"].search(
@@ -662,7 +679,7 @@ async def test_deepseek_evidence_failure_leaves_the_sources_intact(tmp_path) -> 
 
     handler.calls = []  # type: ignore[attr-defined]
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         response = await PROVIDERS["deepseek"].search(
@@ -689,7 +706,7 @@ async def test_deepseek_evidence_is_off_by_default(tmp_path) -> None:
         return httpx.Response(200, json=_deepseek_payload())
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         await PROVIDERS["deepseek"].search(
@@ -714,7 +731,7 @@ async def test_deepseek_evidence_failure_is_reported_not_swallowed(tmp_path) -> 
 
     handler.calls = []  # type: ignore[attr-defined]
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         response = await PROVIDERS["deepseek"].search(
@@ -766,7 +783,7 @@ async def test_a_truncated_evidence_pass_is_reported_not_passed_off_as_complete(
         )
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "sk-test-not-real")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         response = await PROVIDERS["deepseek"].search(
@@ -1198,7 +1215,7 @@ async def test_the_failure_message_fits_the_card_reason_budget(tmp_path, monkeyp
         monkeypatch.setitem(PROVIDERS, provider_id, SimpleNamespace(search=boom))
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     service = WebSearchService(
         WebSearchSettings(
             providers=["duckduckgo", "tavily", "perplexity", "deepseek"], strategy="ordered"
@@ -1253,7 +1270,7 @@ async def test_the_failure_budget_holds_for_a_double_width_reason(tmp_path, monk
         monkeypatch.setitem(PROVIDERS, provider_id, SimpleNamespace(search=boom))
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     service = WebSearchService(
         WebSearchSettings(
             providers=["duckduckgo", "tavily", "perplexity", "deepseek"], strategy="ordered"
@@ -1296,7 +1313,7 @@ def test_chain_markers_name_paid_unready_and_best_effort_legs(tmp_path) -> None:
     from local_operator.web_search.providers import chain_label, provider_statuses
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     settings = WebSearchSettings(providers=["duckduckgo", "brave", "perplexity", "deepseek"])
     label = chain_label(provider_statuses(settings, credentials))
 
@@ -1364,7 +1381,7 @@ def test_the_legend_defines_the_painted_words_and_only_those(tmp_path) -> None:
     )
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     statuses = provider_statuses(
         WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"]),
         credentials,
@@ -1713,7 +1730,7 @@ async def test_a_keyed_search_reports_usage_so_it_is_not_priced_free(tmp_path) -
         return httpx.Response(200, json=payload)
 
     manager = _credentials(tmp_path)
-    manager.set_credential("PERPLEXITY_API_KEY", "test-key")
+    _store_key(manager, "PERPLEXITY_API_KEY", "test-key")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         response = await PROVIDERS["perplexity"].search(
             client, manager, WebSearchSettings(), "query", 3
@@ -1954,7 +1971,7 @@ async def test_parallel_keyless_mcp_maps_excerpts_and_ignores_the_vendor_meter(
 @pytest.mark.asyncio
 async def test_parallel_keyed_mode_sends_authorization_and_is_unpriced(tmp_path) -> None:
     credentials = _credentials(tmp_path)
-    credentials.set_credential("PARALLEL_API_KEY", "stored-test-key")
+    _store_key(credentials, "PARALLEL_API_KEY", "stored-test-key")
     inner = {"results": [{"url": "https://docs.example/one", "title": "One", "excerpts": ["x"]}]}
     seen: dict[str, Any] = {}
 
@@ -2025,7 +2042,8 @@ def test_provider_auth_mode_truth_table_covers_the_whole_catalogue(tmp_path) -> 
     )
 
     for provider_id in PROVIDER_IDS:
-        credentials.set_credential(
+        _store_key(
+            credentials,
             {
                 "tavily": "TAVILY_API_KEY",
                 "deepseek": "DEEPSEEK_API_KEY",
@@ -2052,7 +2070,7 @@ def test_provider_statuses_reports_the_resolved_chain_not_the_stored_list(tmp_pa
     )
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     settings = WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"])
     statuses = {status.id: status for status in provider_statuses(settings, credentials)}
 
@@ -2088,7 +2106,7 @@ def test_the_status_rows_follow_the_chain_and_the_paid_leg_is_never_plain_enable
     )
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     settings = WebSearchSettings(providers=["duckduckgo", "perplexity", "deepseek"])
     chain = resolve_providers(settings, credentials)
     statuses = provider_statuses(settings, credentials)
@@ -2125,7 +2143,7 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
     )
 
     credentials = _credentials(tmp_path)
-    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    _store_key(credentials, "DEEPSEEK_API_KEY", "stored")
     settings = WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"])
     statuses = {status.id: status for status in provider_statuses(settings, credentials)}
 

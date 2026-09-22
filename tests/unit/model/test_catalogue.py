@@ -603,32 +603,40 @@ def test_the_key_is_read_from_the_apps_own_credential_store(
     """Reading only ``os.environ`` made the whole fix a no-op for the users who
     configured credentials the sanctioned way.
 
-    ``local-operator credential update`` writes the CredentialManager file and
+    ``local-operator credential update`` writes a provider-class store ROW and
     the TUI's ``/login`` writes the AuthStore; neither touches the environment.
     Their sessions streamed fine (the stream-time cascade reads those stores)
     while the band showed a 128k window and no cost forever, with the failure
-    recorded only at debug level.
+    recorded only at debug level. The row is now the shape this test arms (PR2a),
+    since the plaintext file it used to write is no longer read.
     """
-    from local_operator.credentials import CredentialManager
     from local_operator.model import configure as configure_mod
+    from local_operator.providers.registry import store_provider_key
 
     monkeypatch.delenv(env_var, raising=False)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    CredentialManager(tmp_path).set_credential(file_key, "sk-store-value")
+    # A provider-class store ROW (PR2a): the plaintext file leg is gone, so this
+    # is the sanctioned credential ``lop credential update`` now writes.
+    store_provider_key(file_key, "sk-store-value", base=tmp_path)
 
     assert configure_mod._catalogue_api_key(provider) == "sk-store-value"
 
 
 @pytest.mark.parametrize("provider, env_var, file_key", _ENV_KEY_SHAPES)
-def test_an_env_var_takes_precedence_over_the_stored_credential(
+def test_an_env_var_resolves_when_no_store_row_holds_the_key(
     tmp_path, monkeypatch, provider: str, env_var: str, file_key: str
 ) -> None:
-    """An explicit env var is the operator overriding config for one run."""
-    from local_operator.credentials import CredentialManager
+    """The env tier is BEHIND the store row, not gone.
+
+    The order the consolidation states is store-first: a value the operator
+    deliberately saved outranks an ambient export. An exported variable is still
+    a real instruction when nothing is stored, which is what this asserts — the
+    ``test_the_key_is_read_from_the_apps_own_credential_store`` sibling covers
+    the store-wins direction.
+    """
     from local_operator.model import configure as configure_mod
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    CredentialManager(tmp_path).set_credential(file_key, "sk-store-value")
     monkeypatch.setenv(env_var, "sk-env-value")
 
     assert configure_mod._catalogue_api_key(provider) == "sk-env-value"
