@@ -32,6 +32,7 @@ lop --resume SESSION_ID
 | `--name TEXT` | Set the persisted conversation title. |
 | `--tools NAMES` | Declare this run's whole reach: a comma-separated list of tools, and the only ones the session may reach — an excluded tool is unreachable by name, not merely unapproved, and delegated children inherit the bound. The declaration is **one-way** for the session's life (a second declaration may only tighten it; a host that needs a different set starts a session with it) and it is not persisted, so a later `--resume` without the flag is unrestricted. It also stands as the APPROVAL for the names it lists *where nobody can be asked* — a non-TTY run without `--control`; on a terminal, and under `--control`, every write/exec call is still put to the gate. Overrides an attached role's `tools:` allow-list, and inherits it when the flag is absent. A name this build does not have is unreachable, and reported at the end of the run. |
 | `--effort LEVEL` | Set reasoning effort using the selected model's existing validation. Unsupported levels fail before a turn. |
+| `--workstream` | Publish this run as a long-lived parallel WORKSTREAM the operator asked for: it is listed in the sidebar, `/resume` and the phone list, labelled with the session that opened it, and can be followed and steered. **Implies `--control`**, because a row can only be steered where a live discovery record exists. Only meaningful under an agent's shell — it is what selects the `agent-workstream` stamp below; at your own terminal nothing is stamped and the run is an ordinary session. Absent (the default, and what every caller that predates the flag gets) an agent-opened run is `agent-shell`: hidden everywhere and silent. |
 | `--resume [ID]` | Reopen the same transcript; omit the ID to select the most recent session. A live headless runtime is refused rather than raced; `lop --resume ID` attaches the TUI to that runtime instead. |
 | `--background` | Detach a worker. The launcher prints a bounded readiness receipt, not a claim that the work completed. |
 | `--status JOB_ID` | Print the durable job record as JSON, including terminal outcome and canonical session ID. Does not run a model; cannot combine with a prompt or run options. |
@@ -128,6 +129,42 @@ run's own output, the OPERATOR reopens it with `lop --resume <id>`, and an AGENT
 reaches it again with `lop exec --resume <id>`, because the bare `--resume` form
 is the interactive path and that stays refused for every agent shell.
 
+**The stamp has TWO values, and `--workstream` chooses the second.** Visibility
+here is an opt-in allow-list (`resume.USER_ORIGINS`) and every listing in the
+tree funnels through one scan and one predicate, so the value on disk is the
+whole decision. `agent-shell` is the default and means *ephemeral*: hidden from
+the sidebar, the `/resume` picker and the phone's history, and silent — the run's
+own runtime raises no completion banner, because a session the operator's
+listings hide must not put anything on his screen (the delegated run's
+supervising session owns it, and the durable records keep it findable).
+`--workstream` writes `agent-workstream` (`ORIGIN_AGENT_WORKSTREAM`), which is
+registered as a USER origin: the run is listed everywhere a conversation of the
+operator's own is, and it keeps its notifications.
+
+A workstream marker also records WHO asked: `opened_by` = `{agent, label,
+name, session}`, read at creation from the requesting session's directory (its
+role and task label, when it is itself a delegated child) and published on the
+desktop row as `{agent, label, session}` (`docs/DESKTOP_API.md`). That is the
+other half of the 2026-09-18 incident: a machine-started row that read as the
+operator's own conversation was the confusion, so a listed one carries its
+owner. A member that cannot be read is `null` rather than guessed.
+
+**Two answers the flag's semantics depend on.**
+
+* An ephemeral-stamped session is NOT promotable later. `origin.json` is written
+  once, at creation, and is immutable from then on — the same rule a subagent
+  child and a fork obey — so a run started without `--workstream` stays hidden
+  for its whole life. The remedy is to start it as a workstream, not to edit the
+  marker: a hand-edited `origin.json` is a supported un-hide for the operator on
+  their own store, but it is not a durable way to run one, and nothing in the
+  product writes it after creation.
+* `lop exec --resume <id>` of an agent-workstream session does NOT re-stamp
+  (`created_here` is false) and therefore KEEPS its visibility — the row stays
+  listed, with its opener, while the run continues. The operator's own
+  `lop --resume <id>` of it works too, and the row stays listed either way: a
+  resumed conversation is never re-marked in either direction, so this form can
+  neither hide a listed session nor un-hide a hidden one.
+
 **The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
 waives the refusal for one invocation, on BOTH entry points. It exists because
 testing evidence here comes from exercising the REAL CLI — including the TUI in
@@ -166,6 +203,14 @@ forgets.
   itself, reported by the tool that spawns the command and not a secret, so a
   shell that scrubs it looks like a session that may not delegate (which is the
   direction that FAILS CLOSED).
+* `--workstream` is not a way around that guard: it selects the stamp on a run
+  the guard already allowed, and the guard never consults it. A session that
+  does not hold `task` is refused with or without the flag, and the interactive
+  path stays refused for every agent shell.
+* The attribution is a SNAPSHOT taken at creation, from the environment the
+  `bash` tool signed. A requesting session that renames itself later does not
+  re-write the row, and a run with no readable scratchpad path records `null`
+  members rather than a guess.
 * The guard lives at `cli.main`: a marked process that starts `lop serve`, or
   engages a runtime, mints sessions through the server/runtime composition root
   and is not refused there.

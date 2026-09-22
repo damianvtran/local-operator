@@ -3005,7 +3005,18 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   because then two rows differing only here are not the same row on
     #:   screen. Its desktop consumer is a separate renderer with its own
     #:   refresh, not this signature.
-    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s", "degraded")
+    #: * `opened_by` is the one excluded field that is IMMUTABLE BY CONSTRUCTION:
+    #:   it is read from the session's `origin.json`, which is written once when
+    #:   the directory is created (`agent_shell.stamp_agent_shell_session`) and
+    #:   never rewritten — the same "written once, at directory creation"
+    #:   property the origin-verdict cache rests on. Two ticks of one open
+    #:   picker therefore cannot see it differ, so no repaint can be missed by
+    #:   omitting it. This screen does not paint it either: the OPENER's
+    #:   attribution renders in the desktop sidebar (where `opened_by` rides the
+    #:   wire row). That second reason is a bonus rather than the argument — and
+    #:   it is the one that could change, since a TUI row that named the opener
+    #:   would still not need a comparison here, for the same immutability.
+    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s", "degraded", "opened_by")
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form
     # checked only that every signature NAME is a real field, which catches a

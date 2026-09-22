@@ -114,9 +114,12 @@ the ALLOW path while looking like it tested the refusal.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 #: Set by the ``bash`` tool on every command it runs. Names the first of the two
 #: facts this module acts on: the process descended from an agent's tool call.
@@ -350,7 +353,9 @@ def interactive_session_refusal() -> str | None:
     return _session_refusal(exec_may_be_opened_by_a_delegating_shell=False)
 
 
-def stamp_agent_shell_session(directory: Path, *, created_here: bool) -> bool:
+def stamp_agent_shell_session(
+    directory: Path, *, created_here: bool, delegated_workstream: bool = False
+) -> bool:
     """Mark a session an agent's shell opened as machine-started.
 
     Returns whether it did. The seatbelt under BOTH routes in
@@ -371,6 +376,22 @@ def stamp_agent_shell_session(directory: Path, *, created_here: bool) -> bool:
     caller can answer it (an empty directory a moment old and one from last
     week look identical from here), so it is passed rather than guessed.
 
+    ``delegated_workstream`` chooses WHICH machine-started value is written, and
+    it is the flag the run's own caller set (`lop exec --workstream`): the
+    operator asked for this one as a long-lived parallel workstream, so it is
+    registered as a USER origin and every listing offers it — with the opener
+    recorded beside it (:func:`_origin_attribution`), because a visible
+    machine-started row that reads as the operator's own conversation is the
+    2026-09-18 confusion rather than the fix. Absent, the run is an ephemeral
+    agent-shell run and stays hidden, which is what every caller that predates
+    the flag gets.
+
+    The GUARD above is deliberately not part of that choice: a run is stamped
+    only when this call created the directory and an agent's shell started it,
+    in both modes — `--workstream` on the operator's own terminal is a no-op (no
+    marker at all, so the run reads as their own session), and
+    `--workstream --resume <their conversation>` is not re-stamped either.
+
     Called from :func:`local_operator.session_factory._prepare`, which is
     the one place every session — foreground exec, the detached worker, the
     interactive viewer's runtime, the server — gets its directory. It began in
@@ -383,7 +404,92 @@ def stamp_agent_shell_session(directory: Path, *, created_here: bool) -> bool:
     """
     if not created_here or not agent_shell_opened_run():
         return False
-    from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
+    from local_operator.resume import (
+        ORIGIN_AGENT_SHELL,
+        ORIGIN_AGENT_WORKSTREAM,
+        mark_session_origin,
+    )
 
+    if delegated_workstream:
+        mark_session_origin(
+            Path(directory), ORIGIN_AGENT_WORKSTREAM, opened_by=_origin_attribution()
+        )
+        return True
     mark_session_origin(Path(directory), ORIGIN_AGENT_SHELL)
     return True
+
+
+#: The marker key a workstream records its opener under. One nested object
+#: rather than flat keys because it is one fact, and because the desktop wire
+#: publishes exactly this object's members (``resume.OPENED_BY_KEYS``): a flat
+#: spelling here would need a translation step, which is a second place for the
+#: two to drift.
+ORIGIN_OPENED_BY_KEY = "opened_by"
+
+
+def _origin_attribution() -> dict[str, str | None]:
+    """WHO asked for this workstream, as far as THIS process can honestly tell.
+
+    Read at stamp time and never re-derived, because this is the only moment
+    the answer exists: the requesting session's identity reaches the child as
+    the environment the ``bash`` tool signed, and nothing in the child's own
+    directory says who started it.
+
+    The sources, all of them read-only and best-effort:
+
+    * the requesting session's directory, taken from
+      :data:`local_operator.scratchpad.SCRATCHPAD_PATH_ENV` — the one variable a
+      session's shell exports that NAMES the session it belongs to (its parent
+      directory IS that session's directory, and its name is that session's id).
+      Absent for a run whose parent has no session directory, which is why every
+      member is nullable rather than this being an error;
+    * that session's conversation name (``resume.session_name``), recorded for the
+      durable marker;
+    * that session's own task label and role, when it is itself a delegated
+      child — the same ``label``/``agent`` pair ``harness.subagent`` writes into
+      a child's marker, read back from its own, so a fan-out records WHICH
+      delegated slice asked for the workstream. A top-level session has no such
+      marker and honestly reports ``None``.
+
+    EVERY member that cannot be read is ``None``, never invented and never
+    inferred from a neighbouring field: an attribution that guessed would be
+    worse than none, because the row it decorates is the operator's only way to
+    tell whose work this is.
+    """
+    import json
+
+    attribution: dict[str, str | None] = {
+        key: None for key in ("agent", "label", "session", "name")
+    }
+    from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
+
+    raw = os.environ.get(SCRATCHPAD_PATH_ENV, "").strip()
+    if not raw:
+        return attribution
+    # ``<config dir>/sessions/<session id>/scratchpad``: the ROOT is what the
+    # child is handed, so the session's own directory is its parent. A value
+    # shaped some other way names no session this rule can describe, so it is
+    # reported as no attribution rather than as a guess.
+    requesting = Path(raw).parent
+    if not requesting.name:
+        return attribution
+    attribution["session"] = requesting.name
+    try:
+        from local_operator.resume import session_name
+
+        attribution["name"] = session_name(requesting) or None
+    except Exception:  # noqa: BLE001 — attribution never breaks a stamp
+        logger.debug("workstream opener name unavailable", exc_info=True)
+    try:
+        from local_operator.resume import ORIGIN_NAME
+
+        payload = json.loads((requesting / ORIGIN_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return attribution
+    if not isinstance(payload, dict):
+        return attribution
+    for key in ("agent", "label"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            attribution[key] = value
+    return attribution

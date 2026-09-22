@@ -128,6 +128,24 @@ class ExecArgs:
     #: carries it across that boundary). ``None`` — the default — leaves the
     #: session unrestricted, exactly as every run before this flag existed.
     tools: str | None = None
+    #: The operator asked for this run as a LONG-LIVED PARALLEL WORKSTREAM, so
+    #: it is published rather than hidden: listed in the sidebar, ``/resume`` and
+    #: the phone list, labelled with the session that opened it, and steerable.
+    #:
+    #: OFF by default, and that direction is the whole point: every caller that
+    #: predates this flag gets the ephemeral behaviour it already had — an
+    #: agent-opened run is stamped ``agent-shell`` and hidden everywhere — so the
+    #: list only ever grows by the runs the operator actually asked for.
+    #:
+    #: IT IMPLIES :attr:`control` rather than merely documenting the pairing
+    #: (``cli`` sets both from this one flag). A listed row the operator cannot
+    #: follow or steer is half a feature and an actively misleading one: the
+    #: sidebar can only attach to a run that published a live discovery record,
+    #: so without the control socket the row would appear and then never move.
+    #: Meaningful only under an agent's shell — that is where the run is stamped
+    #: ``agent-workstream``; outside one nothing is stamped and the flag is a
+    #: no-op, so the run is an ordinary session either way.
+    workstream: bool = False
     goal: str | None = None
     clear_goal: bool = False
     loop: int | None = None
@@ -630,6 +648,12 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
             yolo=exec_args.yolo,
             train=exec_args.train,
             resume=exec_args.resume,
+            # Read by ``session_factory._prepare`` through the stamp, its only
+            # consumer: the value decides which ``origin.json`` the run gets,
+            # and therefore whether every listing hides it. Carried in BOTH
+            # narrow namespaces (here and the detached worker's) because the
+            # factory receives this namespace and nothing wider.
+            workstream=exec_args.workstream,
         )
         return create_session(session_args, config_manager, agent_registry)
 

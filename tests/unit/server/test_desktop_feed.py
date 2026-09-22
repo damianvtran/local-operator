@@ -3680,3 +3680,36 @@ def test_the_authoring_token_ignores_the_team_writers_staging_directories(tmp_pa
 
     assert feed._authoring_token == before, "the writer's staging directories moved the token"
     assert _authoring(frames) == [], frames
+
+
+def test_a_workstream_is_announced_and_an_agent_shell_run_is_not(tmp_path):
+    """The machine-wide feed's half of the same rule, in both directions.
+
+    The feed composes the machine-wide completion frames and asks
+    ``resume.is_user_session`` per record, so the two rows here differ only by
+    their marker: an ``agent-shell`` run (a throwaway `lop exec`) is skipped
+    exactly as the subagent child above is, while an ``agent-workstream`` — the
+    run the operator asked for — is announced like any conversation of theirs.
+    Asserted together because a filter that dropped both would pass a test that
+    only checked the hidden arm.
+    """
+    root = tmp_path
+    parent, delegated, workstream = "7" * 12, "8" * 12, "9" * 12
+    _session(root, parent)
+    mark_session_origin(_session(root, delegated), "agent-shell")
+    mark_session_origin(
+        _session(root, workstream), "agent-workstream", opened_by={"session": parent}
+    )
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    for session_id in (parent, delegated, workstream):
+        _publish(root, session_id)
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    scoped = [frame for frame in frames if frame["type"] == "notification"]
+    assert scoped, frames
+    assert {frame["session_id"] for frame in scoped} == {parent, workstream}

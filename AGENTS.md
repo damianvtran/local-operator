@@ -1574,6 +1574,24 @@ every agent shell (which is why this paragraph names the `exec` form). A
 conversation a run merely RESUMES is never re-marked — that
 is the operator's own work.
 
+**`--workstream` is the ONE explicit exception, and it is opt-in per run.**
+`lop exec --workstream` asks for the opposite disposition: a long-lived parallel
+workstream the operator asked for is LISTED in the sidebar, `/resume` and the
+phone list — by minting `resume.ORIGIN_AGENT_WORKSTREAM`, a second value
+registered in `USER_ORIGINS`, which every listing in the tree already funnels
+through — and it carries `opened_by` (the opening session's role, task label and
+session id) so a machine-started row cannot be mistaken for one the operator
+opened. It implies `--control`, because a row can only be followed and steered
+where a live discovery record exists. Absent the flag nothing changes: an
+unflagged agent run is `agent-shell`, hidden and silent, and a hidden run raises
+no completion banner of its own — its supervising session owns it, and the durable
+records still make it findable. Reach for the flag only when the operator asked
+for parallel sessions; a run that was not asked for is noise in their list. The
+marker is written once, at creation, so a run started without the flag cannot be
+promoted later by editing it — start it as a workstream instead — while
+`lop exec --resume <id>` of a workstream does not re-stamp and therefore keeps the
+row listed. `docs/EXEC.md` owns the flag table and the full semantics.
+
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
 it inherits the marker and every inner run would be refused, which reads as a

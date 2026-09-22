@@ -89,6 +89,31 @@ class SessionRow(BaseModel):
         """Refuse an unusable count the way every other reader does."""
         return reported_subagent_count(value)
 
+    #: WHO opened this conversation when an AGENT opened it on the operator's
+    #: behalf — ``{"agent": str | None, "label": str | None,
+    #: "session": str | None}`` — and ``None`` for every ordinary row.
+    #:
+    #: ADDITIVE AND FROZEN, for the same reason `degraded` is: the sidebar that
+    #: renders the attribution is written against exactly these three names in
+    #: another repository, so a rename here would surface as an empty label
+    #: rather than as an error anyone sees (``resume.OPENED_BY_KEYS`` owns the
+    #: list and the reasoning).
+    #:
+    #: A NULLABLE OBJECT rather than an omission, which is the opposite of
+    #: `pinned`'s rule and deliberately so: ``pinned`` is a state the user
+    #: TOGGLES, so an absent key would leave a stale optimistic value standing,
+    #: while this is an immutable fact about how the session began and a client
+    #: that never renders it is unaffected. ``None`` therefore means "nobody
+    #: machine-opened this" and is the answer on every row that is not an agent
+    #: workstream.
+    #:
+    #: Populated ONLY for a workstream row (``resume.ORIGIN_AGENT_WORKSTREAM``).
+    #: The 2026-09-18 incident was a machine-started session being
+    #: indistinguishable from one the operator opened; a visible workstream
+    #: without this would repeat it with the row merely visible instead of
+    #: hidden.
+    opened_by: dict[str, str | None] | None = None
+
 
 class SessionList(BaseModel):
     """One page of conversations, plus what could NOT be read while building it.

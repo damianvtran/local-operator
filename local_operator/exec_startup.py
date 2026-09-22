@@ -28,6 +28,13 @@ STARTUP_FIELDS = (
     "name",
     "effort",
     "tools",
+    # Not a selector a session applies (`apply_startup` never reads it): this one
+    # decides what the run IS to every listing, and it belongs in this tuple for
+    # the property the tuple exists for — a `--background` run is the same
+    # request run elsewhere, so a flag dropped here would be accepted by the
+    # front end and silently lost, and the workstream the operator asked for
+    # would come back hidden.
+    "workstream",
 )
 
 #: Separator between tool names in ``--tools``. A COMMA, not a space: the flag's
@@ -165,6 +172,18 @@ def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
         "--effort",
         metavar="LEVEL",
         help="Set reasoning effort; validated against the selected model",
+    )
+    parser.add_argument(
+        "--workstream",
+        action="store_true",
+        help=(
+            "Publish this run as a long-lived parallel WORKSTREAM the operator asked "
+            "for: it is listed in the sidebar, /resume and the phone list, carries the "
+            "session that opened it, and can be followed and steered. Without it an "
+            "agent-opened run stays ephemeral: hidden everywhere and silent. Implies "
+            "--control, because a row can only be steered where a live discovery "
+            "record exists. A no-op outside an agent's shell"
+        ),
     )
 
 

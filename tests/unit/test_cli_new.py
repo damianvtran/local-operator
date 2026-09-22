@@ -3007,3 +3007,36 @@ def cli_attached_connect():
     from local_operator.session.attached import AttachedSession
 
     return AttachedSession.connect
+
+
+def test_the_workstream_flag_is_carried_and_implies_control(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lop exec --workstream` is one request, and the second half is not cosmetic.
+
+    A published row the operator cannot follow or steer is half a feature: the
+    sidebar attaches only to a run that published a live discovery record, so
+    without the control socket the workstream would appear in the list and then
+    never move. The implication is made where the ExecArgs object is built rather
+    than in the parser, so it holds for every entry point that builds one.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_run_exec(command: str, exec_args) -> int:
+        captured["args"] = exec_args
+        return 0
+
+    monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry", lambda args: ("test", "m")
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["program", "--hosting", "test", "--model", "m", "exec", "do it", "--workstream"],
+    )
+    assert main() == 0
+    exec_args = captured["args"]
+    assert exec_args.workstream is True
+    assert exec_args.control is True, "a workstream that cannot be steered is not one"
+    # And the default stays exactly what every existing caller gets.
+    del captured["args"]

@@ -400,6 +400,27 @@ origin metadata remain authoritative; no `desktop` origin hides the session from
 terminal/phone lists. Older sessions use their saved frontend checkpoint cwd,
 falling back to the parent of the config root when no cwd was retained.
 
+**A row says WHO opened it when an agent did.** `opened_by` is an additive,
+nullable field on every `GET /v1/desktop/sessions` row:
+`{"agent": str | null, "label": str | null, "session": str | null}`, and `null`
+on every row a person started. It is populated only for a session an agent opened
+as a WORKSTREAM the operator asked for (`lop exec --workstream`, whose
+`origin.json` reads `agent-workstream`) — the one machine-started population that
+is LISTED rather than hidden — and it carries the OPENING session's role, task
+label and session id, read from that session's own marker at creation time.
+
+Why it exists: the 2026-09-18 incident was not merely that a machine-started
+session appeared in the sidebar — it was that the row was indistinguishable from
+one the operator had opened. A listed workstream therefore has to name its owner,
+or the fix would repeat the confusion with the row visible instead of hidden. The
+three member names are FROZEN (`local_operator.resume.OPENED_BY_KEYS`): the
+renderer is written against exactly them, and a rename here would surface as an
+empty label rather than as an error. A member that could not be read is `null`,
+never guessed, and the key is always PRESENT (as `null`) so a client cannot read
+its absence as a claim. Every other listing reaches the same fact through the
+same predicate — `resume.is_user_session` — so the sidebar, `/resume` and the
+phone list cannot disagree about which rows exist to be offered.
+
 **A new conversation can be born on a chosen model and reasoning level.**
 `model` is an **optional, additive** field of both `POST /v1/desktop/sessions`
 and its `preview` twin, carrying the same three fields the canonical frontend
