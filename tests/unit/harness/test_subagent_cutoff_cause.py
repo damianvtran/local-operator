@@ -32,15 +32,14 @@ from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.subagent import _make_relay, _publish_terminal_outcome
 from local_operator.harness.types import (
     AbortSignal,
-    AgentEvent,
     AgentEndEvent,
+    AgentEvent,
     ChatRequest,
     Message,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
     SubagentEndEvent,
-    SubagentStartEvent,
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -234,9 +233,7 @@ async def test_the_roster_reports_why_a_settled_child_stopped() -> None:
     """``hub op='list'`` must be able to say WHY, after the job row is swept."""
     comms = _comms()
     comms.record_launch("job-3", "child", prompt="go")
-    comms.record_outcome(
-        "job-3", "failed", error_text="cut off", cut_off_cause=CUT_CAUSE
-    )
+    comms.record_outcome("job-3", "failed", error_text="cut off", cut_off_cause=CUT_CAUSE)
 
     [row] = [r for r in comms.roster() if r.job_id == "job-3"]
     assert row.cut_off_cause == CUT_CAUSE
@@ -284,9 +281,8 @@ def test_restored_rows_prefer_a_recorded_cause_over_owner_lost() -> None:
     child the loop itself cut off has a SPECIFIC recorded cause, and relabelling
     it would send a reader looking for a dead runtime that never died.
     """
-    from local_operator.session.restored_rows import restored_job_row
-
     from local_operator.harness.jobs import AsyncJob
+    from local_operator.session.restored_rows import restored_job_row
 
     job = AsyncJob.model_construct(
         id="job-5", type="task", label="child", status="running", restored=False, cut_off_cause=""
@@ -384,9 +380,7 @@ async def test_a_child_cut_off_by_its_own_loop_settles_named_and_resumable(
 
 
 @pytest.mark.asyncio
-async def test_a_cleanly_finishing_child_carries_no_cause_end_to_end(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_cleanly_finishing_child_carries_no_cause_end_to_end(tmp_path, monkeypatch) -> None:
     """The end-to-end negative arm.
 
     A child that simply answers must settle ``completed`` with no cause on the

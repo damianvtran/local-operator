@@ -990,7 +990,6 @@ async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
     ``tests/unit/session/test_todo_guardrail.py``; this stands in for it.
     """
 
-
     reminder = CustomMessage(
         custom_type=TODO_REMINDER_MESSAGE_TYPE,
         attribution="system",
@@ -5296,7 +5295,9 @@ async def test_a_parent_note_does_not_spend_the_todo_budget():
             CustomMessage(
                 custom_type=TODO_REMINDER_MESSAGE_TYPE,
                 attribution="system",
-                details={"text": f"<system-reminder>still open: item {follow_calls}</system-reminder>"},
+                details={
+                    "text": f"<system-reminder>still open: item {follow_calls}</system-reminder>"
+                },
             )
         ]
 

@@ -10131,10 +10131,14 @@ class Session:
         Fires only while the list is MOVING. A model that yields twice with a
         byte-identical list is telling you it cannot proceed — usually it needs
         a decision only the user can make — and nudging it again would burn the
-        loop's ``max_paused_turn_continuations`` budget (default 8), end the turn
-        with a continuation-limit warning notice, and delay the user's answer by
-        up to eight model calls. Any progress earns another nudge; a fresh user
-        turn re-arms the latch (see ``_run_turn_pipeline``).
+        loop's ``max_follow_up_continuations`` budget (its own, and the larger
+        one: 64 against the 8 the steering/aside producers share), end the turn
+        with a continuation-limit notice, and delay the user's answer by up to
+        that many model calls. The larger budget is safe precisely because the
+        latch above is what really bounds this producer — a chatty parent can no
+        longer spend the allowance a still-moving list needs. Any progress earns
+        another nudge; a fresh user turn re-arms the latch (see
+        ``_run_turn_pipeline``).
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which
