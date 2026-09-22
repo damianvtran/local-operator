@@ -1131,48 +1131,85 @@ def _has_no_image_media(block: ImageContent) -> bool:
     """Whether ``block`` carries no image bytes AT ALL — nothing to send, ever.
 
     Deliberately the NARROWEST possible question, and the docstring is the
-    boundary: a block is refused here iff NO decoder we would send with pulls a
-    single byte out of its payload — empty, whitespace-only, or corrupt beyond
-    recovery. Anything that yields bytes, wire form and all, is left alone.
+    boundary: a block is refused here iff NO decoder that could be asked for
+    its bytes pulls a single one out — empty, whitespace-only, padding-only, or
+    corrupt beyond recovery. Anything that yields bytes under ANY of the three
+    decodes below is left alone.
+
+    THREE decodes, not two, and the third is the one that matters most. The
+    strict/lenient pair are the SAME decoder parameterised on character
+    validation, and they enforce the same padding and quantum rules — so a
+    payload that is URL-safe-alphabet base64 (``qw``, ``El_8``, ``-_8=``) or
+    standard base64 with its padding stripped or truncated (``6sg``) raises
+    under BOTH while holding real bytes (review round 1, MAJOR 1). Refusing
+    readable bytes is the one error this function exists to avoid, so the
+    both-raise case asks a THIRD question: would a padding-tolerant,
+    alphabet-tolerant decode recover anything? If yes, the block is kept.
 
     Nothing about the FORMAT is asked. A block whose header
     :func:`~local_operator.media.sniff_image` cannot name is NOT refused:
     :func:`_rebound_history_images` documents that such a block "may be
     perfectly acceptable to the provider" (a HEIF, or a host without Pillow to
-    read the header), and dropping it would destroy context on a guess. Yes,
-    this means decoding the payload to measure it, where a magic sniff would be
-    a header read — but the sniff can only answer a question we must NOT ask,
-    and the decode is the same cost :func:`~local_operator.imaging.rebound_oversize_image`
-    already pays for every block at this seam (a header read cannot answer it,
-    because a header read IS the sniff).
-
-    The strict decode is tried first and the lenient one only after it — the
-    order is load-bearing in the direction that MATTERS. Strict alone would
-    refuse a payload that is merely line-wrapped (``"QUJD\\nREVG"`` decodes to
-    ``b"ABC"`` with the newlines stripped and with ``validate=True`` raises
-    instead), and refusing readable bytes is the one error this function exists
-    to avoid; lenient alone would accept ``"="``, which is nothing but padding
-    and decodes to nothing. Together they answer the intended question exactly:
-    neither decoder finds a byte in it.
+    read the header), and dropping it would destroy context on a guess.
 
     A block that DOES carry bytes is left to the two mechanisms that own it:
     :func:`_rebound_history_images` for size, and the sticky provider degrade
     (:func:`~local_operator.providers.failover.is_image_rejection`) for bytes a
     provider refuses. This pass must not pre-empt either.
+
+    COST, stated because the seam is hot: this decodes each image payload up to
+    three times, where :func:`_rebound_history_images` decodes once and stops at
+    a header sniff. Measured on this host, 20 frames per render, min-of-7:
+    **945 ms** at ~4.2 MB of base64 per frame (review round 1 measured 694 ms at
+    ~2.1 MB per frame), and **0.04 ms** for the same 20 frames with empty
+    payloads — the empty case is short-circuited before any decode, so the cost
+    falls only on blocks that carry something. It is NOT free, and this pass runs
+    on EVERY render, including the ones below this call that deliberately do not
+    decode (the ``_images_rejected`` strip and the text-only strip, which skip
+    :func:`_rebound_history_images` precisely to avoid it). That is accepted
+    rather than avoided: a payload-less block is UNSENDABLE on every one of those
+    paths too, so a pass that skipped a path would leave the original 400 live on
+    it, which is the bug.
     """
     data = block.data
     if not isinstance(data, str) or not data.strip():
         return True
-    for validate in (True, False):
-        try:
-            decoded = base64.b64decode(data, validate=validate)
-        except (ValueError, TypeError):
-            continue
-        if decoded:
-            return False
-    # Neither decoder produced a byte: the block has no media to lose, and the
-    # provider would only ever be handed the same malformed payload.
-    return True
+    if any(_decoded_bytes(data, validate=validate) for validate in (True, False)):
+        return False
+    # Both standard decodes refused it. Before calling that "no bytes", ask a
+    # padding- and alphabet-tolerant decoder — the shapes that would otherwise
+    # be dropped here while holding real image data (URL-safe base64, stripped
+    # or truncated padding).
+    return not _decode_tolerantly(data)
+
+
+def _decoded_bytes(data: str, *, validate: bool) -> bytes:
+    """``base64.b64decode`` as a total function: ``b""`` when it cannot decode.
+
+    ``b""`` is the right answer for a caller asking "did any bytes come out",
+    and it keeps the three probes in :func:`_has_no_image_media` one shape.
+    """
+    try:
+        return base64.b64decode(data, validate=validate)
+    except (ValueError, TypeError):
+        return b""
+
+
+def _decode_tolerantly(data: str) -> bytes:
+    """Last-resort decode: URL-safe alphabet, missing or surplus padding, and
+    stray characters ignored — does this hold ANY bytes?
+
+    Only ever consulted after the two standard decodes both refused the input,
+    so its tolerance cannot mask a payload the wire would have accepted. It
+    exists because a false "empty" here silently replaces a real image with a
+    text notice, which is unrecoverable context loss the user cannot even see.
+    """
+    payload = "".join(data.split()).translate(str.maketrans("-_", "+/"))
+    payload = payload.rstrip("=") + "=" * (-len(payload.rstrip("=")) % 4)
+    try:
+        return base64.b64decode(payload, validate=False)
+    except (ValueError, TypeError):
+        return b""
 
 
 def _rebound_history_images(messages: list[Message]) -> list[Message]:
@@ -1309,13 +1346,13 @@ def _shed_frames_to_budget(messages: list[Message], *, budget: int) -> tuple[lis
 def _without_unresolvable_frames(messages: list[Message]) -> tuple[list[Message], int]:
     """Replace every payload-less image block with a one-line notice.
 
-    The third render degrade, and the one for a block that is not unacceptable
-    to anybody — it is EMPTY. A transcript references its media by digest
-    (:data:`~local_operator.session.transcript.ATTACHMENT_KEY`) rather than
-    carrying it inline, and the store behind that reference is not guaranteed
-    to still hold the bytes: a cleaner the user ran pruned them, or the
-    transcript was copied without the store. ``_resolve_attachments`` re-hydrates
-    what it can and leaves ``data`` empty for what it cannot (see
+    One of the render degrades, and the one for a block that is not
+    unacceptable to anybody — it is EMPTY. A transcript references its media by
+    digest (:data:`~local_operator.session.transcript.ATTACHMENT_KEY`) rather
+    than carrying it inline, and the store behind that reference is not
+    guaranteed to still hold the bytes: a cleaner the user ran pruned them, or
+    the transcript was copied without the store. ``_resolve_attachments``
+    re-hydrates what it can and leaves ``data`` empty for what it cannot (see
     :data:`~local_operator.session.transcript.ATTACHMENT_MISSING`), which is
     correct — the archive degrades rather than raising — and the empty block
     then reproduced a permanent 400 at the wire:
@@ -1329,9 +1366,24 @@ def _without_unresolvable_frames(messages: list[Message]) -> tuple[list[Message]
     sending a block that has no content to lose.
 
     Applied to the RENDERED history and NEVER to the transcript, exactly like
-    :func:`_rebound_history_images` and :func:`_without_images`: the stored
-    block keeps its reference, so ``/export``, forks, and a session rehydrated
-    from a RESTORED store all still see the image.
+    :func:`_rebound_history_images` and :func:`_without_images`: this pass
+    cannot itself lose information, because it only ever replaces a block that
+    carries no bytes.
+
+    BUT the "the archive keeps its reference" premise has a shelf life, and the
+    docstrings here say so rather than assuming it forever (round 1 review,
+    MAJOR 3). ``_resolve_attachments`` replaces the digest with the empty
+    placeholder IN PLACE on the stored entry's payload — the same dict object
+    inside ``TranscriptEntry.payload`` — and :meth:`Transcript.compact_file`
+    re-serializes those entries, so as soon as a prune fold runs the digest is
+    gone from disk too (reproduced: ``"attachment" in file`` is ``True`` before
+    the fold and ``False`` after, the row left carrying the empty placeholder).
+    The fold is routine (``COMPACT_FILE_THRESHOLD_BYTES``) and is reached from a
+    journal prune. So the honest statement is: **the reference survives until
+    the next fold** — a restored store re-sends the image on a session that has
+    not folded since, and cannot on one that has. That is pre-existing and out
+    of scope here; the claim is scoped, not fixed. (No docstring can fix it —
+    the mutation is in ``transcript.py``.)
 
     ``_has_no_image_media`` is the whole discriminator and is deliberately
     narrow — see its docstring for why asking about the format here would cost
@@ -2770,14 +2822,26 @@ class Session:
         model cannot be sent.
 
         Every path that builds wire history goes through here rather than
-        calling ``_convert_to_llm`` directly, because BOTH degrades have to
-        hold for ALL of them. Compaction is the one that matters most: it has
-        to send the history to summarise it, so a poisoned block makes even
-        the escape hatch fail (anthropics/claude-code#50708) — and the same
-        goes for a text-only model, whose refusal would otherwise brick the
-        session exactly the way a provider refusal did.
+        calling ``_convert_to_llm`` directly, because ALL of the degrades have
+        to hold for ALL of them. Compaction is the one that matters most: it has
+        to send the history to summarise it, so a poisoned block makes even the
+        escape hatch fail (anthropics/claude-code#50708) — and the same goes for
+        a text-only model, whose refusal would otherwise brick the session
+        exactly the way a provider refusal did.
 
-        Two independent reasons strip images, checked in order of stickiness:
+        FOUR independent reasons strip an image, and the ORDER is not the order
+        they were written in (round 1 review, MAJOR 2). The pass that runs FIRST
+        is the payload-less one, which is not about acceptability at all:
+
+        - ``_without_unresolvable_frames`` — the block carries NO BYTES, so it
+          is unsendable on every model, under every flag, and on every path
+          (a provider refusal, a text-only model, a compaction rebuild). It
+          runs first, ahead of the two early returns below, because there is no
+          state it could key on: an empty block never becomes sendable, so
+          leaving it to a later branch would leave the 400 live on every branch
+          that returns early. See ``_has_no_image_media`` for the boundary.
+
+        Then the two acceptability strips, checked in order of stickiness:
 
         - ``_images_rejected``: a provider REFUSED an image block, so the
           session never sends one again, whatever model it is on now.
@@ -2788,16 +2852,16 @@ class Session:
           history still carries screenshots. This one is NOT sticky: it reads
           the CURRENT spec, so switching back to a vision model restores the
           images on the very next render. ``keep_images=True`` suspends ONLY
-          this strip (compaction's kept-window rebuild, which must not bake
-          the omission into the live context); the sticky provider strip and
-          the announcement still apply.
+          this strip; it does NOT suspend the payload-less pass above, which has
+          nothing to restore.
 
-        A THIRD degrade runs last and is not about images being unacceptable:
-        the aggregate request can outgrow the provider's size cap even when
-        every block in it is individually fine (``_shed_frames_to_budget``).
-        It belongs here for the same reason the other two do — a 34 MB history
-        makes ``/compact`` fail too, so the escape hatch has to be covered —
-        and it is ordered after the rebound so it measures the real bytes.
+        A FOURTH degrade runs LAST, and it is not about images being
+        unacceptable either: the aggregate request can outgrow the provider's
+        size cap even when every block in it is individually fine
+        (``_shed_frames_to_budget``). It belongs here for the same reason the
+        acceptability strips do — a 34 MB history makes ``/compact`` fail too,
+        so the escape hatch has to be covered — and it is ordered after the
+        rebound so it measures the real bytes.
 
         Expired todo reminders are dropped here for the same reason: every path
         that reaches a provider has to be free of them.
@@ -2818,16 +2882,25 @@ class Session:
         # whole correctness argument — above the early returns it applies on all
         # of them (the sticky ``_images_rejected`` strip already runs on the
         # result, and ``_without_images`` leaves a text notice where this one
-        # puts it), and on the ``keep_images=True`` path, which is compaction's
-        # kept-window rebuild and the exact path that must not bake the loss
-        # into the live context.
+        # puts it).
         #
-        # Deliberately ABOVE the ``_images_rejected`` early return despite that
-        # test's own reasoning about decoding order: a missing block is missing
-        # regardless, and this keeps ONE application covering every branch. The
-        # ordering is only observable in the pathological case of the two states
-        # set at once — and ``_set_images_rejected`` clears the size flag when it
-        # sets the sticky one, so there is no such steady state to order against.
+        # Above the ``keep_images=True`` SUSPENSION too, and there the placement
+        # is the opposite of the acceptability strips: that flag means "do not
+        # bake THIS model's omission into the live context, because a later model
+        # may want the images" — but a payload-less block has nothing for any
+        # later model to want, and the kept-window render is what
+        # ``_run_compaction`` REBINDS ``_context.messages`` from. So this pass is
+        # exactly what stops the hole being persisted into the live context
+        # (round 1 review, MINOR 2); it is not merely allowed to run there.
+        #
+        # COST, accepted deliberately (round 1 review, MINOR 1): unlike the
+        # paths below, this one decodes payloads, so the ``_images_rejected``
+        # and text-only paths — which skip ``_rebound_history_images`` precisely
+        # to avoid decoding a block about to become a notice — pay a decode they
+        # did not before. A payload-less block is unsendable on those paths too,
+        # so a pass that skipped them would leave the original 400 live there;
+        # the empty case is short-circuited before any decode, so only blocks
+        # that carry something are decoded.
         rendered, missing_media = _without_unresolvable_frames(rendered)
         if missing_media:
             self._announce_missing_media_once(missing_media)
