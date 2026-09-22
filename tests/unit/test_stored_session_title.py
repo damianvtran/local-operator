@@ -22,6 +22,7 @@ from local_operator.resume import (
     backfill_session_titles,
     live_runtime_pid,
     read_title_names,
+    read_title_state,
     session_name,
     stored_session_title,
     write_session_title,
@@ -403,6 +404,72 @@ def test_the_current_spelling_wins_over_a_legacy_title(tmp_path: Path):
     sidecar = _read_title_sidecar(session)
     assert sidecar is not None
     assert sidecar.text == "Current Name"
+
+
+def test_a_blank_text_does_not_shadow_a_legacy_title(tmp_path: Path):
+    """QA round 13, Q13-4: a whitespace ``text`` is a MISSING ``text``.
+
+    The migration window is exactly where a half-rewritten sidecar is plausible:
+    the interim writer spelled the name ``title``, the current one spells it
+    ``text``, and a record carrying both with an EMPTY ``text`` used to reach
+    this reader, find the legacy name sitting right there in it, and answer with
+    nothing — because the fallback fired only for a key that was absent or not a
+    string. Nothing correct can be shadowed by treating a blank as absent, so
+    the row now paints the legacy name.
+    """
+    session = tmp_path / "sessions" / "blank-text"
+    session.mkdir(parents=True)
+    (session / TITLE_SIDECAR_NAME).write_text(
+        json.dumps({"text": "", "title": "legacy-name", "names": ["legacy-name"]}),
+        encoding="utf-8",
+    )
+    sidecar = _read_title_sidecar(session)
+    assert sidecar is not None
+    assert sidecar.text == "legacy-name"
+    assert stored_session_title(session) == "legacy-name"
+    # The whitespace-only variant: the blankness is what decides, not the length.
+    (session / TITLE_SIDECAR_NAME).write_text(
+        json.dumps({"text": "   ", "title": "legacy-name"}), encoding="utf-8"
+    )
+    assert stored_session_title(session) == "legacy-name"
+    # ...and the widening costs nothing where it must: a blank ``text`` with NO
+    # legacy key is still no title, and the NAMES it carries still read back (the
+    # search digest matches a session by any name it ever bore).
+    (session / TITLE_SIDECAR_NAME).write_text(
+        json.dumps({"text": "", "names": ["borne-name"]}), encoding="utf-8"
+    )
+    blank = _read_title_sidecar(session)
+    assert blank is not None and blank.text == ""
+    assert read_title_names(session) == ["borne-name"]
+    assert stored_session_title(session) == ""
+
+
+def test_read_title_state_carries_the_precedence_flag(tmp_path: Path):
+    """The reader a boot uses for PRECEDENCE (QA round 13, Q13-1).
+
+    ``SessionTitle.user_set`` had no reader on the boot path at all: the relay
+    wrote the flag into the sidecar and the session that relay then ran restored
+    its naming state from the transcript alone, so a name the user typed was
+    outranked by the first generated title. This pins the reader's half of that
+    contract — the flag comes back with the text — and the session-side half is
+    ``tests/unit/network/test_session_plane.py``'s real-turn case.
+    """
+    session = tmp_path / "sessions" / "flag"
+    session.mkdir(parents=True)
+    write_session_title(session, "Typed Name", user_set=True, past_names=[])
+    state = read_title_state(session)
+    assert state is not None
+    assert state.text == "Typed Name"
+    assert state.user_set is True
+    assert state.names == ("Typed Name",)
+    # A sidecar holding a GENERATED title reports the flag false, so a caller
+    # cannot read "a title exists" as "the user named it".
+    write_session_title(session, "Generated Name", user_set=False, past_names=["Typed Name"])
+    generated = read_title_state(session)
+    assert generated is not None and generated.user_set is False
+    # No sidecar at all is ``None``, not an empty title: a boot has to be able to
+    # tell "nothing was ever named" from "named with nothing".
+    assert read_title_state(tmp_path / "sessions" / "absent") is None
 
 
 def test_the_sidecar_write_preserves_directory_mtime(tmp_path: Path):

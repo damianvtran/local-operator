@@ -3312,7 +3312,7 @@ class RelayServer:
             "complete": True,
             "device": {
                 "device_id": self.identity.device_id,
-                "name": self.identity.name,
+                "name": self._own_label(),
             },
             "generated_at": time.time(),
             "sessions": self.local_session_rows(),
@@ -4171,9 +4171,56 @@ class RelayServer:
             return self._engage_failure_detail(session_id, exc)
         return ""
 
+    def _member_name(self, device_id: str) -> str:
+        """The name the MESH knows ``device_id`` by, or ``''`` when it has none.
+
+        ONE LOOKUP FOR BOTH SIDES (UX round 4, U25). A peer's label and this
+        device's OWN label were resolved by two different questions: the peer's
+        from the network's member table, this device's from its IDENTITY — and
+        the two disagree whenever the identity was minted before the join.
+        ``network/cli.py``'s ``identity = load_or_mint(name=args.name)`` KEEPS an
+        existing identity's name, so a device whose relay was started first (the
+        order that makes it reachable for the pairing at all) answers to its
+        HOSTNAME on every sentence it composes about itself while every
+        viewer-side surface — the sidebar heading, the create receipt, the
+        federated listing, the picker's rows — shows the name its peers were
+        admitted under. The member table is the name a person typed, so it is
+        the one a person can recognise.
+
+        Empty rather than the id when the answer is "nobody named it": the two
+        callers want different fallbacks (a peer falls back to the token it was
+        ASKED for, this device to its identity's name) and a shared helper must
+        not choose for them. Best effort by contract — a refusal's words are not
+        worth a raise.
+        """
+        if not device_id:
+            return ""
+        try:
+            for record in store.list_networks(self.root):
+                for member in record.active_members():
+                    if member.device_id == device_id and member.name:
+                        return str(member.name)
+        except Exception:  # noqa: BLE001 — a refusal's words are not worth a raise
+            pass
+        return ""
+
     def _own_label(self) -> str:
-        """This device's name, or its id when nobody named it."""
-        return str(self.identity.name or self.identity.device_id)
+        """This device's name as the MESH knows it, else its identity's, else its id.
+
+        The mesh's name first, because that is the name every surface the user
+        is looking at puts on this device (see :meth:`_member_name`): a receipt
+        that answered ``damians-MacBook-Pro`` about a session the sidebar heads
+        ``⇄ pixel-8`` reads as a SECOND device being involved. UX round 4's U25
+        measured exactly that on the stop receipt.
+
+        The identity is the middle term rather than the first because it is the
+        device's own record of itself: minted before any join and unchanged by
+        one, so it is the right answer for a device in no network at all — which
+        is what every non-mesh ``lop network`` receipt on a fresh install is.
+        """
+        return self._member_name(self.identity.device_id) or str(
+            self.identity.name or self.identity.device_id
+        )
 
     def _peer_label(self, device_id: str) -> str:
         """A peer's NAME when this device knows one, else the token it was asked for.
@@ -4186,16 +4233,7 @@ class RelayServer:
         invented name: "I do not know what to call this device" must not read as
         a device called something.
         """
-        if not device_id:
-            return device_id
-        try:
-            for record in store.list_networks(self.root):
-                for member in record.active_members():
-                    if member.device_id == device_id and member.name:
-                        return str(member.name)
-        except Exception:  # noqa: BLE001 — a refusal's words are not worth a raise
-            pass
-        return device_id
+        return self._member_name(device_id) or device_id
 
     def _engage_failure_detail(self, session_id: str, exc: BaseException) -> str:
         """Why a runtime could not start, in words that name WHOSE device failed.
@@ -6086,7 +6124,7 @@ class RelayServer:
                 network_id: report.to_json() for network_id, report in sorted(reports.items())
             },
             "device_id": self.identity.device_id,
-            "device_name": self.identity.name,
+            "device_name": self._own_label(),
         }
 
     def _require_network(self, target: str) -> NetworkRecord:

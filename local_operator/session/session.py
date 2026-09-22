@@ -4943,6 +4943,31 @@ class Session:
         generated titles across a resume, or the first re-title check in the
         resumed session would quietly overwrite it.
 
+        AND THE TITLE SIDECAR IS THE SECOND HALF OF THAT RESTORE, which is not
+        a convenience for a torn transcript (QA round 13, Q13-1). A session
+        created ON A PEER is named through the sidecar and by nothing else:
+        ``network.relay`` writes ``title.json`` with ``user_set=True`` before it
+        spawns the session's runtime, and that runtime is a NEW process whose
+        transcript holds no ``conversation_name`` entry yet. Restoring from the
+        transcript alone therefore booted it with an empty holder, and an empty
+        holder is exactly what the naming gates read as "nobody has named this"
+        (``app._maybe_name_conversation``, ``serving._maybe_name_conversation``)
+        — so the first turn's auto-namer claimed the conversation, stored a
+        generated title over the user's, and re-wrote the sidecar with
+        ``user_set=False``. The typed name survived only in ``names``, where no
+        surface paints it. Reading the sidecar here is what puts the user's
+        claim into the holder the gates compare against, which is the whole of
+        ``user_set``'s precedence story.
+
+        A title adopted from the sidecar is JOURNALLED, unlike one restored from
+        an entry that is already there. The two cases only look alike: a resume
+        is re-reading its own history, while this is a name that exists nowhere
+        in the transcript, and leaving it there would make the transcript and
+        the sidecar disagree about the same conversation — a reader of the
+        journalled naming state (the fork check, the title backfill, the next
+        resume after a lost sidecar) would see a nameless session wearing a
+        name.
+
         Writes through the holder's fields rather than through
         :meth:`ConversationName.set`, since ``set`` cannot express "restore a
         user-set title" without also claiming it as a fresh user action, and a
@@ -4983,19 +5008,41 @@ class Session:
             # :attr:`wears_inherited_title`.
             self._wears_inherited_title = True
             return
-        details = self._transcript.latest_custom(CONVERSATION_NAME_CUSTOM_TYPE)
-        if not details:
-            return
-        text = details.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return
+        details = self._transcript.latest_custom(CONVERSATION_NAME_CUSTOM_TYPE) or {}
+        # A blank ``text`` is no title, exactly as ``_read_title_sidecar``
+        # treats it (QA round 13, Q13-4): a half-written entry must fall through
+        # to the sidecar rather than latch an empty holder as "restored".
+        raw_text = details.get("text")
+        text = raw_text if isinstance(raw_text, str) and raw_text.strip() else ""
+        from_sidecar = not text
+        user_set = bool(details.get("user_set"))
+        if from_sidecar:
+            # THE SIDECAR, when the transcript has nothing to say. Imported
+            # here rather than at module top for the reason the naming write
+            # is: the CLI's import-guard on ``resume`` covers a leaf reader,
+            # and a session constructible without a store must stay so.
+            from local_operator.resume import read_title_state
+
+            state = read_title_state(self._transcript.directory)
+            if state is None or not state.text:
+                return
+            text, user_set = state.text, state.user_set
         self._conversation_name.text = " ".join(text.split())[:MAX_TITLE_CHARS]
-        self._conversation_name.user_set = bool(details.get("user_set"))
+        self._conversation_name.user_set = user_set
         # A restored conversation has already SPENT its naming attempt: the
         # title on disk is the result of it. Without this latch a host that
         # asks "has naming been requested?" would spend a second provider call
         # to re-derive a name the session is already wearing.
         self._conversation_name.requested = True
+        if from_sidecar:
+            # The name was the sidecar's alone, so the transcript has to be told
+            # about it or the two records disagree about this conversation (see
+            # the docstring). Dirty-then-spawn is the ordinary write path: it
+            # appends the entry and rewrites the sidecar with the same content,
+            # and it is a no-op outside a running loop — a session built and
+            # disposed without one lands the write from the dispose flush.
+            self._conversation_name_dirty = True
+            self._spawn_conversation_name_write()
         # Mirror the restored title into the analytics ledger. Writing the
         # holder's fields directly (above) is what keeps a restore from reading
         # as a fresh user action — but it also bypasses

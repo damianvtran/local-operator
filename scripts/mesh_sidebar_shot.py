@@ -34,6 +34,7 @@ production. Both relays are stopped in ``finally``; no LaunchAgent is written.
 
 from __future__ import annotations
 
+import re
 import secrets as _secrets
 import shutil
 import subprocess
@@ -49,6 +50,12 @@ from local_operator.network import identity, relay, store, types, wire  # noqa: 
 
 REPO = Path(__file__).resolve().parent.parent
 NETWORK_NAME = "devmesh"
+
+#: One ``<text>`` run of the exported SVG, with its baseline ``y``, for the chip
+#: census below. The capture helper writes a run per styled span — the band's chip
+#: is one ROW of several runs (the glyph, the model label, the cwd) — so the census
+#: has to group by ``y`` to read the row the way a person reads it.
+_SVG_TEXT_RUN = re.compile(r'<text[^>]*\by="([\d.]+)"[^>]*>(.*?)</text>', re.S)
 
 #: The two sessions B holds, as ``(session_id, title)``. Real-length titles, so
 #: the frame shows the title budget rather than a curated short name.
@@ -182,6 +189,49 @@ def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
     print(f"producer rows: {[(row.id, row.name, row.owner_device_name) for row in rows]}")
 
 
+def _require_settled_chip(path: Path) -> None:
+    """Refuse a frame whose model chip was captured MID-CONNECT (design round 4, D30).
+
+    Re-running this rig three times at the same head produced one frame that
+    differed from the committed PNG by exactly one text row —
+    ``◆ connecting…  › ⌂ mesh-network`` where the settled frame reads
+    ``◆ test/model``. One run in three is not a rare-enough rate for a shipped
+    artifact, and nothing in the rig objected: the committed PNG happens to be a
+    settled one and a re-capture could as easily have shipped the transient with
+    nothing to say it had.
+
+    Read off the exported SVG — the bytes a reviewer reads — the way the splash
+    mark's census reads its own frame (`new_remote_shot._MARK_GLYPHS`), and from
+    the widgets that OWN the two strings: ``status_line.ICON_MODEL`` and
+    ``welcome.MODEL_PENDING`` are the band's own vocabulary, so this guard cannot
+    go stale by spelling them a second time.
+    """
+    from local_operator.tui.widgets.status_line import ICON_MODEL
+    from local_operator.tui.widgets.welcome import MODEL_PENDING
+
+    svg = path.read_text(encoding="utf-8")
+    # GROUPED BY BASELINE, because the chip is one ROW of several runs: the glyph,
+    # the model label and the cwd are painted as separate spans, so a check that
+    # looked inside the run holding the glyph would find no words at all and could
+    # never fire on the transient it exists for (measured on this rig's own frame:
+    # the only run containing ``◆`` is ``◆`` itself).
+    rows: dict[str, list[str]] = {}
+    for match in _SVG_TEXT_RUN.finditer(svg):
+        rows.setdefault(match.group(1), []).append(re.sub(r"<[^>]+>", "", match.group(2)))
+    chips = ["".join(runs) for runs in rows.values() if any(ICON_MODEL in run for run in runs)]
+    if not chips:
+        raise SystemExit(
+            f"no {ICON_MODEL!r} model chip is in {path.name}, so the band this frame "
+            "is supposed to show was not painted at all"
+        )
+    if any(MODEL_PENDING in chip for chip in chips):
+        raise SystemExit(
+            f"the model chip in {path.name} reads {chips!r} — the band is still "
+            "awaiting the session factory, so this frame is a mid-connect transient "
+            "and not the state the artifact documents. Re-capture."
+        )
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         raise SystemExit("usage: mesh_sidebar_shot.py OUT.svg [COLSxROWS]")
@@ -262,6 +312,7 @@ def main() -> int:
         )
         if shot.returncode != 0:
             return shot.returncode
+        _require_settled_chip(out)
         print(f"wrote {out}")
         return 0
     finally:

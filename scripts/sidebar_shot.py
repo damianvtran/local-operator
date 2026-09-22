@@ -44,6 +44,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -166,6 +167,33 @@ SUBAGENT_ROWS = [
 #: script with the knob set; the fixture stays the default so the deterministic
 #: goldens and every other gallery frame are unchanged.
 MESH_ROOT = os.environ.get("LO_SIDEBAR_SHOT_MESH") or ""
+
+#: The peers that answered NOTHING, as ``(name, reason)`` — the shape
+#: ``app._refresh_sidebar`` hands to ``SessionSidebar.set_silent_peers``
+#: (``session.peer_rows.unanswered_peers``, which reads the cache entry the
+#: remote rows came from, so the two halves cannot disagree about a mesh that
+#: moved between them).
+#:
+#: WHY A CASE FOR THIS STATE (design round 4, D26). The delta's headline sidebar
+#: state — a silent/unreachable peer, where the whole section is its heading and
+#: the relay's reason is the only thing there is to say — appeared in NO capture:
+#: ``set_silent_peers`` is reached from the app's own poll and from nothing else,
+#: so no script called it and the round had to build a throwaway rig to look at
+#: the state this branch exists to fix. The closest existing case,
+#: ``peers-focus``, paints the ROW-derived ``⇄ … (unreachable)`` heading with a
+#: row underneath, which is a different code path (`_display_rows` builds these
+#: sections with no rows at all).
+SILENT_PEERS = [
+    ("radiant-m4", "connect_failed:ConnectionRefusedError"),
+    ("pixel-8", "connect_failed:ConnectionRefusedError"),
+]
+
+#: The subagent tier's painted heading, whose owner is `SessionSidebar.render`'s
+#: own kind-to-name table (``header:subagent``). Spelled here deliberately rather
+#: than re-derived: the census has to ask the FRAME the question, and the failure
+#: direction is safe — a rename makes the guard REFUSE a frame rather than pass
+#: one it should not.
+SUBAGENT_HEADING = "⌥ Subagent Runs"
 
 #: The mesh (R6) rows: one live peer's two sessions and one UNREACHABLE peer's
 #: session. Used when ``LO_SIDEBAR_SHOT_MESH`` is unset; the published README
@@ -503,10 +531,53 @@ def _widget_state(sidebar: SessionSidebar) -> tuple[object, ...]:
     )
 
 
+def _require_silent_sections(sidebar: Any, expected: int) -> None:
+    """Refuse a frame that is not the heading-only state it was asked for.
+
+    A GUARD THAT COUNTS ROWS CANNOT SEE THIS CASE (design round 4, D26): the whole
+    point of a silent peer's section is that it has NO rows, so "the producer
+    returned nothing" and "the peer is gone" are the same count and a row census
+    cannot tell them apart. So the assertion is on the TWO headings the frame is
+    about, and their ORDER: every silent peer's own ``⇄ <name> (unreachable)`` —
+    the same string a live unreachable section carries, see
+    ``session_sidebar._peer_heading_text`` — and the subagent tier's, which must
+    come after them (mesh-ui.md decision 1's rank, the place D27 measured wrong).
+    """
+    from local_operator.tui.widgets.session_sidebar import _peer_heading_text
+
+    lines = [line.strip() for line in sidebar.render().plain.splitlines()]
+    # The expected strings come from the widget that paints them — the peer
+    # headings from `_peer_heading_text`, the one spelling every source shares.
+    wanted = [_peer_heading_text(name, False).strip() for name, _reason in SILENT_PEERS[:expected]]
+    headings = [line for line in lines if line.startswith("⇄") or line == SUBAGENT_HEADING]
+    missing = [heading for heading in wanted if heading not in headings]
+    if missing:
+        raise SystemExit(
+            f"the frame paints none of {missing} ({headings}): a silent peer's "
+            "section is its HEADING, so a frame without it shows the state this "
+            "case exists to capture as an empty list"
+        )
+    if SUBAGENT_HEADING not in headings:
+        raise SystemExit(
+            f"the {SUBAGENT_HEADING!r} tier is not in this frame, so the place a "
+            f"silent peer's section takes relative to it cannot be read off the "
+            f"artifact ({headings}). Capture at 100x45 or taller"
+        )
+    if max(headings.index(heading) for heading in wanted) > headings.index(SUBAGENT_HEADING):
+        raise SystemExit(
+            f"the silent peer sections are painted AFTER {SUBAGENT_HEADING!r} "
+            f"({headings}): the peer axis ranks after `previous` and before "
+            "`subagent` (mesh-ui.md decision 1), so a section painted below it "
+            "would jump when the peer answered again (design round 4, D27)"
+        )
+
+
 async def main() -> None:
     global CURSOR_ID, FOCUS_LIST
     if len(sys.argv) < 2:
-        raise SystemExit("usage: sidebar_shot.py OUT.svg [COLSxROWS] [peers|peers-focus]")
+        raise SystemExit(
+            "usage: sidebar_shot.py OUT.svg [COLSxROWS] " "[peers|peers-focus|silent|silent-two]"
+        )
     # Before it is used as a path: a mistyped flag here writes a file called
     # ``--help.svg`` into the working directory (see the helper's docstring).
     refuse_flag_shaped_argument(sys.argv[1], what="OUT")
@@ -517,6 +588,8 @@ async def main() -> None:
     # containing an `x` is a size; anything else names the variant.
     peers = False
     focus = FOCUS_LIST
+    #: How many heading-only peer sections to paint (design round 4, D26).
+    silent = 0
     for arg in sys.argv[2:]:
         refuse_flag_shaped_argument(arg, what="argument")
         if "x" in arg:
@@ -524,6 +597,13 @@ async def main() -> None:
             size = (int(cols), int(rows))
         elif arg == "peers":
             peers = True
+        elif arg in ("silent", "silent-two"):
+            # THE HEADING-ONLY STATE, one peer and two. No live peer rows are
+            # seeded with it: the state under capture is "the device is gone",
+            # and a frame holding both states in one section would be a picture
+            # of neither. Two is its own case because the gap BETWEEN two
+            # heading-only sections is what the doubled break was measured on.
+            silent = 1 if arg == "silent" else 2
         elif arg == "peers-focus":
             # THE SETTLING FRAME design round 1's D4 asked for: the peers variant
             # with the list FOCUSED and the cursor ON a remote row, which is the
@@ -537,7 +617,8 @@ async def main() -> None:
             focus = True
         else:
             raise SystemExit(
-                f"unknown argument {arg!r}: expected a WxH size, 'peers' or 'peers-focus'"
+                f"unknown argument {arg!r}: expected a WxH size, "
+                "'peers', 'peers-focus', 'silent' or 'silent-two'"
             )
     FOCUS_LIST = focus
     if focus and peers:
@@ -585,6 +666,8 @@ async def main() -> None:
         sidebar.set_pins(PINS)
         sidebar.set_subagent_total(SUBAGENT_TOTAL)
         sidebar.set_entries(_entries(peers=peers))
+        if silent:
+            sidebar.set_silent_peers(SILENT_PEERS[:silent])
         sidebar.current_id = CURRENT_ID
         sidebar.cursor_id = CURSOR_ID
         # Pin the animation: a capture is only comparable frame-to-frame if the
@@ -661,6 +744,11 @@ async def main() -> None:
                     file=sys.stderr,
                 )
 
+        if silent:
+            # BEFORE the write, so a frame that is not the state it claims is
+            # never on disk to be read as evidence (the census `new_remote_shot`
+            # grew for the splash mark, applied to the heading-only sections).
+            _require_silent_sections(sidebar, silent)
         save_capture(app, out)
         conversation = app.query_one("#session-conversation")
         # THE LIST STATE, as a number rather than something to infer from pixels
@@ -677,6 +765,7 @@ async def main() -> None:
             "page_size": sidebar.page_size,
             "visible": len(sidebar.visible_entries),
             "sections": len({sidebar._section_key(e) for e in sidebar.entries}),
+            "silent_sections": len(sidebar._silent_peers),
             "cursor_id": sidebar.cursor_id,
             "has_focus": sidebar.has_focus,
         }
@@ -692,4 +781,11 @@ async def main() -> None:
         print("list_state=" + json.dumps(list_state, sort_keys=True))
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    # GUARDED, or importing this module to reuse its fixtures executes the
+    # capture against the IMPORTER's argv (design round 4, D31: `unknown
+    # argument 'two': expected a WxH size, 'peers' or 'peers-focus'`, from a
+    # round that only wanted the fixture). Every other shot script in the tree
+    # guards its entry point; this one did not, which is what made the rig
+    # unusable as a library.
+    asyncio.run(main())

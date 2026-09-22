@@ -61,11 +61,14 @@ def cases() -> list[dict[str, Any]]:
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]
             elif script == "sidebar_shot.py":
-                # Three widths/variants, because the sample's whole point is the
+                # Five widths/variants, because the sample's whole point is the
                 # trade-off between them: "base" is the size at which the list does
                 # not grow at all, "wide" the size at which it does, and "peers"
                 # adds the remote rows whose `⇄` slot and `⇄ <device>` sections are
                 # the mesh annotation's own frame (`mesh-ui.md` §1.3/§4.1).
+                # "silent"/"silent-two" are the delta's HEADLINE state — a peer
+                # that answered nothing, so the whole section is its heading —
+                # which had no case at all until design round 4 (D26).
                 if variant == "peers-focus":
                     # TALLER THAN THE OTHER FRAMES ON PURPOSE: this is the settling
                     # frame for the caret/locality interaction (design round 1,
@@ -77,8 +80,26 @@ def cases() -> list[dict[str, Any]]:
                     args += ["peers-focus", "100x45"]
                 elif variant == "peers":
                     args += ["peers", "100x30"]
+                elif variant in {"silent", "silent-two"}:
+                    # 100x45 for the reason `peers-focus` is: at 100x30 the frame
+                    # stops before the subagent tier, and the whole claim these
+                    # cases carry is the ORDER of a silent peer's section against
+                    # it (design round 4, D27). The rig refuses such a frame
+                    # rather than writing one — `_require_silent_sections`.
+                    args += [variant, "100x45"]
                 else:
                     args += ["160x40" if variant == "wide" else "100x30"]
+            elif script == "mesh_sidebar_shot.py":
+                # THE ONLY FRAME BUILT FROM A REAL MESH (design round 4, D29):
+                # two config roots, two identities, two relays on loopback and a
+                # live link, where the peer tier comes from the production
+                # producer rather than from a hand-stamped fixture. It was
+                # outside this census while being the source of a committed
+                # artifact (`static/tui-mesh-sidebar.png`), so a reviewer had to
+                # rebuild the rig by hand to re-derive that frame. The size is
+                # the script's own default and the committed PNG's native
+                # 800x510 (100x30) — the frame it ships, not a new one.
+                args += ["100x30"]
             elif script == "network_shot.py":
                 # Both of the panel's phases from one boot, so the pair differs by
                 # nothing but the relay's answer. It writes into the case's own

@@ -142,6 +142,9 @@ LaunchAgent is installed.
   <img src="./static/tui-welcome.png" alt="The Local Operator welcome screen with rotating tips and the composer ready for a first prompt" width="720">
 </p>
 
+<p align="center"><i>The version line in this splash is the version of the build the frame
+was captured from, which is not the version you will install.</i></p>
+
 Prefer a local model? A 7–14B model needs roughly 10–16 GB of RAM or VRAM.
 Start [LM Studio](https://lmstudio.ai), load a chat model, and enable its
 server in the Developer tab; then `/login lmstudio` inside Local Operator
@@ -385,7 +388,7 @@ the peer, with a trailing sentence as its first prompt:
   <img src="./static/tui-mesh-picker.png" alt="The /new device picker: one row per paired device, each showing the device's name, the network it is in and the role it holds there — radiant-m4 in devmesh as admin, an unnamed device as drive, and pixel-8 in homelab as read — while the composer above previews /new remote radiant-m4." width="620">
 </p>
 
-<p align="center"><i><code>/new</code> lists the devices you paired: the row carries the whole <code>remote &lt;peer&gt;</code> argument, so the first Enter fills a command that runs, and the composer preview always shows exactly what will be sent.</i></p>
+<p align="center"><i><code>/new</code> lists the devices you paired: the row carries the whole <code>remote &lt;peer&gt;</code> argument, so the first Enter fills a command that runs, and the composer preview always shows exactly what will be sent. The splash's version line is the build this frame was captured from — a development worktree — and not the version of the release this page documents.</i></p>
 
 The session is minted, spawned and admitted by that device, and the receipt in
 your transcript names it. `/network sessions --peer radiant-m4` then lists what
