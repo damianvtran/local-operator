@@ -557,8 +557,9 @@ class AwsProvider:
         # BEFORE upstream's reset, and therefore before the episode's first
         # observation: the guest ships ~93% full and its own snapd fills the
         # rest on a clock, which killed 7 of 8 episodes in a 424-466s window.
-        # See ``guest_disk`` for the measurements and for why this cannot fail
-        # the allocation.
+        # See ``guest_disk`` for the measurements, and for why a reclamation
+        # that did NOT land now refuses the episode here instead of being
+        # recorded and stepped over.
         await asyncio.to_thread(self._prepare_guest_disk, plan)
         await asyncio.to_thread(self._start_desktop_env, plan, task)
 
@@ -600,14 +601,34 @@ class AwsProvider:
         )
 
     def _prepare_guest_disk(self, plan: ProvisioningPlan) -> None:
-        """Reclaim the guest's root filesystem and record what happened.
+        """Reclaim the guest's root filesystem, record it, and refuse a dead guest.
 
-        Wrapped in a blanket ``except`` on purpose, on top of ``guest_disk``'s
-        own per-step fail-soft: this is a hygiene step, and the one outcome that
-        must be impossible is a housekeeping defect destroying an episode that
-        would otherwise have run. The report is still written when the
-        reclamation itself achieved nothing -- "the guest had N bytes free at the
-        start" is the fact a later environment failure is read against.
+        THE REPORT IS ALWAYS WRITTEN FIRST, then the refusal is raised, so the
+        evidence of WHY the episode ended is in the bundle even though the
+        episode never started. Keeping the partial record is the point: the four
+        paid episodes this refusal exists for left nothing to read but a
+        transport error ~400 s later.
+
+        WHAT IS REFUSED, exactly: ``GuestDiskReport.blocking_steps`` -- a
+        reclamation step that did not land (failed, unreachable, or skipped for
+        want of budget), with a failed ``snap refresh --hold`` covered by its
+        successful ``refresh.hold`` fallback. A step-side failure is the
+        measured signature of a wrong ``OSWORLD_CLIENT_PASSWORD`` (every
+        privileged step returned ``sudo: no password was provided`` / ``1
+        incorrect password attempt``) and the guest then fills its root
+        filesystem within minutes, so walking on buys nothing but model spend.
+
+        WHAT IS NOT REFUSED: a guest that reclaimed successfully and is still
+        short of free space. That is the normal completed state (measured: ~2.2
+        GB free after a successful hold+clear, on the run that scored), the
+        threshold is 12 GiB, and aborting on the shortfall would refuse every
+        healthy episode while protecting nothing -- the hold is what stops the
+        clock, not the number of bytes free at t+0.
+
+        The blanket ``except`` on the probe itself stays, on top of
+        ``guest_disk``'s own per-step fail-soft: it catches a contract violation
+        (or an injected runner that misbehaves) rather than a normal failure
+        mode, and there is then no report to write or to act on.
         """
 
         report: guest_disk.GuestDiskReport | None = None
@@ -618,19 +639,36 @@ class AwsProvider:
                 clock=time.monotonic,
             )
         except Exception:
-            # ``prepare_guest_disk`` raises nothing by contract; this catches a
-            # contract violation (or an injected runner that misbehaves) rather
-            # than a normal failure mode, so there is no report to write.
             return
-        if self._cache_root is None:
-            return
-        try:
-            (self._cache_root / GUEST_PREPARATION_FILENAME).write_bytes(report.to_json_bytes())
-        except OSError:
-            # An unwritable cache root is the adapter's problem to surface
-            # elsewhere (upstream writes there too); losing the hygiene report
-            # must not be the thing that ends the episode.
-            pass
+        if self._cache_root is not None:
+            try:
+                (self._cache_root / GUEST_PREPARATION_FILENAME).write_bytes(report.to_json_bytes())
+            except OSError:
+                # An unwritable cache root is the adapter's problem to surface
+                # elsewhere (upstream writes there too); losing the hygiene report
+                # must not be the thing that ends the episode. The refusal below
+                # still fires: it does not depend on the file being readable.
+                pass
+        blockers = report.blocking_steps()
+        if blockers:
+            names = ", ".join(step.name for step in blockers)
+            detail = "; ".join(
+                f"{step.name} {step.status}"
+                + (f" rc={step.returncode}" if step.returncode is not None else "")
+                + (f" ({step.detail})" if step.detail else "")
+                for step in blockers
+            )
+            raise AllocationError(
+                f"guest disk reclamation did not land at preparation: {names}. "
+                "The episode is refused here, before any model spend, because a "
+                "guest whose snapd is still filling the root filesystem dies of "
+                "'no space left on device' a few hundred seconds in, and reports "
+                "it as an unrelated transport error. Check OSWORLD_CLIENT_PASSWORD "
+                "first: a value this image rejects fails every privileged step "
+                "with 'sudo: no password was provided' / '1 incorrect password "
+                f"attempt'. Full step record: {GUEST_PREPARATION_FILENAME}. "
+                f"Failed steps: {detail}"
+            )
 
     def _run_instance(self, plan: ProvisioningPlan) -> str:
         ec2 = self._clients.ec2
