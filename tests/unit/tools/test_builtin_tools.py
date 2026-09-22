@@ -38,7 +38,11 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.scratchpad import SCRATCHPAD_MAX_WRITE_BYTES, SCRATCHPAD_PATH_ENV
+from local_operator.scratchpad import (
+    SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_MAX_WRITE_BYTES,
+    SCRATCHPAD_PATH_ENV,
+)
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 
@@ -1476,6 +1480,23 @@ async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tm
     assert segment.details is not None and segment.details["__fault"] == "invalid_arguments"
     assert "'node_modules' is a build or dependency directory" in segment.text
     assert "git worktree add" in segment.text
+    # The advice is appended by the shared constant rather than restated per arm,
+    # so it cannot drift between them — and the caller reads it here.
+    assert segment.text.endswith(SCRATCHPAD_ELSEWHERE)
+
+    # The case-varied spelling of the same directory, which on this machine's
+    # case-insensitive volume IS the same directory: this is the reviewer's
+    # repro, and it is pinned through the tool because that is where it was.
+    folded = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://NODE_MODULES/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert folded.is_error is True
+    assert folded.details is not None and folded.details["__fault"] == "invalid_arguments"
+    assert "'NODE_MODULES' is a build or dependency directory" in folded.text
 
     suffix = await tools["edit"].execute(
         "c",
@@ -1492,6 +1513,7 @@ async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tm
     # The refusal is the model's argument at fault, and none of it reached the
     # disk: no directory was created on the way to saying no.
     assert not (pad / "node_modules").exists()
+    assert not (pad / "NODE_MODULES").exists()
     assert not (pad / "runs").exists()
 
 

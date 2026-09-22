@@ -375,6 +375,13 @@ def _resolve_scratchpad(path: Path, url: str) -> Path:
 #: The dot-prefixed entries are already unreachable through a URL — the parser
 #: refuses every dotfile segment — and are listed anyway so the policy is stated
 #: in one place for a path that arrives from anywhere else.
+#:
+#: Membership is CASE-INSENSITIVE, because the volume it runs on is not: APFS is
+#: case-insensitive, so ``NODE_MODULES`` IS ``node_modules`` on disk, the same
+#: directory one keystroke away, and a spelling-exact rule would refuse only the
+#: spelling the author happened to type. No legitimate scratch name differs from
+#: a refused one by case alone, so the fold costs no false refusal — and both
+#: arms of the policy fold, so neither can drift from the other.
 SCRATCHPAD_REFUSED_SEGMENTS: frozenset[str] = frozenset(
     {
         "node_modules",
@@ -406,17 +413,23 @@ SCRATCHPAD_REFUSED_SEGMENTS: frozenset[str] = frozenset(
     }
 )
 
+#: :data:`SCRATCHPAD_REFUSED_SEGMENTS` folded, which is what membership is
+#: actually tested against. The set above keeps each toolchain's own spelling
+#: because that is how it is read; folding here rather than spelling the names
+#: twice in lower case is what keeps the two from drifting apart.
+_REFUSED_SEGMENTS_FOLDED: frozenset[str] = frozenset(
+    name.lower() for name in SCRATCHPAD_REFUSED_SEGMENTS
+)
+
 #: File EXTENSIONS refused below the pad root: compiled artefacts, build
 #: intermediates, archives, disk images, executables and model weights. None of
 #: these has a reading as scratch, and the non-image ones have no text to return
 #: through the scheme either (``read`` refuses their bytes as text), so a pad
 #: copy is unreadable as well as heavy.
 #:
-#: Compared case-insensitively, UNLIKE the segments: an extension is a
+#: Compared case-insensitively, like the segments above: an extension is a
 #: well-known token whose canonical spelling is lower case, and the same archive
-#: arrives spelled ``ZIP`` from whatever tool upper-cased it. A directory name
-#: is instead a literal name the agent is about to create, so spelling it exactly
-#: is what keeps the refusal predictable.
+#: arrives spelled ``ZIP`` from whatever tool upper-cased it.
 SCRATCHPAD_REFUSED_SUFFIXES: frozenset[str] = frozenset(
     {
         ".o",
@@ -466,23 +479,29 @@ SCRATCHPAD_REFUSED_SUFFIXES: frozenset[str] = frozenset(
 #: files, and nothing budgets the sum (see ``guide://scratchpad``).
 SCRATCHPAD_MAX_WRITE_BYTES = 32 * 1024 * 1024
 
-#: The sentence every content refusal ends with: where the material DOES belong.
+#: The sentence EVERY content refusal ends with: where the material DOES belong.
 #: A refusal that only says no sends the agent to the next-worst place — the
 #: user's working directory — which is the littering the scheme exists to
 #: prevent, so the alternative is part of the refusal rather than a note beside
-#: it. ``mktemp -d`` with no template lands in ``$TMPDIR``, NOT ``/tmp``: macOS's
-#: ``com.apple.tmp_cleaner`` prunes ``/tmp`` entries older than three days, so a
-#: template carrying that directory is the one way to put a live session's
-#: scratch under a reaper.
+#: it. It is built to read after every arm: the segments, the extensions, the
+#: ceiling and the unplaceable path each end with it and add no tail of their own,
+#: because a second copy of the alternatives inline is a second copy that drifts.
+#: Hence it names each home by the material rather than by the rule that refused
+#: it — a large shaped extract is not build output, and a sentence that called it
+#: that would send the caller to the wrong place. ``mktemp -d`` with no template
+#: lands in ``$TMPDIR``, NOT ``/tmp``: macOS's ``com.apple.tmp_cleaner`` prunes
+#: ``/tmp`` entries older than three days, so a template carrying that directory
+#: is the one way to put a live session's scratch under a reaper.
 SCRATCHPAD_ELSEWHERE = (
-    "Scratch belongs here; build output belongs in a git worktree "
-    "(`git worktree add <path>`), and a throwaway binary or archive in "
-    "`bash mktemp -d`, which lands in $TMPDIR rather than /tmp."
+    "The pad is for scratch you will read back in this session: a dependency tree or build "
+    "output belongs in a git worktree (`git worktree add <path>`), and a throwaway binary, "
+    "an archive or an oversized extract in `bash mktemp -d`, which lands in $TMPDIR rather "
+    "than /tmp."
 )
 
 
-def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
-    """The segments of ``path`` BELOW ``root``, or the bare file name.
+def _relative_parts(path: Path, root: Path) -> tuple[str, ...] | None:
+    """The segments of ``path`` BELOW ``root``, or ``None`` when they cannot be related.
 
     The comparison must judge only what is below the root, because ``path`` is
     absolute and a pad routinely sits under a directory that is itself named
@@ -494,9 +513,15 @@ def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
     hypothetical: ``_scratchpad_root`` returns the context's string as a plain
     ``Path`` while the parsed target is ``Path.resolve()``d, so a session
     directory reached through a symlink (``/tmp`` is ``/private/tmp`` on macOS)
-    shares no textual prefix with it. Falling straight through to ``(path.name,)``
-    there would silently stop refusing ``node_modules`` altogether — the check
-    would answer "allowed" for exactly the writes it exists to refuse.
+    shares no textual prefix with it.
+
+    When neither attempt relates the two the answer is ``None``, and the caller
+    REFUSES — never the bare file name. Returning ``(path.name,)`` there fails
+    OPEN for the segment arm: ``node_modules/x.js`` would be judged on ``x.js``
+    alone and allowed, which is exactly the outcome this function exists to
+    prevent. ``parse_scratchpad_url`` has already proven containment before the
+    check runs, so ``None`` is unreachable through the tools and is here as
+    defence in depth for a direct caller.
     """
     try:
         return path.relative_to(root).parts
@@ -505,16 +530,18 @@ def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
     try:
         return path.resolve().relative_to(root.resolve()).parts
     except (OSError, RuntimeError, ValueError):
-        return (path.name,)
+        return None
 
 
 def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
     """Refuse a write whose NAME or SIZE is build output rather than scratch.
 
     Raises :class:`ScratchpadContentError` on a refused segment, a refused
-    extension, or a ``size`` over :data:`SCRATCHPAD_MAX_WRITE_BYTES`; returns
-    ``None`` otherwise. ``url`` is echoed so the message names the address the
-    caller actually typed.
+    extension, a ``size`` over :data:`SCRATCHPAD_MAX_WRITE_BYTES`, or a path that
+    cannot be placed inside the pad; returns ``None`` otherwise. ``url`` is
+    echoed so the message names the address the caller actually typed, and every
+    message ends with :data:`SCRATCHPAD_ELSEWHERE`, which is where the material
+    belongs instead.
 
     ``size`` is the payload's length in BYTES, and it is optional because
     ``edit`` has none to give: an edit sees only its hunks, never the whole
@@ -528,8 +555,13 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
     a shell (given the absolute path) as the way in.
     """
     below = _relative_parts(path, root)
+    if below is None:
+        raise ScratchpadContentError(
+            f"{url}: this write could not be placed inside the pad, so it is refused "
+            f"rather than judged. {SCRATCHPAD_ELSEWHERE}"
+        )
     for segment in below:
-        if segment in SCRATCHPAD_REFUSED_SEGMENTS:
+        if segment.lower() in _REFUSED_SEGMENTS_FOLDED:
             raise ScratchpadContentError(
                 f"{url}: '{segment}' is a build or dependency directory, not scratch. "
                 f"{SCRATCHPAD_ELSEWHERE}"
@@ -543,8 +575,5 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
     if size is not None and size > SCRATCHPAD_MAX_WRITE_BYTES:
         raise ScratchpadContentError(
             f"{url}: {size} bytes is over the {SCRATCHPAD_MAX_WRITE_BYTES}-byte ceiling for a "
-            "single write. A payload this size belongs in a git worktree "
-            "(`git worktree add <path>`) or in a throwaway temp directory "
-            "(`bash mktemp -d`, which lands in $TMPDIR rather than /tmp). Keep the pad to what "
-            "you will read back: it is reclaimed only when the session ends."
+            f"single write. {SCRATCHPAD_ELSEWHERE}"
         )

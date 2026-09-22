@@ -70,12 +70,18 @@ cannot tell apart from output.
   loop or a multi-turn state file therefore has no reason to keep a second copy
   anywhere else.
 - **Build output, a dependency tree, a compiled artefact or an archive** → not
-  here, and refused by name if you try. Build it in a git worktree instead —
-  `git worktree add <path>` — where the output is wanted and can be rebuilt
-  from the commit rather than carried around as bytes. A pad is the wrong home
-  for it in both directions: it is billed to a disk shared with every other
-  session, and it ends with the session, so nothing can be built from it
-  afterwards.
+  here, and `write`/`edit` refuse it by name if you try. Build it in a git
+  worktree instead — `git worktree add <path>` — where the output is wanted and
+  can be rebuilt from the commit rather than carried around as bytes. A pad is
+  the wrong home for it in both directions: it is billed to a disk shared with
+  every other session, and it ends with the session, so nothing can be built
+  from it afterwards. **This rule is enforced at the TOOLS and not in a shell.**
+  `write` and `edit` carry their payload inline and are checked; `bash` and the
+  `eval` kernel are handed this pad as a path (`$LOCAL_OPERATOR_SCRATCHPAD`) and
+  are NOT policed, so a `pnpm install`, a `cargo build` or a redirect into the
+  pad still succeeds and still lists back through the scheme. The refusal is a
+  nudge at the tool surface — it keeps a build tree out of a pad you write with
+  the tools, and it does not by itself undo what a shell has already put there.
 - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
   has no text to return, so the reader refuses it as text and there is nothing
   useful to do with it. (`bash mktemp -d` with NO template, which lands in

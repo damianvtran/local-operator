@@ -22,6 +22,7 @@ import pytest
 from local_operator import scratchpad as scratchpad_module
 from local_operator.scratchpad import (
     SCRATCHPAD_DIRNAME,
+    SCRATCHPAD_ELSEWHERE,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
@@ -406,6 +407,8 @@ def _pad(where: Path, *ancestors: str) -> Path:
         ((".git", "objects", "ab", "cdef"), ".git"),
         (("site-packages", "pkg", "module.py"), "site-packages"),
         (("__pycache__", "module"), "__pycache__"),
+        (("NODE_MODULES", "pkg", "index.js"), "NODE_MODULES"),
+        (("pods", "x"), "pods"),
     ],
 )
 def test_a_refused_segment_is_refused_wherever_below_the_root_it_appears(
@@ -415,6 +418,12 @@ def test_a_refused_segment_is_refused_wherever_below_the_root_it_appears(
     refusal names the segment and where the material belongs — the alternative
     is the actionable half, because a refusal that only says no sends the caller
     to the user's working directory instead.
+
+    The case-varied rows are the ones that matter on this machine and are not a
+    formality: APFS is case-insensitive, so ``NODE_MODULES`` IS ``node_modules``
+    on disk and the spelling-exact form let the refusable directory in. The
+    ``pods`` row runs the fold the other way, from a capitalised member of the
+    list.
     """
     root = _pad(tmp_path)
     url = "scratchpad://" + "/".join(segments)
@@ -546,9 +555,10 @@ def test_the_segment_rule_survives_a_symlinked_root(tmp_path: Path) -> None:
     while the parsed target is ``Path.resolve()``d, so a pad reached through a
     symlink is the ordinary case rather than the exotic one — ``/tmp`` is
     ``/private/tmp`` on macOS, and every pytest ``tmp_path`` sits under one of
-    those. The two spellings share no textual prefix; a comparison that fell
-    back to the bare file name would answer "allowed" for exactly the writes
-    this rule exists to refuse.
+    those. The two spellings share no textual prefix, so it is the resolved
+    second attempt that relates them; without it the pair would be unplaceable,
+    which is now a refusal too, but for the wrong reason and at the cost of
+    every write into a symlinked pad.
     """
     real = _pad(tmp_path / "real")
     link = tmp_path / "link"
@@ -558,3 +568,61 @@ def test_the_segment_rule_survives_a_symlinked_root(tmp_path: Path) -> None:
         check_scratchpad_write(
             (link / "node_modules" / "x.js").resolve(), link, "scratchpad://node_modules/x.js"
         )
+
+
+@pytest.mark.parametrize(
+    ("target", "root"),
+    [
+        (Path("/c/node_modules/x.js"), Path("/a/b/scratchpad")),
+        (Path("/a/b/scratchpad/node_modules/x.js"), Path("/a/b/other")),
+        (
+            Path("/tmp/probe2/sessions/s1/scratchpad/node_modules/x.js"),
+            Path("sessions/s1/scratchpad"),
+        ),
+    ],
+)
+def test_a_path_that_cannot_be_placed_inside_the_pad_is_refused(target: Path, root: Path) -> None:
+    """The spellings that reach the branch where neither containment attempt
+    relates the target to the root: a mismatched absolute pair, and a relative
+    root against an absolute target.
+
+    This is the arm the reviewer flagged as failing OPEN — judging the bare file
+    name there would ALLOW ``node_modules/x.js`` in exactly the case where the
+    name cannot be trusted, which is the outcome the helper exists to prevent.
+    It is unreachable through the tools (``parse_scratchpad_url`` has already
+    proven containment), so this is the function-level pin for the defence in
+    depth, and it is the honest place to prove it.
+    """
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(target, root, "scratchpad://node_modules/x.js")
+
+    assert "could not be placed inside the pad" in str(excinfo.value)
+
+
+def test_every_content_refusal_ends_with_the_same_elsewhere_sentence(tmp_path: Path) -> None:
+    """The constant claims to be the sentence EVERY content refusal ends with,
+    and the reviewer's probe was literally ``endswith`` — so all four arms are
+    pinned to it here.
+
+    The size arm used to restate the alternatives inline with "build output
+    belongs in a git worktree", which is wrong for the caller it addressed: an
+    oversized shaped extract is not build output, and a second copy of the
+    advice is a second copy that drifts from the first.
+    """
+    root = _pad(tmp_path)
+    attempts = [
+        (root / "node_modules" / "x.js", root, "scratchpad://node_modules/x.js", None),
+        (root / "artefact.o", root, "scratchpad://artefact.o", None),
+        (root / "dump.csv", root, "scratchpad://dump.csv", SCRATCHPAD_MAX_WRITE_BYTES + 1),
+        (
+            Path("/c/node_modules/x.js"),
+            Path("/a/b/scratchpad"),
+            "scratchpad://node_modules/x.js",
+            None,
+        ),
+    ]
+    for target, where, url, size in attempts:
+        with pytest.raises(ScratchpadContentError) as excinfo:
+            check_scratchpad_write(target, where, url, size)
+
+        assert str(excinfo.value).endswith(SCRATCHPAD_ELSEWHERE), url
