@@ -1580,14 +1580,21 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
             return []
         return [tool for tool in child._tools if origin(tool) is None]
 
-    def activate(server_name: str, raw_tool_name: str) -> None:
+    def activate(server_name: str, raw_tool_name: str) -> bool:
         # Unreachable for a restricted child: its resolver is built with
         # ``deny_activation_reason``, which returns before calling this. Kept
         # unguarded so there is ONE activation path rather than a second
         # allow-check that could drift from the resolver's.
+        #
+        # The return value travels back to the resolver, which is what tells the
+        # user whether the schema reaches the next model call or the next turn:
+        # the tools array is published once per turn (``Session._wire_tools``),
+        # so a child that activates mid-turn is deferred exactly like a top-level
+        # session's.
         enabled.add((server_name, raw_tool_name))
-        if child is not None:
-            child.refresh_tools(base() + selected(manager.get_tools()))
+        if child is None:
+            return True
+        return child.refresh_tools(base() + selected(manager.get_tools()))
 
     def defer(server_name: str, raw_tool_name: str) -> None:
         deferred.add((server_name, raw_tool_name))
@@ -1938,6 +1945,16 @@ async def _construct_child_session(
     if len(knowledge) > 12000:
         knowledge = knowledge[:12000].rsplit("\n", 1)[0]
 
+    # Same construction-time freeze as the session provider's: this child's block 0
+    # also starts a persisted prefix epoch when it changes, and this host probe
+    # answers from the desktop app's heartbeat (see
+    # ``prompts_api.host_capability_probes``). One child render is cheap; a child
+    # that re-anchors mid-run is not, and a subagent's work is exactly the case
+    # where a mid-run prefix loss costs the most.
+    from local_operator.prompts_api import host_capability_probes
+
+    host_has_browser, host_has_console = host_capability_probes()
+
     def system_blocks_provider(model_label: str = "") -> list[str]:
         # ``model_label`` is passed by the child Session each turn (its own
         # ``model_label``), which for a subagent is the resolved effort-tier
@@ -1977,11 +1994,15 @@ async def _construct_child_session(
             repo_guidance=repo_guidance,
             credentials=names,
             model_label=model_label,
+            host_has_browser=host_has_browser,
+            host_has_console=host_has_console,
         )
 
     setattr(system_blocks_provider, "append_only_state", True)
     setattr(system_blocks_provider, "repo_guidance", repo_guidance)
     setattr(system_blocks_provider, "knowledge_hooks", parent_hooks)
+    setattr(system_blocks_provider, "host_has_browser", host_has_browser)
+    setattr(system_blocks_provider, "host_has_console", host_has_console)
     parent_stream = parent_session._stream_fn
     fork_stream = getattr(parent_stream, "fork", None)
     # Transport pooling is shared infrastructure; routing, callbacks, effort,
