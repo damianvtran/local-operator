@@ -5370,8 +5370,38 @@ def test_a_payload_less_image_becomes_a_notice_and_never_a_wire_block():
 
 
 def test_whitespace_and_corrupt_payloads_count_as_no_bytes():
-    """The discriminator is \"decodes to zero bytes\", not \"is the empty string\"."""
+    """The discriminator is "no decoder finds a byte", not "is the empty string".
+
+    Contrast with ``test_real_bytes_survive_even_when_the_format_is_unrecognised``
+    below: garbage that no decoder recovers is dropped, but garbage-SHAPED input
+    that a tolerant decode DOES recover real bytes from is kept (round 1 review,
+    MAJOR 1). The two tests together are the boundary.
+    """
     for payload in ("", "   ", "\n\t", "!!! not base64 !!!"):
+        messages, dropped = _without_unresolvable_frames(
+            [
+                Message(
+                    role="user",
+                    content=[
+                        TextContent(text="x"),
+                        ImageContent(data=payload, mime_type="image/png"),
+                    ],
+                )
+            ]
+        )
+        assert dropped == 1, payload
+        assert _wire_image_urls(messages) == [], payload
+
+
+def test_a_payload_with_no_bytes_under_any_decode_is_still_omitted():
+    """The refusal side of the extended discriminator.
+
+    ``====`` and ``=`` are pure padding: the tolerant decode re-pads and returns
+    nothing, so the block is refused exactly as before the third decode existed.
+    This is the case that proves the tolerant decoder did not become a way for
+    a genuinely byte-less payload to sneak through.
+    """
+    for payload in ("====", "=", "A===", "========"):
         messages, dropped = _without_unresolvable_frames(
             [
                 Message(
@@ -5402,6 +5432,15 @@ def test_real_bytes_survive_even_when_the_format_is_unrecognised():
     # it. It holds real bytes, so refusing it here would be the one error this
     # pass must not make — hence the tolerant fallback decode.
     wrapped = "\n".join(textwrap.wrap(real_png, 64))
+    # The shapes that BOTH standard decoders refuse while holding real bytes
+    # (round 1 review, MAJOR 1): URL-safe alphabet, and standard base64 with its
+    # padding stripped or truncated by one character. ``rebound_oversize_image``
+    # returns such a block UNCHANGED when its strict decode raises, so this pass
+    # must not be the only one in the file that drops it.
+    raw = base64.b64decode(real_png)
+    url_safe = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    stripped = real_png.rstrip("=")
+    truncated = real_png[:-1]
     message = Message(
         role="user",
         content=[
@@ -5409,6 +5448,9 @@ def test_real_bytes_survive_even_when_the_format_is_unrecognised():
             ImageContent(data=real_png, mime_type="image/png"),
             ImageContent(data=unknown_format, mime_type="image/heif"),
             ImageContent(data=wrapped, mime_type="image/png"),
+            ImageContent(data=url_safe, mime_type="image/png"),
+            ImageContent(data=stripped, mime_type="image/png"),
+            ImageContent(data=truncated, mime_type="image/png"),
         ],
     )
     rendered, dropped = _without_unresolvable_frames([message])
@@ -5416,7 +5458,7 @@ def test_real_bytes_survive_even_when_the_format_is_unrecognised():
     assert dropped == 0
     assert rendered[0] is message, "an untouched message must not be copied"
     urls = _wire_image_urls(rendered)
-    assert len(urls) == 3
+    assert len(urls) == 6
     assert all(not url.endswith("base64,") for url in urls), urls
 
 
@@ -5500,10 +5542,59 @@ async def test_render_history_omits_a_payload_the_store_lost(tmp_path, monkeypat
         for message in rendered
         for block in message.content
     )
-    # The ARCHIVE is untouched: the row still carries its digest reference, so
-    # /export, a fork, and a session rehydrated from a RESTORED store all still
-    # see the image. Only the wire copy is degraded.
+    # The ARCHIVE keeps its digest reference at this point, so /export, a fork,
+    # and a session rehydrated from a RESTORED store still see the image — on a
+    # session that has not folded since. That qualifier is load-bearing, not
+    # hedging: see test_the_digest_reference_is_lost_by_a_prune_fold below, which
+    # pins the fold that does destroy it (round 1 review, MAJOR 3).
     assert '"attachment"' in transcript.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_the_digest_reference_is_lost_by_a_prune_fold(tmp_path, monkeypatch):
+    """What actually survives, proven rather than assumed (round 1 review, MAJOR 3).
+
+    ``_resolve_attachments`` replaces the digest with the empty placeholder IN
+    PLACE on the stored entry's payload, and ``compact_file`` re-serializes the
+    entries — so the first prune fold after a replay writes the placeholder over
+    the reference and the image becomes unrecoverable even from a restored
+    store. The render-seam fix is unaffected (the block was empty either way),
+    but the "the transcript is untouched" claim is only true UNTIL the fold, and
+    this test is the boundary rather than a comment asserting it.
+
+    The mutation is pre-existing in ``transcript.py`` and deliberately NOT fixed
+    here: it is a different slice, and this PR's own evidence should not imply a
+    guarantee it does not provide.
+    """
+    store_root = tmp_path / "attachments"
+    monkeypatch.setattr("local_operator.session.attachments.attachments_dir", lambda: store_root)
+    transcript = Transcript(tmp_path / "session")
+    transcript._attachments = AttachmentStore(store_root)
+    await transcript.append_message(
+        Message(
+            role="user",
+            content=[
+                TextContent(text="the shot"),
+                ImageContent(data=_large_png_b64(), mime_type="image/png"),
+            ],
+        )
+    )
+    await transcript.append_message(Message.assistant("a reply long enough to prune " * 20))
+    for path in store_root.glob("*"):
+        path.unlink()
+
+    assert '"attachment"' in transcript.path.read_text(encoding="utf-8")
+
+    transcript.build_llm_history()  # the replay that mutates the entry in place
+
+    await transcript.append_prune(transcript._entries[1].id, "[pruned]")
+    reclaimed = await transcript.compact_file(min_reclaim_bytes=0)
+
+    assert reclaimed > 0, "the fold must have actually rewritten the file"
+    assert '"attachment"' not in transcript.path.read_text(encoding="utf-8"), (
+        "the digest survived the fold — if this now passes, the in-place mutation was "
+        "fixed and the scoped claims in _without_unresolvable_frames can be widened"
+    )
 
 
 @pytest.mark.asyncio
