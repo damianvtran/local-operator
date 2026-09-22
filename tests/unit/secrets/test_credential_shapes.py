@@ -1890,6 +1890,363 @@ async def test_a_real_bash_command_never_publishes_an_open_key_body(
     assert "[redacted]" in text
 
 
+# --- the pipe's OPEN BLOCK: nothing inside it is published -------------------
+#
+# The three mechanisms that defeated this state, each measured at the revision
+# before this section existed, and each one a REGRESSION ARM below:
+#
+# 1. the header's own terminator was offered to the line loop, whose prose test
+#    read a bare separator as prose and CLOSED the block one line into itself —
+#    every later release then had no header to reopen it. Measured: 143 body
+#    lines (the whole 8 KiB ``pending``) from PR #1427's case, one call.
+# 2. a 512-line bound released the body verbatim past it — measured 1,488 body
+#    lines of a 2,000-line block.
+# 3. a cap-forced cut could land INSIDE a line, and the fragment is what the loop
+#    classified: a four-character fragment is below the body grammar's floor, so
+#    it read as prose and closed the block — measured 1,092 body lines published
+#    on the next release.
+#
+# The outcome all three reach is the same publish, and it is also reachable when
+# RETENTION drops one marker line from a >cap stream: the settled shape pass
+# cannot repair it because ``pem-private-key`` spans BEGIN to END. That route
+# measured 1,420 raw body lines in the call-site spill of a >4 MiB stream through
+# the real tool, served over ``read spill://``.
+#
+# The armour below is built from PARTS on purpose: these tests are about a
+# literal's LENGTH as much as its spelling, and a display filter that rewrote the
+# dashes would leave every arm here passing vacuously. ``_PEM_GRAMMAR_IS_LIVE``
+# is asserted first by every arm that depends on it.
+
+_PEM_DASHES = "-" * 5
+_PEM_HEADER = f"{_PEM_DASHES}BEGIN RSA PRIVATE KEY{_PEM_DASHES}\n"
+_PEM_END = f"{_PEM_DASHES}END RSA PRIVATE KEY{_PEM_DASHES}\n"
+#: A body line at a real PEM's width, and UNIQUE per line so a publish is
+#: countable and locatable rather than merely detectable.
+_PEM_BODY_STEM = "MIIEowIBAAKCAQEA" + "bKdFgHjLmNpQrStUvWxYzAbCdEfGhJkLmNoP"
+
+
+def _body_lines(count: int) -> str:
+    return "".join(f"{_PEM_BODY_STEM}{index:04d}\n" for index in range(count))
+
+
+def _published_body_lines(text: str) -> list[str]:
+    """Every body line still readable in ``text`` — the property under test."""
+    return [line for line in text.splitlines() if line.startswith(_PEM_BODY_STEM)]
+
+
+def _pem_grammar_is_live() -> None:
+    """Fail LOUDLY if an armour literal stopped matching the classifiers.
+
+    A rewritten header is not a masked one: it publishes the whole body, so an arm
+    whose header no longer matches would assert the wrong thing about the wrong text.
+    """
+    assert builtin._PEM_HEADER_LINE.match(_PEM_HEADER.rstrip("\n")), "header literal is not PEM"
+    assert builtin._PEM_END_LINE.match(_PEM_END.rstrip("\n")), "END literal is not PEM"
+    assert builtin._PEM_BODY_LINE.match(_PEM_BODY_STEM), "body line is not PEM-shaped"
+
+
+def test_an_unterminated_block_past_the_deferral_limit_publishes_no_body() -> None:
+    """PR #1427's case, through the pipe: header + 200 body lines and no END.
+
+    One call, and the whole 8 KiB ``pending`` used to go out verbatim — 143 body
+    lines of a 57-byte body, or 31-32 of a 256-byte one: the byte budget is what
+    is fixed, and the body width only chooses how many lines it buys.
+    """
+    _pem_grammar_is_live()
+    payload = _PEM_HEADER + _body_lines(200)
+    published = _pipe_whole(payload)
+
+    published_lines = _published_body_lines(published)
+    assert not published_lines, f"{len(published_lines)} body lines of an open block went out"
+    assert REDACTION_MARKER in published, "the block was not masked at all"
+
+
+def test_a_chunk_boundary_just_after_the_header_keeps_the_block_open() -> None:
+    """The header in one release and its body in the next: the block must stay open.
+
+    This is the separator bug at its narrowest. The header's own terminator used to
+    be the line loop's first element, where the prose test closed the block — so a
+    read boundary that lands after the header (any slow child that prints the
+    header first) published everything after it.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    published = redactor.feed(_PEM_HEADER.encode())
+    published += redactor.feed(_body_lines(200).encode())
+    published += redactor.feed(b"", final=True)
+    text = published.decode()
+
+    assert not _published_body_lines(
+        text
+    ), f"{len(_published_body_lines(text))} body lines were published across the boundary"
+    assert REDACTION_MARKER in text, "the block was not masked at all"
+
+
+def test_a_block_longer_than_the_old_line_bound_is_masked_to_its_end() -> None:
+    """The bound that released the body: 1,488 of these 2,000 lines used to go out raw.
+
+    An unterminated block cannot hold memory — a masked line is DROPPED, and
+    ``pending`` is capped separately — so the state is not bounded by lines any more.
+    """
+    _pem_grammar_is_live()
+    published = _pipe_whole(_PEM_HEADER + _body_lines(2000))
+
+    assert not _published_body_lines(
+        published
+    ), f"{len(_published_body_lines(published))} body lines past the old line bound"
+
+
+def test_a_forced_cut_inside_a_line_is_held_to_the_line_boundary() -> None:
+    """A fragment of a line cannot be classified, so it must not be classified.
+
+    The cap can cut mid-line, and a fragment shorter than the body grammar's floor
+    (``PEM_BODY_FLOOR``) is read as PROSE by the loop — which CLOSES an open block.
+    Measured: the four-character fragment ``MIIE`` closed one, and the next release
+    (all body, no header left) published 1,092 lines of a 2,000-line block.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    # 400 lines is past the deferral limit, so the cap decides the cut. The tail
+    # length is SEARCHED, not guessed: which byte the cap lands on depends on the
+    # line width, and the case only exists when the remainder is shorter than the
+    # grammar's floor. A guessed length that happens to land at a line boundary
+    # would assert nothing while looking like it did.
+    # The floor is the code's own name for it, with the historical value as the
+    # fallback: an arm run against a tree that predates the shared constant still
+    # tests the MECHANISM (where the cut lands) instead of failing on the lookup.
+    floor = getattr(builtin, "PEM_BODY_FLOOR", 8)
+    for tail in range(1, 60):
+        text = _PEM_HEADER + _body_lines(400) + "M" * tail
+        cap_cut = len(text) - builtin._PIPE_DEFERRAL_LIMIT
+        line_start = max(text.rfind("\n", 0, cap_cut), text.rfind("\r", 0, cap_cut)) + 1
+        fragment = cap_cut - line_start
+        if 0 < fragment < floor:
+            break
+    else:  # pragma: no cover - the fixture could not reach the case
+        pytest.fail("no tail length puts a sub-floor fragment at the cap's cut")
+
+    cut = redactor._release_point(text, final=False)
+
+    assert cut == line_start, (
+        f"the release ends {cut - line_start} bytes into a line, where the classifier "
+        "reads the fragment as prose (and closes the block)"
+    )
+
+
+def test_a_terminated_block_is_masked_whole_and_its_end_line_closes_the_state() -> None:
+    """The preservation arm: the fix must not start eating real key blocks.
+
+    Asserted at the MASK rather than on the pipe's whole output, and that is
+    deliberate: for a complete block the shape table ALSO masks the span from the
+    header to the terminator, so a product-level assertion here would be satisfied by
+    either layer and could not be reddened by breaking one of them. The mask's own
+    contract is the narrower, provable one — body gone, END line out, state closed —
+    and `pem-private-key` is already pinned elsewhere as the second layer.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    masked = redactor._mask_open_key_block(_PEM_HEADER + _body_lines(3) + _PEM_END)
+
+    assert not _published_body_lines(masked), "a complete block published its body"
+    assert _PEM_END.rstrip("\n") in masked, "the END line was eaten"
+    assert redactor._in_key_block is False, "the END line did not close the block"
+    # And the product-level outcome for the same text, which is the marker.
+    assert REDACTION_MARKER in _pipe_whole(_PEM_HEADER + _body_lines(400) + _PEM_END)
+
+
+def test_prose_after_a_stray_header_is_released_and_closes_the_block() -> None:
+    """The over-mask guard, unchanged by this fix: prose is not key material.
+
+    A header quoted in a doc or matched by ``grep`` opens the state, and the FIRST
+    ordinary line closes it — so the fixture text after it stays readable.
+    """
+    _pem_grammar_is_live()
+    published = _pipe_whole(_PEM_HEADER + "ordinary prose line\n" + _PEM_BODY_STEM + "0000\n")
+
+    assert "ordinary prose line" in published, "prose was eaten by a stray header"
+    # The one body-shaped line after the prose is masked: a close is not a licence
+    # to publish, and this arm pins the direction the layer must fail in.
+    assert not _published_body_lines(published)
+
+
+def test_a_numeric_table_without_a_header_is_left_alone() -> None:
+    """The negative half: a table of numbers is output a human has to read.
+
+    ``10000000 10000001`` IS body-shaped — the line grammar reads the first run as a
+    line-number prefix, which is how the old ambiguous ``LINE_PREFIX`` cost seconds
+    on exactly this row (PR #1427). What keeps such a table readable is that NO
+    HEADER is open: the state is the only thing that makes a body-shaped line a body
+    line. The plausible bug this pins is the one that masks body-shaped lines with no
+    header at all, which is a single mutation away in the loop below. (Inside an open
+    block these rows ARE masked: an over-mask is the direction this layer must fail
+    in, and it is recorded in the module comment.)
+    """
+    _pem_grammar_is_live()
+    table = "10000000 10000001\n" * 20
+    published = _pipe_whole(table)
+
+    assert published == table, "a table with no header was rewritten by the pipe filter"
+
+
+def _pipe_chunks(raw: bytes, chunk: int = 16384) -> str:
+    """The pipe filter over a WHOLE stream, in chunks, as ``_pump`` drives it."""
+    redactor = builtin._PipeRedactor([])
+    published = [
+        redactor.feed(raw[index : index + chunk]).decode() for index in range(0, len(raw), chunk)
+    ]
+    published.append(redactor.feed(b"", final=True).decode())
+    return "".join(published)
+
+
+def _retention_stream(cap: int, variant: str, block_lines: int) -> tuple[bytes, int]:
+    """A >cap stream whose retention window drops exactly ONE marker line.
+
+    Two things here are deliberate. The feed is CHUNKED, like the product's: a
+    single call would hand the shape pass a complete BEGIN … END and it would mask
+    the whole block, so there would be no fragment to measure and no case to test.
+    And the layout is SEARCHED against the pipe's own output rather than computed
+    from the raw bytes, because the masked length of the block is exactly what
+    differs between the revision that leaks and the revision that does not — a
+    layout derived from the raw stream would place the marker differently on each
+    and the arm would prove nothing. Returns the raw stream and the window size.
+    """
+    marker = "BEGIN" if variant == "begin" else "END"
+    marker_line = _PEM_HEADER if variant == "begin" else _PEM_END
+    pad_line = "filler " + "x" * 40 + "\n"
+    target = cap // 2
+    window = 512
+
+    def prose(total: int) -> str:
+        """At least ``total`` bytes, always ending on a line break (a glued header is
+        not the line-anchored spelling the mask looks for)."""
+        return pad_line * (-(-total // len(pad_line)))
+
+    def build(pre: int, post: int) -> bytes:
+        block = _PEM_HEADER + _body_lines(block_lines) + _PEM_END
+        return (prose(max(pre, 0)) + block + prose(max(post, 0))).encode()
+
+    pre = target + 64 if variant == "begin" else target - 64
+    for _ in range(30):
+        measured = _pipe_chunks(build(pre, window * 4))
+        at = measured.find(marker)
+        if at < 0:  # the layout put the block inside a masked run: shift and retry
+            pre += 4096
+            continue
+        line_start = measured.rfind("\n", 0, at) + 1
+        if target <= line_start < target + window - len(marker_line):
+            break
+        pre += max(min(target - line_start, 4096), -4096)
+    else:  # pragma: no cover - the search could not place the marker
+        pytest.fail("could not place the marker line inside the retention window")
+
+    # Size the tail so the omitted window is the width this arm needs. The tail
+    # moves in whole pad lines, so the window lands in [window, window + a line):
+    # the assertion is that band, and the ACTUAL width is what the arm compares
+    # against, rather than a number the fixture would have to hit exactly.
+    post = window * 4 + window - len(measured)
+    raw = build(pre, post)
+    omitted = len(measured) - cap
+    for _ in range(4):
+        raw = build(pre, post)
+        measured = _pipe_chunks(raw)
+        omitted = len(measured) - cap
+        if window <= omitted < window + len(pad_line):
+            break
+        post += window - omitted
+    assert window <= omitted < window + len(pad_line), f"the retention window is {omitted} bytes"
+    line_start = measured.rfind("\n", 0, measured.find(marker)) + 1
+    assert (
+        0 <= line_start - target < omitted - len(marker_line)
+    ), "the marker line is not inside the omitted window"
+    return raw, omitted
+
+
+@pytest.mark.parametrize("variant", ["begin", "end"])
+def test_a_retention_split_marker_still_publishes_no_body(variant: str) -> None:
+    """Retention drops ONE marker line; nothing in the body may reach any surface.
+
+    This is the route a reviewer found independently, from the retention side, and it
+    is the one the settled pass cannot repair: the operator's copy is built from the
+    retained text, and ``pem-private-key`` needs a complete BEGIN … END, so a fragment
+    matches no rule at all. Measured at the base: 1,420 raw body lines in the call-site
+    spill of a >4 MiB stream through the real tool, served over ``read spill://``.
+    """
+    _pem_grammar_is_live()
+    cap = 65536
+    raw, window = _retention_stream(cap, variant, 700)
+
+    sink = builtin._BashOutput(limit=cap)
+    redactor = builtin._PipeRedactor([])
+    live = []
+    for index in range(0, len(raw), 16384):
+        piece = redactor.feed(raw[index : index + 16384])
+        sink.append(piece)
+        live.append(piece.decode())
+    piece = redactor.feed(b"", final=True)
+    sink.append(piece)
+    live.append(piece.decode())
+
+    assert sink.omitted_bytes == window, "retention did not drop the marker line"
+    for surface, text in (
+        ("the live pipe", "".join(live)),
+        ("the retained copy", sink.decode()),
+        ("the settled pass", _live_text(sink.decode())),
+    ):
+        published = _published_body_lines(text)
+        assert not published, f"{surface} published {len(published)} body lines of a split block"
+
+
+def test_a_block_truncated_by_the_cap_still_publishes_no_body() -> None:
+    """A block whose body is cut off mid-line by the cap, with no END at all.
+
+    The cap is the mechanism that releases a block's middle, and the fragment it
+    leaves is the one the loop used to read as prose; this is that shape end to
+    end, through the pipe, at a small forced deferral.
+    """
+    _pem_grammar_is_live()
+    original = builtin._PIPE_DEFERRAL_LIMIT
+    try:
+        builtin._PIPE_DEFERRAL_LIMIT = 256
+        redactor = builtin._PipeRedactor([])
+        # Chunks of 100 bytes: the cut lands inside lines repeatedly, and the
+        # third line's remainder is a sub-floor fragment.
+        payload = (_PEM_HEADER + _body_lines(60)).encode()
+        published = b""
+        for index in range(0, len(payload), 100):
+            published += redactor.feed(payload[index : index + 100])
+        published += redactor.feed(b"", final=True)
+    finally:
+        builtin._PIPE_DEFERRAL_LIMIT = original
+
+    text = published.decode()
+    assert not _published_body_lines(
+        text
+    ), f"{len(_published_body_lines(text))} body lines escaped a cap-truncated block"
+
+
+def test_an_unterminated_block_with_a_second_block_present_publishes_no_body() -> None:
+    """An END dropped while ANOTHER block follows: the first must not leak either.
+
+    ``_release_point``'s hold looks for the NEXT terminator, so a second block's END
+    can satisfy the first block's search. Whatever that does to the deferral, the
+    body of the unterminated one must not reach the pipe's output.
+    """
+    _pem_grammar_is_live()
+    # 700 lines in the unterminated block, not 300: below the old 512-line bound
+    # this arm would have passed at the revision that published, which is how a
+    # boundary arm becomes a vacuous one.
+    payload = _PEM_HEADER + _body_lines(700) + _PEM_HEADER + _body_lines(200) + _PEM_END
+    # CHUNK-fed: in one call the shape pass would match BEGIN(1) … END(2) as a single
+    # span and mask the lot, so the arm would pass at the revision that published.
+    published = _pipe_chunks(payload.encode())
+
+    published_lines = _published_body_lines(published)
+    # The second block is terminated, so ITS body is masked by the settled pass as
+    # well; what this arm pins is that no body line survives the pipe.
+    assert not published_lines, f"{len(published_lines)} body lines were published"
+    assert REDACTION_MARKER in published
+
+
 def test_two_stores_in_one_process_are_independent() -> None:
     """The registration set and its cap are PER STORE, not per process.
 
