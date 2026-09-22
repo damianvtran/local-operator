@@ -376,7 +376,7 @@ def _search_reason(segment: str) -> str | None:
         # is matched as a whole token, so `--files-with-matches` (`-l`) is caught
         # too (QA Q2). (`fd`/`locate` have no such flag; the scan is harmless.)
         for word in _words(rest):
-            if _RG_ENUMERATION_RE.match(word) or word in ("-l", "-L"):
+            if _RG_ENUMERATION_RE.match(word):
                 return None
         recursive = True
     else:
@@ -410,32 +410,29 @@ _LONG_FLAGS_WITH_VALUE_RE = re.compile(
     r"max-count|context|after-context|before-context|regexp|file|label|encoding|color|colour)="
 )
 
-#: Long flags that RECURSE BY DEFAULT and are named in the message rather than
-#: the reason string; kept here so the enumeration/one-off set has one home.
-_RG_ENUMERATION_RE = re.compile(r"^--(?:files|type-list|type-list|files-with-matches)$")
+#: Long ENUMERATION flags: they LIST rather than search content, so they are
+#: never a content walk. `--files` lists project files (our `glob` replaces it);
+#: `--type-list` prints the regex-type table. `--files-with-matches` (`-l`) is
+#: deliberately NOT here — it still SEARCHES content and prints filenames, so
+#: `rg -l NEEDLE .` walks the tree (review round 2, M-b).
+_RG_ENUMERATION_RE = re.compile(r"^--(?:files|type-list)$")
 
 
-def _short_flag_bundle_takes_value(bundle: str) -> bool:
-    """Does a short-flag bundle like ``-m5``/``-C3``/``-e foo`` consume a value?
+def _short_flag_bundle(bundle: str) -> tuple[bool, bool]:
+    """Parse a short-flag bundle (the text after ``-``) left to right.
 
-    Three cases, and the third is what review B1 caught:
-
-    * the bundle's final letter takes a value and nothing follows (``-m``) —
-      the NEXT token is the value;
-    * the bundle's final letter takes a value and the rest is a non-alphabetic
-      tail (``-m5``) — the value is INLINE, nothing is consumed;
-    * any EARLIER letter takes a value (``-rn -e`` is a separate token, but
-      ``-ePATTERN`` bundles the value) — only the final letter can be followed
-      by a value here, so no earlier letter consumes the next token.
+    Returns ``(consumes_next_token, supplies_pattern)``. A short flag's value is
+    the REST OF THE TOKEN when anything follows it (``-efoo`` -> value ``foo``,
+    ``-m5`` -> value ``5``), and the NEXT token only when the flag is the last
+    character (``-e`` / ``-m``). Getting this wrong is what left `grep -rn -efoo
+    src/` refused (review round 2, M-a): the inline value was ignored, the
+    pattern was lost, and `src/` was read as the pattern.
     """
-    letters = [c for c in bundle[1:] if c.isalpha()]
-    if not letters:
-        return False
-    last = bundle[-1]
-    if last.isdigit() or not last.isalpha():
-        # `-m5` / `-C3`: the value is inline on the final letter.
-        return False
-    return letters[-1] in _FLAGS_WITH_VALUE
+    for idx, ch in enumerate(bundle):
+        if ch in _FLAGS_WITH_VALUE:
+            rest = bundle[idx + 1 :]
+            return (rest == "", ch in ("e", "f"))
+    return (False, False)
 
 
 def _path_operands(rest: str, program: str) -> list[str]:
@@ -504,13 +501,11 @@ def _path_operands(rest: str, program: str) -> list[str]:
             continue
         if raw.startswith("-") and len(raw) > 1:
             # A short-flag bundle. `-e`/`-f` supply the pattern; any other
-            # value-taking FINAL letter consumes the next token.
-            letters = [c for c in raw[1:] if c.isalpha()]
-            if letters and letters[-1] in ("e", "f"):
+            # value-taking flag's INLINE tail (>1 char follows) is its value.
+            consumes_next, supplies_pattern = _short_flag_bundle(raw[1:])
+            if supplies_pattern:
                 pattern_consumed = True
-                skip_next = True
-                continue
-            if _short_flag_bundle_takes_value(raw):
+            if consumes_next:
                 skip_next = True
             continue
         # A bare word: the pattern unless it was supplied by a flag.

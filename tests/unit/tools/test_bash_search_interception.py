@@ -97,6 +97,12 @@ NEVER_BLOCKED = [
     "grep -rn -B2 foo src/",
     "grep -rn -e NEEDLE -e OTHER src/",
     "rg -n -e NEEDLE src/",
+    # round-2 M-a: an ATTACHED short-flag value (`-efoo`, `-fpatterns.txt`).
+    "grep -rn -efoo src/",
+    "grep -rn -fpatterns.txt src/",
+    "rg -n -eNEEDLE src/",
+    # ring-2 M-b: `-l` scoped is fine; only the unscoped form walks.
+    "rg -l NEEDLE src/",
     # Q2: enumeration flags list rather than walk.
     "rg --type-list",
     "rg -l NEEDLE src/",
@@ -188,6 +194,10 @@ BLOCKED = [
     # review M2: a piped search with its own path still walks
     "cat foo | grep -rn p .",
     "cat foo | find . -type f -name '*.py'",
+    # round-2 M-b: `-l` with a path STILL SEARCHES and walks.
+    "rg -l NEEDLE .",
+    "rg -l NEEDLE node_modules",
+    "rg --files-with-matches NEEDLE .",
     # review m3: -mindepth is not a bound
     "find . -mindepth 2 -type f -name '*.py'",
     # review M3: a quoted `<<` must not truncate the command
