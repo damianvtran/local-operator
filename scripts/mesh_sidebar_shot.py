@@ -34,7 +34,6 @@ production. Both relays are stopped in ``finally``; no LaunchAgent is written.
 
 from __future__ import annotations
 
-import re
 import secrets as _secrets
 import shutil
 import subprocess
@@ -47,15 +46,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from local_operator.network import audit as audit_mod  # noqa: E402
 from local_operator.network import identity, relay, store, types, wire  # noqa: E402
+from scripts.visual_capture import svg_text_runs_by_row  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 NETWORK_NAME = "devmesh"
-
-#: One ``<text>`` run of the exported SVG, with its baseline ``y``, for the chip
-#: census below. The capture helper writes a run per styled span — the band's chip
-#: is one ROW of several runs (the glyph, the model label, the cwd) — so the census
-#: has to group by ``y`` to read the row the way a person reads it.
-_SVG_TEXT_RUN = re.compile(r'<text[^>]*\by="([\d.]+)"[^>]*>(.*?)</text>', re.S)
 
 #: The two sessions B holds, as ``(session_id, title)``. Real-length titles, so
 #: the frame shows the title budget rather than a curated short name.
@@ -214,11 +208,15 @@ def _require_settled_chip(path: Path) -> None:
     # the model label and the cwd are painted as separate spans, so a check that
     # looked inside the run holding the glyph would find no words at all and could
     # never fire on the transient it exists for (measured on this rig's own frame:
-    # the only run containing ``◆`` is ``◆`` itself).
-    rows: dict[str, list[str]] = {}
-    for match in _SVG_TEXT_RUN.finditer(svg):
-        rows.setdefault(match.group(1), []).append(re.sub(r"<[^>]+>", "", match.group(2)))
-    chips = ["".join(runs) for runs in rows.values() if any(ICON_MODEL in run for run in runs)]
+    # the only run containing ``◆`` is ``◆`` itself). The grouping itself lives in
+    # `visual_capture.svg_text_runs_by_row` — this module and
+    # `new_remote_shot.py` both census an export, and a private copy of the parse
+    # in each is how one of them would quietly stop matching the export.
+    chips = [
+        "".join(runs)
+        for runs in svg_text_runs_by_row(svg)
+        if any(ICON_MODEL in run for run in runs)
+    ]
     if not chips:
         raise SystemExit(
             f"no {ICON_MODEL!r} model chip is in {path.name}, so the band this frame "

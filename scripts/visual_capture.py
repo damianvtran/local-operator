@@ -156,6 +156,45 @@ def terminal_svg(svg: str, columns: int, rows: int, profile: CaptureProfile) -> 
     return ET.tostring(root, encoding="unicode")
 
 
+#: One ``<text>`` element of an export, with its baseline ``y`` and its body.
+_TEXT_ELEMENT = re.compile(r'<text[^>]*\by="([\d.]+)"[^>]*>(.*?)</text>', re.S)
+_MARKUP = re.compile(r"<[^>]+>")
+
+
+def svg_text_runs_by_row(svg: str) -> list[list[str]]:
+    """The text of an exported frame, grouped by baseline, oldest row first.
+
+    Returns each row as its styled RUNS, because joining them is the caller's
+    policy: a reader that must not miss a phrase split across two styled spans
+    joins a row, while a reader asking which run holds a glyph must not. The
+    grouping is the part every caller got wrong in its own copy.
+
+    TWO THINGS ABOUT THIS EXPORT DEFEAT A NAIVE MATCH, and a census written
+    without knowing them is a check that can never fire — worse than no census,
+    because it looks like one. Both were measured on 2026-09-22 against this
+    helper's own export of the welcome splash:
+
+    * A ROW IS NOT A SUBSTRING OF THE FILE. ``terminal_svg`` hands every grapheme
+      cluster its own ``<tspan x=…>`` origin, so the row reading
+      ``! latest is v0.62.2 — /update`` is stored as ``>!</tspan><tspan
+      x="248">l``, and ``"latest is v" in svg`` is FALSE on a frame that paints it.
+    * ITS SPACES ARE U+00A0, NOT U+0020. The observed row joins to
+      ``'!\\xa0latest\\xa0is\\xa0v0.62.2\\xa0—\\xa0/update\\n'``, so even after
+      reassembling the row, ``"latest is v" in joined`` is still FALSE. Textual
+      pads cells with no-break space and this export preserves it.
+
+    So the runs are returned with no-break space folded to a plain space: what a
+    reader of the frame sees is a space, and a census is a comparison against what
+    is on the screen. A caller comparing a token with no spaces (``◆``,
+    ``connecting…``) is unaffected by the fold.
+    """
+    rows: dict[float, list[str]] = {}
+    for y, body in _TEXT_ELEMENT.findall(svg):
+        text = _MARKUP.sub("", body).replace("\u00a0", " ")
+        rows.setdefault(float(y), []).append(text)
+    return [rows[y] for y in sorted(rows)]
+
+
 @lru_cache(maxsize=16)
 def font_provenance(profile: CaptureProfile) -> dict[str, Any]:
     """Measure fontconfig's local selection, used by the librsvg gallery path.

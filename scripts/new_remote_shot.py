@@ -28,6 +28,34 @@ EVERY PEER HERE IS A FIXTURE: ``network.peers.known_peers`` is replaced before t
 app reads it, so no real device id or peer name leaves this machine — the rules
 that apply to an SVG on a PR are the rules that apply to a clipboard.
 
+THE SPLASH'S UPDATE ROW IS PINNED ABSENT FOR THE SAME REASON, and it needed to be
+(design round 5, D32). The welcome splash draws `! latest is v<X> — /update` when
+the background probe finds a newer release, and that row SHIFTS everything below
+it down one row. This probe re-homes ``HOME``, so the version cache is always
+cold and the probe really does reach PyPI: the frame therefore used to be a
+function of the capturing machine's resolver. Measured 2026-09-22, both captures
+rendered at the committed artifact's own 1.8x zoom and diffed against
+``static/tui-mesh-picker.png``:
+
+* with DNS: PyPI answered (`latest='0.62.2', behind=True`), the banner row took
+the place of the blank one at y=319.9, every row below moved down 17 px, and the
+diff was that whole shifted block (bbox x408..1179 y558..765) — the exact bbox
+D32 reported.
+* with ``XPC_FLAGS=0x2`` (no resolver): AE=0, i.e. the committed PNG IS this
+  state.
+
+So the committed copy documents the BROKEN-RESOLVER machine while nothing said
+so, and a re-capture on a healthy one silently produced a different frame. The
+pin below is what ``known_peers`` is: the frame stops depending on what this
+machine can reach. THE VERSION ROW IS NOT PINNED, because it is not the same
+kind of value — it reads the INSTALLED version, not a remote one, and the frame
+is captured from a checkout whose version is a property of the commit. NOTE the
+row below it: the splash prints its CWD, so the invoking directory is part of
+the frame (`static/tui-mesh-picker.png` carries the worktree root), which is why
+the byte-exact comparison above must be run from the repository root. That is a
+separate determinism hole, deliberately left alone here rather than silently
+re-shot: see ``docs/VISUAL_CAPTURE.md``.
+
 The isolation import must stay FIRST (it re-homes ``HOME`` /
 ``LOCAL_OPERATOR_CONFIG_DIR`` and drops every inherited ``CMUX_*`` before any
 application code reads them), for the reason ``scripts/probe_isolation.py``
@@ -42,11 +70,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import scripts.probe_isolation  # noqa: E402, F401
+from local_operator import update as update_mod  # noqa: E402
 from local_operator.network import peers as peers_mod  # noqa: E402
 from local_operator.network.peers import KnownPeer  # noqa: E402
 from scripts.visual_capture import (  # noqa: E402
     refuse_flag_shaped_argument,
     save_capture,
+    svg_text_runs_by_row,
 )
 
 #: The fixture's peers, as ``known_peers`` returns them: one named, one WITHOUT a
@@ -92,6 +122,35 @@ VARIANTS = ("with-peers", "no-peers")
 #: UX round 3 walked this flow at.
 DEFAULT_SIZE = (110, 34)
 
+#: The one splash row this frame must never carry. The pinned state below is the
+#: absent one, and the census asserts it on the exported bytes.
+_UPDATE_ROW = "latest is v"
+
+
+def _pin_update_check() -> None:
+    """Make the splash's update row absent, whatever this machine can reach.
+
+    The app imports ``check_latest`` FUNCTION-LOCALLY at both call sites
+    (``OperatorApp._check_for_update`` and ``_cmd_update``), so replacing the
+    module attribute is what the production call actually sees — the same
+    mechanism ``known_peers`` above uses, and the same one
+    ``tests/unit/tui/test_new_remote.py`` uses for the peer fixture.
+
+    The stub answers the way an unreachable PyPI does (``latest is None``,
+    ``behind is False``), which is the state the committed artifact already
+    documents — see the module docstring for the two measurements. It does NOT
+    fake an install: ``installed`` is read from this install, so the value the
+    splash would show on a ``/update`` stays honest.
+    """
+
+    def check_latest(*_args: object, **_kwargs: object) -> update_mod.VersionCheck:
+        return update_mod.VersionCheck(
+            installed=update_mod.installed_version(), latest=None, behind=False
+        )
+
+    update_mod.check_latest = check_latest  # type: ignore[assignment]
+
+
 #: The mark glyphs the welcome splash draws. Used only to check the frame is in
 #: the settled state below; `local_operator.tui.widgets.welcome` owns the art.
 _MARK_GLYPHS = frozenset("█▀▄")
@@ -118,6 +177,9 @@ async def main() -> None:
     peers_mod.known_peers = (  # type: ignore[assignment]
         (lambda root=None: list(PEERS)) if variant == "with-peers" else (lambda root=None: [])
     )
+    # Before the app boots: the splash's background probe runs on its own thread
+    # and can land between any two `pilot.pause()` calls below.
+    _pin_update_check()
 
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.editor import Editor
@@ -151,6 +213,30 @@ async def main() -> None:
         # splash a short terminal sheds first.
         exported = app.export_screenshot()
         mark = sum(exported.count(glyph) for glyph in _MARK_GLYPHS)
+        # THE SPLASH STATE IS PART OF THE FRAME, so it is censused rather than
+        # trusted to the pin above (design round 5, D32): the pin is one import
+        # away from being bypassed by a second path to the same row, and a frame
+        # whose composition moved is exactly what this file exists to make
+        # impossible to ship quietly. Absent is the only passing count.
+        #
+        # READ THE ROW, NOT THE FILE. The check cannot be
+        # `exported.count(_UPDATE_ROW)`: the capture helper gives every grapheme
+        # cluster its own `<tspan>` origin, so that count is 0 even on a frame that
+        # paints the banner (measured on the pre-pin capture, whose `y=319.9` row
+        # reads `! latest is v0.62.2 — /update`). A census written that way is a
+        # check that can never fail — worse than no census, because it looks like
+        # one. `svg_text_runs_by_row` is the parse the mesh rig's own census uses.
+        banner = sum(1 for runs in svg_text_runs_by_row(exported) if _UPDATE_ROW in "".join(runs))
+        if banner:
+            raise SystemExit(
+                f"the splash is carrying the update row {banner} time(s), so this "
+                "frame is the DNS-dependent one: the pin in _pin_update_check did not "
+                "take effect, or the splash grew a second writer for that row."
+            )
+        print(
+            f"census[{variant}]: update row absent, "
+            f"rows {len(svg_text_runs_by_row(exported))}, mark glyphs {mark}"
+        )
         if mark == 0:
             raise SystemExit(
                 "the welcome splash's mark is not in this frame, so the two states are not "
