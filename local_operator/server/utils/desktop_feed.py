@@ -1394,6 +1394,16 @@ class DesktopFeed:
         leaving = ""
         kind = ""
         age: float | None = None
+        # The two subagent counts are a hand transcription of
+        # ``decorate_rows``' live mapping, exactly like ``live_state``/``leaving``
+        # above and for the same reason: the pair this feed publishes on
+        # ``session_status`` must be the pair the LIST derives for the same
+        # on-disk state, and a row that is ``delegating`` in the list while the
+        # feed's copy reads ``idle`` is precisely the divergence the parity test
+        # exists to catch. ``None`` when there is no record — never ``0``, which
+        # would be a count nobody reported (see ``SessionRow.delegating``).
+        subagents_running: int | None = None
+        subagents_queued: int | None = None
         if cached is not None and cached[1] != "stale":
             # ``stale`` IS TREATED AS NO RECORD, and that is not a shortcut: the
             # pid is gone, so nothing the record says about work in progress is
@@ -1413,6 +1423,8 @@ class DesktopFeed:
             pending = record.pending or None
             kind = str(record.kind or "")
             leaving = str(record.leaving or "")
+            subagents_running = getattr(record, "subagents_running", None)
+            subagents_queued = getattr(record, "subagents_queued", None)
             # The age from the same owner the list asks, and without the zombie
             # probe for the same reason ``decorate_rows`` gives: the verdict has
             # already been reached, so a ``ps`` fork here would buy nothing. It
@@ -1427,6 +1439,8 @@ class DesktopFeed:
             live_state=live_state,
             pending=pending,
             leaving=leaving,
+            subagents_running=subagents_running,
+            subagents_queued=subagents_queued,
             wakes=len(schedules),
             wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
             kind=kind,
