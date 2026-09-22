@@ -5341,13 +5341,48 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     # Imported HERE rather than at module scope for the reason recorded on
     # _DAEMON_PLIST_LABELS: mobile.install pulls Starlette into the updater,
     # and that probe runs in the CLI and in the TUI's update worker.
-    from local_operator.mobile.install import snapshot_bundle
-
-    print(
-        "lop-update: mobile web bundle: "
-        f"{snapshot_bundle(snapshot.path / 'local_operator' / 'mobile' / 'web')}",
-        flush=True,
+    # Imported alongside the classifier below, because both are the same project's
+    # private helpers for "is there a UI in this tree" and re-implementing a dist
+    # check here is how the two answers drift apart.
+    from local_operator.mobile.install import (
+        _bundle_state,
+        _pinned_pnpm,
+        snapshot_bundle,
     )
+
+    web_dir = snapshot.path / "local_operator" / "mobile" / "web"
+    bundle_status = snapshot_bundle(web_dir)
+    print(f"lop-update: mobile web bundle: {bundle_status}", flush=True)
+    # ``snapshot_bundle`` NEVER raises — it returns a status STRING — and this
+    # caller used to print that string and install anyway, so a snapshot whose
+    # bundle did not build was flipped to `current` with no UI and exit 0: that is
+    # how generations 0.61.13-0.61.16, 0.61.18 and 0.62.0 landed with no bundle,
+    # the phone's portal answered 503 "mobile web bundle not built", and `lop
+    # mobile status` still printed `healthy: yes` the whole time. A snapshot that
+    # HAS web sources (``_bundle_state`` is not ``missing-sources``) and whose
+    # build did not reach a servable dist is a FAILED update, so it does not
+    # install. The tolerance for a tree with no web sources at all is unchanged:
+    # that generation has no UI to serve either way, and refusing it would break
+    # the non-web snapshots this command legitimately installs.
+    if _bundle_state(web_dir) != "missing-sources" and bundle_status not in (
+        "built",
+        "already built",
+    ):
+        # The PIN, read from the tree being installed rather than written into the
+        # sentence: the remedy has to survive a pin bump, and naming a version
+        # this snapshot no longer carries is the same defect as naming a command
+        # the reader cannot run (the D8/D14 class, one step along).
+        pinned = _pinned_pnpm(web_dir) or "11.22.0"
+        print(
+            f"lop-update: the mobile web bundle did not build ({bundle_status}); "
+            "refusing to install a generation with no UI — fix the build with "
+            "`lop mobile install`, or run "
+            f"`npx --yes pnpm@{pinned} install --frozen-lockfile && "
+            f"npx --yes pnpm@{pinned} build` in local_operator/mobile/web, "
+            "then re-run this update.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"installing {snapshot.install_label} ({shape})")
     try:
         install_into_generation(

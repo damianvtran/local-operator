@@ -1029,10 +1029,24 @@ def _runner_or_refusal(
     if seeded is not None:
         return seeded, None
     corepack = _shim_argv("corepack")
-    if corepack is None:
+    if corepack is not None:
+        _corepack_enable(corepack, web_dir, env=env)
+        return [*corepack, "pnpm"], None
+    # THE LAST RESORT, tried only when every local route above is unavailable — so
+    # a machine whose PATH pnpm already reports the pin never reaches here and
+    # nothing is fetched for it. ``npx --yes pnpm@<pin>`` fetches the PINNED
+    # tarball DIRECTLY (npm resolves ``pnpm@<pin>`` itself, and ``--yes`` skips the
+    # install prompt), so it does not re-enter pnpm's own ``pnpm add pnpm@<pin>``
+    # self-install — the recursion this guard exists to refuse, and the reason the
+    # lopped-on pinned version is the version fetched rather than whatever PATH
+    # carries. The steps :func:`_build_bundle` appends (``install
+    # --frozen-lockfile`` / ``build``) run through :func:`_run_build_step` exactly
+    # as the other arms' do, so the bound and the group reap are unchanged. An
+    # absent ``npx`` falls through to today's refusal, untouched.
+    npx = _shim_argv("npx")
+    if npx is None:
         return runner, mismatch
-    _corepack_enable(corepack, web_dir, env=env)
-    return [*corepack, "pnpm"], None
+    return [*npx, "--yes", f"pnpm@{pin}"], None
 
 
 def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
