@@ -69,6 +69,13 @@ cannot tell apart from output.
   automatic cleanup pass does too when its policy is switched on). A long-running
   loop or a multi-turn state file therefore has no reason to keep a second copy
   anywhere else.
+- **Build output, a dependency tree, a compiled artefact or an archive** → not
+  here, and refused by name if you try. Build it in a git worktree instead —
+  `git worktree add <path>` — where the output is wanted and can be rebuilt
+  from the commit rather than carried around as bytes. A pad is the wrong home
+  for it in both directions: it is billed to a disk shared with every other
+  session, and it ends with the session, so nothing can be built from it
+  afterwards.
 - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
   has no text to return, so the reader refuses it as text and there is nothing
   useful to do with it. (`bash mktemp -d` with NO template, which lands in
@@ -203,10 +210,20 @@ gets no tile and no viewer. One file per subject; subdirectories are free
 - One directory level per listing, and a listing is bounded, so a wide directory
   cannot flood the transcript. Reading a very large file comes back truncated,
   with the `read` call that continues it.
-- The folder itself is NOT size-capped: a single write is not refused for its
-  size, so keep the files to what you need. Nothing caps it later either — the
-  only thing that removes it is the session going away, by the cleanup pass (when
-  its policy is switched on) or by the session being deleted.
+- The folder is NOT size-capped overall, and nothing budgets the sum of what a
+  pad holds. A SINGLE write is the one thing that is capped: 32 MiB
+  (33,554,432 bytes), because a pad is disk shared with every other session on
+  the machine and is reclaimed only when its session ends — so a payload meant
+  to be built from or streamed belongs in a git worktree or a temp directory.
+  A write is refused by NAME as well: a build or dependency directory
+  (`node_modules`, `target`, `dist`, `build`, `site-packages`, `Pods`, …) or a
+  compiled, archived or model extension (`.o`, `.a`, `.so`, `.zip`, `.tar.gz`,
+  `.pt`, `.bin`, …) is not scratch, whatever it is called here. Reading is
+  deliberately NOT gated: a pad written before this rule can still be listed,
+  read and cleaned up, which is the point. Nothing removes the folder later
+  either — the only thing that removes it is the session going away, by the
+  cleanup pass (when its policy is switched on) or by the session being
+  deleted.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.
 - Any other URL scheme in a path argument is refused: a scheme the tools do not

@@ -1,10 +1,16 @@
-"""The ``scratchpad://`` URL grammar, one assertion per row.
+"""The ``scratchpad://`` URL grammar and content policy, one assertion per row.
 
 The grammar is a security boundary as much as a convenience: a scratchpad URL is
 resolved by ``read``/``write``/``edit`` against a directory OUTSIDE the working
 directory, so the containment rule here is the only thing standing between an
 agent's scratch folder and the rest of the disk. Each row of the table below
 therefore asserts its own sentence, not just "it raises".
+
+The content policy sits beside it because it is the same kind of rule — a
+boundary enforced before anything reaches the disk — and because its NEGATIVE
+cases are as load-bearing as its refusals: a name rule that also fires on
+something legitimately named as a note is one an agent routes around, which
+puts the litter back in the user's tree.
 """
 
 from __future__ import annotations
@@ -16,11 +22,14 @@ import pytest
 from local_operator import scratchpad as scratchpad_module
 from local_operator.scratchpad import (
     SCRATCHPAD_DIRNAME,
+    SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
+    ScratchpadContentError,
     ScratchpadPathError,
+    check_scratchpad_write,
     ensure_scratchpad_dir,
     parse_scratchpad_url,
     scratchpad_dir_of,
@@ -366,3 +375,186 @@ def test_the_ensure_helper_never_raises_on_an_impossible_root(tmp_path: Path) ->
 
     # ``file-not-dir/scratchpad`` cannot be created under a regular file.
     assert ensure_scratchpad_dir(str(blocked / "scratchpad")) == str(blocked / "scratchpad")
+
+
+# ---------------------------------------------------------------------------
+# Content policy: the pad keeps scratch, not build output
+# ---------------------------------------------------------------------------
+
+
+def _pad(where: Path, *ancestors: str) -> Path:
+    """A pad root, optionally sited under directories named like refused ones.
+
+    ``ancestors`` exists for the one case that decides whether the segment rule
+    is usable at all: a pad under a ``build`` or ``target`` directory — which is
+    where several of this fleet's checkouts and worktrees actually sit — must
+    not be refused wholesale.
+    """
+    root = where.joinpath(*ancestors, "sessions", "abc123", SCRATCHPAD_DIRNAME)
+    root.mkdir(parents=True)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("segments", "refused"),
+    [
+        (("node_modules", "pkg", "index.js"), "node_modules"),
+        (("wt", "node_modules", "index.js"), "node_modules"),
+        (("target", "debug", "app"), "target"),
+        (("dist", "bundle.js"), "dist"),
+        (("build", "notes.md"), "build"),
+        ((".git", "objects", "ab", "cdef"), ".git"),
+        (("site-packages", "pkg", "module.py"), "site-packages"),
+        (("__pycache__", "module"), "__pycache__"),
+    ],
+)
+def test_a_refused_segment_is_refused_wherever_below_the_root_it_appears(
+    tmp_path: Path, segments: tuple[str, ...], refused: str
+) -> None:
+    """A build or dependency directory keeps its meaning at any depth, and the
+    refusal names the segment and where the material belongs — the alternative
+    is the actionable half, because a refusal that only says no sends the caller
+    to the user's working directory instead.
+    """
+    root = _pad(tmp_path)
+    url = "scratchpad://" + "/".join(segments)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root.joinpath(*segments), root, url)
+
+    assert f"'{refused}' is a build or dependency directory" in str(excinfo.value)
+    assert "git worktree add" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("segments", "suffix"),
+    [
+        (("artefact.o",), ".o"),
+        (("runs", "artefact.o"), ".o"),
+        (("artefact.zip",), ".zip"),
+        (("artefact.pt",), ".pt"),
+        (("artefact.TAR.GZ",), ".gz"),
+    ],
+)
+def test_a_refused_extension_is_refused_and_names_a_temp_dir(
+    tmp_path: Path, segments: tuple[str, ...], suffix: str
+) -> None:
+    """The compiled/archive/model extensions are judged on the FILE name, so
+    burying one in a subdirectory is not an escape — and the spelling is
+    case-folded, because the same artefact arrives upper-cased from any tool
+    that does it (a Finder-made ``ZIP``).
+    """
+    root = _pad(tmp_path)
+    url = "scratchpad://" + "/".join(segments)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root.joinpath(*segments), root, url)
+
+    assert f"'{suffix}' is a compiled, archived or model artefact" in str(excinfo.value)
+    assert "mktemp -d" in str(excinfo.value)
+
+
+def test_a_write_one_byte_over_the_ceiling_is_refused(tmp_path: Path) -> None:
+    """The size arm is the only one that needs the payload, and it is a refusal
+    rather than a truncation on purpose: a dump cut at the ceiling would look
+    written and be unreadable."""
+    root = _pad(tmp_path)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(
+            root / "dump.csv", root, "scratchpad://dump.csv", SCRATCHPAD_MAX_WRITE_BYTES + 1
+        )
+
+    assert str(SCRATCHPAD_MAX_WRITE_BYTES) in str(excinfo.value)
+    assert "mktemp -d" in str(excinfo.value)
+
+
+def test_a_write_at_the_ceiling_is_allowed(tmp_path: Path) -> None:
+    """The boundary itself is ordinary scratch: the ceiling is there to catch a
+    dump, and an off-by-one that refused the largest legitimate payload would be
+    a rule the fleet works around rather than with."""
+    root = _pad(tmp_path)
+
+    assert (
+        check_scratchpad_write(
+            root / "dump.csv", root, "scratchpad://dump.csv", SCRATCHPAD_MAX_WRITE_BYTES
+        )
+        is None
+    )
+
+
+def test_an_edit_passes_no_size_and_is_judged_on_the_name_alone(tmp_path: Path) -> None:
+    """``edit`` sees only its hunks, so it has no size to give and must not be
+    refused for one — but the name arm still applies to it."""
+    root = _pad(tmp_path)
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md") is None
+    with pytest.raises(ScratchpadContentError):
+        check_scratchpad_write(root / "blob.a", root, "scratchpad://blob.a")
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        ("notes.md",),
+        ("runs", "deep.csv"),
+        ("perf-2026-09-22.png",),
+        ("node_modules-notes.md",),
+        ("build-report.csv",),
+        ("out", "stdout.log"),
+        ("objects", "shape.json"),
+        ("targets", "notes.md"),
+        ("probe.sh",),
+    ],
+)
+def test_intended_scratch_is_allowed(tmp_path: Path, segments: tuple[str, ...]) -> None:
+    """The negative half of the policy, and the half a reviewer should read
+    first. The rule is a path SEGMENT and never a substring, so a name that
+    merely contains a refused token is scratch; the ambiguous directory names
+    (``out``, ``objects``) are deliberately not in the list, because a false
+    refusal teaches the caller to route around the pad and put the litter back
+    in the user's tree.
+    """
+    root = _pad(tmp_path)
+    url = "scratchpad://" + "/".join(segments)
+
+    assert check_scratchpad_write(root.joinpath(*segments), root, url) is None
+
+
+def test_a_refused_name_in_an_ancestor_of_the_root_does_not_refuse_the_write(
+    tmp_path: Path,
+) -> None:
+    """Only what is BELOW the root is judged, and this is the case that makes
+    that necessary rather than tidy: the path is absolute, and this fleet's own
+    checkouts sit under worktrees whose ancestors are named like refused ones.
+    Judging every segment of the absolute path would make every write in such a
+    pad a refusal.
+    """
+    root = _pad(tmp_path, "build", "target")
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md") is None
+    # ...and the rule is not disarmed for that root: a refused segment BELOW it
+    # is still refused, which is what tells the two halves apart.
+    with pytest.raises(ScratchpadContentError):
+        check_scratchpad_write(
+            root / "node_modules" / "x.js", root, "scratchpad://node_modules/x.js"
+        )
+
+
+def test_the_segment_rule_survives_a_symlinked_root(tmp_path: Path) -> None:
+    """``_scratchpad_root`` hands back the context's string as a plain ``Path``
+    while the parsed target is ``Path.resolve()``d, so a pad reached through a
+    symlink is the ordinary case rather than the exotic one — ``/tmp`` is
+    ``/private/tmp`` on macOS, and every pytest ``tmp_path`` sits under one of
+    those. The two spellings share no textual prefix; a comparison that fell
+    back to the bare file name would answer "allowed" for exactly the writes
+    this rule exists to refuse.
+    """
+    real = _pad(tmp_path / "real")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(ScratchpadContentError):
+        check_scratchpad_write(
+            (link / "node_modules" / "x.js").resolve(), link, "scratchpad://node_modules/x.js"
+        )
