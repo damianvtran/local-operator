@@ -408,7 +408,9 @@ def test_a_device_rotation_rewrites_the_row_in_place(root: Path) -> None:
     lane_row.public_key = old.public_key
     new, previous = identity.rotate(lane, name="peer")
     statement = identity.rotation_statement(old, new, NETWORK)
-    member = relay.apply_device_rotation(record, statement, root=root)
+    outcome = relay.apply_device_rotation(record, statement, root=root)
+    assert outcome.applied is True, "a first application is what the audit line records"
+    member = outcome.member
     assert member.device_id == new.device_id
     assert member.public_key == new.public_key
     # The old id is kept for a bounded window, so an in-flight link is not cut.
@@ -456,8 +458,13 @@ def test_a_rotation_statement_that_arrives_after_the_pull_is_a_no_op(root: Path)
     assert record.member(old.device_id) is record.member(new.device_id)
 
     # NOW THE FRAME ARRIVES, exactly as it was queued, and finds its work already done.
-    member = relay.apply_device_rotation(record, statement)
+    duplicate = relay.apply_device_rotation(record, statement)
 
+    # ``applied`` is FALSE here and the caller's audit line is what reads it: this
+    # delivery rewrote nothing and verified nothing, so a ``device_rotated`` entry
+    # for it would be a false row on the log an incident is reconstructed from.
+    assert duplicate.applied is False
+    member = duplicate.member
     assert member.device_id == new.device_id
     assert record.member(old.device_id) is member
     assert [row.device_id for row in record.active_members()] == [SELF, new.device_id]
@@ -468,7 +475,9 @@ def test_a_rotation_statement_that_arrives_after_the_pull_is_a_no_op(root: Path)
     assert fresh_row is not None
     fresh_row.device_id = old.device_id
     fresh_row.public_key = old.public_key
-    assert relay.apply_device_rotation(fresh, statement).device_id == new.device_id
+    first = relay.apply_device_rotation(fresh, statement)
+    assert first.applied is True
+    assert first.member.device_id == new.device_id
     assert [row.device_id for row in fresh.active_members()] == [SELF, new.device_id]
 
 
@@ -487,3 +496,89 @@ def test_a_rotation_statement_without_the_old_key_is_refused(root: Path) -> None
     with pytest.raises(Exception) as excinfo:
         relay.apply_device_rotation(record, statement, persist=False)
     assert getattr(excinfo.value, "code", "") == "bad_rotation_statement"
+
+
+def test_a_frame_signed_for_another_network_is_refused_and_moves_no_row(root: Path) -> None:
+    """A statement names ONE network, and the FRAME path must enforce that too.
+
+    THE TABLE PATH'S TWIN of this is ``test_endpoint_probe``'s
+    ``test_a_rotation_claim_this_record_cannot_verify_retires_nothing`` with
+    ``tamper == "another_network"``, which proves ``adopt_members`` refuses these
+    bytes. This is the OTHER route to the same row, and it must answer identically —
+    the same comparison, the same refusal code — or the two paths disagree about one
+    member: the peer that learned the rotation from the frame holds the device's new
+    key while the peer that learned it from the table refused it, and the peer holding
+    the table never sees the genuine successor at all.
+
+    The trigger is ordinary rather than hostile. An admin who is a member of another
+    network signs one statement PER network and broadcasts each to that network's
+    members, so a device in both receives a perfectly valid statement — the signature
+    verifies and every field is right — whose only wrong field is the network it names.
+    """
+    record, _state = _record()
+    _admit_peer(record)
+    lane = root / "peer"
+    old = identity.mint(lane, name="peer")
+    lane_row = record.member(PEER)
+    assert lane_row is not None
+    lane_row.device_id = old.device_id
+    lane_row.public_key = old.public_key
+    new, _previous = identity.rotate(lane, name="peer")
+    statement = identity.rotation_statement(old, new, "n_ffffffffffffffffffffffff")
+    before = lane_row.to_json()
+
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        relay.apply_device_rotation(record, statement, root=root)
+
+    assert excinfo.value.code == "bad_rotation_statement"
+    # THE ROW IS UNTOUCHED — no id, no key, no proof — and nothing reached the disk.
+    assert record.member(old.device_id) is lane_row
+    assert lane_row.to_json() == before
+    assert lane_row.rotation_proof == {}
+    assert record.member(new.device_id) is None
+    assert not store.record_path(NETWORK, root).exists()
+
+
+def test_another_network_is_refused_even_when_this_one_already_applied_it(root: Path) -> None:
+    """The network check runs BEFORE the duplicate-delivery no-op, and the order is the rule.
+
+    The no-op branch trusts a statement's ids and public key WITHOUT verifying anything
+    — it answers "already done" — so a foreign statement that happens to name the same
+    old and new ids for the same new key would be answered "already applied" and kept
+    as the row's ``rotation_proof`` if the network check ran after it. Same bytes, same
+    trigger as the test above: only the network named is wrong, and no path may believe
+    it. The row here is left exactly as this network's OWN statement left it.
+    """
+    record, _state = _record()
+    _admit_peer(record)
+    lane = root / "peer"
+    old = identity.mint(lane, name="peer")
+    lane_row = record.member(PEER)
+    assert lane_row is not None
+    lane_row.device_id = old.device_id
+    lane_row.public_key = old.public_key
+    new, _previous = identity.rotate(lane, name="peer")
+    statement = identity.rotation_statement(old, new, NETWORK)
+    # The pull's half: adopt the row the rotated device publishes, which is the state
+    # the no-op branch is written for.
+    published = types.MemberRecord(
+        device_id=new.device_id,
+        public_key=new.public_key,
+        name="peer",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        previous_ids=[old.device_id],
+        rotation_proof=statement,
+        rotated_at=time.time(),
+        added_via="invite",
+    )
+    assert relay.adopt_members(record, [published.to_json()]) == (True, [new.device_id])
+    survivor = record.member(new.device_id)
+    assert survivor is not None and survivor.rotation_proof == statement
+    foreign = identity.rotation_statement(old, new, "n_ffffffffffffffffffffffff")
+
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        relay.apply_device_rotation(record, foreign, root=root)
+
+    assert excinfo.value.code == "bad_rotation_statement"
+    assert survivor.rotation_proof == statement, "the row must keep THIS network's proof"

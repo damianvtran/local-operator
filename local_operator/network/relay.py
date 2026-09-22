@@ -575,6 +575,29 @@ def _row_for_id(record: NetworkRecord, device_id: str) -> MemberRecord | None:
     return None
 
 
+def _statement_names_network(record: NetworkRecord, statement: Any) -> bool:
+    """Is ``statement`` signed for THIS network?
+
+    THE ONE COMPARISON THAT MAKES A STATEMENT NON-TRANSFERABLE, asked by BOTH paths
+    that believe one — the table path (:func:`_statement_covers`) and the frame path
+    (:func:`apply_device_rotation`). A statement is signed for exactly one network
+    (``identity.rotation_statement`` takes the network id as an argument), because a
+    statement usable anywhere would be a skeleton key for the device's other
+    memberships: an operator is a member of several networks in the ordinary case, so
+    the copy of one rotation broadcast to network B names B and must not move the
+    same device's row in network A.
+
+    Single-sourced rather than spelled twice because the two paths are two routes to
+    ONE row, and the failure is a DISAGREEMENT rather than an error: with the
+    comparison made in the table path and missed in the frame path, the peer that
+    learned the change from the frame held the device's new key while the peer that
+    learned it from the table refused it, and the two counted one member differently.
+    """
+    if not isinstance(statement, dict):
+        return False
+    return str(statement.get("network_id") or "") == record.network_id
+
+
 def _statement_covers(
     record: NetworkRecord,
     statement: Any,
@@ -593,10 +616,12 @@ def _statement_covers(
     TWO CHECKS ON TOP OF IT, because a statement can be replayed where it does not
     belong:
 
-    * ``network_id`` is checked HERE and is not checked by the verifier. A statement
-      is signed for ONE network (a statement usable anywhere would be a skeleton key
-      for the device's other memberships), so a statement signed for another network
-      must not move a row in this one.
+    * ``network_id`` is checked HERE and is not checked by the verifier, and it is
+      checked through :func:`_statement_names_network` — the SAME comparison the frame
+      path makes, so the two routes to a row cannot drift apart. A statement is signed
+      for ONE network (a statement usable anywhere would be a skeleton key for the
+      device's other memberships), so a statement signed for another network must not
+      move a row in this one.
     * The row and the statement must name the same hop — ``old_device_id`` is the
       predecessor's own id, ``new_*`` is the successor's, and the predecessor's id is
       in ``previous_ids``. The two representations are written together by the same
@@ -604,7 +629,7 @@ def _statement_covers(
     """
     if not isinstance(statement, dict) or not statement:
         return False
-    if str(statement.get("network_id") or "") != record.network_id:
+    if not _statement_names_network(record, statement):
         return False
     if str(statement.get("old_device_id") or "") != predecessor.device_id:
         return False
@@ -1727,6 +1752,22 @@ def apply_panic(
     return ApplyOutcome(True, "untrusted")
 
 
+@dataclass
+class DeviceRotationOutcome:
+    """What happened to a received ``net_identity_rotate``.
+
+    ``applied`` is FALSE for the duplicate-delivery no-op: the row was already what
+    the statement asks for, so nothing was written — and in that branch nothing was
+    VERIFIED either, because the proof is not what the no-op reads. THE DISTINCTION IS
+    THE AUDIT LINE'S: a ``device_rotated`` event for a row that did not move is a false
+    entry on the log an incident is reconstructed from, which is worse than a missing
+    one.
+    """
+
+    member: MemberRecord
+    applied: bool
+
+
 def apply_device_rotation(
     record: NetworkRecord,
     statement: dict[str, Any],
@@ -1734,7 +1775,7 @@ def apply_device_rotation(
     root: Path | None = None,
     now: float | None = None,
     persist: bool = True,
-) -> MemberRecord:
+) -> DeviceRotationOutcome:
     """Rewrite a member's row in place after a key rotation (§3.3).
 
     The statement must be signed by the OLD key and the old id must be an ACTIVE
@@ -1743,7 +1784,24 @@ def apply_device_rotation(
     id is not cut mid-turn, and the statement itself is kept on the row
     (``rotation_proof``) so a peer that only ever reads this device's table can
     verify the hop rather than guess it.
+
+    THE STATEMENT MUST ALSO NAME THIS NETWORK, checked BEFORE the no-op branch below
+    and through :func:`_statement_names_network` — the SAME comparison the table path
+    makes, not a second spelling of it. This is the frame half of the rule the table
+    path already enforced, and the two halves matter together: without the check here,
+    one statement (an admin who is also in another network broadcasts its rotation to
+    that network's members) stored the new key on the frame path while the identical
+    bytes were refused on the table path, so two peers of ONE network disagreed about
+    ONE member and the peer that learned it from the table never saw the device's
+    genuine new key.
     """
+    named = str(statement.get("network_id") or "") if isinstance(statement, dict) else ""
+    if not _statement_names_network(record, statement):
+        raise MeshRefusal(
+            "bad_rotation_statement",
+            "a device rotation statement signed for "
+            f"{named or 'no network'} does not apply to {record.name}",
+        )
     old_id = str(statement.get("old_device_id") or "")
     new_id = str(statement.get("new_device_id") or "")
     # A STATEMENT WE HAVE ALREADY APPLIED IS A NO-OP, NOT A REFUSAL. The rotation is
@@ -1753,13 +1811,16 @@ def apply_device_rotation(
     # below would fail its own "the old id is the fingerprint of the old key" check
     # and answer a duplicate delivery with an error. Nothing is written: the row is
     # already what the statement asks for.
-    applied = _row_for_id(record, new_id) if new_id else None
+    #
+    # It is reported as NOT APPLIED for that reason, and the caller's audit line is
+    # what reads the flag: this branch rewrites nothing and verifies nothing.
+    already = _row_for_id(record, new_id) if new_id else None
     if (
-        applied is not None
-        and old_id in applied.previous_ids
-        and applied.public_key == str(statement.get("new_public_key") or "")
+        already is not None
+        and old_id in already.previous_ids
+        and already.public_key == str(statement.get("new_public_key") or "")
     ):
-        return applied
+        return DeviceRotationOutcome(already, False)
     member = record.member(old_id)
     if member is None or not member.active:
         raise MeshRefusal(
@@ -1777,7 +1838,7 @@ def apply_device_rotation(
     member.rotated_at = time.time() if now is None else now
     if persist:
         store.save(record, root)
-    return member
+    return DeviceRotationOutcome(member, True)
 
 
 # ---------------------------------------------------------------------------
@@ -3878,6 +3939,18 @@ class RelayServer:
         # A decision taken on a snapshot would let this device answer "stale refus"
         # for an epoch it has just written, or apply a rotation on top of a record
         # that moved in between.
+        #
+        # THE REHANDSHAKE IS OUTSIDE THIS BLOCK, DELIBERATELY. It closes and redials
+        # every link of this network, and BOTH halves of that wait on a socket:
+        # ``link.send`` blocks up to ``op_wait_s`` (10 s) on a full queue and
+        # ``link.close`` waits ``CLOSE_FLUSH_S`` (1 s) for its writer to drain, PER
+        # LINK. Holding this record's write lock across it serialises every other
+        # writer — the heartbeat, the membership pull, the CLI — behind a peer's
+        # socket for the length of that ladder. The lock now covers exactly the
+        # read-modify-write it was taken for (the applied record is saved before the
+        # block exits) and ``_rehandshake_network`` touches ``self.links`` alone, so
+        # nothing it needed was being protected here.
+        rehandshake = False
         with store.mutate(link.network_id, self.root) as record:
             if incoming == record.epoch and str(
                 frame.get("rotation_id") or ""
@@ -3930,7 +4003,9 @@ class RelayServer:
                         },
                     )
                 )
-                self._rehandshake_network(record.network_id, reason="epoch_stale")
+                rehandshake = True
+        if rehandshake:
+            self._rehandshake_network(link.network_id, reason="epoch_stale")
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -4112,21 +4187,31 @@ class RelayServer:
         # a membership pull that admitted somebody in the same second is not
         # reverted by this one-row edit.
         with store.mutate(link.network_id, self.root) as record:
-            member = apply_device_rotation(record, statement, root=self.root)
-        self.audit.record(
-            AuditEvent(
-                event="device_rotated",
-                actor=member.device_id,
-                subject=record.network_id,
-                network_id=record.network_id,
-                epoch=record.epoch,
-                detail={
-                    "old_device": str(statement.get("old_device_id") or ""),
-                    "new_device": member.device_id,
-                },
+            rotation = apply_device_rotation(record, statement, root=self.root)
+        # THE AUDIT LINE IS CONDITIONAL ON WHAT WAS APPLIED, not on the frame having
+        # arrived. A duplicate delivery (the table overtook the queue) rewrites nothing
+        # and verifies nothing, so recording it would put a `device_rotated` row on a
+        # network where no row moved — and this log is what an incident is reconstructed
+        # from, where a false entry costs more than a missing one.
+        if rotation.applied:
+            self.audit.record(
+                AuditEvent(
+                    event="device_rotated",
+                    actor=rotation.member.device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={
+                        "old_device": str(statement.get("old_device_id") or ""),
+                        "new_device": rotation.member.device_id,
+                    },
+                )
             )
-        )
-        return {"op": "ack", "req": frame.get("req"), "detail": {"device_id": member.device_id}}
+        return {
+            "op": "ack",
+            "req": frame.get("req"),
+            "detail": {"device_id": rotation.member.device_id},
+        }
 
     # -- the session plane: create / engage / stop / forward / stream --------
     #
