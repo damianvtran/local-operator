@@ -330,8 +330,17 @@ def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
     assert "deleted with the session" not in body
     assert "dies with the session" not in body
     # The shell channel's one limit, in the copy an agent reads BEFORE choosing
-    # where to write (round 1, R4): a relative redirect is not resolved.
-    assert "needs the path named absolutely" in body
+    # where to write (round 1, R4): a relative redirect is not resolved. The home
+    # spellings are pinned beside it because the two sentences are one
+    # instruction — what the scan can see, and what it refuses — and the refusal
+    # half is what an agent has to know to spell a path it wants noticed.
+    #
+    # Asserted against a whitespace-flattened body: these are phrases, and a
+    # phrase re-wrapped in the source is the same sentence to the reader.
+    flat = " ".join(body.split())
+    assert "needs the path NAMED, not related" in flat
+    assert "`~/`, `$HOME/` or `${HOME}/` is expanded to the real home" in flat
+    assert "`~other/tmp/x.md` is another user's home" in flat
     assert "one-off script" in body
     assert "Data you are still shaping" in body
     assert "real extension" in body

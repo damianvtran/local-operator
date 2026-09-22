@@ -6276,8 +6276,14 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
         # A target the shell has yet to expand does not NAME a path, and printing
         # its resolved form would invent one (``> /tmp/f$i`` is not
         # ``/private/tmp/f$i``). The directory is the honest subject there, and it
-        # is a directory that really exists.
-        unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
+        # is a directory that really exists. The two expansions first are the
+        # spellings that DO name a path (``~``/``$HOME`` and ``$TMPDIR``, both
+        # leading), and what still carries a ``$`` or a backtick after them is what
+        # this scan cannot resolve — ``~/rig-x/f$i`` names no file either.
+        unexpanded = (
+            _UNEXPANDED_SHELL.search(_expand_home_spellings(_expand_tmpdir_spellings(candidate)))
+            is not None
+        )
         return _temp_scratch_line(
             resolved.parent if unexpanded else resolved,
             why,
@@ -6382,17 +6388,80 @@ def _expand_tmpdir_spellings(candidate: str) -> str:
     return candidate
 
 
+#: The shell's two spellings of the home directory, longest first — the same
+#: ordering constraint as the temp spellings above, so `${HOME}` can never be
+#: rewritten to a leftover `${}`.
+_HOME_SPELLINGS = ("${HOME}", "$HOME")
+
+
+def _expand_home_spellings(candidate: str) -> str:
+    """``candidate`` with a LEADING ``~/``, ``$HOME`` or ``${HOME}`` expanded.
+
+    The shell channel's counterpart of ``Path.expanduser()``, which the
+    ``write``/``edit`` channel already applies in ``_resolve_workspace_path``. A
+    home path is NEITHER of the two shapes this scan refuses: it is not the bare
+    relative target that has no cwd to resolve against, and it is not a scheme.
+    ``~/workspace/…`` is how a session spells a home path all day, so leaving it
+    in the silent bucket is how the SAME write gets advised when spelled
+    absolutely and not when spelled with a tilde — measured on the released
+    v0.62.3, where ``> /Users/<u>/workspace/scratch-a/tmp/x.md`` fired and
+    ``> ~/workspace/scratch-a/tmp/x.md`` was silent.
+
+    Normalising in ONE place, before the absolute test both predicates share, is
+    what keeps a single rule for what names an absolute target: the temp-root arm
+    and the scratch-name arm then read the same expanded string, and neither
+    learns a second shape.
+
+    Three shapes only, and LEADING only: ``~/…``, ``~`` alone, and the two
+    variable spellings followed by ``/`` or standing alone. ``~other/tmp/x`` names
+    ANOTHER user's home, which this scan cannot resolve, so it is left alone — the
+    same refusal a relative path gets, and for the same reason. A ``~`` outside
+    the leading position (``/tmp/~/x``) is a literal directory name, and so is
+    ``$HOMEfoo``, whose expansion is the shell's business rather than this scan's.
+
+    A host the OS will not name a home directory for raises ``RuntimeError`` out
+    of ``expanduser``; the candidate is handed on UNCHANGED then, which leaves it
+    failing the absolute test and so silent, rather than inventing a path.
+    ``os.environ["HOME"]`` is deliberately not read directly: ``Path`` is what the
+    other channel resolves through, so the two cannot disagree about whose home
+    ``~`` means.
+
+    Quoting is not visible here — ``_bash_tokens`` has already dequoted the token,
+    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. That is
+    inherited from the temp spelling next door rather than introduced by this
+    helper, and it errs toward one advisory line about a path the command did not
+    name, never toward a wrong subject or a refusal.
+    """
+    if candidate == "~" or candidate.startswith("~/"):
+        try:
+            return str(Path(candidate).expanduser())
+        except RuntimeError:  # pragma: no cover - a host with no home directory
+            return candidate
+    for spelling in _HOME_SPELLINGS:
+        if candidate == spelling or candidate.startswith(spelling + "/"):
+            try:
+                home = str(Path.home())
+            except RuntimeError:  # pragma: no cover - a host with no home directory
+                return candidate
+            return home + candidate[len(spelling) :]
+    return candidate
+
+
 def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
 
     The root spellings a shell writes are the point of the expansion below:
     ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
     literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
-    shells on this fleet spell it. Every other form is left alone: a relative
-    path, a ``~`` path and anything carrying a scheme are not temp-root targets
-    and must not be guessed at.
+    shells on this fleet spell it. ``~`` and ``$HOME`` spellings are normalised
+    here too (:func:`_expand_home_spellings`) so ``~/…`` reaches this predicate
+    exactly as its absolute spelling does — the home arm of the same hole.
+
+    What is left alone is a RELATIVE path and anything carrying a scheme: neither
+    names a temp-root target, and the scan has no cwd to resolve the relative one
+    against.
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
@@ -6412,10 +6481,14 @@ def _scratch_dir_target(
     """``candidate`` resolved, when it sits DIRECTLY in a scratch-named directory.
 
     The shell side of the second arm, and the sibling of :func:`_temp_root_target`
-    above — same expansion, same refusals, a different predicate. The refusals are
-    shared for the same reason they exist there: a relative path, a ``~`` path and
-    anything carrying a scheme are not guessed at, because the scan has no cwd to
-    resolve them against and a path the command never names is worse than the miss.
+    above — same expansions, same refusals, a different predicate. The refusals are
+    shared for the same reason they exist there: a relative path and anything
+    carrying a scheme are not guessed at, because the scan has no cwd to resolve
+    them against and a path the command never names is worse than the miss. A home
+    spelling is not in that class — ``~``/``$HOME`` name a directory the OS can
+    resolve without a cwd, and the ``write``/``edit`` channel has always resolved
+    them — so :func:`_expand_home_spellings` normalises them rather than letting
+    the two channels disagree about the same path.
 
     That refusal is also the honest limit of this arm on the shell channel: a bare
     ``> tmp/x.md`` is RELATIVE and goes unnoticed, while the same write through
@@ -6425,7 +6498,7 @@ def _scratch_dir_target(
     states this, because it is the copy an agent reads before choosing where to
     write (round 1, R4).
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
