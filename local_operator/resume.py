@@ -577,6 +577,15 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
     fallback because a build of the mesh branch wrote it (see the note on the
     fallback itself). :func:`write_session_title` is the only writer of the
     current spelling, which is how the two stay agreed.
+
+    A BLANK ``text`` IS A MISSING ``text``, not a name (QA round 13, Q13-4).
+    The fallback below used to fire only on a key that was absent or not a
+    string, so a half-rewritten sidecar — ``{"text": "", "title":
+    "legacy-name"}``, the shape the interim writer could leave while the store
+    was being migrated — reached this reader with the legacy name sitting right
+    there in it and answered with nothing instead. A blank name is not a name
+    the user typed, so nothing correct can be shadowed by treating it as
+    absent: the check is widened to a value carrying no visible characters.
     """
     try:
         raw = (session_dir / TITLE_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
@@ -589,7 +598,7 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
     if not isinstance(payload, dict):
         return None
     text = payload.get("text")
-    if not isinstance(text, str):
+    if not isinstance(text, str) or not text.strip():
         # THE LEGACY SPELLING, kept deliberately, and this is the one place a
         # reader may still meet it. A build of the mesh branch wrote its
         # sidecar under ``title`` (``network.relay._op_session_create``, before
@@ -598,11 +607,16 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
         # not make those records go away, it would make the name inside them
         # UNRECOVERABLE — the file holds it and no reader will ever look —
         # while the only cost of accepting it is one ``.get`` on a path reached
-        # solely when ``text`` is absent. ``text`` therefore WINS whenever it
-        # is present and this cannot shadow a correct record; it answers only
-        # for the records already written. Removable once no store carries the
-        # old spelling, which is not a condition a reader can check.
-        text = payload.get("title")
+        # solely when ``text`` cannot answer. ``text`` therefore WINS whenever
+        # it is present AND USABLE and this cannot shadow a correct record; it
+        # answers only for the records already written. Removable once no store
+        # carries the old spelling, which is not a condition a reader can check.
+        #
+        # A BLANK legacy value changes nothing: the blank ``text`` is left in
+        # place below, so a record whose names list is all it has keeps them.
+        legacy = payload.get("title")
+        if isinstance(legacy, str) and legacy.strip():
+            text = legacy
     if not isinstance(text, str):
         return None
     raw_names = payload.get("names")
@@ -616,6 +630,31 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
         user_set=bool(payload.get("user_set")),
         names=names,
     )
+
+
+def read_title_state(session_dir: Path) -> SessionTitle | None:
+    """The title sidecar's contents — the name, its precedence flag, its history.
+
+    The SIDECAR-ONLY reader, unlike :func:`stored_session_title` (which falls
+    back to the transcript's windows) and :func:`session_name` (which falls back
+    to the opening message). Callers that can read the transcript themselves
+    need the two halves apart: a boot restoring naming state has to know whether
+    a title came from the sidecar, because the sidecar can hold a name the
+    transcript never journalled at all — see ``Session._load_conversation_name``
+    and QA round 13's Q13-1.
+
+    ``SessionTitle.user_set`` is the reason this function exists rather than a
+    narrower string accessor: it is PRECEDENCE, not display, and until this
+    reader existed the flag had no reader on the boot path — a ``--name`` typed
+    by a user was written into the sidecar and then silently outranked by the
+    first generated title, because the live holder it is compared against had
+    never learned the claim.
+
+    ``None`` on the same terms as :func:`_read_title_sidecar`: absent, unreadable
+    or unusable is no title, never an exception, so a boot cannot be refused by
+    a decoration.
+    """
+    return _read_title_sidecar(session_dir)
 
 
 def read_title_names(session_dir: Path) -> list[str]:

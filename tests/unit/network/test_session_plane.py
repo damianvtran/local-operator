@@ -24,9 +24,11 @@ The properties this file exists for, each from ``mesh-session-mobility.md``:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import socket
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -223,6 +225,228 @@ def _dial(server: relay.RelayServer, record: Any, host: str, port: int) -> relay
 def _stop_all(served: dict[str, _Served]) -> None:
     for entry in served.values():
         entry.stop()
+
+
+# ---------------------------------------------------------------------------
+# A peer's runtime with a REAL session in it
+# ---------------------------------------------------------------------------
+#
+# ``_serve`` above stands in for the spawned runtime with a ``FakeHandle``, and
+# that is the right rig for everything the relay's own transport does: the
+# create frame, the engage, the prompt hand-off, the listing. It is blind to the
+# one thing two rounds filed against (QA round 13, Q13-1 / UX round 4, U24)
+# because there is no SESSION in it — the conversation name a running session
+# keeps is decided by the session's own naming errand, on its first real turn,
+# and a fake handle has neither. So the turn has to be real for the claim to be
+# testable at all; a rig that fakes it is what let the previous head ship a pin
+# that passed while the name was still being replaced.
+#
+# ``hosting: test`` is the production shape for a real turn with no provider:
+# ``providers.registry`` maps provider id ``test`` (wire ``mock``) to
+# ``MockClient``, ``tests.e2e.harness.build_session``'s ``TEST_MODEL`` is that
+# provider, and the mock's reply is the same deterministic string QA's and UX's
+# meshes produced — which is why the generated title in the failing direction is
+# literally ``Hello from the mock provider``.
+
+
+class _RealServed:
+    """A real ``Session`` on the peer, on its own loop, served by a real runtime."""
+
+    def __init__(
+        self,
+        session: Any,
+        handle: Any,
+        runtime: Any,
+        loop: asyncio.AbstractEventLoop,
+        thread: threading.Thread,
+    ) -> None:
+        self.session = session
+        self.handle = handle
+        self.runtime = runtime
+        self._loop = loop
+        self._thread = thread
+
+    def on_session_loop(self, coro: Any, *, timeout: float = 30.0) -> Any:
+        """Run ``coro`` on the session's own loop and return its result."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
+
+    def transcript_entries(self) -> list[dict[str, Any]]:
+        """Every journalled line of this session's transcript, as parsed dicts."""
+        path = Path(self.session.transcript.path)
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def naming_state(self) -> dict[str, Any]:
+        """The newest ``conversation_name`` entry's payload — the transcript's OWN
+        answer to "what is this conversation called, and did the user name it".
+
+        Read from disk rather than from the live holder for the reason the two
+        rounds' findings are about: the holder is memory, the journal is the
+        record every later reader (a resume, a fork, the title backfill) trusts.
+        """
+        seen = [
+            (entry.get("payload") or {}).get("details") or {}
+            for entry in self.transcript_entries()
+            if (entry.get("payload") or {}).get("custom_type") == "conversation_name"
+        ]
+        return seen[-1] if seen else {}
+
+    def wait_for_turn(self, *, timeout: float = 60.0) -> None:
+        """Block until the admitted prompt has RUN, then until naming has settled.
+
+        Two waits, and the second is not decoration: on the unfixed tree the
+        auto-namer runs concurrently with the turn (``_maybe_name_conversation``
+        dispatches it at admission, ``serving.ServingSessionHandle.prompt``), so
+        a test that read the sidecar the instant the turn landed could pass on
+        the bug by winning a race. Draining the handle's naming tasks after the
+        turn makes the failing direction deterministic rather than a coin flip —
+        and a test that cannot fail on the code it was written against is not a
+        pin at all.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(
+                (entry.get("payload") or {}).get("role") == "assistant"
+                for entry in self.transcript_entries()
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(
+                "the peer's session never finished its turn: nothing in the transcript "
+                "carries an assistant row, so this test would be asserting about a turn "
+                "that did not happen"
+            )
+        while time.monotonic() < deadline and self.handle._background_tasks:
+            time.sleep(0.05)
+
+    def stop(self) -> None:
+        """Close the runtime, dispose the session, and reap the loop it ran on."""
+        try:
+            self.on_session_loop(self.runtime.aclose(), timeout=20.0)
+        finally:
+            try:
+                self.on_session_loop(self.session.dispose(), timeout=20.0)
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._thread.join(timeout=5.0)
+                self._loop.close()
+
+
+def _start_real_session(root: Path, session_id: str, cwd: str) -> _RealServed:
+    """Boot one real session + runtime on a dedicated loop, and hand it back.
+
+    A LOOP OF ITS OWN, not the caller's: ``ServingSessionHandle`` publishes the
+    loop it was built on (``session_loop``) and the runtime hops to it for every
+    handle call, so the loop has to outlive the ``asyncio.run`` the relay wraps
+    its engage in — exactly as the spawned process's loop does in production.
+    """
+    from local_operator.providers.clients import MockClient
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from tests.e2e.harness import build_session
+
+    loop = asyncio.new_event_loop()
+    booted: list[Any] = []
+    buried: list[BaseException] = []
+    gate = threading.Event()
+
+    def _boot() -> None:
+        asyncio.set_event_loop(loop)
+        try:
+            # BUILT ON THE RUNNING LOOP, exactly as production builds it
+            # (``process.amain``, the TUI's adoption worker): a session
+            # constructed OUTSIDE a loop cannot start its own background writes
+            # (``_spawn_conversation_name_write``
+            # catches the missing loop and defers to the dispose flush), and the
+            # journal write a booting session owes the transcript is one of
+            # them. A rig that built it on the thread would be testing a
+            # session shape no `lop` ever constructs.
+            async def _build() -> tuple[Any, Any, Any]:
+                session = build_session(
+                    root / "sessions" / session_id, MockClient().stream, cwd=Path(cwd)
+                )
+                handle = ServingSessionHandle(session, loop, cwd=cwd)
+                runtime = RuntimeServer(handle, kind="tui")
+                await runtime.start_in_process()
+                return session, handle, runtime
+
+            booted.extend(loop.run_until_complete(_build()))
+            gate.set()
+            loop.run_forever()
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's thread
+            buried.append(exc)
+            gate.set()
+
+    thread = threading.Thread(target=_boot, name=f"mesh-real-session-{session_id}", daemon=True)
+    thread.start()
+    if not gate.wait(timeout=30.0):
+        raise AssertionError(f"the runtime for {session_id} never booted")
+    if buried:
+        raise buried[0]
+    session, handle, runtime = booted
+    return _RealServed(session, handle, runtime, loop, thread)
+
+
+def _serve_real_sessions(monkeypatch: pytest.MonkeyPatch, root: Path) -> dict[str, _RealServed]:
+    """``_serve``'s stand-in for the runtime start, serving REAL sessions.
+
+    The relay's ``_engage_locally`` is only the trigger: it calls
+    ``launch.engage_runtime`` and every interesting thing happens in whatever
+    that returns. In production it spawns a process; here it boots a real
+    session in this one, which is the same contract the fake rig substitutes a
+    ``FakeHandle`` for.
+    """
+    served: dict[str, _RealServed] = {}
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+
+    async def engage(session_id: str, cwd: str, *_args: Any, **_kwargs: Any) -> None:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+        if session_id not in served:
+            served[session_id] = _start_real_session(root, session_id, cwd)
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+    return served
+
+
+def _stop_real(served: dict[str, _RealServed]) -> None:
+    for entry in served.values():
+        entry.stop()
+
+
+def _cli_listing_line(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    peer_token: str,
+    capsys: pytest.CaptureFixture[str],
+    session_id: str,
+) -> str:
+    """The one line `lop network sessions --peer <token>` prints for a session.
+
+    THE COMMAND'S OWN FUNCTION, not a re-derivation of its logic: QA read the
+    empty name column on this surface, so this drives ``cli._cmd_sessions`` —
+    the handler argv dispatches to — over the real relay control socket with the
+    ambient config dir pointed at the device that owns the CLI, exactly as a
+    user's shell does it. Called in-process rather than as a subprocess because
+    the path under test is the listing, and a second interpreter would only add
+    a spawn to time out.
+    """
+    from local_operator.network import cli as network_cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    capsys.readouterr()
+    assert (
+        network_cli._cmd_sessions(argparse.Namespace(peer=peer_token, all_peers=False, json=False))
+        == 0
+    )
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith(session_id)]
+    assert lines, "`network sessions` listed nothing for the session under test"
+    return lines[0]
 
 
 # ---------------------------------------------------------------------------
@@ -443,18 +667,28 @@ def test_a_named_create_writes_the_sidecar_the_product_reads(
         _stop_all(served)
 
 
-def test_the_name_survives_the_turn_that_makes_the_catalogue_rank_it(
+def test_the_name_survives_the_hand_over_to_the_catalogue(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """QA round 12's repro, end to end: name, take a turn, list — the name stays.
+    """Name, then let the CATALOGUE take the row over — the name is still there.
 
-    The promptless create is listed off the relay's own empty-mint half, which
-    reads the sidecar directly; the moment the session has an activity file the
-    CATALOGUE ranks it and the name comes from ``resume.session_name`` instead.
-    On the code QA measured, that hand-over is where the name vanished: the
-    sidecar held ``title``, the catalogue read ``text``, and the row painted
-    ``Untitled conversation``. Both halves and BOTH devices are asserted here,
-    because the user reads the creator's listing, not the owner's.
+    QA round 12's other shape: a promptless create is listed off the relay's own
+    empty-mint half, which reads the sidecar directly, and the moment the
+    session has an activity file the CATALOGUE ranks it and the name comes from
+    ``resume.session_name`` instead. On the code QA measured, that hand-over is
+    WHERE THE NAME VANISHED: the sidecar held ``title``, the catalogue read
+    ``text``, and the row painted ``Untitled conversation``. Both halves and
+    BOTH devices are asserted here, because the user reads the creator's
+    listing, not the owner's.
+
+    WHAT THIS DOES NOT COVER, stated because the previous head claimed it did
+    (UX round 4, U24): NO TURN RUNS HERE. The ``_serve`` rig's runtime is a
+    ``FakeHandle``, so there is no session and no auto-namer, and the transcript
+    this test writes is empty text. It pins the sidecar's SPELLING and the
+    catalogue hand-over, and nothing about what a live session does with the
+    name. That claim is
+    ``test_a_named_create_keeps_its_name_through_a_real_turn``'s job, on a rig
+    with a real session in it.
     """
     server_a, server_b, _host_a, _port_a = peer_pair
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
@@ -503,6 +737,304 @@ def test_the_name_survives_the_turn_that_makes_the_catalogue_rank_it(
         link.close("test")
     finally:
         _stop_all(served)
+
+
+class _NamedRemoteCreate:
+    """One named create on a REAL peer, with a real session behind it.
+
+    Shared by the two tests below because the RIG is the expensive part — two
+    relays, a paired mesh, a session booted on its own loop — and the two
+    findings that need it differ only in WHEN they read the surfaces: QA round
+    13's Q13-2 is about the window while the runtime is live, Q13-1/U24 about
+    what survives the turn. ``stop`` is the only teardown the caller owes.
+    """
+
+    def __init__(
+        self,
+        *,
+        server_a: relay.RelayServer,
+        server_b: relay.RelayServer,
+        served: dict[str, _RealServed],
+        session_id: str,
+        link: relay.PeerLink,
+    ) -> None:
+        self.server_a = server_a
+        self.server_b = server_b
+        self.served = served
+        self.session_id = session_id
+        self.link = link
+
+    @property
+    def owner(self) -> _RealServed:
+        return self.served[self.session_id]
+
+    @property
+    def session_dir(self) -> Path:
+        return self.server_b.root / "sessions" / self.session_id
+
+    @property
+    def peer_token(self) -> str:
+        """The token ``--peer`` takes: the device id, which no name can shadow."""
+        return self.server_b.identity.device_id
+
+    def owner_rows(self) -> list[dict[str, Any]]:
+        """The OWNER's listing rows for this session — live half or stored half."""
+        return [
+            row
+            for row in self.server_b.local_session_rows()
+            if row["session_id"] == self.session_id
+        ]
+
+    def sidebar_rows(self) -> list[Any]:
+        """The rows the CREATOR's sidebar producer yields — what the user reads."""
+        from local_operator.session.peer_rows import clear_cache, peer_session_rows
+
+        clear_cache()
+        return [row for row in peer_session_rows(self.server_a.root) if row.id == self.session_id]
+
+    def federated_rows(self) -> list[dict[str, Any]]:
+        """The creator's federated listing, as the relay answers it."""
+        payload = _call(self.server_a.root, "peer_session_rows")["detail"]
+        return [row for row in payload["sessions"] if row["session_id"] == self.session_id]
+
+    def stop(self) -> None:
+        try:
+            self.link.close("test")
+        finally:
+            _stop_real(self.served)
+
+
+def _create_named_session_on_a_real_peer(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    prompt: str,
+) -> _NamedRemoteCreate:
+    """Pair, dial, and have the CREATOR create a named session on the peer.
+
+    The frame is the product's own ``net_session_create`` over a real link, with
+    a real session booted on the peer's side of it — the create QA and UX both
+    typed as ``lop network sessions --peer <dev> --create --name …``.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve_real_sessions(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 21,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "name": name,
+                "prompt": prompt,
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        assert reply["detail"]["admitted"] is bool(prompt), reply["detail"]
+        created = _NamedRemoteCreate(
+            server_a=server_a,
+            server_b=server_b,
+            served=served,
+            session_id=reply["detail"]["session_id"],
+            link=link,
+        )
+        assert created.session_id in served, "the relay brought up no runtime for the new session"
+    except BaseException:
+        # The rig is what is expensive here, not the assertion: a failure between
+        # the boot and the hand-off would otherwise leave a session, a runtime and
+        # a loop behind for the rest of the run.
+        _stop_real(served)
+        raise
+    return created
+
+
+def test_a_named_create_paints_the_name_while_the_runtime_is_live(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q13-2/U26: no window in which a NAMED session reads as nameless.
+
+    QA round 13 measured ~4–5 s after a create in which the sidebar literally
+    painted ``Untitled conversation`` and the CLI a nameless ``live`` row; UX
+    round 4 filed the same row for one poll cycle, and their own note says the
+    producer already carried the name when they looked directly — i.e. the first
+    paint was the placeholder, not a wrong name. Both surfaces read the RUNTIME'S
+    record for a resident session, so the name was missing from the record, which
+    is the same missing seed as Q13-1 one step earlier: the record is published
+    from the live session's projection, so it is named the moment the boot is.
+
+    A PROMPTLESS create, which is QA's own repro and the sharper form of it: with
+    no turn there is no auto-namer that could move the name afterwards, so what
+    this asserts is only ever about the window itself.
+    """
+    created = _create_named_session_on_a_real_peer(
+        peer_pair, monkeypatch, name="live-name-probe", prompt=""
+    )
+    try:
+        rows = created.owner_rows()
+        assert rows, "the owner cannot list the session it minted"
+        assert rows[0]["state"] != "stored", (
+            "this is the STORED row, not the live one, so the window Q13-2 is "
+            f"about does not exist here ({rows[0]['state']!r}) and the assertion "
+            "below would prove nothing"
+        )
+        assert rows[0]["conversation_name"] == "live-name-probe", (
+            "while the runtime is live the owner's row paints "
+            f"{rows[0]['conversation_name']!r} for a session the user named"
+        )
+        assert _cli_listing_line(
+            monkeypatch, created.server_a.root, created.peer_token, capsys, created.session_id
+        ).endswith("live-name-probe"), "the live row `network sessions` prints carries no name"
+    finally:
+        created.stop()
+
+
+def test_a_named_create_keeps_its_name_through_a_real_turn(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE BLOCKING ONE, on a rig where the turn is real (QA Q13-1 / UX U24).
+
+    ``lop network sessions --peer <dev> --create --name "Field notes" --prompt …``
+    leaves the user's name in the title sidecar, and the session the peer then
+    runs takes a real turn. What two independent rounds measured on this branch
+    is that the name is gone afterwards — replaced, on the sidebar, in the
+    federated listing, in the CLI's own output and in the transcript, by the
+    auto-namer's title, with the typed name demoted into ``names[]`` and
+    ``user_set`` rewritten to false.
+
+    The mechanism is in the BOOT, not in the relay's write: ``--name`` reaches
+    the sidecar with ``user_set=True``, and the runtime that then takes the turn
+    is a new process whose transcript holds no ``conversation_name`` entry — so
+    the holder the naming gates read started EMPTY, and ``user_set``, the flag
+    whose whole job is "a generated title never displaces this", had no reader on
+    that path at all. See ``Session._load_conversation_name``.
+
+    EVERY SURFACE THE FINDINGS NAME IS ASSERTED, because "the sidecar is right"
+    is exactly what the pin this replaces proved while the session still lost the
+    name. The turn itself is asserted to have HAPPENED
+    (``_RealServed.wait_for_turn``, which reads the mock's own reply out of the
+    transcript): a rig that fakes the turn is what let the previous head ship a
+    pin that passed while the feature was broken.
+    """
+    created = _create_named_session_on_a_real_peer(
+        peer_pair, monkeypatch, name="Field notes", prompt="hello from my keyboard"
+    )
+    try:
+        # THE REAL TURN, and the assertion that it happened: the mock's reply on
+        # the wire this branch's `hosting: test` resolves to.
+        created.owner.wait_for_turn()
+        assert any(
+            "Hello from the mock provider" in json.dumps(entry)
+            for entry in created.owner.transcript_entries()
+        ), "the peer's session never took the mocked turn this test is about"
+
+        # 1. THE SIDECAR, which is the record the relay wrote.
+        from local_operator.resume import read_title_state, stored_session_title
+
+        state = read_title_state(created.session_dir)
+        assert state is not None, "the create wrote no title sidecar"
+        assert state.text == "Field notes", (
+            "the name the user typed was replaced in the sidecar by "
+            f"{state.text!r} once the session took a turn"
+        )
+        assert state.user_set is True, "the generated title took the user's precedence flag"
+        assert state.names == ("Field notes",), state.names
+        assert stored_session_title(created.session_dir) == "Field notes"
+
+        # 2. THE TRANSCRIPT'S OWN NAMING STATE — what a later resume, a fork and
+        # the title backfill read — and the live holder the naming gates compare
+        # against, so the claim is not merely on disk.
+        assert (
+            created.owner.naming_state().get("text") == "Field notes"
+        ), created.owner.naming_state()
+        assert created.owner.naming_state().get("user_set") is True, created.owner.naming_state()
+        assert created.owner.session.conversation_name == "Field notes"
+        assert created.owner.session.conversation_name_state.user_set is True
+
+        # 3. THE OWNER'S OWN ROW, 4. the federated listing, 5. the sidebar's
+        # producer (the row a person actually reads) and 6. the CLI's output.
+        own = created.owner_rows()
+        assert own and own[0]["conversation_name"] == "Field notes", own
+        remote = created.federated_rows()
+        assert remote, "the creator's listing does not carry the session at all"
+        assert remote[0]["conversation_name"] == "Field notes", remote[0]
+        produced = created.sidebar_rows()
+        assert produced, "the created session is not on the creator's sidebar"
+        assert produced[0].name == "Field notes", produced[0]
+        assert _cli_listing_line(
+            monkeypatch, created.server_a.root, created.peer_token, capsys, created.session_id
+        ).endswith("Field notes"), "`network sessions` does not print the name the user typed"
+    finally:
+        created.stop()
+
+
+def _mesh_name(server: relay.RelayServer, name: str) -> None:
+    """Give this device's own row in every network the name a person typed.
+
+    ``MemberRecord`` is what every viewer-side label resolves from
+    (``relay._fan_out_catalog``, so the sidebar heading and the picker too), and
+    the IDENTITY is a separate record — which is precisely the state a device
+    that started its relay before the join is in, because
+    ``cli.load_or_mint(name=…)`` keeps an existing identity's name.
+    """
+    for network in store.list_networks(server.root):
+        for member in network.active_members():
+            if member.device_id == server.identity.device_id:
+                member.name = name
+        store.save(network, server.root)
+
+
+def test_a_devices_own_receipts_use_the_name_the_mesh_knows(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 4, U25: one device, one name, on every surface a person reads.
+
+    The owner's own sentence read ``… is not running on damians-MacBook-Pro``
+    about a session every other surface in the same session heads ``⇄ pixel-8``
+    — a receipt that invents a second device. ``relay._own_label`` answered from
+    the identity while the member table is what the sidebar, the listing, the
+    picker and the create receipt all resolve, and the two diverge exactly when
+    the relay was already running when the device joined.
+
+    Asserted on the two surfaces that put a name on THIS device for a person:
+    the sentence the stop op returns (the receipt UX filed) and the device block
+    the CLI prints in its holder column. The identity is deliberately left alone
+    — the divergence is the subject, so the fixture reproduces it rather than
+    removing it.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        _mesh_name(server_b, "pixel-8")
+        assert server_b.identity.name != "pixel-8", (
+            "the fixture must keep the hostname identity and the mesh name apart, "
+            "or this test would pass without the fix"
+        )
+        # The session has to LIVE on B or the ownership chokepoint refuses the op
+        # before any receipt is composed (§7.2/INV-1); it is simply not running,
+        # which is the branch whose sentence names the device.
+        _own_locally(server_b.root, "ffffffffffff", server_b.identity.device_id)
+        receipt = link.request(
+            {
+                "op": "net_session_stop",
+                "req": 31,
+                "locality": "remote",
+                "session_id": "ffffffffffff",
+                "mode": "graceful",
+            }
+        )
+        assert receipt is not None and receipt["op"] == "ack", receipt
+        detail = str(receipt["detail"]["detail"])
+        assert "pixel-8" in detail, f"the owner's own receipt names it {detail!r}"
+        assert server_b.identity.name not in detail, detail
+        assert _call(server_b.root, "peer_session_rows")["detail"]["device_name"] == "pixel-8"
+    finally:
+        link.close("test")
 
 
 def test_a_create_frame_that_names_a_session_id_is_refused(

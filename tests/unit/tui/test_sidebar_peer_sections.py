@@ -75,6 +75,15 @@ def _remote(
 TIER_HEADINGS = {"★ Pinned", "Active Sessions", "Previous Sessions", "⌥ Subagent Runs"}
 
 
+def _section_headings(sidebar) -> list[str]:
+    """The section headings the painter would emit, in order, with their keys."""
+    return [
+        kind.removeprefix("header:")
+        for kind, _entry in sidebar._display_rows()
+        if kind.startswith("header:")
+    ]
+
+
 def _headings(lines: list[str]) -> list[str]:
     return [
         line.strip()
@@ -459,6 +468,100 @@ async def test_a_peer_that_stopped_answering_keeps_a_heading_with_no_rows() -> N
         sidebar.set_silent_peers([])
         await pilot.pause()
         assert "⇄ damian-mbp" not in _headings(sidebar.render().plain.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_a_silent_peer_keeps_the_peer_rank_on_both_sides_of_answering() -> None:
+    """Design round 4, D27: the peer axis' rank is not a function of liveness.
+
+    ``mesh-ui.md`` decision 1 puts the peer axis after `previous` and BEFORE
+    `subagent`, and a live peer's section obeys it. Built at the END of the row
+    list instead, a silent peer's heading sat below `⌥ Subagent Runs` and moved
+    above it the moment the peer recovered — so the list re-ordered itself around
+    an event the user did not cause, and two devices stacked in one order
+    re-ordered themselves.
+
+    Asserted BOTH ways round, which is what makes it a claim about place rather
+    than about one frame: the silent heading and the equivalent answering one
+    (a remote row for the same device, ``reachable=False``) put the peer section
+    in the same position relative to the subagent tier.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 45)) as pilot:
+        await pilot.pause()
+        entries = [_plain("mine", active=True), _sub("s1")]
+        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True)
+        sidebar.set_silent_peers([("radiant-m4", "connect_failed:ConnectionRefusedError")])
+        await pilot.pause()
+        silent = _section_headings(sidebar)
+        silent_at = silent.index("peer: ⇄ radiant-m4 (unreachable)")
+        assert silent_at < silent.index("subagent"), silent
+
+        sidebar.set_silent_peers([])
+        sidebar.set_entries([*entries, _remote("p1", label="radiant-m4", reachable=False)])
+        await pilot.pause()
+        answering = _section_headings(sidebar)
+        answering_at = answering.index("peer: ⇄ radiant-m4 (unreachable)")
+        assert answering_at < answering.index("subagent"), answering
+
+        # AND THE TWO DEVICES STAY IN ONE ORDER. A second peer's section is
+        # placed by its NAME, not by when it was last heard from, so two peers do
+        # not swap places when one of them comes back.
+        sidebar.set_silent_peers([("radiant-m4", "connect_failed:ConnectionRefusedError")])
+        sidebar.set_entries(
+            [
+                *entries,
+                _remote("p1", device="d_aaaa", label="radiant-m4", reachable=False),
+                _remote("p2", device="d_bbbb", label="pixel-8", reachable=False),
+            ]
+        )
+        await pilot.pause()
+        both = _section_headings(sidebar)
+        assert both.index("peer: ⇄ pixel-8 (unreachable)") < both.index(
+            "peer: ⇄ radiant-m4 (unreachable)"
+        ), both
+
+
+@pytest.mark.asyncio
+async def test_two_row_less_sections_are_separated_by_one_blank() -> None:
+    """Design round 4, D28: every boundary in the list is ONE blank row.
+
+    The per-section chrome is `blank, heading, blank`, which is right for a
+    section with rows under it and one blank too many between two that have
+    none: two unreachable peers came out three rows apart where every other
+    boundary is two. The rule is now the builder's — a section declines its
+    leading blank when the previous row is already a blank — so the frame a user
+    with several lost devices actually gets is the same shape as every other.
+
+    The invariant is asserted over the WHOLE row list, not just the pair, because
+    "never two blanks in a row" is what the rule is; the pair is the case that
+    exposed it.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 45)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("mine", active=True)])
+        sidebar.set_silent_peers(
+            [
+                ("radiant-m4", "connect_failed:ConnectionRefusedError"),
+                ("pixel-8", "connect_failed:ConnectionRefusedError"),
+            ]
+        )
+        await pilot.pause()
+        kinds = [kind for kind, _entry in sidebar._display_rows()]
+        doubled = [
+            index
+            for index, (first, second) in enumerate(zip(kinds, kinds[1:]))
+            if first == second == "blank"
+        ]
+        assert doubled == [], f"two blank rows in a row at {doubled}: {kinds}"
+        first = kinds.index("header:peer: ⇄ pixel-8 (unreachable)")
+        second = kinds.index("header:peer: ⇄ radiant-m4 (unreachable)")
+        assert second - first == 2, kinds[first : second + 1]
+        assert kinds[first + 1] == "blank", kinds[first : second + 1]
+        # The headers are chrome the frame still fits: the page size is computed
+        # from the same model, so a silent section cannot overrun the height.
+        assert len(sidebar._display_rows()) <= sidebar.size.height
 
 
 @pytest.mark.asyncio

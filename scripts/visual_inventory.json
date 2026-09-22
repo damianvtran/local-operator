@@ -156,7 +156,12 @@
       "base",
       "wide",
       "peers",
-      "peers-focus"
+      "peers-focus",
+      "silent",
+      "silent-two"
+    ],
+    "mesh_sidebar_shot.py": [
+      "default"
     ],
     "steer_fold_shot.py": [
       "default"

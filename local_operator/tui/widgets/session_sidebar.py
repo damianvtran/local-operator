@@ -234,10 +234,10 @@ def _peer_heading_text(label: str, reachable: bool) -> str:
 
     Split out because the heading is now DERIVED from two different things: a
     peer's rows (which carry the device's label and its reachability) and a
-    peer that answered NOTHING (`_silent_peer_rows`, which carries the relay's
-    own report). A second ``f" ⇄ …"`` beside this one is how the two would
-    drift into two vocabularies for one state — and the reader has to be able
-    to tell a live section from a silent one by that suffix alone.
+    peer that answered NOTHING (``SessionSidebar._silent_peer_tiers``, which
+    carries the relay's own report). A second ``f" ⇄ …"`` beside this one is how
+    the two would drift into two vocabularies for one state — and the reader has
+    to be able to tell a live section from a silent one by that suffix alone.
     """
     return f" ⇄ {label}" + ("" if reachable else " (unreachable)")
 
@@ -469,6 +469,11 @@ class SessionSidebar(Widget, can_focus=True):
         if not window:
             return 0
         tiers = {self._section_key(entry) for entry in window}
+        # The row-less peer sections are ALWAYS painted, whatever the window is
+        # (design round 4, D27), so they are charged unconditionally — a heading
+        # the page size did not reserve is an overrun, which is the one thing
+        # this accounting exists to prevent.
+        tiers |= self._silent_peer_tiers()
         chrome = len(tiers) * 2 + (len(tiers) - 1)
         if any(rank == 0 for rank, _heading in tiers) and self._pinned_overflow(window):
             chrome += 1
@@ -494,12 +499,22 @@ class SessionSidebar(Widget, can_focus=True):
         # two peers and the frame would overrun its height by a line — the same
         # fault this accounting exists to prevent.
         tiers = {self._section_key(entry) for entry in self.entries}
+        # The silent peers are sections too (design round 4, D27) and cost the
+        # same chrome, so they are charged here as well — `_chrome_for` asks the
+        # same question of a window and must get the same shape of answer.
+        tiers |= self._silent_peer_tiers()
         # Per section: its heading, the blank beneath it, and a blank above
         # every heading after the first. The leading blank is load-bearing:
         # without it a heading sits flush against the previous group's last
         # ENTRY row (the section does not end in a blank — the blank belongs
         # under the heading), and the two groups read as one. See the comment
         # in `_display_rows` and the assertion it is defended by.
+        #
+        # ONE OVER-COUNT IS DELIBERATE: where two ROW-LESS sections meet,
+        # `_append_section` declines the second break (design round 4, D28), so
+        # this charges one line more than the paint emits. That is the direction
+        # this number is allowed to be wrong in — it is `page_size`'s safe seed
+        # and a spare line is headroom, where the other direction hides a row.
         chrome = len(tiers) * 2 + (len(tiers) - 1)
         # The `+N more pinned` note (`_display_rows`) is chrome too, and both
         # sides have to charge it identically or the frame overruns its height.
@@ -650,10 +665,11 @@ class SessionSidebar(Widget, can_focus=True):
         header.
         """
         rows: list[tuple[str, CatalogEntry | None]] = []
-        section: str | None = None
         # Sections must be CONTIGUOUS, and a pinned row can come from anywhere
-        # in the ranking. Sort the window's rows by section key alone, stably,
-        # so the catalog's own order survives inside each section.
+        # in the ranking. Group the window's rows by section key, then paint the
+        # groups in key order: the catalog's own order survives inside each
+        # section, and the sections themselves come out in the ranking's order
+        # because the key IS the ranking's own sort key.
         # `self.entries` itself is NOT resorted and `visible_entries` is NOT
         # widened: `action_move`, `_cursor_index` and `_switch_session_from`
         # all index `entries` and must keep seeing the ranking's order. A
@@ -661,28 +677,24 @@ class SessionSidebar(Widget, can_focus=True):
         # visible until the user pages to it — the same as any other row
         # outside the window, and what keeps `page_size`/`action_move`/
         # `_entry_at` on one geometry.
-        ordered = sorted(
-            enumerate(self.visible_entries), key=lambda pair: (*self._section_key(pair[1]), pair[0])
-        )
-        for _index, entry in ordered:
-            current = self._section_key(entry)[1]
-            if current != section:
-                # A blank ABOVE every heading but the first, and one BELOW
-                # every heading. The ask was "an active sessions header and
-                # then padding, previous sessions": the heading owns the space
-                # beneath it, so the gap reads as "this group starts here"
-                # rather than "the last one ended". The leading blank is still
-                # needed or the second heading collides with the row above it
-                # — with padding only underneath, `Previous Sessions` sat
-                # flush against the last active row and the two groups ran
-                # together. The first heading takes no leading blank: nothing
-                # sits above it to separate from.
-                if section is not None:
-                    rows.append(("blank", None))
-                rows.append((f"header:{current}", None))
-                rows.append(("blank", None))
-                section = current
-            rows.append(("entry", entry))
+        #
+        # A SECTION WITHOUT ROWS IS STILL A SECTION (design round 4, D27). The
+        # silent peers are put through the SAME key as the live ones inside this
+        # one pass, so a peer's place in the list is a property of its NAME and
+        # not of whether it answered: built at the end of the list instead, its
+        # section sat below `⌥ Subagent Runs` while it was unreachable and JUMPED
+        # above it the moment it recovered — the peer axis' rank (mesh-ui.md
+        # decision 1: after `previous`, before `subagent`) is not conditional on
+        # liveness. They also interleave with the live peer sections by heading,
+        # so two devices do not re-order themselves when one of them comes back.
+        sections: dict[tuple[int, str], list[CatalogEntry]] = {}
+        for entry in sorted(self.visible_entries, key=self._section_key):
+            sections.setdefault(self._section_key(entry), []).append(entry)
+        for key in self._silent_peer_tiers():
+            sections.setdefault(key, [])
+        for key, entries in sorted(sections.items()):
+            self._append_section(rows, key[1])
+            rows.extend(("entry", entry) for entry in entries)
         # An honest heading: say how many pinned rows are not on this page
         # rather than under-reporting the set. A CHROME row, never an entry —
         # `entry=None` keeps it out of `self.entries` and makes `_entry_at`
@@ -711,46 +723,75 @@ class SessionSidebar(Widget, can_focus=True):
             # push the whole pinned tier off a full-height frame.
             insert_at = last_pinned + 1 if last_pinned >= 0 else 0
             rows.insert(insert_at, ("note:pinned-overflow", None))
-        rows.extend(self._silent_peer_rows())
         return tuple(rows)
 
-    def _silent_peer_rows(self) -> list[tuple[str, None]]:
-        """A heading-only section per peer that did not answer. UX round 3, U16.
+    def _append_section(self, rows: list[tuple[str, CatalogEntry | None]], heading: str) -> None:
+        """Append one section's chrome: a break, the heading, and the gap beneath it.
+
+        A blank ABOVE every heading but the first, and one BELOW every heading.
+        The ask was "an active sessions header and then padding, previous
+        sessions": the heading owns the space beneath it, so the gap reads as
+        "this group starts here" rather than "the last one ended". The leading
+        blank is still needed or the second heading collides with the row above
+        it — with padding only underneath, `Previous Sessions` sat flush against
+        the last active row and the two groups ran together. The first heading
+        takes no leading blank: nothing sits above it to separate from.
+
+        AND NEVER TWO BREAKS IN A ROW (design round 4, D28). A row-less section
+        ends on the blank it just emitted, so the section after it may not emit
+        another one: two unreachable peers were separated by TWO blank rows where
+        every other boundary in the list is one, which is the frame a user with
+        two lost devices actually gets. Every section goes through here — the
+        live ones, the peer ones and the silent ones — so "one blank per
+        boundary" is a property of the builder rather than of each call site.
+        """
+        if rows and rows[-1][0] != "blank":
+            rows.append(("blank", None))
+        rows.append((f"header:{heading}", None))
+        rows.append(("blank", None))
+
+    def _silent_peer_tiers(self) -> set[tuple[int, str]]:
+        """The section KEY of every peer that did not answer.
 
         WHY A HEADING WITH NOTHING UNDER IT. ``mesh-ui.md`` §8.3 says a peer that
         does not answer contributes NO ROWS rather than stale ones — dropping the
-        rows is right, and it is not what U16 filed. What it also did was drop
-        the FACT: the section was built from rows, so a peer that stopped
-        answering lost its heading too, and the sidebar then read as a complete
-        list. "My peer has no sessions" and "my peer is gone" became one picture,
-        and the six sessions the user was looking at a minute ago vanished and
-        came back with nothing said either way.
+        rows is right, and it is not what UX round 3's U16 filed. What it also
+        did was drop the FACT: the section was built from rows, so a peer that
+        stopped answering lost its heading too, and the sidebar then read as a
+        complete list. "My peer has no sessions" and "my peer is gone" became
+        one picture, and the six sessions the user was looking at a minute ago
+        vanished and came back with nothing said either way.
 
         The heading keeps §8.3's promise (no row claims a state the peer did not
         send) and restores the one sentence that explains the frame. It is the
         SAME string a live section would carry with ``reachable`` false, because
-        the state is the same state — see `_peer_heading_text`.
+        the state is the same state — see :func:`_peer_heading_text` — and it is
+        built from the SAME key (`_section_key`) so it takes the peer rank's
+        place in the list rather than the end of it (design round 4, D27).
 
-        Chrome, never entries: ``entry=None`` keeps these out of ``self.entries``,
-        which is what `action_move`, `_cursor_index` and `_switch_session_from`
-        index — a silent peer must not be reachable by the keyboard or the
-        pointer, and `_entry_at` already answers ``None`` for every row whose
-        entry is ``None``.
+        Chrome, never entries: these sections contribute no ``CatalogEntry``, so
+        they stay out of ``self.entries`` — which is what `action_move`,
+        `_cursor_index` and `_switch_session_from` index — and `_entry_at`
+        already answers ``None`` for a row whose entry is ``None``.
 
         The relay's ``reason`` is deliberately NOT painted. It is the machine
         token ``connect_failed:ConnectionRefusedError`` that UX round 3 filed as
         U23 on the listing surface; the tooltip on a real row shows it, and a
         heading is not the place to grow a second, unlocalised spelling of it.
+
+        Shared by the three places that must agree about these sections: the
+        paint (`_display_rows`, which builds them) and the two chrome counts
+        (`_header_lines`, `_chrome_for`, which reserve their height). A second
+        derivation of the heading text is how a heading gets painted without
+        being charged, and an uncharged line is an overrun.
         """
-        if not self._silent_peers:
-            return []
-        rows: list[tuple[str, None]] = []
-        for name, _reason in self._silent_peers:
-            heading = _peer_heading_text(name or UNNAMED_DEVICE, False)
-            rows.append(("blank", None))
-            rows.append((f"header:{_PEER_HEADER_PREFIX}{heading}", None))
-            rows.append(("blank", None))
-        return rows
+        return {
+            (
+                _SECTION_PEER_RANK,
+                _PEER_HEADER_PREFIX + _peer_heading_text(name or UNNAMED_DEVICE, False),
+            )
+            for name, _reason in self._silent_peers
+        }
 
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
         ordered = rank_entries(entries)

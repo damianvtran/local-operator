@@ -47,6 +47,30 @@ forces them open to manufacture a page. Providers, jobs and analytics use
 synthetic data in the **real OperatorApp** with production CSS, not CSS-less
 unit-test hosts. They validate rendering, not live provider authentication.
 
+Two additions to that matrix are worth naming here, because each was a state a
+review round had to rebuild a rig to look at (design round 4, D26/D29):
+
+- `sidebar_shot.py silent` and `silent-two` — a peer that answered nothing, so
+  its whole section is the heading `⇄ <device> (unreachable)` with no rows under
+  it. Neither is a fixture the row producer can express, because the state is
+  precisely the ABSENCE of rows: the script calls `set_silent_peers` itself and
+  refuses to write a frame whose headings are missing or painted below
+  `⌥ Subagent Runs`. Capture at **100x45** — at 100x30 the frame stops before the
+  subagent tier, and the tier is half of what the case asserts.
+- `mesh_sidebar_shot.py` — the ONE capture built from a real mesh (two config
+  roots, two identities, two relays on loopback, a live link) rather than from
+  hand-stamped rows, which is what makes a row-producer regression fail here
+  instead of shipping (`Q-R10-1`). It drives `sidebar_shot.py peers-focus`, so
+  its size is that script's own default, 800x510 native (100x30). It also
+  refuses a frame whose model chip is still `connecting…`, the mid-connect
+  transient one run in three produced (D30).
+
+Both `silent` cases and the mesh case are in the committed inventory, so the
+next round re-derives them with `visual_gallery.py --case …` instead of writing
+another rig. Pairing in the mesh case is written into both stores rather than
+negotiated (no pty, no second human), so it is evidence about the transport and
+the rendering, never about the pairing ceremony.
+
 ## What changed
 
 Textual exports the real compositor through Rich. Rich's default SVG is a
