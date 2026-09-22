@@ -1999,44 +1999,38 @@ _live_handle: object | None = None
 def _tool_batch_in_flight(session: object) -> bool:
     """Is a tool batch EXECUTING in this session right now?
 
-    Read off the live context rather than a counter, because the state already
-    IS the counter and the two cannot drift: ``AgentLoop`` appends the assistant
-    message the moment a model turn ends and appends the tool results only once
+    Reads the live context through ``protocol.unanswered_tail_call_ids``, which IS
+    this rule and the one scan behind both display questions that ask it
+    (``pending_display_tool_ids`` / ``executing_display_tool_ids``). Agent review
+    round 1 caught the first revision re-deriving it by hand: that copy agreed on
+    today's shapes and would have drifted, because the published rule also scopes
+    to the latest group after the latest user boundary (so an old interrupted turn
+    cannot be revived by a later turn's liveness) and steps over the
+    ``CustomMessage`` rows an incident can land on top of an open batch. The
+    property itself is the message tail's, not a session's — ``AgentLoop`` appends
+    the assistant message when a model turn ends and the tool results only once
     ``_execute_tool_calls`` returns, so for the whole duration of every batch the
-    live list ends in an assistant message whose tool calls have no answers.
-    That is the property ``Session._paired_prefix`` and
-    ``Session._wire_legal_snapshot`` both document from the other side — they
-    exist because the tail is illegal exactly while a batch is running — and it
-    is what makes this leg exact for a subprocess tool, an in-process tool and a
-    batch parked on an approval alike, without this module knowing which tool it
-    is.
+    live list ends in unanswered calls.
 
-    A RAISING OR UNREADABLE SESSION ANSWERS ``True``, and the direction is
-    deliberate: this feeds a predicate that ends the process, so uncertainty
-    must never be the thing that fires it. (The opposite direction is right for
-    :func:`_work_motion`, whose docstring argues it: that tuple decides when to
-    stop WAITING, and an unreadable probe there is not movement either.)
+    An unreadable context answers ``False`` — "no batch" — deliberately: this
+    feeds a predicate that ends the process, so a state we cannot read must not be
+    the thing that fires it, and a session with no context has nothing running.
+    (The opposite direction is right for :func:`_work_motion`, whose docstring
+    argues it: that tuple decides when to stop WAITING.)
     """
     context = getattr(session, "_context", None)
     messages = getattr(context, "messages", None)
-    if messages is None:
-        # No live context is not a batch: a session that has not opened one yet
-        # (a reduced handle, a test double) has nothing running, and answering
-        # "in flight" there would leave the leg inert for real boots.
+    if not messages:
         return False
-    # WALK BACK OVER ROWS THAT ARE NOT MESSAGES, rather than reading ``[-1]``.
-    # A ``CustomMessage`` (an incident note, an MCP report) can land on top of an
-    # open batch and is not a ``Message``, so a tail check would read the batch
-    # as finished — the exact mistake ``Session._paired_prefix`` documents from
-    # the persistence side. Duck-typed on ``role`` rather than ``isinstance``
-    # because this runs on a sampler thread and the import it would need is not
-    # worth paying per sample for a distinction the attribute already makes.
-    for entry in reversed(messages):
-        role = getattr(entry, "role", None)
-        if role is None:
-            continue
-        return role == "assistant" and bool(getattr(entry, "tool_calls", None))
-    return False
+    # Function-local like every other import in this module: this file is the
+    # child's boot path, and ``protocol`` pulls the session graph in.
+    from local_operator.session.protocol import unanswered_tail_call_ids
+
+    try:
+        return bool(unanswered_tail_call_ids(messages))
+    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
+        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        return False
 
 
 def _step_in_flight(handle: object) -> bool:

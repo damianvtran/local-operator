@@ -856,12 +856,28 @@ def install_moved(row: TurnJournalRow) -> bool:
 def _stall_bound_leg(row: TurnJournalRow) -> str | None:
     """Which leg of the runtime's stall bound ended it, or ``None`` when it did not.
 
-    THE DUMP IS THE EVIDENCE AND THE MTIME IS THE KEYS: a dump is keyed by pid
-    alone (``stall_watchdog.dump_path``), and a pid the OS has since recycled
-    would otherwise let another runtime's freeze be narrated as this row's death.
-    A file written after this row's turn began can only be about this run — the
-    dump's last write IS the fire, because ``faulthandler`` writes with a bare
-    descriptor at the moment its timer expires.
+    THE DUMP IS THE EVIDENCE AND THE MTIME IS THE KEYS. A file written after this
+    row's turn began can only be about this run — the dump's last write IS the
+    fire, because ``faulthandler`` writes with a bare descriptor at the moment its
+    timer expires — while a file older than the turn belongs to a predecessor that
+    happened to hold the same pid.
+
+    THE FENCE IS ONE-DIRECTIONAL, AND THE OTHER DIRECTION IS A NAMED LIMITATION
+    rather than a solved problem (agent review round 1, MINOR 3). It excludes a
+    STALE same-pid dump; it cannot recover a fired one, because ``arm`` opens the
+    dump with ``"w"`` and the next runtime to draw a recycled pid therefore
+    truncates the evidence away — and that reader then falls through to
+    ``runtime-killed``/``unattributed``, which is the mis-narration this whole rung
+    exists to end. Nothing cheap closes it: the arm site is the child's entry
+    point and has no session identity to key a second filename on (see
+    ``process._live_handle``'s comment for the same constraint from the other
+    side), and ``dump_path`` is deliberately pid-only so that a reader holding a
+    record's pid needs nothing else. WHAT A READER CAN DO: the dump's header
+    carries the epoch the bound was ARMED at, so a dump whose arm time falls
+    outside the row's turn is a recycled pid's file and not this death's evidence
+    — the same cross-check this fence performs on mtime, available by hand when a
+    reader has both files in front of them. A per-run filename remains the real
+    fix and is its own change.
 
     NEVER RAISES: this runs while a session is opening, on a file a killed
     process may have been midway through, and an unreadable instrument must

@@ -49,6 +49,7 @@ REAL spawned runtime (which arms, and which disarms on a clean stop) — see
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import os
 import subprocess
@@ -56,12 +57,24 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_operator import incidents
+from local_operator.harness.types import (
+    AgentTool,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolResult,
+)
+from local_operator.session.runtime import process as process_module
 from local_operator.session.runtime import stall_watchdog
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import ScriptedStream, make_session
 
 #: The worktree root. ``parents[4]`` because this file lives four levels under it
 #: (``tests/unit/session/runtime/``).
@@ -1344,3 +1357,231 @@ def test_arming_with_a_probe_starts_the_sampler_and_disarming_stops_it(
     assert stop is not None and not stop.is_set()
     stall_watchdog.disarm()
     assert stop.is_set(), "the sampler was left running past a clean exit"
+
+
+# -- the in-flight guard and the production wiring ---------------------------
+#
+# BOTH OF THESE EXIST BECAUSE AGENT REVIEW ROUND 1 MEASURED THEIR ABSENCE, and
+# the absence was invisible: the real probe answers "no batch" in every rig that
+# only ever spins, so stubbing `_step_in_flight` to `False` left the whole file
+# green (18 passed / 1 failed, and the failure was a known flake). That is the
+# worst shape a gap can have — the leg that decides whether a legitimate long
+# operation is KILLED was reachable by nothing, and the two lines that make the
+# predicate live in production were reachable by nothing either. A predicate that
+# ships silently disabled with green tests makes the fleet look protected, which
+# is the exact failure the #1363 docstring warns about.
+
+
+@pytest.mark.asyncio
+async def test_a_real_tool_batch_holds_the_progress_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-flight leg, on a REAL batch running through the REAL agent loop.
+
+    A tool that blocks on an event is the state the leg exists for: the process
+    is burning CPU with no transcript movement — the tool's row lands only when
+    the batch returns — and cutting it would destroy work that is going fine.
+    So this drives the real loop (``Session.prompt`` over a scripted stream that
+    emits a tool call, with a real ``AgentTool`` whose ``execute`` parks), samples
+    the REAL ``process._progress_probe`` while the tool is executing, and then
+    releases it and shows the same predicate firing once nothing is in flight.
+
+    Both halves in one cell on purpose: a cell that only showed "no fire while a
+    tool runs" would pass with the whole leg stubbed out, and a cell that only
+    showed the fire would pass with the guard deleted. The mutant is the test.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        started.set()
+        await release.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="ok")]
+        )
+
+    tool = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}, "required": []},
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="working"),
+                StreamToolCallDelta(index=0, id="c1", name="slow", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[tool])
+    # A CARRIER, NOT A DOUBLE, and the constraint is measured rather than
+    # preferred: ``_step_in_flight`` reads exactly ``handle._session`` (that is
+    # its whole contract), while a real ``ServingSessionHandle`` in this harness
+    # — no running ``RuntimeServer`` to drive it — leaves the turning settle
+    # parked forever: the tool RUNS and the batch holds, and then ``prompt``
+    # never returns (measured here, 15 s). Parking on that would make this cell a
+    # test of the handle rather than of the guard. The REAL parts the guard is
+    # about — the real session, the real agent loop, the real tool, the real
+    # ``_progress_probe`` — are all below; only the carrier is synthetic.
+    handle = SimpleNamespace(_session=session)
+    monkeypatch.setattr(process_module, "_live_handle", handle)
+
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump = tmp_path / f"{stall_watchdog.DUMP_PREFIX}-5252.log"
+    opened = dump.open("w", encoding="utf-8")
+    armed = stall_watchdog._Armed(dump, opened, 4.0, 5252, process_module._progress_probe)
+
+    def step() -> bool:
+        fake.wall += 1.0
+        fake.cpu += 1.0
+        return stall_watchdog._sample(armed)
+
+    turn = asyncio.create_task(session.prompt("go"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=30.0)
+        # THE REAL STATE: the live context ends in unanswered calls, exactly as
+        # the loop leaves it for the whole duration of every batch.
+        assert process_module._tool_batch_in_flight(session) is True
+        assert process_module._step_in_flight(handle) is True
+        assert process_module._progress_probe()[1] is True
+        # ...AND NOTHING FIRES, however long the CPU leg would otherwise hold.
+        assert [step() for _ in range(30)] == [False] * 30, (
+            "the bound fired while a REAL tool batch was executing: this is the "
+            "false positive that would kill a legitimate in-process tool"
+        )
+        assert armed.progress_deadline is None
+        assert spy.armed == [], "the progress leg armed the C timer during a live tool batch"
+    finally:
+        release.set()
+        await asyncio.wait_for(turn, timeout=30.0)
+
+    # THE SAME PREDICATE, ONCE THE BATCH IS DONE: the tool result is in the
+    # context, nothing is executing, and the leg fires on the same spinning loop
+    # the cell was already simulating.
+    assert process_module._step_in_flight(handle) is False
+    assert process_module._progress_probe()[1] is False
+    for _ in range(int(armed.seconds) + 4):
+        if step():
+            break
+    else:
+        opened.close()
+        raise AssertionError(
+            "the leg never fired after the tool batch returned, so the first half "
+            "of this cell proves nothing about a guard that is doing work"
+        )
+    assert spy.armed, "the fire never reached the C timer"
+    opened.close()
+    assert stall_watchdog.PROGRESS_MARKER in dump.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_in_flight_holds_the_progress_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other in-flight fact: a compaction rewrites history in-process.
+
+    It burns CPU with no transcript movement while it runs (the compaction row
+    lands when it finishes), so it is the second shape leg 2 exists for. Set
+    through the same attribute the session's own compaction path sets, because
+    the point is that this predicate reads THAT attribute — a private one, for
+    the reason ``process._step_in_flight``'s docstring gives.
+    """
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    assert process_module._step_in_flight(handle) is False
+    session._compacting = True
+    try:
+        assert process_module._step_in_flight(handle) is True
+    finally:
+        session._compacting = False
+    assert process_module._step_in_flight(handle) is False
+    await session.dispose()
+
+
+def test_the_progress_leg_is_wired_at_the_one_arm_site_and_reads_the_live_handle() -> None:
+    """The two lines that make the leg LIVE, pinned so neither can vanish quietly.
+
+    Agent review round 1's MAJOR 2: ``_progress_probe`` is wired by exactly two
+    statements — the entry point passing ``probe=` and ``amain`` publishing the
+    handle it reads — and dropping EITHER left every cell green while the
+    predicate was inert for the whole fleet. This asserts them against the source,
+    the same way ``test_the_only_arm_site_is_the_runtime_entry_point`` pins the
+    arm site's location (a shape no behaviour in this file can observe, because
+    an inert leg and a quiet one look identical from outside).
+    """
+    source = (REPO / "local_operator" / "session" / "runtime" / "process.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    arms = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "arm"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "stall_watchdog"
+    ]
+    assert len(arms) == 1, f"expected exactly one arm call site, found {len(arms)}"
+    passed = {kw.arg: kw.value for kw in arms[0].keywords}
+    assert "probe" in passed, (
+        "the entry point arms without a probe, so the progress leg can never run: "
+        "every test would stay green and the fleet would look protected"
+    )
+    assert isinstance(passed["probe"], ast.Name) and passed["probe"].id == "_progress_probe"
+
+    published = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_live_handle" for target in node.targets
+        )
+    ]
+    assert published, (
+        "nothing publishes the live handle, so ``_progress_probe`` answers 'judge "
+        "nothing' forever and the leg is inert in production"
+    )
+    assert any(
+        isinstance(node.value, ast.Name) and node.value.id == "handle" for node in published
+    ), "the handle published is not the runtime's own"
+
+    # ...AND THE ENDS AGREE BY NAME: the probe must read the global the entry
+    # point fills, or the two halves are wired to different names.
+    probe_source = ast.get_source_segment(source, _function(tree, "_progress_probe"))
+    assert (
+        probe_source is not None and "_live_handle" in probe_source
+    ), "``_progress_probe`` no longer reads ``_live_handle``"
+    # The behavioural twin of the source claim: arming with the real callable
+    # installs THE REAL callable, which is what cell above this one drives.
+    assert process_module._progress_probe.__module__ == process_module.__name__
+
+
+def _function(tree: ast.AST, name: str) -> ast.AST:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"no function named {name}")
+
+
+def test_arming_with_the_real_probe_installs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sampler is given the runtime's OWN callable, not a stand-in."""
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    assert stall_watchdog.arm(
+        seconds=SHORT_BOUND_S, directory=tmp_path, pid=5253, probe=process_module._progress_probe
+    )
+    armed = stall_watchdog._ARMED
+    assert armed is not None
+    assert armed.probe is process_module._progress_probe
+    assert armed.thread is not None and armed.thread.is_alive()
+    stall_watchdog.disarm()
