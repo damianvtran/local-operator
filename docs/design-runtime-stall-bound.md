@@ -106,6 +106,35 @@ freezes actually suffered (1.5-7.2 h, four of five with zero writes). A single
 synchronous step that holds the GIL for five unbroken minutes is not slow work.
 `LOP_RUNTIME_STALL_SECONDS` overrides it; `0` disables it.
 
+**The bound during BOOT: 900 s, and 300 s starts at engagement.** The steady bound
+is measured from the last sign of life, so it can only be honest once something is
+in a position to write one — and nothing in the boot path can. `arm` runs from the
+`__main__` guard, before `main()`, and seeds both planes to that instant; the
+workload beat's only driver starts after publication and sleeps a heartbeat before
+its first stamp, and the serving beat starts with the serving thread. So from the
+arm to the first post-publication beat, every second of a legitimate boot
+(session construction, lease arbitration, MCP bring-up, the inbox drain, socket
+bind, publication) was spent against a clock no boot code could re-arm, and the
+only possible deadline was `arm + 300 s`. Measured over 68 retained dumps on the
+build carrying the observation header: 17 fires, 10 of them at the full
+`Timeout (0:05:00)` value, i.e. no beat ever re-armed the timer at all — the
+never-engaged class, and the plurality. `DEFAULT_BOOT_STALL_S`
+(`LOP_RUNTIME_BOOT_STALL_SECONDS`, same spellings and floor/ceiling as the steady
+knob, `off` meaning "no boot phase") is what `arm` arms with; the runtime's first
+ENGAGEMENT — the publication boundary in `process.amain`, where `_live_handle` is
+set — calls `stall_watchdog.engage()`, which moves the bound down to the steady one
+and stamps BOTH planes, so the steady bound is measured from engagement rather than
+from boot. That is also what makes the never-engaged class NAMEABLE: a fire that
+engaged has the deadline sibling `engage` writes, and one that never engaged has
+none. Engagement never widens the bound.
+
+**Still open in that window, and NOT closed here.** A tick that returns early
+without raising is never re-created by `_watch_stall_beats`, whose restart fires
+only on an exception (`_do_shutdown` is the same class: a plane is unreported
+because the runtime is ending). Both are real — dump 24646 (19 threads, main idle
+in `select`, no `tick died:` line) and 75019 (mid-shutdown) — and both need their
+own fix (a restart on early return, and a shutdown state the bound recognises).
+
 **What the exit costs, beyond the turn.** A hard exit runs no Python, so the
 in-process kill of this turn's tool process groups cannot fire (`execute_bash`'s
 `_kill` chain) — which is exactly the "hard death of the owning `lop` process"

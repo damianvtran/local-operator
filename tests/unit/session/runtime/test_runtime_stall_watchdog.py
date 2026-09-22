@@ -1241,6 +1241,513 @@ def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
     assert fake.armed == [], "a timer was armed for a dump that cannot be written"
 
 
+# ============================================================================
+# THE BOOT BOUND, AND THE BOUND ENGAGEMENT MOVES IT TO
+# ============================================================================
+#
+# WHY THERE ARE TWO BOUNDS, in one read. ``arm`` runs from the entry point, before
+# ``main()``, and it seeds both planes to that instant — but NOTHING IN THE BOOT
+# PATH CAN MOVE A STAMP: the workload tick starts after publication and sleeps a
+# heartbeat before its first stamp, and the serving beat starts with the serving
+# thread. So every second a legitimate boot spends (construction, lease
+# arbitration, MCP bring-up, the inbox drain, the socket bind, publication) is spent
+# against a clock no boot code can re-arm. The cells below pin the two halves of the
+# fix as ONE mechanism: the entry point arms the BOOT bound, and the first
+# ENGAGEMENT moves the bound down to the steady one and stamps BOTH planes.
+#
+# The measured population this is sized for: over 68 retained dumps on the build
+# carrying the observation header, 10 of its 17 fires carried the full ``0:05:00``
+# value — no beat ever re-armed the timer, the never-engaged class. Those are what
+# the boot bound covers and what the engagement reset makes NAMEABLE (a fire that
+# engaged has a deadline sibling; one that never engaged has none).
+
+#: One child, four arguments, because every cell in this section is the same rig with
+#: a different answer to "did it engage": ``mode`` (``never`` or ``engage``), the boot
+#: bound, the steady bound, and how long to wait before engaging. The engage line it
+#: prints is the evidence the parent asserts on — the bound it moved from and to, and
+#: BOTH planes' stamp deltas, so a reset that stamped one plane cannot pass.
+_ENGAGE_CHILD = """
+import ctypes
+import os
+import sys
+import time
+
+from local_operator.session.runtime import stall_watchdog
+
+mode = sys.argv[1]
+boot = float(sys.argv[2])
+steady = float(sys.argv[3])
+delay = float(sys.argv[4])
+
+assert stall_watchdog.arm(boot_seconds=boot, seconds=steady), "the child could not arm the bound"
+print(f"armed:{os.getpid()}", flush=True)
+if mode == "engage":
+    time.sleep(delay)
+    before = dict(stall_watchdog._ARMED.last_beat)
+    moved = stall_watchdog.engage()
+    after = dict(stall_watchdog._ARMED.last_beat)
+    deltas = " ".join(f"{plane}={after[plane] - before[plane]:.6f}" for plane in sorted(after))
+    print(
+        f"engage:{moved} bound:{stall_watchdog._ARMED.boot_seconds:g}->"
+        f"{stall_watchdog._ARMED.seconds:g} stamps:{deltas}",
+        flush=True,
+    )
+
+lib = ctypes.PyDLL(None)
+lib.sleep.argtypes = [ctypes.c_uint]
+lib.sleep(600)
+"""
+
+
+def _engage_run(
+    tmp_path: Path,
+    mode: str,
+    boot: float,
+    steady: float,
+    delay: float = 0.0,
+) -> tuple[subprocess.CompletedProcess[str], int, Path, float]:
+    """Run one life of ``_ENGAGE_CHILD`` and hand back what a reader would have.
+
+    Returns the finished process, its pid, its dump path and how long the whole
+    subprocess took — the last one because "it outlived the steady bound measured
+    from the arm" is a claim about TIME, and nothing in the dump carries it.
+    """
+    started = time.monotonic()
+    result = _run_script(_ENGAGE_CHILD, tmp_path, args=(mode, str(boot), str(steady), str(delay)))
+    elapsed = time.monotonic() - started
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    return result, pid, _dump_for(tmp_path, pid), elapsed
+
+
+def test_the_entry_point_arms_the_boot_bound_and_engagement_moves_it_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BOTH HALVES, in process: 900 armed, 300 after engaging, both planes stamped.
+
+    This is the whole decision as one cell, and each assertion is one of its parts:
+    the bound armed is the BOOT one; ``engage`` moves it to the steady one (a RE-ARM,
+    not a cancel and a re-arm); BOTH planes' stamps move to the engagement instant,
+    which is what makes the next deadline a measurement of what happened AFTER the
+    runtime engaged; the deadline sibling is written, so a post-engagement fire is
+    distinguishable from the never-engaged class; and a SECOND engage is a no-op,
+    which is what idempotence buys a boot path that might reach the line twice.
+
+    MUTATION THIS CELL CATCHES: make ``engage`` a no-op (or let it move the bound
+    without stamping a plane) — the armed list stays at one entry and the stamps stay
+    at the arm instant, so the boot bound is all this process can ever fire at.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    try:
+        assert stall_watchdog.arm(directory=tmp_path) is True
+        assert [seconds for seconds, _, _ in fake.armed] == [stall_watchdog.DEFAULT_BOOT_STALL_S]
+        armed = stall_watchdog._ARMED
+        assert armed is not None
+        assert armed.boot_seconds == stall_watchdog.DEFAULT_BOOT_STALL_S
+        assert armed.steady_seconds == stall_watchdog.DEFAULT_STALL_S
+        seeded = dict(armed.last_beat)
+
+        assert stall_watchdog.engage() is True, (
+            "engage reported nothing to do on a process whose armed bound is the boot "
+            "one, so the steady bound can only ever be reached by waiting out boot"
+        )
+        # APPROX, not equality: the re-arm value is ``deadline() - now`` (the same shape
+        # ``beat`` uses, so the timer always holds the time left to the earliest plane),
+        # and that subtraction carries float error -- 300.00000000000006 on a Linux
+        # runner where macOS produced exactly 300.0. The claim is which bound was armed,
+        # and a half-second band states that without pinning an arithmetic accident.
+        armed_bounds = [seconds for seconds, _, _ in fake.armed]
+        assert armed_bounds[:1] == [stall_watchdog.DEFAULT_BOOT_STALL_S], armed_bounds
+        assert armed_bounds[1:] == pytest.approx(
+            [stall_watchdog.DEFAULT_STALL_S]
+        ), f"engagement did not re-arm the timer at the steady bound: {armed_bounds!r}"
+        for plane in (stall_watchdog.WORKLOAD, stall_watchdog.SERVING):
+            assert armed.last_beat[plane] > seeded[plane], (
+                f"the {plane} plane's stamp is still at the arm instant, so a fire after "
+                f"engagement would still be measured from the entry point"
+            )
+        epoch, leg = _deadline_record(tmp_path, os.getpid())
+        assert leg in (stall_watchdog.WORKLOAD, stall_watchdog.SERVING), leg
+        # The tolerance is not slack: the deadline is computed from ``time.monotonic`` and
+        # read back against ``time.time``, so it can sit microseconds over the bound. The
+        # DISCRIMINATION is the boot bound (900 s) versus the steady one (300 s), which a
+        # half-second band separates with room to spare.
+        remaining = epoch - time.time()
+        assert 0 < remaining <= stall_watchdog.DEFAULT_STALL_S + 0.5, (
+            f"the sibling engagement wrote says {remaining:.1f}s left, which is not the "
+            f"steady bound this process moved to"
+        )
+
+        assert stall_watchdog.engage() is False, "a second engage moved the bound again"
+        assert len(fake.armed) == 2, fake.armed
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_engage_never_widens_the_steady_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE INVARIANT: engagement only ever moves the bound DOWN, or does nothing.
+
+    Two shapes, because both are states a real process can be in. An explicit
+    ``arm(seconds=...)`` states one bound for the whole arming, so there is no boot
+    phase to end; a steady knob set ABOVE the boot bound arms at the larger of the two,
+    so the bound is already the steady one by construction. In neither may engagement
+    touch the timer — an engage that "moved the bound to the default" would RELAX the
+    bound a silent runtime is judged against, which is the one thing this function
+    must never do (the invariant the whole design rests on: after engagement, a runtime
+    genuinely silent for the steady bound is still cut).
+
+    MUTATION THIS CELL CATCHES: ``armed.seconds = max(armed.seconds, steady_seconds)``,
+    or an unconditional ``armed.seconds = DEFAULT_STALL_S`` — the first is caught by the
+    explicit-bound arm, the second by both.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    try:
+        assert stall_watchdog.arm(seconds=SHORT_BOUND_S, directory=tmp_path) is True
+        assert (
+            stall_watchdog.engage() is False
+        ), "engagement re-armed a process that stated one bound for its whole arming"
+        assert [seconds for seconds, _, _ in fake.armed] == [float(SHORT_BOUND_S)], fake.armed
+
+        stall_watchdog.disarm()
+        monkeypatch.setenv(stall_watchdog.ENV_SECONDS, "1200")
+        assert stall_watchdog.arm(directory=tmp_path) is True
+        assert [seconds for seconds, _, _ in fake.armed] == [
+            float(SHORT_BOUND_S),
+            1200.0,
+        ], "the armed bound is not the larger of the two bounds"
+        assert (
+            stall_watchdog.engage() is False
+        ), "engagement extended a bound an operator set ABOVE the boot bound"
+        assert [seconds for seconds, _, _ in fake.armed] == [float(SHORT_BOUND_S), 1200.0]
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_the_runtime_log_names_both_bounds_when_they_differ(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator-facing line says what the dump header says, or it misstates the bound.
+
+    ``announce`` runs from ``main``'s first lines, which is BOOT — so before this split
+    its one number was the whole story, and after it a line naming only the boot bound
+    would tell a reader that a frozen runtime is judged at 900 s when from publication
+    (seconds later) it is judged at 300 s. One bound still reads as one number: the
+    pre-split wording is asserted here too, because a cell that only knew the split
+    would let the single-bound log line drift away unnoticed.
+
+    MUTATION THIS CELL CATCHES: drop the two-bound branch from ``announce`` — the line
+    goes back to naming the boot bound alone and the second half of this cell fails.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    try:
+        assert stall_watchdog.arm(directory=tmp_path) is True
+        with caplog.at_level(logging.INFO, logger=stall_watchdog.logger.name):
+            stall_watchdog.announce()
+        line = " ".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == stall_watchdog.logger.name
+        )
+        assert (
+            f"{stall_watchdog.DEFAULT_BOOT_STALL_S:.0f}s of no progress during BOOT" in line
+        ), line
+        assert f"then {stall_watchdog.DEFAULT_STALL_S:.0f}s once it engages" in line, line
+
+        stall_watchdog.disarm()
+        caplog.clear()
+        assert stall_watchdog.arm(seconds=SHORT_BOUND_S, directory=tmp_path) is True
+        with caplog.at_level(logging.INFO, logger=stall_watchdog.logger.name):
+            stall_watchdog.announce()
+        line = " ".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == stall_watchdog.logger.name
+        )
+        assert f"{SHORT_BOUND_S:.0f}s of no progress dumps every thread" in line, line
+        assert "during BOOT" not in line, line
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_engagement_takes_the_exit_leg_from_the_arm_and_not_from_a_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE FIFTH ARM SITE OWES WHAT THE OTHER FOUR DO: no ``exit`` spelled here.
+
+    ``_arm_timer`` is the one spelling for every site that reaches
+    ``dump_traceback_later``, and the reason is in its own docstring: the exit leg is
+    answered PER RE-ARM, from the work-in-flight answer, so a literal ``exit=True`` at
+    any site ends a runtime the bound must leave alive. ``engage`` is a fifth site, and
+    it is the one whose arming starts the STEADY phase — the bound everything else in
+    this module is measured against — so a literal here would override the in-flight
+    hold for the whole life of the runtime, not for one episode.
+
+    Written after the merge with #1439, whose own cell for the fourth site
+    (``test_the_executing_extension_takes_the_exit_leg_from_the_arm``) is the reason
+    this one exists and the shape it copies: the ARMED FLAG is what makes it cheap and
+    exact, and the other direction is asserted too so the cell cannot pass by never
+    arming fatally at all.
+
+    MUTATION THIS CELL CATCHES: re-arm in ``engage`` with a timer call of its own
+    carrying ``exit=True`` (or with the flag hard-coded either way) — the held case
+    fails, because what is captured is the flag the module would have armed with.
+    """
+    captured: list[bool] = []
+    monkeypatch.setattr(
+        stall_watchdog.faulthandler,
+        "dump_traceback_later",
+        lambda timeout, *, file, exit: captured.append(exit),
+    )
+    # The sampler refreshes the exit leg from the probe on its own schedule; stubbed so
+    # this cell is about the two arms it names and nothing else.
+    monkeypatch.setattr(stall_watchdog, "_start_sampler", lambda armed: None)
+    try:
+        assert (
+            stall_watchdog.arm(
+                boot_seconds=600.0, seconds=300.0, busy=lambda: True, directory=tmp_path
+            )
+            is True
+        )
+        assert captured == [
+            False
+        ], f"the entry point armed a FATAL timer on a runtime holding work: {captured}"
+        assert stall_watchdog.engage() is True
+        assert captured == [False, False], (
+            "engagement armed a FATAL timer on a runtime holding a turn, a subagent or a "
+            f"job: {captured}"
+        )
+
+        # ...and the other direction: an IDLE runtime still gets a fatal arm from the
+        # engagement, which is the wedge recovery the steady bound exists for.
+        stall_watchdog.disarm()
+        captured.clear()
+        assert (
+            stall_watchdog.arm(
+                boot_seconds=600.0, seconds=300.0, busy=lambda: False, directory=tmp_path
+            )
+            is True
+        )
+        assert stall_watchdog.engage() is True
+        assert captured[-1] is True, (
+            f"an IDLE runtime was left on a non-fatal arm, so the steady bound can never "
+            f"end a wedge: {captured}"
+        )
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_engage_with_nothing_armed_is_a_no_op(tmp_path: Path) -> None:
+    """An in-process host calls it on a boot path that never armed the process timer.
+
+    ``beat`` has the same contract for the same reason (a TUI, a test), and the failure
+    it prevents is loud rather than subtle: an engage that raised, or that armed a
+    process-global C timer from a library path, would displace the timer the fleet's
+    e2e stages own.
+    """
+    assert not stall_watchdog.is_armed()
+    assert stall_watchdog.engage() is False
+    assert not list(tmp_path.glob(f"{stall_watchdog.DUMP_PREFIX}-*.log"))
+
+
+def test_the_boot_knob_resolves_like_the_steady_one_but_means_the_opposite_by_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One resolver, two knobs — and ``off`` reads the same and means something else.
+
+    The steady knob's ``0``/``off`` disables the WATCHDOG; the boot knob's spells "no
+    boot phase", which arms straight at the steady bound. Both are asserted here
+    because a reader who assumes they behave alike would set one and get the other,
+    and the two are one line apart in the same function.
+    """
+    monkeypatch.delenv(stall_watchdog.ENV_BOOT_SECONDS, raising=False)
+    assert stall_watchdog.boot_bound_seconds() == stall_watchdog.DEFAULT_BOOT_STALL_S
+
+    monkeypatch.setenv(stall_watchdog.ENV_BOOT_SECONDS, "600")
+    assert stall_watchdog.boot_bound_seconds() == 600.0
+
+    floor = stall_watchdog.min_bound_seconds()
+    monkeypatch.setenv(stall_watchdog.ENV_BOOT_SECONDS, "4")
+    assert stall_watchdog.boot_bound_seconds() == floor, "the boot bound skipped the floor"
+
+    for typo in ("soon", "-1", str(stall_watchdog.MAX_BOUND_S * 2)):
+        monkeypatch.setenv(stall_watchdog.ENV_BOOT_SECONDS, typo)
+        assert stall_watchdog.boot_bound_seconds() == stall_watchdog.DEFAULT_BOOT_STALL_S, typo
+
+    for spelling in ("0", "off", "no", "false", ""):
+        monkeypatch.setenv(stall_watchdog.ENV_BOOT_SECONDS, spelling)
+        assert stall_watchdog.boot_bound_seconds() is None, spelling
+
+
+def test_a_boot_knob_spelled_off_arms_the_steady_bound_and_only_the_steady_knob_disarms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``off`` on the boot knob is the pre-split behaviour, not an unarmed runtime.
+
+    Worth its own cell because the two knobs share a resolver and would be easy to wire
+    to one meaning: a test or an operator that spells the boot bound off must get a
+    runtime armed at the steady bound from the first instant (exactly what shipped
+    before the split), while ``0`` on the STEADY knob must still leave the process
+    completely untouched.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    try:
+        monkeypatch.setenv(stall_watchdog.ENV_BOOT_SECONDS, "off")
+        assert stall_watchdog.arm(directory=tmp_path) is True
+        assert [seconds for seconds, _, _ in fake.armed] == [stall_watchdog.DEFAULT_STALL_S]
+        assert stall_watchdog.engage() is False, "there was no boot phase to end"
+
+        stall_watchdog.disarm()
+        monkeypatch.setenv(stall_watchdog.ENV_SECONDS, "0")
+        assert (
+            stall_watchdog.arm(directory=tmp_path) is False
+        ), "the boot knob's off spelling disabled the watchdog; only the steady knob may"
+        assert stall_watchdog.is_armed() is False
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_a_runtime_that_never_engages_fires_at_the_boot_bound_with_no_sibling(
+    tmp_path: Path,
+) -> None:
+    """THE CLASS THE SPLIT MAKES NAMEABLE, as a real fire: it never engaged at all.
+
+    The child arms a 2 s boot bound and a 1 s steady bound and never engages, so this is
+    the measured plurality exactly — no session judged, no beat ever landing — and the
+    two facts a reader gets from it are the ones the design exists to produce: the value
+    on the fired line is the BOOT bound (it survived past the steady bound, which is what
+    makes a 1 s steady bound harmless here), and there is NO deadline sibling, because
+    only an engagement or a beat writes one.
+
+    MUTATION THIS CELL CATCHES: arm the steady bound from the entry point (i.e. drop the
+    boot bound from ``arm``'s resolution) — the child fires at 1 s with 1 on the fired
+    line, and this cell goes red on the value it asserts.
+    """
+    boot, steady = 2 * SHORT_BOUND_S, SHORT_BOUND_S
+    result, pid, dump, _elapsed = _engage_run(tmp_path, "never", boot, steady)
+    assert (
+        result.returncode == 1
+    ), f"the boot bound never fired: {result.stdout!r} {result.stderr!r}"
+    assert "engage:" not in result.stdout, "this child engaged after all"
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text[:400]
+    assert _fired_seconds(text) == pytest.approx(float(boot)), (
+        f"a runtime that never engaged fired at {_fired_seconds(text)}s rather than its "
+        f"{boot:g}s boot bound: {text[:400]!r}"
+    )
+    assert f"armed for {boot:g}s" in text, (
+        "the header does not name the bound the timer was armed for, so the fired value "
+        f"cannot be attributed: {text[:400]!r}"
+    )
+    assert "THIS IS THE BOOT BOUND" in text, (
+        "the header does not say that this value means the runtime never engaged, which "
+        f"is the whole reading this class needs: {text[:400]!r}"
+    )
+    assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
+        "a never-engaged fire left a deadline sibling, so presence no longer answers "
+        "'did anything ever re-arm this timer'"
+    )
+
+
+def test_engagement_moves_the_bound_to_the_steady_one_and_stamps_both_planes(
+    tmp_path: Path,
+) -> None:
+    """THE INVARIANT CELL: after engaging, silence for the STEADY bound is still cut.
+
+    A 4 s boot bound and a 1 s steady bound, then an engage and a park: the fire must
+    carry the steady bound, not the boot one, and the sibling engage wrote must count
+    down from the engagement instant. Both halves matter to the fleet — the boot bound
+    buys a slow boot its time, and the steady bound is what #1438's executing-loop
+    abstention and #1439's in-flight protection act on, so an engage that carried the
+    boot bound forward for the process's whole life would quietly disable them.
+
+    MUTATION THIS CELL CATCHES: widen the steady bound inside ``engage`` (e.g. set it to
+    ``DEFAULT_STALL_S``, or ``max`` the two) — the fired value becomes the wide one and
+    this cell, and only this cell, goes red. It also catches a reset that stamps ONE
+    plane: the other plane's stamp stays at the arm instant, so the re-armed deadline is
+    measured from the arm and the child outlives the window it should not.
+    """
+    boot, steady = 4 * SHORT_BOUND_S, SHORT_BOUND_S
+    result, pid, dump, _elapsed = _engage_run(tmp_path, "engage", boot, steady)
+    line = next((row for row in result.stdout.splitlines() if row.startswith("engage:")), "")
+    assert (
+        "engage:True" in line
+    ), f"the child never engaged, so nothing here is about the reset: {result.stdout!r}"
+    assert (
+        f"bound:{boot:g}->{steady:g}" in line
+    ), f"engagement did not move the bound from the boot bound to the steady one: {line!r}"
+    deltas = {
+        plane: float(delta)
+        for plane, delta in (part.split("=") for part in line.split("stamps:", 1)[1].split())
+    }
+    assert set(deltas) == {"serving", "workload"}, line
+    for plane, delta in deltas.items():
+        assert delta > 0.0, (
+            f"engagement left the {plane} plane's stamp at the arm instant, so the deadline "
+            f"it re-armed is measured from the entry point: {line!r}"
+        )
+
+    assert result.returncode == 1, f"the steady bound never fired: {result.stdout!r}"
+    text = dump.read_text(encoding="utf-8")
+    # A 50 ms band, not equality: ``_rearm`` derives the remaining time from the stamps
+    # this engagement just moved, so it is a few microseconds UNDER the steady bound (the
+    # arithmetic runs a moment after the stamp) and the fired value carries that. The
+    # discrimination this cell exists for is the boot bound (4 s here) against the steady
+    # one (1 s), which a band this width separates many times over.
+    assert _fired_seconds(text) == pytest.approx(float(steady), abs=0.05), (
+        f"a runtime silent AFTER engaging fired at {_fired_seconds(text)}s rather than the "
+        f"{steady:g}s steady bound: {text[:400]!r}"
+    )
+    epoch, leg = _deadline_record(tmp_path / "logs", pid)
+    assert leg in (stall_watchdog.WORKLOAD, stall_watchdog.SERVING), leg
+    remaining = epoch - time.time()
+    assert -0.5 < remaining <= float(steady) + 0.5, (
+        f"the sibling counts down from {remaining:.2f}s, which is not the steady bound "
+        f"measured from the engagement instant"
+    )
+
+
+def test_the_deadline_resets_on_engagement_not_on_arm(tmp_path: Path) -> None:
+    """THE OPERATOR'S ASK, measured: arm, outlive the steady bound, engage, go silent.
+
+    The steady bound is 1 s and the child waits 2 s BEFORE engaging, so a deadline that
+    reset on the arm (or an armed bound that was the steady one) would have killed this
+    process before the engage line was ever printed — and a deadline that did not reset
+    on engagement at all would fire 4 s after the arm carrying 4 on the fired line. Both
+    are asserted: the engage line is present, the whole run outlived the steady bound
+    measured from the arm, and the fire landed one STEADY bound after the engagement.
+
+    MUTATION THIS CELL CATCHES: an ``engage`` whose bound move is a no-op (or an
+    ``arm`` that arms the steady bound) — the first fires at the boot value, the second
+    kills the child before it can print.
+    """
+    boot, steady, delay = 4 * SHORT_BOUND_S, SHORT_BOUND_S, 2.0
+    result, _pid, dump, elapsed = _engage_run(tmp_path, "engage", boot, steady, delay)
+    assert "engage:True" in result.stdout, (
+        f"the child did not reach its engagement, so a fire before it says nothing about "
+        f"the reset: {result.stdout!r} {result.stderr!r}"
+    )
+    assert elapsed > delay + float(steady) - 0.25, (
+        f"the run lasted {elapsed:.2f}s, so it did not outlive the steady bound measured "
+        f"from the arm and this cell cannot tell a reset from an arm-time bound"
+    )
+    assert result.returncode == 1, f"the bound never fired: {result.stdout!r}"
+    text = dump.read_text(encoding="utf-8")
+    # The band is the same one as above and for the same reason (``_rearm`` recomputes
+    # from the stamps, so the value lands microseconds under the bound); what it must
+    # separate here is the steady bound from the 4 s boot bound, four times away.
+    assert _fired_seconds(text) == pytest.approx(float(steady), abs=0.05), (
+        f"the fire carries {_fired_seconds(text)}s rather than the steady bound the "
+        f"engagement moved to: {text[:400]!r}"
+    )
+
+
 # -- the structure a real firing cannot be asked about -----------------------
 
 
@@ -1368,6 +1875,11 @@ def test_the_only_arm_site_is_the_runtime_entry_point() -> None:
     Also pins that ``server.py`` touches this module ONLY through ``beat``: a
     ``disarm`` or an ``arm`` from the serving plane would let a library path
     decide the fate of the process-global timer.
+
+    And pins the SAME shape for ``engage``: one call site, on the boot path at the
+    publication boundary, and never reachable from the ``__main__`` guard — it moves
+    the bound and stamps planes, so a second site (or a library-path one, on an
+    in-process host that never armed) would be the same defect this cell exists for.
     """
     arm_sites = [
         str(path)
@@ -1423,6 +1935,40 @@ def test_the_only_arm_site_is_the_runtime_entry_point() -> None:
         "SERVING",
         "note_tick_death",
     }, f"the serving plane reaches the watchdog for {touched}"
+
+    # ``engage`` IS NOT A SECOND ARM SITE, and it is pinned here beside ``arm`` because it
+    # moves the bound and stamps planes: a call added to a library path (or to the
+    # entry-point guard, where it would run before the runtime has anything to judge)
+    # would be the same class of defect that pin exists for. It belongs on the boot path
+    # at the publication boundary — the function that publishes ``_live_handle``, the line
+    # the code itself documents as "there is a session to judge".
+    engage_sites = [
+        str(path)
+        for path in sorted((REPO / "local_operator").rglob("*.py"))
+        if "stall_watchdog.engage(" in path.read_text(encoding="utf-8")
+    ]
+    assert [Path(site).name for site in engage_sites] == ["process.py"], (
+        f"engagement is reachable from a library path, so a host that never armed the "
+        f"timer could move its bound: {engage_sites}"
+    )
+    assert process_source.count("stall_watchdog.engage(") == 1, (
+        "the boot path engages more than once, so a later call could move a bound a beat "
+        "has already set"
+    )
+    assert (
+        "stall_watchdog.engage(" not in guarded
+    ), "engagement is reachable from the entry point, before a session exists"
+    publishers = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and "stall_watchdog.engage(" in ast.unparse(node)
+        and "_live_handle = handle" in ast.unparse(node)
+    ]
+    assert publishers == ["amain"], (
+        f"engagement has moved off the publication boundary — the window it must cover "
+        f"starts where the process publishes the handle the probe judges: {publishers}"
+    )
 
 
 @pytest.mark.slow
@@ -1556,6 +2102,111 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         assert stall_watchdog.fired_pids(config_dir / "logs") == set()
     finally:
         signal_module.signal(signal_module.SIGUSR1, previous_usr1)
+        if child is not None:
+            _reap(child, config_dir)
+
+
+@pytest.mark.slow
+def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ENGAGEMENT ARRIVES, on a process spawned the way a viewer engages one.
+
+    The cells above prove the mechanism; this proves the ARRIVAL, and it is the only
+    evidence that the line is on the boot path at all: a runtime booted through
+    ``launch._spawn_runtime`` must show BOTH halves in its own artifacts — a dump header
+    that names the BOOT bound (the entry point armed it), and a deadline sibling counting
+    down from the STEADY bound (the publication boundary moved it and stamped both
+    planes).
+
+    WHY THE SIBLING'S VALUE IS THE WHOLE PROOF. The sibling carries one number: the
+    epoch deadline the timer really holds, rewritten by every re-arm. Before this change
+    no beat reaches the timer during boot, so a sibling written by the first serving beat
+    would count down from the ARM — about 900 s on the shipped defaults. Only an
+    engagement at publication makes it \u2248300 s within seconds of the spawn, and only a
+    stamp of BOTH planes makes the pin the engagement instant rather than the arm
+    instant. So one assertion covers the reset, the bound move and the two-plane stamp at
+    once, on a real child, with the number printed on failure.
+
+    MUTATION THIS CELL CATCHES: delete the ``stall_watchdog.engage()`` call from
+    ``process.py`` — the sibling then reads \u2248900 s (or, before the first beat, is
+    absent), and this cell goes red while every mechanism cell above stays green.
+    """
+    from local_operator.session.runtime import launch as launch_module
+    from tests.unit.session.runtime.test_runtime_detachment import (
+        _SESSION_ID,
+        _capture_text,
+        _isolate,
+        _log_text,
+        _reap,
+        _seed,
+        _wait_for_record,
+    )
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _seed(config_dir)
+    _isolate(monkeypatch, config_dir)
+    # Same reason as the sibling cell above: the spawn would otherwise hand the child
+    # whatever install generation the host has, which is not this tree.
+    monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+
+    child = None
+    try:
+        child = launch_module._spawn_runtime(
+            _SESSION_ID,
+            str(config_dir),
+            defer_materialise=False,
+        )
+        pid = child.pid
+        _wait_for_record(config_dir)
+
+        logs = config_dir / "logs"
+        dump = logs / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+        deadline = time.monotonic() + 60.0
+        while not dump.is_file() and time.monotonic() < deadline:
+            assert child.poll() is None, (
+                f"the runtime exited (rc={child.returncode}) without arming:\n"
+                f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
+            )
+            time.sleep(0.05)
+        assert dump.is_file(), "the runtime child never armed its stall bound"
+
+        header = dump.read_text(encoding="utf-8")
+        assert f"armed for {stall_watchdog.DEFAULT_BOOT_STALL_S:g}s" in header, (
+            "the entry point did not arm the BOOT bound, so the boot stretch is still "
+            f"covered by the steady one: {header[:600]!r}"
+        )
+        assert (
+            "THIS IS THE BOOT BOUND" in header
+        ), f"the header does not name the boot phase: {header[:600]!r}"
+
+        sibling = stall_watchdog.deadline_path(pid, logs)
+        deadline = time.monotonic() + 60.0
+        while not sibling.is_file() and time.monotonic() < deadline:
+            assert child.poll() is None, (
+                f"the runtime exited (rc={child.returncode}) before anything re-armed its "
+                f"timer:\n{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
+            )
+            time.sleep(0.05)
+        assert sibling.is_file(), (
+            "nothing re-armed the timer after the child armed it, so the runtime never "
+            "engaged (or an engagement that moved the bound did not write the deadline "
+            f"sibling):\n{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
+        )
+        epoch, leg = _deadline_record(logs, pid)
+        assert leg in (stall_watchdog.WORKLOAD, stall_watchdog.SERVING), leg
+        remaining = epoch - time.time()
+        assert remaining <= stall_watchdog.DEFAULT_STALL_S + 1.0, (
+            f"the child's deadline sits {remaining:.1f}s out, which is the bound it armed "
+            f"with at the entry point rather than the steady bound an engagement moves it "
+            f"to -- the boot clock was never reset"
+        )
+        assert remaining > 60.0, (
+            f"the child's deadline sits only {remaining:.1f}s out, which is not the steady "
+            f"bound measured from a publication boundary seconds ago"
+        )
+    finally:
         if child is not None:
             _reap(child, config_dir)
 

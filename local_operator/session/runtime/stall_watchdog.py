@@ -458,6 +458,19 @@ logger = logging.getLogger(__name__)
 #: :data:`DEFAULT_STALL_S`; ``0``/``off`` disables the watchdog outright.
 ENV_SECONDS = "LOP_RUNTIME_STALL_SECONDS"
 
+#: The BOOT bound's own knob, parallel to :data:`ENV_SECONDS` and resolved by the
+#: same rules (same spellings, same floor, same ceiling). Unset means
+#: :data:`DEFAULT_BOOT_STALL_S`; ``0``/``off`` means "no boot phase" — arm
+#: straight at the steady bound — rather than "do not arm". The two knobs read
+#: their spellings identically and mean different things by them, which is worth
+#: the sentence: only the STEADY knob can disable the watchdog, because it is the
+#: one that governs the life a runtime spends after it has engaged.
+#:
+#: Deliberately NOT a registry key (``settings_io``): the bound has always been
+#: env-only, and registering one drags in a ``Setting``, a ``Scope`` and the
+#: every-default-matches-its-consumer gate for a knob no operator asked to see.
+ENV_BOOT_SECONDS = "LOP_RUNTIME_BOOT_STALL_SECONDS"
+
 #: How many doublings a survived fire's interval may take, and the ceiling it stops
 #: at (agent review round 1, MINOR-5). Two figures rather than one so the growth is
 #: written down where a reader asks "how fast does this grow": 4 steps of a 300 s
@@ -489,6 +502,37 @@ HELD_FIRE_BACKOFF_MAX_S = 3600.0
 #: CEILING on one uninterrupted stall, not a limit on how long a session may
 #: live or how long a turn may take: a turn that keeps yielding keeps beating.
 DEFAULT_STALL_S = 300.0
+
+#: Seconds of NO PROGRESS allowed BEFORE THE RUNTIME HAS ENGAGED, and the bound the
+#: single :func:`arm` call arms with.
+#:
+#: A SEPARATE NUMBER FROM :data:`DEFAULT_STALL_S` BECAUSE THE WINDOW IT COVERS HAS
+#: NO CLOCK OF ITS OWN. ``arm`` runs from the ``__main__`` guard, before ``main()``,
+#: and it seeds both planes to that instant — but NOTHING IN THE BOOT PATH CAN MOVE
+#: A STAMP: the WORKLOAD beat's only driver starts after publication and sleeps a
+#: heartbeat before its first stamp, and the SERVING beat starts with the serving
+#: thread. So from the arm to the first post-publication beat, every second a
+#: legitimate boot spends — session construction, lease arbitration, MCP bring-up,
+#: the inbox drain, the socket bind, publication — is spent against a clock no boot
+#: code can re-arm, and the earliest deadline is ``arm + bound``.
+#:
+#: MEASURED over 68 retained dumps on the build that carries the observation header:
+#: 17 fires, and 10 of them carried the full ``Timeout (0:05:00)`` value — i.e. NO
+#: beat ever re-armed the timer, which is the never-engaged class and the plurality
+#: of that build's fires. (The other 7 show the planes' boot latencies differ: the
+#: re-arm line names WORKLOAD "has reported nothing since the ARM" while SERVING
+#: "reported 0 s ago" — the workload plane is the long pole, which is why
+#: :func:`engage` stamps BOTH.)
+#:
+#: 900 s is loose ON PURPOSE, and it is not the same kind of number as the steady
+#: bound: that one is a ceiling on one silent synchronous step in a runtime that is
+#: running, and this one is room for a boot whose latency is unbounded and
+#: legitimate (there is no boot-side false-positive class to size against, only the
+#: unbounded-tail risk of cutting a slow-but-working boot). The steady bound takes
+#: over the moment the runtime engages, so the whole of this number is spent on boot
+#: and a genuinely hung boot is still cut, at this bound, with the never-engaged
+#: attribution the deadline sibling's absence carries.
+DEFAULT_BOOT_STALL_S = 900.0
 
 #: The largest bound ``faulthandler`` can hold. Its timeout becomes a signed
 #: 64-bit count of nanoseconds, so a larger value raises ``OverflowError:
@@ -890,6 +934,8 @@ class _Armed:
         "deadline_path",
         "handle",
         "seconds",
+        "boot_seconds",
+        "steady_seconds",
         "pid",
         "last_beat",
         "seeded_at",
@@ -921,13 +967,30 @@ class _Armed:
         pid: int,
         probe: "ProgressProbe | None" = None,
         busy: "BusyProbe | None" = None,
+        *,
+        steady_seconds: float | None = None,
     ) -> None:
         self.path = path
         #: Where the CURRENT deadline is recorded for a reader who arrives after the
         #: process is gone (:func:`deadline_path`), rewritten by every beat.
         self.deadline_path = path.with_suffix(DEADLINE_SUFFIX)
         self.handle = handle
+        #: THE LIVE BOUND, and the only one the timer arithmetic reads
+        #: (:meth:`deadline`, the quiet threshold, the progress window). It starts at
+        #: the bound this process was ARMED for -- the BOOT bound, because nothing in
+        #: the boot path can stamp a plane -- and :func:`engage` moves it DOWN to
+        #: :attr:`steady_seconds` once and once only.
         self.seconds = seconds
+        #: What ``seconds`` was at arm time: the bound the header named and the timer
+        #: was armed with, kept because ``seconds`` no longer holds it after an
+        #: engage, and both a reader of the dump and the failure line in :func:`engage`
+        #: are about THAT number rather than the live one.
+        self.boot_seconds = seconds
+        #: The bound :func:`engage` moves to, resolved from the steady knob. Defaults
+        #: to the armed bound, so an ``_Armed`` built with one number (every cell that
+        #: constructs one directly, and every arm that resolved a single value) has no
+        #: boot phase to end and :func:`engage` is a documented no-op on it.
+        self.steady_seconds = seconds if steady_seconds is None else steady_seconds
         #: How many fires this process has SURVIVED. Only the held-fire backoff reads
         #: it (see ``_rearm``): an all-thread dump is ~14 KB, so a runtime wedged with
         #: work in flight would otherwise write one every bound for the rest of its
@@ -1230,41 +1293,46 @@ _ARMED: _Armed | None = None
 _LOCK = threading.Lock()
 
 
-def bound_seconds() -> float | None:
-    """The configured bound, or ``None`` when the watchdog is switched off.
+def _bound_from_raw(env_name: str, raw: str | None, default: float) -> float | None:
+    """One bound from one RAW environment value, with the shared floor and ceiling.
 
-    Unreadable, non-numeric and out-of-range values fall back to
-    :data:`DEFAULT_STALL_S` rather than raising, and a value below
-    :func:`min_bound_seconds` is raised TO that floor (see the constant): this runs in the runtime's
-    entry point, where an exception would take the session down over a
-    diagnostic, and the honest failure of a typo is the default bound rather
-    than no bound at all. An explicit ``0``/``off`` is the one spelling that
-    means "do not arm", which an operator (or a test that deliberately blocks a
-    loop) needs.
+    BOTH KNOBS PARSE HERE rather than in two near-copies, because the rules are the
+    same rules: the same spellings mean "off", the same typos fall back to the knob's
+    own default, and both clamp to :func:`min_bound_seconds` and the C timer's range.
+    Two copies would be two chances for the boot knob to accept something the steady
+    one refuses, and a bound that is only wrong during boot is the one nobody measures.
+
+    The ``os.environ.get`` itself stays at each caller, one line per knob, and that is
+    load-bearing: the ambient-environment audit
+    (``tests/unit/test_ambient_env_isolation.py``) resolves a read's key through
+    module-local constants, so a read through a PARAMETER would leave both knobs
+    invisible to it and quietly unaccounted for.
+
+    Unreadable, non-numeric and out-of-range values fall back to ``default`` rather
+    than raising: this runs in the runtime's entry point, where an exception would
+    take the session down over a diagnostic, and the honest failure of a typo is the
+    default bound rather than no bound at all.
     """
-    raw = os.environ.get(ENV_SECONDS)
     if raw is None:
-        return DEFAULT_STALL_S
+        return default
     text = raw.strip().lower()
     if text in ("", "off", "no", "false"):
         return None
     try:
         seconds = float(text)
     except ValueError:
-        logger.warning("%s=%r is not a number; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S)
-        return DEFAULT_STALL_S
+        logger.warning("%s=%r is not a number; using %.0fs", env_name, raw, default)
+        return default
     if seconds == 0:
         return None
     if seconds < 0:
         # A NEGATIVE bound is a typo rather than a switch: ``0`` is the written
         # spelling for "do not arm", and nothing else can be meant by -1.
-        logger.warning("%s=%r is negative; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S)
-        return DEFAULT_STALL_S
+        logger.warning("%s=%r is negative; using %.0fs", env_name, raw, default)
+        return default
     if seconds >= MAX_BOUND_S:
-        logger.warning(
-            "%s=%r is beyond the C timer's range; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S
-        )
-        return DEFAULT_STALL_S
+        logger.warning("%s=%r is beyond the C timer's range; using %.0fs", env_name, raw, default)
+        return default
     floor = min_bound_seconds()
     if seconds < floor:
         # THE FLOOR, and clamping rather than honouring it: a bound under three
@@ -1275,7 +1343,7 @@ def bound_seconds() -> float | None:
         # set 4 s and got 45 s needs to know which one they are running.
         logger.warning(
             "%s=%.3fs is below the %.0fs floor (%d heartbeat intervals); using %.0fs",
-            ENV_SECONDS,
+            env_name,
             seconds,
             floor,
             MIN_BOUND_FLOOR_TICKS,
@@ -1283,6 +1351,35 @@ def bound_seconds() -> float | None:
         )
         return floor
     return seconds
+
+
+def bound_seconds() -> float | None:
+    """The configured STEADY bound, or ``None`` when the watchdog is switched off.
+
+    This is the bound a runtime is judged against once it has ENGAGED, which
+    :func:`engage` moves the timer to; the stretch before that is covered by
+    :func:`boot_bound_seconds`. An explicit ``0``/``off``/``no``/``false`` (or an
+    empty value) is the one spelling that means "do not arm", which an operator (or
+    a test that deliberately blocks a loop) needs.
+    """
+    return _bound_from_raw(ENV_SECONDS, os.environ.get(ENV_SECONDS), DEFAULT_STALL_S)
+
+
+def boot_bound_seconds() -> float | None:
+    """The configured BOOT bound (:data:`DEFAULT_BOOT_STALL_S`), or ``None`` for
+    "no boot phase".
+
+    Read by :func:`arm` and only there: it is the deadline covering the stretch in
+    which nothing can stamp a plane, and :func:`engage` is what ends it.
+
+    ``None`` here means the boot phase is DISABLED, not that the watchdog is: the
+    entry point arms straight at the steady bound, exactly the behaviour that existed
+    before the two bounds were split. The distinction runs opposite to the steady
+    knob's, where ``0``/``off`` means "do not arm at all" — worth the paragraph
+    because the two knobs accept identical spellings and mean different things by
+    them.
+    """
+    return _bound_from_raw(ENV_BOOT_SECONDS, os.environ.get(ENV_BOOT_SECONDS), DEFAULT_BOOT_STALL_S)
 
 
 def dump_path(pid: int | None = None, directory: Path | None = None) -> Path:
@@ -1425,6 +1522,7 @@ def _bound_class() -> str:
 def arm(
     *,
     seconds: float | None = None,
+    boot_seconds: float | None = None,
     directory: Path | None = None,
     pid: int | None = None,
     probe: "ProgressProbe | None" = None,
@@ -1437,6 +1535,16 @@ def arm(
     watchdog timers. Idempotent in the sense that re-arming replaces the bound,
     but it is written to be called once: a second call leaks the first handle.
 
+    THE BOUND IT ARMS IS THE BOOT BOUND (:data:`DEFAULT_BOOT_STALL_S`), not the
+    steady one, and that is the whole of the entry point's side of the split: the
+    entry point runs before anything can stamp a plane, so the deadline it sets is
+    measured from here and only :func:`engage` — which the boot path cannot reach —
+    can move it. ``boot_seconds`` overrides the boot bound for a caller that has a
+    reason (the suite's children pass one to exercise the mechanism without waiting
+    out 900 s); an explicit ``seconds=`` is a statement about THIS process's whole
+    arming and therefore stands as both bounds unless ``boot_seconds=`` says
+    otherwise.
+
     Never raises. A diagnostic that cannot be armed must leave the runtime
     otherwise untouched: an unwritable log directory is a reading of "no dump
     possible", not a reason to fail a session's boot.
@@ -1445,10 +1553,54 @@ def arm(
     with _LOCK:
         if _ARMED is not None:
             return True
-        bound = bound_seconds() if seconds is None else seconds
-        if bound is None:
+        steady = bound_seconds() if seconds is None else seconds
+        if steady is None:
             logger.info("stall watchdog disabled by %s", ENV_SECONDS)
             return False
+        # WHICH BOUND IS ARMED HERE, and why the rule is not simply "the boot knob":
+        # the split exists because an operator's steady bound is measured from
+        # ENGAGEMENT and a boot cannot be. So the boot bound is the boot knob's when
+        # this call resolves its own numbers (the production path — the entry point
+        # passes only ``probe=``), and an explicit ``seconds=`` supplies both when a
+        # caller has stated the bound for the whole arming (every child in the suite
+        # passes one at 1-2 s, far below the floor the environment is held to, and a
+        # boot bound of 900 s there would mean no cell could reach a fire).
+        if boot_seconds is not None:
+            boot = boot_seconds
+        elif seconds is not None:
+            boot = seconds
+        else:
+            boot = boot_bound_seconds()
+        if boot is None:
+            # The boot knob spelled ``off``: no boot phase, so the steady bound from
+            # the first instant. The watchdog is NOT disabled here — only the steady
+            # knob says that (see :func:`boot_bound_seconds`).
+            boot = steady
+        # NEVER TIGHTER THAN THE STEADY BOUND, even for the boot stretch: an operator
+        # who set the steady knob above the boot default asked for MORE silence than
+        # the boot bound allows, and arming shorter than that would cut their runtime
+        # during boot and then judge it more leniently afterwards. ``max`` also makes
+        # :func:`engage` a downward move by construction, which is the property its
+        # cells pin.
+        bound = max(boot, steady)
+        # THE ONE SENTENCE THAT MAKES THE SPLIT READABLE FROM THE ARTIFACT. A fired
+        # value on its own cannot say which of the two bounds produced it, and the two
+        # classes have different causes: a value at the steady bound is a runtime that
+        # ENGAGED and then went silent (the case the steady bound was sized for), while
+        # a value at the boot bound is a runtime that never engaged at all — no session
+        # judged, no beat ever landing — which is the class 10 of the 17 measured
+        # current-build fires belonged to. Written only when the two bounds differ:
+        # with one bound there is no split to explain, and a header sentence about a
+        # phase that cannot exist is how a header starts lying.
+        boot_note = ""
+        if bound != steady:
+            boot_note = (
+                f"THIS IS THE BOOT BOUND, covering the stretch before the runtime has a "
+                f"session to judge: nothing can stamp a plane in it, so the value above is "
+                f"the whole of what a fire in that stretch measured. The runtime's first "
+                f"engagement moves the bound to {steady:g}s and stamps BOTH planes, so a "
+                f"fired value of {bound:g}s -- this number -- means it never engaged.\n"
+            )
         target = dump_path(pid, directory)
         inherited = deadline_path(pid, directory)
         try:
@@ -1499,6 +1651,7 @@ def arm(
                 f"timer as they run, so what its expiry measures is {bound:g}s WITH NO RE-ARM FROM "
                 f"THEM -- a fact about the TIMER, never a reading of what this process was "
                 f"doing.\n"
+                f"{boot_note}"
                 f"{OBSERVATION_NOT_VERDICT}\n"
                 f"{HOW_TO_READ_THE_FIRED_VALUE}"
                 f"AND IF A FIRE IS THE CLASS THIS DUMP COUNTS AS, this is the only record of it: "
@@ -1518,7 +1671,9 @@ def arm(
                 f"a progress fire, or a runtime with a quiet plane.\n"
             )
             handle.flush()
-            to_arm = _Armed(target, handle, bound, pid or os.getpid(), probe, busy)
+            to_arm = _Armed(
+                target, handle, bound, pid or os.getpid(), probe, busy, steady_seconds=steady
+            )
             _rearm(to_arm, remaining=bound)
         except (OSError, ValueError, OverflowError, RuntimeError):
             logger.warning("stall watchdog could not arm; no dump will be written", exc_info=True)
@@ -2015,6 +2170,101 @@ def beat(plane: str) -> None:
         # A stamp fact rather than a re-arm fact, so it is recorded either way: this is
         # which plane has gone quiet, and no other artifact carries it.
         _note_quiet_plane(armed, now)
+
+
+def engage() -> bool:
+    """End the BOOT phase: move the bound to the steady one and stamp BOTH planes.
+
+    THE RESET IS ON ENGAGEMENT, NOT ON ARM, and this function is the whole of the
+    difference. :func:`arm` runs before the runtime has a session, a loop or a
+    socket, so the deadline it sets is measured from the entry point — a clock no
+    boot code can re-arm (:data:`DEFAULT_BOOT_STALL_S`). This call belongs where the
+    runtime HAS something to judge, so from here the deadline must be measured from
+    NOW: it stamps both planes to this instant and moves the bound down to the steady
+    one, which is what makes that bound mean what it was sized for (a ceiling on one
+    silent synchronous step in a runtime that is running) rather than an accident of
+    how long boot happened to take.
+
+    BOTH PLANES, and that is not symmetry: in the measured fires where a beat HAD
+    re-armed the timer, the re-arm line names WORKLOAD as "has reported nothing since
+    the ARM" while SERVING "reported 0 s ago". The workload plane is the long pole of
+    boot — its tick starts last, and it sleeps a heartbeat before its first stamp —
+    so a reset that stamped only the plane that happens to be beating would leave the
+    workload plane's seed at arm time and re-arm the very deadline this exists to move.
+
+    IT NEVER WIDENS THE BOUND. The move is downward by construction (:func:`arm`
+    seeds the armed bound at the LARGER of the two), and when the armed bound is
+    already at or below the steady one there is nothing to move: that is the state of
+    an explicit ``arm(seconds=...)``, of a boot knob spelled ``off``, and of a steady
+    knob set at or above the boot bound. In all three this is a documented no-op
+    rather than an extension, and a cell
+    (``test_engage_never_widens_the_steady_bound``) goes red on any edit that lets it
+    raise the bound a silent runtime is judged against.
+
+    Idempotent, and a no-op when nothing is armed — the same contract as
+    :func:`beat`, and for the same reason: an in-process host (a TUI, a test) calls
+    this on a boot path that never armed the process timer, and it must cost it
+    nothing.
+
+    IT RE-ARMS THROUGH :func:`_rearm`, NOT WITH A TIMER CALL OF ITS OWN, and that is
+    a requirement rather than a refactor: ``_rearm`` is the one place that decides
+    the EXIT LEG (``exit_leg=not armed.held``, so a runtime holding a turn, a
+    subagent or a job is dumped but never ended) and the fired-held policy. An
+    ``engage`` that called ``dump_traceback_later(..., exit=True)`` directly would
+    silently OVERRIDE both for the one arming that starts the steady phase — the
+    arming whose bound the rest of the design rests on. The remaining time it is
+    handed is derived from the stamps this call just moved, so the timer holds
+    exactly the steady bound measured from NOW.
+
+    Returns whether THIS call moved the bound, which is what lets a caller — and a
+    cell — tell the boot-to-steady transition from a call that had nothing to do. It
+    is a diagnostic and never a control: every failure below leaves the runtime with a
+    live bound and the caller with nothing to handle.
+    """
+    with _LOCK:
+        armed = _ARMED
+        if armed is None:
+            return False
+        if armed.seconds <= armed.steady_seconds:
+            # Nothing to move, which is also the SECOND call's path: the bounds are only
+            # equal before an engage when there is no boot phase to end, and equal after
+            # one because this is what made them equal.
+            return False
+        now = time.monotonic()
+        armed.seconds = armed.steady_seconds
+        for plane in PLANES:
+            armed.last_beat[plane] = now
+        try:
+            # ONE CALL, NO CANCEL FIRST, for the reason :func:`beat` gives: the replace is
+            # atomic, and a cancel-then-fail would leave the process with no bound while
+            # the steady bound is what everything below assumes is in force. Both planes
+            # have just been stamped to ``now``, so the remaining time ``_rearm`` derives
+            # is the steady bound exactly, and the exit leg comes from the in-flight
+            # answer as it does on every other re-arm.
+            _rearm(armed)
+        except (OSError, ValueError, RuntimeError):
+            logger.warning("stall watchdog could not re-arm its timer on engage", exc_info=True)
+            # AND THE FAILURE IS NAMED, because the attribution a reader gets otherwise is
+            # the WRONG CLASS: the sibling is absent (no beat has ever written it), which
+            # is the signature of the never-engaged runtime, while the value on a fired
+            # line would be the boot bound. The bound did move in memory, so the dump has
+            # to carry both facts.
+            if not _write_dump_line(
+                armed,
+                f"{REARM_FAILED_MARKER}the engage could not re-arm the timer, so a fired line "
+                f"below carries the BOOT bound ({armed.boot_seconds:g}s) rather than the "
+                f"steady one ({armed.steady_seconds:g}s) this runtime moved to\n",
+            ):
+                logger.warning(
+                    "stall watchdog could not record a failed engage for pid %s", armed.pid
+                )
+        else:
+            # AFTER a successful re-arm, and only then, exactly as :func:`beat` does: the
+            # sibling must carry the deadline the timer really holds. Its EXISTENCE is
+            # also the reader's half of the split — a runtime that engaged has one, and
+            # the never-engaged class has none (see :func:`deadline_path`).
+            _record_deadline(armed)
+        return True
 
 
 def note_tick_death(plane: str, reason: str) -> bool:
@@ -2520,11 +2770,28 @@ def announce() -> None:
         armed = _ARMED
         if armed is None:
             return
+        if armed.seconds == armed.steady_seconds:
+            logger.info(
+                "stall watchdog armed: %.0fs of no progress dumps every thread to %s and ends "
+                "the runtime only when nothing is in flight (a turn, a subagent or a job holds "
+                "the exit; the dump is written either way)",
+                armed.seconds,
+                armed.path,
+            )
+            return
+        # BOTH BOUNDS, when they differ, and for the same reason the dump header spells
+        # the split: this line is the artifact an operator reads FIRST after a freeze,
+        # and one claiming the boot bound for the whole life would be a log that
+        # misstates the bound the runtime is actually judged against from publication on.
+        # The exit-leg sentence carries over unchanged: the in-flight hold applies to a
+        # fire under EITHER bound.
         logger.info(
-            "stall watchdog armed: %.0fs of no progress dumps every thread to %s and ends "
-            "the runtime only when nothing is in flight (a turn, a subagent or a job holds "
-            "the exit; the dump is written either way)",
+            "stall watchdog armed: %.0fs of no progress during BOOT (before the runtime has a "
+            "session to judge), then %.0fs once it engages -- either one dumps every thread to "
+            "%s and ends the runtime only when nothing is in flight (a turn, a subagent or a "
+            "job holds the exit; the dump is written either way)",
             armed.seconds,
+            armed.steady_seconds,
             armed.path,
         )
 
