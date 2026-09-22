@@ -803,6 +803,22 @@ def resolve_env_key(provider_id: str) -> str | None:
     return None
 
 
+def _config_root(base: Path | None) -> Path | None:
+    """Normalise a config-root argument: a ``Path``/``str``, else ``None``.
+
+    The store and file legs take ``base`` straight into filesystem calls, so a
+    value that is not a path is treated as "no override" and the HOME-derived
+    default applies rather than being handed to ``open()``. Callers pass
+    ``getattr(manager, "config_dir", None)``, which on a test double is an
+    auto-generated attribute rather than a path.
+    """
+    if base is None or isinstance(base, Path):
+        return base
+    if isinstance(base, str):
+        return Path(base)
+    return None
+
+
 def provider_secret_value(env_key: str, *, base: Path | None = None) -> str | None:
     """The VALUE of the provider-owned store row for ``env_key``, else ``None``.
 
@@ -831,7 +847,7 @@ def provider_secret_value(env_key: str, *, base: Path | None = None) -> str | No
     from local_operator.secrets.store import provider_secret_name
 
     try:
-        raw = retrieve_secret(provider_secret_name(env_key), base, role="provider")
+        raw = retrieve_secret(provider_secret_name(env_key), _config_root(base), role="provider")
     except (SecretStoreError, OSError, ValueError):
         return None
     value = raw.decode("utf-8", "replace").strip()
@@ -897,9 +913,10 @@ def first_provider_key(
     from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
 
+    root = _config_root(base)
     try:
         plaintext = CredentialManager.read_credentials(
-            base if base is not None else config_dir(), non_empty=True
+            root if root is not None else config_dir(), non_empty=True
         )
     except OSError:
         return None
@@ -940,7 +957,7 @@ def store_provider_key(
 
     name = provider_secret_name(env_key)
     payload = value.encode("utf-8")
-    store = open_store(base, create=True)
+    store = open_store(_config_root(base), create=True)
     # ``update`` first, then ``set``: ``set`` refuses an existing name by design
     # (a mistyped name must not clobber a live credential), so a re-run that
     # changed a key would otherwise fail with ``SecretExists``. The fall-through
@@ -977,7 +994,9 @@ def remove_provider_key(env_key: str, *, base: Path | None = None) -> bool:
     from local_operator.secrets.store import provider_secret_name
 
     try:
-        open_store(base).delete(provider_secret_name(env_key), session_id=session_id())
+        open_store(_config_root(base)).delete(
+            provider_secret_name(env_key), session_id=session_id()
+        )
         return True
     except (SecretNotFound, SecretStoreError, OSError):
         return False
@@ -1004,11 +1023,12 @@ def stored_provider_env_keys(base: Path | None = None) -> set[str]:
     from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
 
     try:
-        if not store_path(base).exists():
+        root = _config_root(base)
+        if not store_path(root).exists():
             return set()
         return {
             record.name[len(PROVIDER_SECRET_PREFIX) :]
-            for record in open_store(base).list()
+            for record in open_store(root).list()
             if record.name.startswith(PROVIDER_SECRET_PREFIX)
         }
     except (SecretStoreError, OSError, ValueError):
