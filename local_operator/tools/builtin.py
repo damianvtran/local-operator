@@ -6277,9 +6277,10 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
         # its resolved form would invent one (``> /tmp/f$i`` is not
         # ``/private/tmp/f$i``). The directory is the honest subject there, and it
         # is a directory that really exists. The two expansions first are the
-        # spellings that DO name a path (``~``/``$HOME`` and ``$TMPDIR``, both
-        # leading), and what still carries a ``$`` or a backtick after them is what
-        # this scan cannot resolve — ``~/rig-x/f$i`` names no file either.
+        # spellings that DO name a path: the home spelling, which only counts in
+        # the LEADING position, and ``$TMPDIR``, which rewrites anywhere. What still
+        # carries a ``$`` or a backtick after them is what this scan cannot
+        # resolve — ``~/rig-x/f$i`` names no file either.
         unexpanded = (
             _UNEXPANDED_SHELL.search(_expand_home_spellings(_expand_tmpdir_spellings(candidate)))
             is not None
@@ -6427,10 +6428,12 @@ def _expand_home_spellings(candidate: str) -> str:
     ``~`` means.
 
     Quoting is not visible here — ``_bash_tokens`` has already dequoted the token,
-    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. That is
-    inherited from the temp spelling next door rather than introduced by this
-    helper, and it errs toward one advisory line about a path the command did not
-    name, never toward a wrong subject or a refusal.
+    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. The dequoting
+    is inherited from the temp spelling next door; what is NEW here is the REACH,
+    because ``'~/x'`` could not fire at all before this helper existed. It errs
+    toward one advisory line about a path the command did not create, never toward
+    a wrong subject or a refusal, and the GUIDE says so — a session reading the
+    line needs to know which spelling produced it.
     """
     if candidate == "~" or candidate.startswith("~/"):
         try:

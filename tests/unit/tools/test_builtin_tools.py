@@ -3590,12 +3590,13 @@ async def test_a_home_spelling_that_names_no_scratch_named_directory_is_silent(
 ) -> None:
     """The refusals around the new expansion, one row each.
 
-    Called at the SCANNER rather than through `_run_bash`, unlike the rows above:
-    two of these commands cannot complete in a shell at all (`~other` names no
-    user, and `$HOMEfoo` expands to a path nothing creates), and a row that failed
-    for that reason would be reporting the shell's error as the scan's verdict.
-    The rows the shell CAN run go through the tool, because there a completed
-    command is part of the evidence.
+    Asserted at the SCANNER (``builtin._bash_scratch_hint``) rather than through
+    `_run_bash`, because NONE of these five commands can complete in a real shell:
+    `~other` names no user, `$HOMEfoo` expands to an empty prefix so the redirect
+    lands on an absolute path nothing creates, the two `~/workspace/minervaai/tmp/`
+    rows write into a tree this fixture does not build, and the bare relative row
+    has no `tmp/` under the cwd. A row that failed on its own shell error would be
+    reporting the shell's verdict as the scan's.
 
     They matter because an expansion is the kind of change whose failures are
     silent in the OTHER direction: a helper that rewrote too much would nudge a
