@@ -215,6 +215,66 @@ def test_unbounded_searches_are_blocked(command: str) -> None:
     assert C(command) is not None, f"missed: {command}"
 
 
+def test_the_config_read_does_not_move_a_broken_config_aside() -> None:
+    """The guard's config reader must not quarantine a broken ``config.yml``.
+
+    ``ConfigManager`` does not raise on an unparseable file — it MOVES it to
+    ``config.yml.bad.<ts>`` and continues with defaults. This reader runs at the
+    TOP of ``execute_bash``, before the child environment is built, so an
+    unguarded ``ConfigManager`` here renamed the file out from under
+    ``shell_env``'s strict-mode read and silently downgraded a hardened run from
+    ``allowlist`` to ``inherit``.
+
+    The assertion is deliberately about the FILE, not the returned tuple: the
+    returned defaults are the same either way, so only the side effect
+    discriminates. This test FAILS on the pre-fix reader (which left a
+    ``config.yml.bad.<ts>`` behind) and passes on the probe-first one.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from local_operator.tools.builtin import _search_interception_config
+
+    with tempfile.TemporaryDirectory() as tmp:
+        config_dir = Path(tmp)
+        broken = config_dir / "config.yml"
+        broken.write_text("values: [broken\n", encoding="utf-8")
+        saved = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+        os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = tmp
+        try:
+            # Protective defaults, and — the point — the broken file is LEFT IN
+            # PLACE so the strict-mode reader downstream still fails closed.
+            assert _search_interception_config() == (True, True, True)
+            assert broken.exists(), "the guard's config read quarantined the file"
+            assert not [p for p in config_dir.iterdir() if ".bad" in p.name]
+        finally:
+            if saved is None:
+                os.environ.pop("LOCAL_OPERATOR_CONFIG_DIR", None)
+            else:
+                os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = saved
+
+
+def test_missing_config_returns_protective_defaults() -> None:
+    import os
+    import tempfile
+
+    from local_operator.tools.builtin import _search_interception_config
+
+    with tempfile.TemporaryDirectory() as tmp:
+        saved = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+        os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = tmp
+        try:
+            assert _search_interception_config() == (True, True, True)
+            # …and it does not CREATE a config file either.
+            assert not os.path.exists(os.path.join(tmp, "config.yml"))
+        finally:
+            if saved is None:
+                os.environ.pop("LOCAL_OPERATOR_CONFIG_DIR", None)
+            else:
+                os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = saved
+
+
 def test_heredoc_body_is_not_a_command() -> None:
     # The body is data; the shell that would run this never executes the grep.
     assert C("cat <<EOF\ngrep -rn foo .\nEOF") is None
