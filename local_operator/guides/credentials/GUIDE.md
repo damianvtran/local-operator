@@ -90,6 +90,11 @@ left the harness entirely.
 `secret` tool, `op="store"` — or `lop secret set NAME` from bash. Storing is
 your decision to make.
 
+**List before asking.** When you need a credential, `list` the store (or `lop
+secret list`) before asking the user for something they may have already given
+you — re-asking for a value already stored is the friction this store exists to
+remove.
+
 **Store it when:** you have just minted a token that will be needed after this
 session; the user pasted a credential they will clearly need again; a setup step
 produced a key. Prefer this store over writing to a plaintext `.env`.

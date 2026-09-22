@@ -75,22 +75,16 @@ class SecretParams(BaseModel):
 #: The tool description IS the interface — the only guidance a model reliably
 #: reads — so it states WHEN to reach for this, not merely what it does. It is
 #: also schema that ships on EVERY request in every session and subagent (the
-#: footprint ladder), so each clause has to earn its tokens: "store it as soon
-#: as you get one" and "retrieve NEVER returns the value" change behaviour and
-#: stay; the rationale behind them lives in `guide://credentials`, which costs
-#: nothing until it is read.
+#: footprint ladder), so each clause has to earn its tokens: the store-a-
+#: credential-when-it-is-handed-over nudge and "retrieve NEVER returns the
+#: value" change behaviour and stay; the rationale and the how-to-use mechanics
+#: (bash/eval forms, when not to store) live in `guide://credentials`, which
+#: costs nothing until it is read.
 _DESCRIPTION = (
-    "Store and use long-term secrets in the operator's encrypted store (same store as "
-    "`lop secret`). Store a credential as soon as you get one that outlives this session "
-    "— a token you minted, a key the user pasted — rather than a plaintext .env or only "
-    "this conversation; that is your decision to make. retrieve NEVER returns the value: "
-    "use secrets without reading them, via $(lop secret get NAME) in bash or "
-    'secrets["NAME"] in eval. list before asking the user for something they already '
-    "gave you. Store a credential the USER hands over, with a good description so it is "
-    "findable later; a non-technical user provides one through the /credential gesture "
-    "instead. Do not store a one-off value or provider keys the harness manages. Never "
-    "echo a secret, write it to a file, or put it in a commit or PR. "
-    "See guide://credentials."
+    "Store and use secrets in the encrypted store (`lop secret`). Store a credential the user "
+    "hands you or one outliving this session, with a description so it is findable; a "
+    "non-technical user uses /credential. retrieve NEVER returns the value. Never echo, save or "
+    "commit one."
 )
 
 
