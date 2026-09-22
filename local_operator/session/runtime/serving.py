@@ -2053,20 +2053,13 @@ class ServingSessionHandle(SessionHandle):
             # path: the row is already in the spool, so a failure here loses the
             # RAISING and not the message, and it must not fail a delivery the
             # sender is about to be told succeeded.
-            # THE RECORD IS ONLY AS GOOD AS THE PROCESS THAT READS IT, and that
-            # process is normally DOWN (review round 5, R5-1). The wake
-            # supervisor exits 0 when nothing is fireable and the LaunchAgent's
-            # ``KeepAlive{SuccessfulExit:false}`` leaves it down until the next
-            # schedule PERSIST revives it (``wakes/install.py``,
-            # ``supervisor.serve``'s retirement note) — and every existing call to
-            # ``ensure_supervisor_installed`` is on that persist path
-            # (``wakes/arm.py``, ``cli.py``, ``mobile/install.py``), which a spooled
-            # peer message never touches. So without this call the obligation
-            # waits for an unrelated arm/login to raise the one process that can
-            # act on it, which is the very shape this PR exists to close: on an
-            # otherwise quiet store the record keeps a LIVE supervisor up and
-            # raises no dead one. Idempotent and never-raising by its own
-            # contract, exactly like the persist-path callers.
+            # NOTE_SPOOLED_TURN ALSO RAISES THE READER, and that argument lives in
+            # ONE place — see ``wakes.spooled.note_spooled_turn`` (review round 5,
+            # R5-1; round 6, R6-2; rationale deduplicated in round 7, R7-1). What
+            # matters at this call site: the supervisor is normally DOWN and
+            # nothing on the spool path used to revive it, so a row spooled for a
+            # successor waited for an unrelated schedule persist to raise the only
+            # process that can act on it.
             from local_operator.paths import config_dir
             from local_operator.wakes.spooled import note_spooled_turn
 
