@@ -104,7 +104,6 @@ async def main() -> None:
         return await create_session(
             args_ns(),
             ConfigManager(root),
-            root,
             AgentRegistry(root),
             has_ui=True,
             defer_mcp_wiring=True,

@@ -207,11 +207,10 @@ def build_a_session(workdir: Path) -> None:
         train=False,
     )
     cm = ConfigManager(workdir)
-    cred = workdir / ".local-operator"
     reg = AgentRegistry(workdir / ".local-operator")
     import asyncio
 
-    asyncio.run(build_initial_blocks(args, cm, cred, reg))
+    asyncio.run(build_initial_blocks(args, cm, reg))
 
 
 def main() -> int:

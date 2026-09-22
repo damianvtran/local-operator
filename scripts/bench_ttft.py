@@ -269,7 +269,6 @@ async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
     session = await create_session(
         args,
         ConfigManager(config_dir),
-        config_dir,
         AgentRegistry(config_dir),
         cwd=str(cwd),
     )

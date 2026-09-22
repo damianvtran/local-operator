@@ -248,7 +248,7 @@ async def main() -> int:
     # rather than isolating the store.
     probe_session_id = "probe-ask-restraint"
     stream_fn = create_stream_fn(
-        AuthStore(credential_manager=credential_manager),
+        AuthStore(config_dir=credential_manager),
         session_id=probe_session_id,
     )
     # ...and give that id a human label, since a probe has no conversation to
@@ -259,7 +259,7 @@ async def main() -> int:
         get_recorder().note_session_name(probe_session_id, f"probe ask-restraint ({MODEL})")
     except Exception:  # noqa: BLE001 — a probe never fails on its diagnostics
         pass
-    spec = configure_model(HOSTING, MODEL, credential_manager=credential_manager).spec
+    spec = configure_model(HOSTING, MODEL, config_dir=credential_manager).spec
 
     # Sampled, not single-shot. The model is non-deterministic, so one call per
     # arm cannot tell a real behaviour change from sampling noise — an early

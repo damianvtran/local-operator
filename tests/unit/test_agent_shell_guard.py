@@ -716,7 +716,6 @@ def _factory_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **override
     return create_session(
         args,
         ConfigManager(config_dir),
-        config_dir,
         AgentRegistry(config_dir),
     )
 

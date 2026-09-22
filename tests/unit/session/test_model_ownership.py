@@ -189,7 +189,6 @@ async def test_factory_resolves_birth_off_loop_with_arguments_captured_before_ho
         session_factory.create_session(
             args,
             config,
-            tmp_path,
             AgentRegistry(tmp_path),
             has_ui=False,
             cwd=str(tmp_path),

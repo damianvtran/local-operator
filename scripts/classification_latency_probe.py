@@ -125,7 +125,7 @@ async def main() -> int:
             # A fresh service each time: the client is memoized per service, and the
             # question this answers is what the FIRST construction costs a session.
             fresh = ClassificationService(
-                manager=config_dir(),
+                config_dir=config_dir(),
                 settings={"classification": {"auto": True}},
             )
             started = time.perf_counter()
@@ -143,7 +143,7 @@ async def main() -> int:
     off = [await timed(off_hooks, query, f"off-{i}") for i, query in enumerate(QUERIES)]
 
     service = ClassificationService(
-        manager=config_dir(),
+        config_dir=config_dir(),
         settings={"classification": {"auto": True}},
     )
     on_hooks = hooks(classifier=service)

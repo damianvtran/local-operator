@@ -367,7 +367,6 @@ async def test_store_maintenance_callbacks_run_off_the_event_loop_thread(
     plan = await _prepare(
         args,
         cast_config(config_manager),
-        config_dir,
         cast_registry(FakeRegistry(config_dir)),
         has_ui=True,
         cwd=str(tmp_path),
@@ -957,7 +956,6 @@ async def test_deferred_wiring_returns_a_session_usable_before_wiring_lands(
         session = await create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_config_dir),
-            tmp_config_dir,
             AgentRegistry(tmp_config_dir),
             has_ui=True,
             defer_mcp_wiring=True,
@@ -1005,7 +1003,6 @@ async def test_headless_callers_still_await_mcp_wiring(tmp_config_dir: Path) -> 
         session = await create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_config_dir),
-            tmp_config_dir,
             AgentRegistry(tmp_config_dir),
         )
     try:
@@ -1047,7 +1044,6 @@ async def test_dispose_during_deferred_wiring_cancels_cleanly(
         session = await create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_config_dir),
-            tmp_config_dir,
             AgentRegistry(tmp_config_dir),
             has_ui=True,
             defer_mcp_wiring=True,
@@ -1279,7 +1275,6 @@ async def test_tui_wires_mcp_status_when_deferred_wiring_lands(tmp_path: Path) -
         session = await create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_path / ".local-operator"),
-            tmp_path / ".local-operator",
             AgentRegistry(tmp_path / ".local-operator"),
             has_ui=True,
             defer_mcp_wiring=True,

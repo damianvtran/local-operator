@@ -21,15 +21,17 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict
 
 import pytest
+from pydantic import SecretStr
 
 from local_operator.secrets.legacy_env import CREDENTIALS_FILE_NAME, read_credentials
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _reveal(values: dict) -> dict[str, str]:
+def _reveal(values: "Dict[str, SecretStr]") -> dict[str, str]:
     return {key: value.get_secret_value() for key, value in values.items()}
 
 
@@ -110,6 +112,7 @@ _READ_PROBE = """
 import errno
 import sys
 from pathlib import Path
+from typing import Dict
 from unittest.mock import patch
 from local_operator.secrets.legacy_env import read_credentials
 

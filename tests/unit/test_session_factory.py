@@ -477,7 +477,6 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -524,7 +523,6 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     chosen = await create_session(
         _args(hosting="anthropic", model="claude-opus-5", birth_effort="max"),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -536,7 +534,6 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     default = await create_session(
         _args(hosting="anthropic", model="claude-opus-5"),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -572,7 +569,6 @@ async def test_dict_compaction_config_flows_through_prompt(
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         config_manager,
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -612,7 +608,6 @@ async def test_trigger_knobs_are_settable_in_config_yml(tmp_config_dir: Path) ->
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     settings = cast(Session, session)._compaction_settings
@@ -640,7 +635,6 @@ async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Pat
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     # No block in the file: the session runs on the shipped defaults.
@@ -2351,7 +2345,6 @@ async def test_a_real_session_carries_the_operators_instructions(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -2384,7 +2377,6 @@ async def test_a_subagent_inherits_the_operators_instructions(
     parent = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(parent, Session)
@@ -3017,7 +3009,6 @@ async def test_a_real_session_carries_imported_instructions(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -3051,7 +3042,6 @@ async def test_a_subagent_inherits_imported_instructions(
     parent = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(parent, Session)
@@ -3102,7 +3092,6 @@ async def test_a_non_utf8_agent_prompt_does_not_kill_startup(
     session = await create_session(
         _args(hosting="test", model="test", agent_name="latin1", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         registry,
     )
     await session.dispose()
@@ -3134,7 +3123,6 @@ async def test_the_composition_root_guard_covers_decode_errors(
     session = await create_session(
         _args(hosting="test", model="test", agent_name="boom", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         registry,
     )
     await session.dispose()
@@ -3246,7 +3234,6 @@ async def test_an_unreadable_profile_says_so_in_the_log(
         session = await create_session(
             _args(hosting="test", model="test", agent_name="noisy", yolo=True),
             ConfigManager(tmp_config_dir),
-            tmp_config_dir,
             registry,
         )
     await session.dispose()
@@ -3701,7 +3688,6 @@ async def test_store_maintenance_does_not_block_session_construction(
         create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_config_dir),
-            tmp_config_dir,
             AgentRegistry(tmp_config_dir),
             has_ui=True,
             defer_mcp_wiring=True,
@@ -3772,7 +3758,6 @@ async def test_store_maintenance_waits_until_create_session_can_return(
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
         has_ui=True,
         defer_mcp_wiring=True,
@@ -3868,7 +3853,6 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
         has_ui=True,
         defer_mcp_wiring=True,
@@ -4340,7 +4324,6 @@ async def test_the_classification_seam_is_closed_on_dispose(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -4394,7 +4377,6 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     assert captured, "the composition root registers the seam's dispose hook"
@@ -4523,8 +4505,8 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
     built: list[Any] = []
 
     class _Recording(ClassificationService):
-        def __init__(self, *, manager: Any, settings: Any = None) -> None:
-            super().__init__(manager=manager, settings=settings)
+        def __init__(self, *, config_dir: Any, settings: Any = None) -> None:
+            super().__init__(config_dir=config_dir, settings=settings)
             built.append(self)
 
     monkeypatch.setattr("local_operator.classification.ClassificationService", _Recording)
@@ -4533,7 +4515,6 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        tmp_path,
         AgentRegistry(tmp_path),
     )
     try:
@@ -4605,7 +4586,6 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -4716,7 +4696,6 @@ async def _composition_root_session(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        tmp_config_dir,
         AgentRegistry(tmp_config_dir),
     )
     return cast(Session, session)

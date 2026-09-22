@@ -82,7 +82,6 @@ async def main() -> int:
     built = await create_session(
         _args(),
         ConfigManager(config_dir),
-        config_dir,
         AgentRegistry(config_dir),
     )
     # create_session may hand back a AttachedSession when attaching to an owned

@@ -354,7 +354,6 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
         return await create_session(
             Namespace(**vars(ExecArgs(resume=session_id))),
             ConfigManager(root),
-            root,
             AgentRegistry(root),
             has_ui=True,
             cwd=str(tmp_path),
@@ -449,7 +448,6 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
         return await create_session(
             Namespace(**vars(ExecArgs(resume=state["session_id"]))),
             ConfigManager(root),
-            root,
             AgentRegistry(root),
             has_ui=True,
             cwd=str(tmp_path),
@@ -939,7 +937,6 @@ def test_a_supervised_run_is_approved_through_the_handoff(exec_server, tmp_path)
             return await create_session(
                 Namespace(**vars(ExecArgs(resume=session_id))),
                 ConfigManager(root),
-                root,
                 AgentRegistry(root),
                 has_ui=True,
                 cwd=str(tmp_path),
