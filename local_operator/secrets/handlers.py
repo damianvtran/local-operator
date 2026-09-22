@@ -288,30 +288,50 @@ def _get(args: argparse.Namespace) -> int:
 def _reveal(args: argparse.Namespace) -> int:
     """Print a value to the terminal a human is looking at, and audit it.
 
-    The opt-in for the case where somebody genuinely has to SEE the bytes. Three
-    things make it an opt-in rather than a synonym for ``get``:
+    An opt-in for the case where somebody genuinely has to SEE the bytes, and
+    two things make it one rather than a synonym for ``get``:
 
-    * **It asks, and it cannot be asked in a non-interactive call.** The gate is
-      a prompt on stdin, so a caller with no terminal — every ``bash`` call an
-      agent makes, every script, every pipeline — is refused with rc=3 and an
-      EMPTY stdout, which is the same fail-closed shape ``access.py`` documents
-      for a live broker's refusal: the answer is believed, and unreachability of
-      the human is not permission. There is deliberately no flag, env var or
+    * **It asks.** The gate is a prompt on stdin, so a caller with no terminal —
+      an agent's ordinary ``bash`` call, a pipeline, a script's ordinary
+      redirection — is refused with rc=3 and an EMPTY stdout, which is the same
+      fail-closed shape ``access.py`` documents for a live broker's refusal:
+      nobody to ask is not permission. There is deliberately no flag, env var or
       config key that stands in for the prompt: a setting the model can write in
       the same call it uses is not an opt-in, it is a default with extra steps.
-    * **stdout must be a terminal too.** The reveal's whole contract is "the
-      bytes go to the human's screen". Piping or redirecting them is what the
-      unqualified ``get`` is for, and that keeps working unchanged — so there is
-      nothing this stricter test costs the operator, and it removes "reveal into
-      a file or a pipe" as a shape an agent can write at all.
-    * **It is a distinct audit event.** :meth:`SecretStore.reveal` records
-      ``reveal``/``tty`` instead of ``get``/``ok``, so a deliberate reveal is
-      never lost among the routine rows scripts write, and a refusal is visible
-      as such.
+    * **It is a distinct audit event.** :meth:`SecretStore.note_reveal` records
+      ``reveal``/``tty`` on top of the retrieval it is fed by, so "a value was
+      printed" is a row of its own and never lost among the routine rows scripts
+      write.
 
-    The refusal is recorded best-effort and the reveal itself is recorded
-    before any byte reaches stdout, matching ``get``: the audit trail must not
-    be able to say a value was printed when it was not, or miss one that was.
+    **The pty test is an accident net, not a control, and the earlier wording of
+    this docstring claimed otherwise.** ``isatty()`` answers "does this caller
+    have a terminal", and a caller that can allocate one (``script(1)``,
+    ``pty.openpty``) satisfies it and then answers its own prompt — a run that is
+    indistinguishable in the trail from a human's. Nothing available to this
+    process can tell those two apart, and the distinction would buy little if it
+    could: anything running as the operator can read the master key beside the
+    store and decrypt it. What the gate removes is the ACCIDENT (the ``$( )``,
+    the redirect, the pipeline, the agent that meant to print and pipe); what
+    covers the deliberate bypass is the announcement below.
+
+    **The value is retrieved through the ANNOUNCEMENT seam, never locally.**
+    :func:`~local_operator.secrets.access.retrieve_secret` is what registers the
+    value with the owning session so its sinks can scrub it, and what applies
+    the retrieval-tier gate — including the ``unredactable`` no-ack refusal,
+    whose whole purpose is "this value cannot be kept out of the transcript".
+    Decrypting here instead, which is what this function first did, leaves the
+    bytes in NO sink: a reveal routed through a caller-allocated pty would then
+    come back through a tool stream with nothing that knows the value to redact
+    it, which is the original incident by a different route. Reading it locally
+    buys nothing (same bytes, same key) and costs exactly the property that
+    matters. Where no broker or session is reachable the seam degrades to the
+    local decrypt, UNNOTIFIED, exactly as ``$(lop secret get NAME)`` does —
+    documented in ``access.py``, and visible in the trail as the retrieval row
+    with no session id.
+
+    Ordering, which is the point of the three steps: retrieve (announce), then
+    record the reveal, then print. A failure in either store step prints nothing
+    at all — an unaudited reveal is worse than a refused one.
     """
     if not (sys.stdin and sys.stdin.isatty() and sys.stdout.isatty()):
         return _refuse_reveal(
@@ -331,9 +351,13 @@ def _reveal(args: argparse.Namespace) -> int:
     if answer.strip().lower() not in ("y", "yes"):
         _err("cancelled")
         _note_reveal_refusal(args.name, outcome="cancelled")
-        return 1
+        # REVEAL_REFUSED, not `_remove`'s 1: this file reserves 1 for "the audit
+        # chain is broken", and a script branching on the documented taxonomy
+        # must not read "the human declined" as "tamper detected".
+        return REVEAL_REFUSED
 
-    value = open_store().reveal(args.name, session_id=session_id())
+    value = retrieve_secret(args.name)
+    open_store().note_reveal(args.name, session_id=session_id())
     sys.stdout.buffer.write(value)
     sys.stdout.buffer.flush()
     return 0
@@ -492,12 +516,16 @@ def _describe(args: argparse.Namespace) -> int:
     `role="provider"` and are unaffected.
     """
     store = open_store()
-    identities = args.length or args.fingerprint
-    if identities:
-        # One decrypt, one audit row: the record and its identity come from the
-        # same read, so `--length` cannot describe one record while the
-        # fingerprint belongs to another.
-        record, length, fingerprint = store.describe_fingerprint(args.name)
+    if args.length or args.fingerprint:
+        # One decrypt, one audit row, and the row is labelled with the fields the
+        # caller actually asked for — `length`, `fingerprint` or both. The digest
+        # is not computed at all when only the length was wanted.
+        record, length, fingerprint = store.describe_identity(
+            args.name,
+            with_length=args.length,
+            with_fingerprint=args.fingerprint,
+            session_id=session_id(),
+        )
     else:
         # The metadata-only path, unchanged: no audit row, no value field used.
         record, length, fingerprint = store.describe(args.name), 0, ""

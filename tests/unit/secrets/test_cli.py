@@ -62,6 +62,12 @@ def cli(tmp_path: Path):
             # would actually emit escapes here. Asserting purity under NO_COLOR
             # would prove nothing.
             TERM="xterm-256color",
+            # The attribute every verb records on its audit row when a session
+            # advertises itself. Set here because a run without it cannot tell
+            # "the row omitted the session" from "no session existed" — which is
+            # exactly the reading Q1 turned on (`describe`'s identity row shipped
+            # without it while every neighbour passed it).
+            LOCAL_OPERATOR_SESSION_ID="synthetic-cli-test-session",
         )
         environment.pop("NO_COLOR", None)
         # Callers pass the settings a test needs to prove do NOT act as an
@@ -356,12 +362,18 @@ def test_no_environment_variable_stands_in_for_the_prompt(cli) -> None:
 
 
 def test_reveal_prints_the_value_at_a_terminal(cli) -> None:
-    """The human path, on a REAL pty, with the value audited as a reveal.
+    """The human path, on a REAL pty, and the retrieval it goes through.
 
-    The value is printed exactly (no trailing newline, as ``get`` does), the
-    prompt is answered at the terminal, and the audit records ``reveal``/``tty``
-    — distinguishable from the ``get``/``ok`` a pipeline writes, which is the
-    requirement this whole path exists to satisfy.
+    Two things are asserted, and the second is the one R-1/R-2 turned on. The
+    value is printed exactly, and the trail shows a retrieval row BEFORE the
+    reveal row — because the reveal fetches its bytes through the announcement
+    seam (``access.retrieve_secret``), not from a local decrypt. It also shows
+    that a caller can reach a terminal at all: this test allocates its own pty,
+    which is exactly the bypass the docstring no longer claims is impossible.
+
+    The pty here stands in for the console surface; either way the value comes
+    back to whoever is reading that terminal, and the seam is what registers it
+    for redaction before it does.
     """
     cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
 
@@ -373,22 +385,53 @@ def test_reveal_prints_the_value_at_a_terminal(cli) -> None:
 
     entries = _secret_events(cli)
     assert (entries[-1]["event"], entries[-1]["outcome"]) == ("reveal", "tty")
-    assert [entry["event"] for entry in entries] == ["set", "reveal"]
+    assert [entry["event"] for entry in entries] == ["set", "get", "reveal"]
+    assert entries[-1]["secret_id"] == entries[0]["secret_id"]
     assert cli("audit", "--verify").returncode == 0
 
 
 def test_a_declined_prompt_reveals_nothing(cli) -> None:
-    """The prompt is a gate, not a formality: answering ``n`` shows no bytes."""
+    """The prompt is a gate, not a formality: answering ``n`` shows no bytes.
+
+    It exits ``REVEAL_REFUSED``, not the ``1`` this file reserves for a broken
+    audit chain, so a script branching on the documented taxonomy cannot read
+    "the human declined" as "tamper detected".
+    """
     cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
 
     code, captured = _typed_cli(
         cli.config, ["get", "SYN_ALPHA", "--reveal"], ["n"], answer_when=b"Reveal"
     )
-    assert code != 0
+    assert code == 3, captured
     assert "alpha-synthetic-token-0001" not in captured
     assert "cancelled" in captured
     entries = _secret_events(cli)
     assert (entries[-1]["event"], entries[-1]["outcome"]) == ("reveal", "cancelled")
+
+
+def test_describe_audit_rows_name_the_fields_that_were_asked_for(cli) -> None:
+    """R-4: ``--length`` alone is not recorded as a fingerprint computation.
+
+    The two requests differ on stdout only by which line they print, so the
+    audit row is the only place an operator can ask "who fingerprinted this
+    value?" and get an answer that excludes a run which asked for its size.
+    """
+    cli("set", "SYN_ALPHA", stdin=b"alpha-synthetic-token-0001\n")
+
+    assert cli("describe", "SYN_ALPHA", "--length").returncode == 0
+    assert cli("describe", "SYN_ALPHA", "--fingerprint").returncode == 0
+    assert cli("describe", "SYN_ALPHA", "--length", "--fingerprint").returncode == 0
+
+    describe_rows = [entry for entry in _secret_events(cli) if entry["event"] == "describe"]
+    assert [entry["outcome"] for entry in describe_rows] == [
+        "length",
+        "fingerprint",
+        "length+fingerprint",
+    ]
+    # Q1: the identity rows are attributable to a session like every other verb.
+    assert all(
+        entry["session_id"] is not None for entry in describe_rows
+    ), "the identity row is the only one that cannot say which session read the value"
 
 
 def test_get_without_reveal_is_byte_identical_and_unchanged_in_audit(cli) -> None:

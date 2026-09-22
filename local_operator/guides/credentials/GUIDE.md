@@ -89,8 +89,9 @@ fingerprint  hmac-sha256:191abdba80c8f80cbd072522719bf381
 written. `fingerprint` is an HMAC-SHA256 over the value, keyed on the store's
 master key and truncated to 16 bytes: two calls, two names holding the same
 bytes, and two sessions all produce the same digest, while a different value
-produces a different one. Neither flag prints the value, and no flag on any verb
-does.
+produces a different one. Neither flag prints the value, and `describe` has no
+flag that does — the one verb with a flag that prints a value on purpose is
+`get --reveal`, below, and it is audited as such.
 
 **What a fingerprint proves, and what it does not.**
 
@@ -113,24 +114,35 @@ same question with no value-bearing pipeline to get wrong.
 
 ## When a human has to see the bytes
 
-There is exactly one path for that, and it is the user's own terminal:
+The path set aside for that is `--reveal`, at a terminal:
 
 ```bash
 lop secret get GITHUB_TOKEN --reveal      # asks at the terminal, then prints it
 ```
 
 It is refused — exit 3, **empty stdout**, and the reason on stderr — unless stdin
-AND stdout are both a terminal. So an agent's `bash` call, a script and a
-pipeline are refused by construction: there is nobody to ask, and nobody to ask
-is not permission. There is deliberately no flag, environment variable or config
-setting that stands in for the prompt, because anything the model can set in the
-same call it uses is a default, not an opt-in. Answering `n` at the prompt
-reveals nothing and exits non-zero.
+AND stdout are both a terminal, so a plain `bash` call, a redirect and a pipeline
+never get the bytes: there is nobody to ask, and nobody to ask is not permission.
+Answering `n` at the prompt reveals nothing and exits non-zero. There is
+deliberately no flag, environment variable or config setting that stands in for
+the prompt, because anything the model can set in the same call it uses is a
+default, not an opt-in.
+
+**What that check is and is not.** It is an accident net, not a control: it asks
+"does this caller have a terminal", and a caller willing to allocate one
+(`script`, a `pty` from a script of its own) satisfies it and answers its own
+prompt. Nothing `lop` can observe tells that apart from a human typing `y`, and
+it would change little if it could — anything running as the user can read the
+master key beside the store and decrypt it directly. So do not treat
+`--reveal` as a wall, and do not read a `reveal` row as proof that a person was
+present. What the announcement does give you is the half that matters: the value
+is fetched through the same seam as `$(lop secret get NAME)`, so the owning
+session is told to redact it *before* any byte exists, and a session that will
+not acknowledge that gets no value at all.
 
 If you are an agent wondering whether you need this: you almost certainly need
 `describe --length --fingerprint` above, or one of the forms in "From bash" that
-hand the value to a consumer without printing it. The reveal belongs to the user,
-and it is recorded as theirs (see "What is recorded").
+hand the value to a consumer without printing it. The reveal is for the user.
 
 ## From eval
 
@@ -242,11 +254,15 @@ it was handled, and there is no exposure.
 Every store, retrieval, update, delete and failed authorization is appended to a
 hash-chained audit trail with a timestamp, the secret's id (never its value),
 the session id, and the calling process's pid and executable path. An audited
-reveal is recorded as `reveal` — `tty` when the bytes went to a terminal,
-`refused` when nobody could be asked, `cancelled` when the human declined — so
-it is never mistaken for an ordinary retrieval, and an identity check that reads
-the value (`describe --length`/`--fingerprint`) is recorded as `describe`. A
-plain `describe` reads no value and writes no row. `lop secret audit --verify`
+reveal leaves two rows and they say different things: the retrieval that fed it
+(`get`, carrying the session id when the broker announced the value) and
+`reveal` — `tty` when bytes went to a terminal, `refused` when nobody could be
+asked, `cancelled` when the human declined. Read together they answer "was a
+value fetched?" and "was one printed?" separately, and the retrieval's session
+id is also how you tell an announced reveal from an unannounced one. An identity
+check that reads the value (`describe --length`/`--fingerprint`) is recorded as
+`describe` with the fields it was asked for (`length`, `fingerprint`, or both);
+a plain `describe` reads no value and writes no row. `lop secret audit --verify`
 checks the chain. So "I just read one to check" is visible to the user
 afterwards.
 

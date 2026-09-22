@@ -21,7 +21,9 @@ the plumbing.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
@@ -97,11 +99,11 @@ def test_the_fingerprint_key_is_domain_separated_from_the_other_subkeys() -> Non
 # --- the store methods -------------------------------------------------------
 
 
-def test_describe_fingerprint_returns_length_and_digest_never_the_value(
+def test_describe_identity_returns_length_and_digest_never_the_value(
     store: SecretStore, master_key: bytes
 ) -> None:
     store.set("TOKEN", VALUE)
-    record, length, fingerprint = store.describe_fingerprint("TOKEN")
+    record, length, fingerprint = store.describe_identity("TOKEN")
 
     assert record.name == "TOKEN"
     assert length == len(VALUE)
@@ -123,16 +125,16 @@ def test_equal_values_fingerprint_equal_and_equal_lengths_do_not(store: SecretSt
     store.set("TOKEN_B", VALUE)
     store.set("TOKEN_C", b"alpha-synthetic-token-0002")
 
-    _, _, first = store.describe_fingerprint("TOKEN_A")
-    _, other_length, second = store.describe_fingerprint("TOKEN_B")
-    _, same_length, third = store.describe_fingerprint("TOKEN_C")
+    _, _, first = store.describe_identity("TOKEN_A")
+    _, other_length, second = store.describe_identity("TOKEN_B")
+    _, same_length, third = store.describe_identity("TOKEN_C")
 
     assert first == second
     assert same_length == other_length == len(VALUE)
     assert first != third
 
 
-def test_describe_fingerprint_audits_itself_and_moves_no_use_timestamp(
+def test_describe_identity_audits_itself_and_moves_no_use_timestamp(
     store: SecretStore,
 ) -> None:
     """A value-bearing read is recorded; an identity check is not a "use".
@@ -145,13 +147,45 @@ def test_describe_fingerprint_audits_itself_and_moves_no_use_timestamp(
     store.set("TOKEN", VALUE)
     before = store.describe("TOKEN").last_used_at
 
-    store.describe_fingerprint("TOKEN")
+    store.describe_identity("TOKEN")
 
     entries = store.audit_entries()
-    assert [(entry.event, entry.outcome) for entry in entries][-1] == ("describe", "fingerprint")
+    assert [(entry.event, entry.outcome) for entry in entries][-1] == (
+        "describe",
+        "length+fingerprint",
+    )
     assert store.describe("TOKEN").last_used_at == before
     ok, _, _ = store.verify_audit()
     assert ok
+
+
+def test_the_identity_row_names_the_fields_that_were_asked_for(store: SecretStore) -> None:
+    """R-4: asking for a LENGTH must not be recorded as computing a fingerprint.
+
+    An operator reading "who fingerprinted this value?" has to be able to tell a
+    run that asked for the size from one that asked for an identity, and the
+    digest should not even be computed when it was not asked for. The row is the
+    only place that answer can live, because the two requests look identical on
+    stdout apart from the label they print.
+    """
+    store.set("TOKEN", VALUE)
+
+    store.describe_identity("TOKEN", with_length=True, with_fingerprint=False)
+    length_row = store.audit_entries()[-1]
+    assert (length_row.event, length_row.outcome) == ("describe", "length")
+
+    _, _, digest = store.describe_identity("TOKEN", with_length=False, with_fingerprint=True)
+    digest_row = store.audit_entries()[-1]
+    assert (digest_row.event, digest_row.outcome) == ("describe", "fingerprint")
+    assert digest.startswith("hmac-sha256:")
+
+    # Neither field requested is not a request this surface can satisfy: it would
+    # write a row about nothing and decrypt a value for no purpose.
+    with pytest.raises(ValueError):
+        store.describe_identity("TOKEN", with_length=False, with_fingerprint=False)
+    # set + the two describes that ran; the refused call above writes nothing, and
+    # does not even open the store.
+    assert [entry.event for entry in store.audit_entries()] == ["set", "describe", "describe"]
 
 
 def test_a_plain_describe_still_writes_no_audit_row(store: SecretStore) -> None:
@@ -167,14 +201,30 @@ def test_a_plain_describe_still_writes_no_audit_row(store: SecretStore) -> None:
     assert [entry.event for entry in store.audit_entries()] == ["set"]
 
 
-def test_reveal_is_recorded_as_a_reveal_and_not_as_a_get(store: SecretStore) -> None:
-    """The whole point of the audited opt-in: the row says a human saw the bytes."""
+def test_note_reveal_records_the_reveal_and_leaves_the_retrieval_to_the_seam(
+    store: SecretStore,
+) -> None:
+    """One row for the reveal, and no second copy of `get`'s transaction.
+
+    The value is not fetched here — ``handlers._reveal`` goes through
+    ``access.retrieve_secret`` so the owning session can register it before any
+    byte exists — so this method's job is the reveal row alone: with the record's
+    id (read off the row, not by decrypting it again) and no ``last_used_at``
+    bump, because the retrieval that fed it already counted as the use.
+    """
     store.set("TOKEN", VALUE)
-    assert store.reveal("TOKEN") == VALUE
-    assert [(entry.event, entry.outcome) for entry in store.audit_entries()] == [
+    before = store.describe("TOKEN").last_used_at
+
+    store.note_reveal("TOKEN")
+
+    entries = store.audit_entries()
+    assert [(entry.event, entry.outcome) for entry in entries] == [
         ("set", "ok"),
         ("reveal", "tty"),
     ]
+    assert entries[-1].secret_id == entries[0].secret_id
+    assert store.describe("TOKEN").last_used_at == before
+    assert store.verify_audit()[0]
 
 
 def test_a_refused_reveal_is_recorded_without_touching_any_record(store: SecretStore) -> None:
@@ -196,9 +246,9 @@ def test_the_identity_surface_keeps_the_provider_namespace_boundary(config_root:
     """Both new methods are agent surfaces, so both refuse a provider row.
 
     A fingerprint of a provider key would let an agent confirm a guessed key
-    without being able to read it, and a reveal would simply hand it over; the
-    prefix rule holds on the READ of a value and on the read of its identity, as
-    it does on ``get`` and ``describe``.
+    without being able to read it, and a revealed provider row would simply hand
+    it over; the prefix rule holds on the READ of a value and on the read of its
+    identity, as it does on ``get`` and ``describe``.
 
     The row is written under its own base rather than the ``store`` fixture's:
     a provider row goes through the registry's disk-key path, and that fixture's
@@ -212,13 +262,130 @@ def test_the_identity_surface_keeps_the_provider_namespace_boundary(config_root:
     provider_store = open_store(base)
 
     with pytest.raises(InvalidSecretName):
-        provider_store.describe_fingerprint("LOP_PROVIDER_OPENROUTER_API_KEY")
+        provider_store.describe_identity("LOP_PROVIDER_OPENROUTER_API_KEY")
     with pytest.raises(InvalidSecretName):
-        provider_store.reveal("LOP_PROVIDER_OPENROUTER_API_KEY")
+        provider_store.note_reveal("LOP_PROVIDER_OPENROUTER_API_KEY")
 
     # The provider-side reader still gets its identity, under its own role.
-    _, length, fingerprint = provider_store.describe_fingerprint(
+    _, length, fingerprint = provider_store.describe_identity(
         "LOP_PROVIDER_OPENROUTER_API_KEY", role="provider"
     )
     assert length == len("sk-secret")
     assert fingerprint.startswith("hmac-sha256:")
+
+
+# --- the reveal's announcement seam (R-1/R-2) ---------------------------------
+
+
+class _FakeTty:
+    """Just enough of a terminal for `isatty()` and `input()` to answer."""
+
+    def __init__(self, answer: str = "y\n") -> None:
+        self._answer = answer
+
+    def isatty(self) -> bool:
+        return True
+
+    def readline(self, *arguments: object) -> str:
+        return self._answer
+
+
+class _FakeTtyOut:
+    """A stdout that is a terminal AND records the bytes written to it."""
+
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_the_reveal_path_announces_the_value_before_it_prints(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-1/R-2: the bytes come from the ANNOUNCEMENT seam, and the reveal follows it.
+
+    This is the regression test for the pair the review found. The reveal's pty
+    check is an accident net — a caller that allocates its own pty passes it — so
+    what keeps a revealed value out of a transcript is that the retrieval goes
+    through ``access.retrieve_secret``, which registers the value with the owning
+    session (and applies the retrieval-tier gate) before any byte exists.
+
+    Asserted here, in order: the seam is called at all; the audit rows are
+    ``set`` → ``get`` (the retrieval the seam performs) → ``reveal``, which is
+    the only observable proof that the announcement preceded the reveal row; and
+    the bytes printed are exactly the seam's.
+    """
+    from local_operator.secrets import handlers
+    from local_operator.secrets.access import open_store
+
+    store = open_store(create=True)
+    store.set("TOKEN", b"alpha-synthetic-token-0001")
+
+    announced: list[str] = []
+
+    def announce(name: str) -> bytes:
+        announced.append(name)
+        return store.get(name, session_id="synthetic-session")
+
+    monkeypatch.setattr(handlers, "retrieve_secret", announce)
+    monkeypatch.setattr(handlers.sys, "stdin", _FakeTty())
+    fake_out = _FakeTtyOut()
+    monkeypatch.setattr(handlers.sys, "stdout", fake_out)
+
+    assert handlers._reveal(argparse.Namespace(name="TOKEN")) == 0
+
+    assert announced == ["TOKEN"], "the reveal did not go through the announcement seam"
+    assert fake_out.buffer.getvalue() == b"alpha-synthetic-token-0001"
+    # `deny:*` rows are the broker refusing a caller that descends from no session
+    # (this test process has none), and the store then falls back to the disk key;
+    # they are the pre-existing shape of every terminal run, not this path's.
+    rows = [
+        (entry.event, entry.outcome)
+        for entry in store.audit_entries()
+        if not entry.event.startswith("deny:")
+    ]
+    assert rows == [("set", "ok"), ("get", "ok"), ("reveal", "tty")]
+
+
+def test_an_unannounced_value_is_never_printed(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-2's failure mode, closed: if the announcement fails, nothing is printed.
+
+    The seam raises when the owning session will not acknowledge the redaction
+    notice (``unredactable``) — the one refusal whose meaning is "this value
+    cannot be kept out of the transcript". A reveal that printed anyway would be
+    the incident exactly: bytes in a stream no sink knows about. Driven through
+    ``dispatch`` so the assertion covers the exit code a script sees as well.
+    """
+    from local_operator.secrets import handlers
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.errors import SecretStoreError
+
+    store = open_store(create=True)
+    store.set("TOKEN", b"alpha-synthetic-token-0001")
+
+    def refuse(name: str) -> bytes:
+        raise SecretStoreError("session 1 did not acknowledge the redaction notice")
+
+    monkeypatch.setattr(handlers, "retrieve_secret", refuse)
+    monkeypatch.setattr(handlers.sys, "stdin", _FakeTty())
+    fake_out = _FakeTtyOut()
+    monkeypatch.setattr(handlers.sys, "stdout", fake_out)
+
+    exit_code = handlers.dispatch(
+        argparse.Namespace(secret_command="get", name="TOKEN", reveal=True)
+    )
+
+    assert exit_code == 2
+    assert fake_out.buffer.getvalue() == b"", "an unannounced reveal printed bytes"
+    assert [entry.event for entry in store.audit_entries()] == [
+        "set"
+    ], "an unannounced reveal must not be recorded as one"

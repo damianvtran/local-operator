@@ -884,8 +884,14 @@ class SecretStore:
             record, _ = self._decode(self._row_for(connection, canonical))
         return record
 
-    def describe_fingerprint(
-        self, name: str, *, role: str = "agent", session_id: str | None = None
+    def describe_identity(
+        self,
+        name: str,
+        *,
+        with_length: bool = True,
+        with_fingerprint: bool = True,
+        role: str = "agent",
+        session_id: str | None = None,
     ) -> tuple[SecretRecord, int, str]:
         """Metadata, the value's byte length, and its stable fingerprint.
 
@@ -911,18 +917,29 @@ class SecretStore:
         for two derived fields — rather than discarded, which is why it appends
         its own audit row instead of looking like a metadata read.
 
-        **Audited as ``describe``/``fingerprint``, distinct from ``get``.** The
-        chain has to answer "has anyone read this value?" with a fingerprint
-        computation neither indistinguishable from a scripted retrieval nor
-        silently unaudited. A plain ``describe`` (no fingerprint requested) is
-        untouched: it reads no value field, writes no row, and behaves exactly
-        as it did before.
+        **The two fields are requested separately, and the audit says which.**
+        ``with_length``/``with_fingerprint`` are the caller's flags, and the row
+        is labelled from them — ``length``, ``fingerprint`` or
+        ``length+fingerprint`` — because an operator asking "who fingerprinted
+        this value?" must not be shown a run that only asked for its size. The
+        digest is not even computed when only the length was asked for.
+
+        A plain ``describe`` (no field requested) does not come here at all: it
+        reads no value field, writes no row, and behaves exactly as it did
+        before.
 
         ``last_used_at`` is deliberately NOT moved. It answers "when was this
-        value last handed to a consumer", and a fingerprint hands it to nobody;
+        value last handed to a consumer", and an identity hands it to nobody;
         bumping it here would make an identity check look like a use in the one
         field an operator watches for unexpected access.
         """
+        fields = [
+            label
+            for label, wanted in (("length", with_length), ("fingerprint", with_fingerprint))
+            if wanted
+        ]
+        if not fields:
+            raise ValueError("describe_identity needs at least one of length/fingerprint")
         canonical = validate_name(name)
         _validate_role(canonical, role)
         now = time.time()
@@ -934,7 +951,7 @@ class SecretStore:
                     connection,
                     event="describe",
                     ts=now,
-                    outcome="fingerprint",
+                    outcome="+".join(fields),
                     secret_id=record.record_id,
                     session_id=session_id,
                     pid=os.getpid(),
@@ -943,50 +960,51 @@ class SecretStore:
             except BaseException:
                 connection.execute("ROLLBACK")
                 raise
-        return record, len(value), value_fingerprint(self._master_key, value)
+        fingerprint = value_fingerprint(self._master_key, value) if with_fingerprint else ""
+        return record, len(value), fingerprint
 
-    def reveal(self, name: str, *, role: str = "agent", session_id: str | None = None) -> bytes:
-        """Return a value for a TTY REVEAL, audited as ``reveal``, not ``get``.
+    def note_reveal(self, name: str, *, role: str = "agent", session_id: str | None = None) -> None:
+        """Append the audit row for a reveal whose bytes are about to be printed.
 
-        Same bytes, same transaction shape and the same ``last_used_at`` bump as
-        :meth:`get` — a reveal IS a use of the value — but a different event, so
-        ``lop secret audit`` distinguishes "a human asked to see this" from
-        "something retrieved this". That distinction is the whole reason an
-        audited reveal is worth having while the unqualified ``get`` keeps its
-        old behaviour: without it, every reveal would be lost among the routine
-        rows a scripted pipeline writes.
+        The value does NOT come from here. It is fetched by
+        ``handlers._reveal`` through
+        :func:`~local_operator.secrets.access.retrieve_secret` — the
+        ANNOUNCEMENT seam — so the owning session has registered it for
+        redaction, and the retrieval-tier gate has applied, before any byte
+        exists. This method only records that a reveal happened, which is why it
+        writes an audit row and nothing else: no second decrypt, no
+        ``last_used_at`` bump (the retrieval already made it a *use*), and no
+        copy of :meth:`get`'s transaction body to drift out of step with it.
 
-        Which is also why this does NOT route through the broker's ``retrieve``
-        op the way ``get`` does. That op exists to announce the value to the
-        owning session and wait for its acknowledgement, so the session can
-        register it for redaction before it reaches a model-visible channel, and
-        it writes its own ``get`` row — which would sit under the reveal row and
-        blur exactly the distinction above. The notify step's product ("this
-        value may be in a transcript") does not describe a path whose contract
-        is "the bytes go to the terminal a human is looking at", and the
-        hardened tier's authorization is still applied here: ``open_store``
-        reaches the broker for the key itself, so a locked store still refuses.
+        **Audited as ``reveal``/``tty``, distinct from the retrieval that fed
+        it.** A permitted reveal therefore leaves TWO rows, and that is the
+        honest shape rather than a duplicate: the retrieval row says the value
+        was fetched (and carries the session id when the broker announced it),
+        while this one says the bytes were printed at a terminal. ``lop secret
+        audit`` can answer "was a value fetched?" and "was one revealed?"
+        separately, and neither row pretends the other did not happen.
 
-        ``role`` re-asserts the namespace rule, because this is a VALUE read: a
-        reveal of a ``LOP_PROVIDER_*`` row would hand a provider credential to
-        the same surface the prefix exists to keep out of it.
+        The record ID is resolved from the ROW (the blind index finds it) rather
+        than by decrypting: a value read to write a row about a value read is a
+        cost with no purpose, and it would make this method's own audit entry
+        indistinguishable in kind from the retrieval's.
+
+        ``role`` re-asserts the namespace rule, because a reveal is a VALUE
+        read: a reveal of a ``LOP_PROVIDER_*`` row would hand a provider
+        credential to the same surface the prefix exists to keep out of it.
         """
         canonical = validate_name(name)
         _validate_role(canonical, role)
-        now = time.time()
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                record, value = self._decode(self._row_for(connection, canonical))
-                connection.execute(
-                    "UPDATE secrets SET last_used_at = ? WHERE id = ?", (now, record.record_id)
-                )
+                secret_id = str(self._row_for(connection, canonical)[0])
                 audit.append(
                     connection,
                     event="reveal",
-                    ts=now,
+                    ts=time.time(),
                     outcome="tty",
-                    secret_id=record.record_id,
+                    secret_id=secret_id,
                     session_id=session_id,
                     pid=os.getpid(),
                 )
@@ -994,7 +1012,6 @@ class SecretStore:
             except BaseException:
                 connection.execute("ROLLBACK")
                 raise
-        return value
 
     def note_reveal_refusal(self, *, outcome: str, session_id: str | None = None) -> None:
         """Append the audit row for a reveal this process REFUSED.
