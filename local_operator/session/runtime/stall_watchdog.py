@@ -101,10 +101,11 @@ hold together for a whole window:
    alone is not the predicate: an in-process tool (a render, a local scan) burns
    CPU with no transcript movement for as long as it runs.
 3. CPU ADVANCING. This process burned at least :data:`PROGRESS_CPU_FLOOR` of one
-   core across the sample. A step that WAITS burns none — a model call is a
-   socket read, and a bash child's CPU belongs to the child, never to
-   ``time.process_time`` — while a loop that SPINS burns it. That is the whole
-   discriminator.
+   core **over the whole run** — a mean, not a per-sample reading; see that
+   constant for the measurement that made it one. A step that WAITS burns none —
+   a model call is a socket read, and a bash child's CPU belongs to the child,
+   never to ``time.process_time`` — while a loop that SPINS burns it. That is the
+   whole discriminator.
 
 THE WINDOW IS THE BOUND, and the argument that sized :data:`DEFAULT_STALL_S`
 sizes this one too: 300 s sits above the largest legitimate silence ever measured
@@ -326,14 +327,27 @@ MIN_REARM_S = 0.05
 #: run that can fire, so a two-sample blip cannot.
 PROGRESS_SAMPLES_PER_WINDOW = 12
 
-#: The share of ONE core this process must have burned across a sample for that
-#: sample to count as SPINNING rather than WAITING. Sized well below the
-#: measurement it exists for and well above an idle runtime: the incident's
-#: session burned 14.3 s of CPU in a 75 s window (19% of a core, i.e. 3.8x this
-#: floor), while a loop waiting on a model, a tool result or a subprocess burns
-#: ~0. Set as a RATE rather than a total so a run is only accumulated while the
-#: burn continues: a process that spins for a minute and then waits must not
-#: carry that minute's CPU into a later window.
+#: The share of ONE core this process must have burned **over the whole run** for
+#: the run to count as SPINNING rather than WAITING.
+#:
+#: A MEAN OVER THE RUN, NOT A PER-SAMPLE RATE, and agent review round 1 is why.
+#: The first revision demanded this figure on every one of twelve consecutive
+#: samples and discarded the whole run on one sample below it. Measured on this
+#: host (load ~160-190) with the incident's own spin shape: per-sample rates
+#: within a run had minima of 0.0183, 0.0223, 0.0250, 0.0305 and 0.0310 against
+#: medians of 0.09-0.27 — so the effective margin at the low end was 0.4-1.2x,
+#: not the 3.8x its justification quoted, and one run in fifteen never fired at
+#: all within twenty times the window. A single scheduled-out sample is exactly
+#: the noise a bound on sustained behaviour must not read as evidence, and
+#: averaging over the run also makes the documented margin the statistic the
+#: predicate actually uses.
+#:
+#: Sized well above an idle runtime and well below the measurement it exists for:
+#: the incident's session burned 14.3 s of CPU in a 75 s window (19% of a core,
+#: 3.8x this floor), a healthy idle runtime measures 0.006-0.011 of a core, and a
+#: loop waiting on a model, a tool result or a subprocess burns ~0. The floor is
+#: compared against the mean since the run opened, so a burst cannot buy a run and
+#: a wait cannot be carried into one.
 PROGRESS_CPU_FLOOR = 0.05
 
 #: The line this module writes into the dump when the PROGRESS leg — not the
@@ -372,7 +386,7 @@ class _ProgressClock:
     run, it only delays the next look.
     """
 
-    __slots__ = ("motion", "since", "cpu", "wall")
+    __slots__ = ("motion", "since", "cpu", "wall", "samples")
 
     def __init__(self) -> None:
         self.motion: object = _NO_SAMPLE
@@ -382,6 +396,31 @@ class _ProgressClock:
         # interval would divide by ~0 and read as an infinite spin.
         self.cpu: float = time.process_time()
         self.wall: float = time.monotonic()
+        #: How many samples this run has, for a reader of a log line rather than
+        #: for the decision: the CPU leg is a MEAN over the run, so no sample
+        #: count is required to fire, and requiring one was the defect review
+        #: round 1 measured (a run at eighteen times the window that never fired).
+        self.samples: int = 0
+
+    def restart(self, now: float, cpu: float, motion: object) -> None:
+        """Open a NEW run at this instant: no elapsed time, no CPU to average.
+
+        Used for every disagreement AND for the sample that opens a run, so there
+        is one spelling of "the run starts here" — a second one is how the two
+        readings the mean is taken over drift apart.
+        """
+        self.since = None
+        self.samples = 0
+        self.wall = now
+        self.cpu = cpu
+        self.motion = motion
+
+    def rate(self, now: float, cpu: float) -> float:
+        """This process's CPU since the run opened, as a share of ONE core."""
+        span = now - self.wall
+        if span <= 0:
+            return 0.0
+        return (cpu - self.cpu) / span
 
 
 class _Armed:
@@ -769,7 +808,6 @@ def _sample(armed: "_Armed") -> bool:
     clock = armed.clock
     now = time.monotonic()
     cpu = time.process_time()
-    elapsed = max(1e-6, now - clock.wall)
     probe = armed.probe
     try:
         motion, in_flight = probe() if probe is not None else (_NO_SAMPLE, True)
@@ -777,22 +815,32 @@ def _sample(armed: "_Armed") -> bool:
         logger.debug("stall watchdog: progress probe failed", exc_info=True)
         motion, in_flight = _NO_SAMPLE, True
     moved = clock.motion is not _NO_SAMPLE and motion != clock.motion
-    spinning = not in_flight and not moved and (cpu - clock.cpu) / elapsed >= PROGRESS_CPU_FLOOR
-    if not spinning:
-        # ANY disagreement ends the run. A leg that is not true NOW is not
-        # "possibly true": a window that kept accumulating across a sample where
-        # the process was working would fire on a runtime that had done
-        # legitimate work inside it, which is the false positive this predicate
-        # exists to avoid. The deadline is cleared with it, so a runtime that
-        # recovered between a decision and its timer re-arming is left running.
-        clock.since = None
-        armed.progress_deadline = None
-    elif clock.since is None:
+    if in_flight or moved:
+        # A disagreeing sample ends the run outright: a leg that is not true NOW
+        # is not "possibly true", and a window that kept accumulating across a
+        # sample where the process was working would fire on a runtime that had
+        # done legitimate work inside it.
+        clock.restart(now, cpu, motion)
+        return False
+    if clock.since is None:
+        # THE RUN OPENS HERE, CLAIMING NOTHING yet: the next sample is the first
+        # that can say anything about CPU, because a mean needs two readings.
+        clock.restart(now, cpu, motion)
         clock.since = now
-    elif now - clock.since >= armed.seconds:
+        clock.samples = 1
+        return False
+    clock.samples += 1
+    if clock.rate(now, cpu) < PROGRESS_CPU_FLOOR:
+        # WAITING, NOT SPINNING, and the run is over rather than paused: a model
+        # call, a socket read and a child's CPU all leave this process at ~0, and
+        # letting such a stretch sit inside a run is how a mean gets carried into
+        # a spin it does not belong to. The next sample opens a fresh run.
+        clock.restart(now, cpu, motion)
+        return False
+    clock.motion = motion
+    if now - clock.since >= armed.seconds:
         _fire_progress(armed, now)
         return True
-    clock.motion, clock.cpu, clock.wall = motion, cpu, now
     return False
 
 
@@ -820,16 +868,33 @@ def _fire_progress(armed: "_Armed", now: float) -> None:
     later moment available to it.
     """
     armed.progress_deadline = now
+    line = (
+        f"{PROGRESS_MARKER}{_bound_class()}: {armed.seconds:g}s of CPU with no progress "
+        f"from the work -- no transcript, roster or job movement, no tool batch in "
+        f"flight, and at least {PROGRESS_CPU_FLOOR:.0%} of a core burned as a mean across "
+        f"every sample of the window.\n"
+    )
     try:
-        armed.handle.write(
-            f"{PROGRESS_MARKER}{_bound_class()}: {armed.seconds:g}s of CPU with no progress "
-            f"from the work -- no transcript, roster or job movement, no tool batch in "
-            f"flight, and at least {PROGRESS_CPU_FLOOR:.0%} of a core burned across every "
-            f"sample of the window.\n"
-        )
+        armed.handle.write(line)
         armed.handle.flush()
-    except (OSError, ValueError):  # noqa: BLE001 — the dump below is the evidence
+    except (OSError, ValueError):
+        # ONE RETRY THROUGH A FRESH DESCRIPTOR, and it is load-bearing rather than
+        # tidy: THIS LINE IS THE ONLY THING THAT SAYS WHICH LEG FIRED, and its
+        # absence is read as the SILENCE leg — so a progress fire whose line could
+        # not be written would have its own detail narrate the other predicate
+        # (agent review round 1, NIT 1). A closed or stale descriptor is the case
+        # this recovers; a permanently unwritable directory is not, which is why
+        # the retirement below warns and ``fired_leg`` states the residual.
         logger.debug("stall watchdog could not write its progress line", exc_info=True)
+        try:
+            with armed.path.open("a", encoding="utf-8") as spare:
+                spare.write(line)
+        except OSError:
+            logger.warning(
+                "stall watchdog could not record which leg fired; the dump for pid %s "
+                "will read as the silence leg",
+                armed.pid,
+            )
     try:
         faulthandler.dump_traceback_later(
             max(MIN_REARM_S, armed.deadline() - now), file=armed.handle, exit=True
@@ -956,6 +1021,15 @@ def fired_leg(pid: int | None = None, directory: Path | None = None) -> str | No
     ``_exit(1)`` from its own thread, so nothing that runs afterwards — no exit
     hook, no journal write, no reaper — can be relied on. ``journal.death_verdict``
     is the caller that turns this into an incident class.
+
+    A MISSING PROGRESS LINE MEANS SILENCE, WITH ONE RESIDUAL, stated here rather
+    than left to be discovered: the progress leg's line is written a moment before
+    it arms, and :func:`_fire_progress` retries once through a fresh descriptor
+    when that write fails — but a directory that is permanently unwritable, or a
+    full disk, leaves a progress fire with no line, and this function then answers
+    ``silence``. The class is unaffected (both legs are ``STALL_BOUND_CAUSE``);
+    only the detail names the wrong predicate. The progress fire warns at WARNING
+    when it cannot record its leg, so the case is not silent in ``runtime.log``.
     """
     text = _dump_text(dump_path(pid, directory))
     if not _fires(text):
