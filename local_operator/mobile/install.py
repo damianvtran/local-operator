@@ -1306,10 +1306,16 @@ def _runner_or_refusal(
          (``isExecutedByCorepack``). This is the route a machine that already
          relied on corepack keeps: dropping the arm refused hosts that used to
          build, which is the regression this arm closes;
-      4. nothing — the runner is handed back WITH the guard's refusal, so the
+      4. ``npx --yes pnpm@<pin>`` — the last resort, and the route a host with
+         neither a seeded copy nor corepack has (Node v26 ships no corepack at
+         all). npm fetches the pinned tarball directly, so pnpm's self-install
+         recursion is never entered either. Exact pins only: ``_pinned_pnpm``
+         reports a range verbatim, and a range is not a pin this module enforces
+         on any route;
+      5. nothing — the runner is handed back WITH the guard's refusal, so the
          sentence a reader ends up acting on is still the one #1394 ships.
 
-    Arms 2 and 3 are consulted only when the guard WOULD refuse, which is what
+    Arms 2, 3 and 4 are consulted only when the guard WOULD refuse, which is what
     keeps a machine whose PATH pnpm already satisfies the pin from having a
     package manager downloaded for it: there is nothing to fix, so nothing is
     fetched. (:func:`_package_runner`'s no-pnpm arm keeps #1394's own order —
@@ -1327,10 +1333,36 @@ def _runner_or_refusal(
     if seeded is not None:
         return seeded, None
     corepack = _shim_argv("corepack")
-    if corepack is None:
+    if corepack is not None:
+        _corepack_enable(corepack, web_dir, env=env)
+        return [*corepack, "pnpm"], None
+    # THE LAST RESORT, tried only when every local route above is unavailable — so
+    # a machine whose PATH pnpm already reports the pin never reaches here and
+    # nothing is fetched for it. ``npx --yes pnpm@<pin>`` fetches the PINNED
+    # tarball DIRECTLY (npm resolves ``pnpm@<pin>`` itself, and ``--yes`` skips the
+    # install prompt), so it does not re-enter pnpm's own ``pnpm add pnpm@<pin>``
+    # self-install — the recursion this guard exists to refuse, and the reason the
+    # lopped-on pinned version is the version fetched rather than whatever PATH
+    # carries. The steps :func:`_build_bundle` appends (``install
+    # --frozen-lockfile`` / ``build``) run through :func:`_run_build_step` exactly
+    # as the other arms' do, so the bound and the group reap are unchanged. An
+    # absent ``npx`` falls through to today's refusal, untouched.
+    #
+    # EXACT PINS ONLY, on the same matcher :func:`_package_manager_env` uses to
+    # decide whether the version checks may be armed. ``_pinned_pnpm`` reports the
+    # ``packageManager`` version verbatim, a range included, and a range is not a
+    # pin this module enforces anywhere — pnpm's own switch returns early on one
+    # ("``^11`` is not a valid version"), so a range is not a fetch on any route
+    # that already exists. Fetching ``pnpm@^11`` through npx would be the first
+    # route to RESOLVE a range, which is both a wider behaviour than this guard
+    # promises and an untestable one (the fetched pnpm would be whatever the
+    # registry serves that day), so a range falls through to today's refusal.
+    if _EXACT_VERSION.fullmatch(pin) is None:
         return runner, mismatch
-    _corepack_enable(corepack, web_dir, env=env)
-    return [*corepack, "pnpm"], None
+    npx = _shim_argv("npx")
+    if npx is None:
+        return runner, mismatch
+    return [*npx, "--yes", f"pnpm@{pin}"], None
 
 
 def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
