@@ -38,7 +38,11 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
+from local_operator.scratchpad import (
+    SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_MAX_WRITE_BYTES,
+    SCRATCHPAD_PATH_ENV,
+)
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 
@@ -1449,6 +1453,234 @@ async def test_scratchpad_refuse_traversal_absolute_and_directory_targets(tmp_pa
     assert "e.g. 'scratchpad://run/name.md'" in dir_write.text
 
     assert not list(tmp_path.rglob("escape.md"))
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tmp_path) -> None:
+    """The content policy through the REAL tools, which is the only place the
+    wiring is proved: a check that raised correctly but was never called would
+    pass every unit test of the check itself and refuse nothing at runtime.
+
+    Each refusal has to be an ``invalid arguments`` result — the model's own
+    argument at fault, a different fault from a machine failure — and it has to
+    name where the material belongs, because that alternative is what the next
+    call acts on. ``write`` and ``edit`` are driven separately because they
+    share one resolver and diverge on the size arm only.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    segment = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert segment.is_error is True
+    assert segment.details is not None and segment.details["__fault"] == "invalid_arguments"
+    assert "'node_modules' is a build or dependency directory" in segment.text
+    assert "git worktree add" in segment.text
+    # The advice is appended by the shared constant rather than restated per arm,
+    # so it cannot drift between them — and the caller reads it here.
+    assert segment.text.endswith(SCRATCHPAD_ELSEWHERE)
+
+    # The case-varied spelling of the same directory, which on this machine's
+    # case-insensitive volume IS the same directory: this is the reviewer's
+    # repro, and it is pinned through the tool because that is where it was.
+    folded = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://NODE_MODULES/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert folded.is_error is True
+    assert folded.details is not None and folded.details["__fault"] == "invalid_arguments"
+    assert "'NODE_MODULES' is a build or dependency directory" in folded.text
+
+    # The FAMILY arm, which is the whole point of matching a SHAPE: this tree was
+    # in no list, and a caller that reaches for it is exactly who the refusal is
+    # for. The segment is named as typed, so the message reads as the URL does.
+    family = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://cmake-build-debug/CMakeCache.txt", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert family.is_error is True
+    assert family.details is not None and family.details["__fault"] == "invalid_arguments"
+    assert "'cmake-build-debug' is a build or dependency directory" in family.text
+
+    # A versioned shared library, whose version rides in the name after the
+    # extension — the shape ``Path.suffix`` cannot see, judged here on the real
+    # tool so the wiring and the matcher are proved together.
+    versioned = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://libfoo.so.1.2", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert versioned.is_error is True
+    assert versioned.details is not None and versioned.details["__fault"] == "invalid_arguments"
+    assert "'.so' is a compiled, archived or model artefact" in versioned.text
+
+    suffix = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://runs/model.pt", "old_text": "a", "new_text": "b"},
+        None,
+        None,
+        context,
+    )
+    assert suffix.is_error is True
+    assert suffix.details is not None and suffix.details["__fault"] == "invalid_arguments"
+    assert "'.pt' is a compiled, archived or model artefact" in suffix.text
+    assert "mktemp -d" in suffix.text
+
+    # The refusal is the model's argument at fault, and none of it reached the
+    # disk: no directory was created on the way to saying no.
+    assert not (pad / "node_modules").exists()
+    assert not (pad / "NODE_MODULES").exists()
+    assert not (pad / "runs").exists()
+    assert not (pad / "cmake-build-debug").exists()
+    assert not (pad / "libfoo.so.1.2").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, monkeypatch) -> None:
+    """The BACKSTOP end to end, and the arm only the pad's own contents can
+    refuse: every name here is ordinary scratch, so nothing but the total can
+    say no. It has to arrive as the model's own argument at fault, like the name
+    arms, because the fix is a decision about where that material lives rather
+    than a machine failure to retry.
+
+    The budget is set from the pad's own ALLOCATED size, which is the walk's unit
+    (a sparse file measures 0), so the boundary is exact on any block size.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    budget = (pad / "bulk.dat").stat().st_blocks * 512
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+
+    refused = await tools["write"].execute(
+        "c", {"path": "scratchpad://x.csv", "content": "a,b\n"}, None, None, context
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert f"{budget:,}-byte ceiling" in refused.text
+    assert refused.text.endswith(SCRATCHPAD_ELSEWHERE)
+    assert not (pad / "x.csv").exists()
+
+    # The same fixture one name apart: overwriting the file that IS the pad's
+    # total is still allowed, because the write REPLACES those bytes rather than
+    # adding to them. A pad at the ceiling must stay workable in place.
+    replaced = await tools["write"].execute(
+        "c", {"path": "scratchpad://bulk.dat", "content": "small\n"}, None, None, context
+    )
+    assert replaced.is_error is False
+    assert (pad / "bulk.dat").read_text() == "small\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_payload_over_the_write_ceiling(tmp_path) -> None:
+    """The SIZE arm, end to end, because it is the one arm that depends on a
+    value computed at the call site rather than on the name. A ceiling that is
+    only unit-tested through ``check_scratchpad_write`` would leave the wiring
+    — ``len(content.encode("utf-8"))`` at the ``write`` handler — unproved.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    refused = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://dump.csv", "content": "x" * (SCRATCHPAD_MAX_WRITE_BYTES + 1)},
+        None,
+        None,
+        context,
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert str(SCRATCHPAD_MAX_WRITE_BYTES) in refused.text
+    assert not (pad / "dump.csv").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_still_writes_ordinary_scratch_with_the_same_fixture(tmp_path) -> None:
+    """The same fixture and the same call, one name apart: the policy must not
+    have cost the pad the writes it exists for. Without this the refusal tests
+    would pass against a resolver that refused everything.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    created = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://notes.md", "content": "still scratch\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert created.is_error is False
+    assert created.text == (
+        f"Created scratchpad://notes.md -> {pad / 'notes.md'} (14 chars)"
+        # The receipt's lifetime clause is the advisory's wording (adopted by
+        # this branch on rebase): the pad is session-SCOPED and rides out a
+        # restart, and "deleted with the session" was read by a measured session
+        # as meaning "like a temp directory" (2026-09-22).
+        " — kept for this session (survives restarts)."
+    )
+
+    # The negatives that must survive the shape rule, through the tool: a name
+    # that merely BEGINS with a refused token is scratch, and it is the case a
+    # rule that matched a substring would have taken away.
+    contained = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules-notes.md", "content": "why it is big\n"},
+        None,
+        None,
+        context,
+    )
+    assert contained.is_error is False
+    assert (pad / "node_modules-notes.md").read_text() == "why it is big\n"
+
+    # ...and neither does a LEAF that merely begins with a token followed by a
+    # file TYPE (M1): `out.json` is data work, while `out/` is the directory the
+    # rule is about.
+    leaf = await tools["write"].execute(
+        "c", {"path": "scratchpad://out.json", "content": "{\n}\n"}, None, None, context
+    )
+    assert leaf.is_error is False
+    assert (pad / "out.json").read_text() == "{\n}\n"
+    assert (pad / "notes.md").read_text(encoding="utf-8") == "still scratch\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_reads_are_not_gated_so_an_old_pad_can_be_cleaned_up(tmp_path) -> None:
+    """Reads are deliberately OUTSIDE the policy, and this pins it. Pads written
+    before the rule are full of exactly the refused names — ``bash`` can put a
+    build tree in the pad with no check at all — and the agent cleaning one up
+    needs to read it. A gate on ``read`` would leave that litter listed by a
+    shell ``ls`` but unreadable through the scheme that is meant to be the way in.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    litter = pad / "node_modules"
+    litter.mkdir(parents=True)
+    (litter / "x.js").write_text("module.exports = 1\n", encoding="utf-8")
+
+    listed = await tools["read"].execute(
+        "c", {"path": "scratchpad://node_modules/"}, None, None, context
+    )
+    assert listed.is_error is False
+    assert "x.js" in listed.text
+
+    read = await tools["read"].execute(
+        "c", {"path": "scratchpad://node_modules/x.js"}, None, None, context
+    )
+    assert read.is_error is False
+    assert "module.exports = 1" in read.text
 
 
 @pytest.mark.asyncio
