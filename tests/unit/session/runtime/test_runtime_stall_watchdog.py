@@ -51,7 +51,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -177,6 +179,22 @@ def _run_script(
 
 def _dump_for(config_dir: Path, pid: int) -> Path:
     return config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+
+
+def _stamp_ages(stdout: str) -> tuple[list[float], list[float]]:
+    """The ``ages`` samples a dead-beater child printed, as (workload, serving).
+
+    The dead-beater children below report BOTH planes' stamp ages every 200 ms,
+    because the claim they exist for is a claim about a pair: the workload stamp
+    stops advancing while the serving plane keeps reporting normally. A child
+    that reported only the silent plane could not tell "the tick died" from "the
+    whole process wedged".
+    """
+    samples = [
+        (float(workload), float(serving))
+        for workload, serving in re.findall(r"ages workload=([\d.]+) serving=([\d.]+)", stdout)
+    ]
+    return [workload for workload, _ in samples], [serving for _, serving in samples]
 
 
 # -- the real thing ---------------------------------------------------------
@@ -1798,3 +1816,945 @@ def test_a_real_runtime_child_fires_the_progress_leg(
     finally:
         for child, config_dir in spawned:
             _reap(child, config_dir)
+
+
+# ============================================================================
+# THE TICK ITSELF DYING: reported, recorded, and -- bounded -- undone
+# ============================================================================
+#
+# WHY THIS SECTION EXISTS. Everything above assumes the two ticks RUN. On
+# 2026-09-21 the workload tick's task RAISED, and the wiring of the day made that
+# invisible three ways at once: nothing read the exception (no done-callback, no
+# ``await``, no reader of ``exception()``), nothing re-created the task, and the
+# dump -- the artifact an incident reader actually opens -- showed an IDLE,
+# HEALTHY process, because ``faulthandler`` dumps THREADS and a dead task has no
+# frame at all. So the bound ended a runtime that was working, one deadline later,
+# and the file attributed it to "the runtime went silent", which was the one
+# explanation that was false. The cells below pin all three halves: the death is
+# logged with its exception, recorded where the dump reader will see it, and the
+# tick is re-created.
+#
+# THE CHILD RIG IS RUN TWICE ON PURPOSE. ``bare`` is the wiring being replaced and
+# ``supervised`` is the production one; the ``bare`` half is the CONTROL for the
+# ``supervised`` half, because a green "it survived" cell on its own cannot
+# separate a real fix from a rig that is blind to the failure. See AGENTS.md,
+# "Prove the test can still fail" and the dead-instrument section under it.
+
+#: The bound the dead-beater children run under, in seconds. Each child spans
+#: FOUR of them, so the surviving run has to prove that a bound which demonstrably
+#: ends the control child never ends this one.
+DEAD_BEATER_BOUND_S = 2
+
+#: A REAL runtime whose workload tick's FIRST beat raises, in both wirings.
+#:
+#: ``bare`` reproduces the pre-fix start site verbatim -- a bare task, unreferenced
+#: by anything that observes it -- and ``supervised`` starts the production
+#: supervisor. NOTHING ELSE DIFFERS between the two runs, so the pair isolates the
+#: supervision itself rather than the rig's ability to make a tick die.
+#:
+#: The serving plane is REAL and stays healthy throughout (``RuntimeServer``'s own
+#: heartbeat, on its own thread), because that is the claim being made: the process
+#: that dies is not a wedged one. Both planes' stamp ages are printed every 200 ms
+#: so the parent can assert the pair -- one stamp frozen past the bound, the other
+#: still reporting normally -- rather than infer it from an exit code.
+_DEAD_BEATER_CHILD = r"""
+import asyncio
+import logging
+import os
+import pathlib
+import sys
+import time
+
+sys.path.insert(0, sys.argv[3])  # the checkout root, for the session factory
+
+from local_operator.harness.types import StreamEndEvent
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+# THE RUNTIME'S OWN LOG, onto stdout: the WARNING the supervisor writes is half
+# the evidence (the dump's tick-death line is the other half), and a child that
+# left the root logger unconfigured would route it through ``logging.lastResort``
+# to stderr, unformatted -- a weaker thing to assert on than the record the
+# supervision actually writes.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
+
+
+def _stream(request, signal):
+    async def gen():
+        yield StreamEndEvent(stop_reason="stop")
+
+    return gen()
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    bound = float(sys.argv[1])
+    mode = sys.argv[4]
+    # Both cadences shortened together: the child's own ticks are what the
+    # supervision re-creates, and a bound of second-scale makes the freeze
+    # observable in a test that has seconds to spend.
+    process.HEARTBEAT_INTERVAL_S = 0.2
+    server.HEARTBEAT_INTERVAL_S = 0.2
+
+    session = make_session(root, _stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published(), "the boot prologue never published"
+    assert stall_watchdog.arm(seconds=bound), "the child could not arm the bound"
+    print(f"armed:{os.getpid()}", flush=True)
+
+    # THE LEVER, and the only thing that differs from a healthy run: the workload
+    # tick's FIRST beat raises. Once, not always -- a tick that cannot beat at all
+    # is a different scenario (the supervisor gives up on it, which the in-process
+    # cell above pins), and what this child is for is the TRANSIENT death that used
+    # to be permanent because nothing re-created the task.
+    real_beat = stall_watchdog.beat
+    raised = {"done": False}
+
+    def rigged_beat(plane):
+        if plane == stall_watchdog.WORKLOAD and not raised["done"]:
+            raised["done"] = True
+            print("beater-raised", flush=True)
+            raise RuntimeError("rig: the workload tick's beat raised on its first call")
+        return real_beat(plane)
+
+    stall_watchdog.beat = rigged_beat
+
+    stop = asyncio.Event()
+    if mode == "bare":
+        tick = asyncio.create_task(process._beat_stall_watchdog(stop))
+    else:
+        tick = asyncio.ensure_future(process._watch_stall_beats(stop))
+    assert tick is not None  # the handle outlives the loop below, as in amain
+
+    started = time.monotonic()
+    while True:
+        await asyncio.sleep(0.2)
+        armed = stall_watchdog._ARMED
+        now = time.monotonic()
+        if armed is None:
+            print("disarmed", flush=True)
+            break
+        print(
+            f"ages workload={now - armed.last_beat[stall_watchdog.WORKLOAD]:.2f} "
+            f"serving={now - armed.last_beat[stall_watchdog.SERVING]:.2f}",
+            flush=True,
+        )
+        if now - started > bound * 4:
+            # ``os._exit`` rather than a return, for two reasons: the serving
+            # plane's thread is still live and must not hold the cell open, and
+            # this leaves the dump exactly as written. A ``disarm`` would remove
+            # it, and the dump's own tick-death line is what the parent reads.
+            print("survived", flush=True)
+            sys.stdout.flush()
+            os._exit(0)
+
+
+asyncio.run(main())
+"""
+
+
+def test_a_dead_workload_ticker_is_logged_recorded_and_re_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The supervisor's whole policy, with the failure made permanent.
+
+    A tick that dies on EVERY attempt is the case the restart budget exists for,
+    and it is the one that separates this fix from an unbounded retry loop: the
+    re-creations are counted to the limit, the death is recorded each time, the
+    supervisor GIVES UP rather than spinning, and the plane is left unbounded so
+    the bound can still fire on it. The last part is the load-bearing one -- a
+    supervisor that "kept the plane alive" by suppressing the deadline would be a
+    bound that no longer guards anything (see ``stall_watchdog``'s docstring).
+
+    THE DEATHS HERE ARE ALL INSIDE ONE WINDOW, which is what makes this a storm:
+    they are ~10 ms apart against ``STALL_BEAT_WINDOW_S``. The cell below is the
+    other half of that property -- the same counting, with the deaths spread
+    APART, must never disarm the supervision.
+
+    The record is read back through ``tick_deaths`` rather than by grepping the
+    file, because the reader is what a future incident will use: an assertion on
+    raw text would pass while the fact stayed unreadable.
+    """
+    from local_operator.session.runtime import process
+
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    # ARMED FOR REAL, so there is a real dump file at a real path -- that file is
+    # the artifact under test. The timer is the fake's, so nothing can fire.
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    # The one patch that makes the death permanent: the tick dies before its first
+    # beat, every time. ``_watch_stall_beats`` looks this up by module attribute, so
+    # the patch reaches the supervisor's own re-creation.
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=30.0))
+
+    # RE-CREATED TO THE BUDGET AND THEN STOPPED: one more death than re-creations,
+    # which is the arming plus every retry. A supervisor that never gave up would
+    # hang here instead of counting (the ``wait_for`` above is the hang's backstop).
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor created the tick {deaths} times, not "
+        f"{process.STALL_BEAT_RESTARTS + 1}: the restart budget is not what the constant says"
+    )
+    pid = os.getpid()
+    assert stall_watchdog.tick_deaths(pid, tmp_path) == (stall_watchdog.WORKLOAD,) * (
+        process.STALL_BEAT_RESTARTS + 1
+    ), (
+        "the artifact does not name every death, so a dump reader still cannot tell a "
+        "dead tick from a silent loop"
+    )
+    text = stall_watchdog.dump_path(pid, tmp_path).read_text(encoding="utf-8")
+    assert text.index(stall_watchdog.ARM_MARKER) < text.index(stall_watchdog.TICK_DEATH_MARKER)
+    assert f"RuntimeError: tick death {deaths}" in text, text
+    assert (
+        stall_watchdog.FIRED_MARKER not in text
+    ), "this cell wrote a fired-bound dump; the record has to be readable on its own"
+
+    # THE GIVE-UP IS IN THE RECORD, because the dump is what survives the exit and
+    # a reader who opens it must learn the consequence, not just the death.
+    assert "GIVES UP here" in text, text
+    assert "nothing watches whether the workload plane reports" in text, text
+
+    # THE LOG, which is the half that reaches an operator who never opens the dump.
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == process.STALL_BEAT_RESTARTS + 1, [
+        record.getMessage() for record in warnings
+    ]
+    assert "WORKLOAD tick died" in warnings[0].getMessage()
+    assert "RuntimeError: tick death 1" in warnings[0].getMessage()
+    assert "re-creating it (death 1 inside" in warnings[0].getMessage()
+    assert "is recorded in" in warnings[0].getMessage()
+    assert "GIVES UP here" in warnings[-1].getMessage()
+    assert "nothing watches whether the workload plane reports" in warnings[-1].getMessage()
+
+
+def test_deaths_spread_across_the_window_never_disarm_the_supervision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE BUDGET IS A RATE, NOT AN ALLOWANCE (agent review round 1, MAJOR 1).
+
+    The defect this closes: with a counter that is only ever incremented, THREE
+    unrelated transients spread over a session were enough to spend the budget, and the
+    death after them -- hours later, no more related to those three than they were to
+    each other -- ended the supervision for the rest of the session, so the WORKLOAD
+    stamp could then freeze for good and the bound could end a healthy runtime. (An
+    earlier version of this docstring said "the fifth", which is one more than the code
+    ends on: the same off-by-one agent review round 3 caught one file over from the
+    correction in ``process.py``.)
+    That is the very incident this supervision exists to prevent, so the cell that
+    forbids it is the one that runs MORE deaths than the budget allows and demands
+    that supervision is still there at the end.
+
+    The spacing is not a bet on the host: the fake tick lives for
+    ``2 * STALL_BEAT_WINDOW_S`` by construction, so every death is older than the
+    window by the time the next one lands, whatever the machine is doing. Nothing
+    here asserts a duration -- only how many ticks were created and whether the
+    supervisor gave up.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    # The window scaled down so the cell costs ~0.5 s; the RATIO is what the
+    # property is about, and it is preserved exactly (the tick outlives one
+    # window, then dies).
+    window_s = 0.05
+    monkeypatch.setattr(process, "STALL_BEAT_WINDOW_S", window_s)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+
+    creations: list[float] = []
+    wanted = process.STALL_BEAT_RESTARTS + 2
+
+    async def transient_tick(stop: asyncio.Event) -> None:
+        """The real tick's shape: it RUNS for a cadence, then a transient kills it."""
+        creations.append(time.monotonic())
+        await asyncio.sleep(window_s * 2)
+        raise RuntimeError(f"transient {len(creations)}")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", transient_tick)
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        supervisor = asyncio.ensure_future(process._watch_stall_beats(stop))
+        for _ in range(400):
+            # WAIT ON THE RECORDED DEATHS, not on the creations: a creation that has not
+            # died yet would be swallowed by the ``stop`` below and counted as a death
+            # the supervisor never got to report.
+            if (
+                sum("WORKLOAD tick died" in record.getMessage() for record in caplog.records)
+                >= wanted
+            ):
+                break
+            await asyncio.sleep(0.005)
+        else:
+            raise AssertionError(
+                f"only {len(creations)} ticks were created and "
+                f"{[r.getMessage() for r in caplog.records]} logged"
+            )
+        # THE SUPERVISION IS STILL THERE, which is the whole claim: it is ended here by
+        # the session ending, not by its own budget.
+        assert not supervisor.done(), "the supervision gave up before the session did"
+        stop.set()
+        supervisor.cancel()
+        await asyncio.gather(supervisor, return_exceptions=True)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(scenario(), timeout=30.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(creations) >= wanted, creations
+    assert not any("GIVES UP" in message for message in messages), (
+        f"{wanted} deaths spread over more than the window disarmed the supervision, so a "
+        f"long session still runs out of budget: {messages}"
+    )
+    assert sum("WORKLOAD tick died" in message for message in messages) == wanted, messages
+    assert (
+        stall_watchdog.tick_deaths(os.getpid(), tmp_path) == (stall_watchdog.WORKLOAD,) * wanted
+    ), "the record must name every death, in both directions"
+
+
+def test_the_supervisor_survives_a_fault_in_its_own_recovery_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """NOTHING IN THE SUPERVISOR MAY END IT UNOBSERVED (round 1, MINOR 1).
+
+    The reviewer's own lever: ``stall_watchdog.beat`` raising on EVERY workload
+    call, which breaks the tick AND the one stamp the supervisor makes on the
+    plane's behalf. Measured against the round-1 head, that raise escaped as an
+    unretrieved task exception, the supervisor died, the stamp froze and the bound
+    killed a healthy runtime -- the defect this PR fixes, re-created one level up.
+
+    So the cell demands all three halves of the guard: the fault is LOGGED with
+    its traceback, it does not stop the supervision, and the death accounting
+    still runs to its decision (a guard that swallowed the cycle would leave the
+    count short). The record stays readable throughout.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+
+    def rigged_beat(plane: str) -> None:
+        if plane == stall_watchdog.WORKLOAD:
+            raise RuntimeError("rig: the workload stamp never works")
+
+    monkeypatch.setattr(stall_watchdog, "beat", rigged_beat)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=30.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    faults = [m for m in messages if "raised in its own recovery path" in m]
+    assert faults, (
+        "the supervisor's own stamp is still unguarded: a raise there ends the supervision "
+        f"silently, which is this PR's defect one level up: {messages}"
+    )
+    assert "rig: the workload stamp never works" in caplog.text, caplog.text[-1500:]
+    assert len(faults) == process.STALL_BEAT_RESTARTS, (
+        f"the guard should absorb one fault per tolerated death ({process.STALL_BEAT_RESTARTS}), "
+        f"got {len(faults)}: {messages}"
+    )
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the death accounting did not run to its decision ({deaths} creations), so the guard "
+        f"swallowed the cycle rather than the fault: {messages}"
+    )
+    assert (
+        stall_watchdog.tick_deaths(os.getpid(), tmp_path) == (stall_watchdog.WORKLOAD,) * deaths
+    ), "the record must survive the guard"
+
+
+def test_a_tick_cancelled_while_the_session_is_live_is_recorded_as_a_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A CANCELLATION WITH ``stop`` UNSET IS NOT A SHUTDOWN (round 1, NIT 1).
+
+    ``amain`` sets ``stop`` and then cancels, so the two cases are separable, and
+    they must be separated: "the session is ending" and "something else ended the
+    ticker" are the pair this module keeps insisting an instrument must not
+    confuse. Nothing in the tree cancels this tick today; the cell exists so that
+    the day something does, it is in the log and in the dump rather than silent.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+
+    async def scenario() -> None:
+        supervisor = asyncio.ensure_future(process._watch_stall_beats(asyncio.Event()))
+        for _ in range(200):
+            # THE REAL TICK, so the cancellation lands on the object production
+            # creates; found by coroutine name rather than by reintroducing a
+            # handle into ``process`` for a test's convenience.
+            ticks = [
+                task
+                for task in asyncio.all_tasks()
+                # ``get_coro()`` is optional, so the name is read through ``getattr``:
+                # the alternative is a type error on a helper whose whole job is to
+                # find a task by name.
+                if getattr(task.get_coro(), "__name__", "") == "_beat_stall_watchdog"
+            ]
+            if ticks:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("the supervisor never created a tick to cancel")
+        ticks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await supervisor
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(scenario(), timeout=30.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "cancelled while the session was live" in message for message in messages
+    ), f"an externally cancelled tick still reads as a shutdown: {messages}"
+    text = stall_watchdog.dump_path(os.getpid(), tmp_path).read_text(encoding="utf-8")
+    assert "not a shutdown" in text, text
+
+
+def test_recording_a_tick_death_with_nothing_armed_is_a_no_op(tmp_path: Path) -> None:
+    """The in-process case: no dump file exists, and that must not be an error.
+
+    A TUI host and a test never go through the runtime entry point, so nothing
+    arms -- and the tick can still die there. ``note_tick_death`` returning False
+    is what lets the supervisor say "this log line is the only trace" instead of
+    raising inside the handler that exists to survive a death.
+
+    The read is pointed at ``tmp_path`` rather than left to the default log
+    directory: the default resolves from ``HOME``, and a test must never so much
+    as read the operator's live store when the case under test does not need it.
+    """
+    assert stall_watchdog.is_armed() is False
+    assert stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, "RuntimeError: x") is False
+    assert stall_watchdog.tick_deaths(os.getpid(), tmp_path) == ()
+
+
+def test_a_dead_workload_ticker_no_longer_takes_a_healthy_runtime_with_it(
+    tmp_path: Path,
+) -> None:
+    """THE ACCEPTANCE CELL: the same rig, bare and supervised, on the real runtime.
+
+    The control run is not decoration. ``bare`` is the pre-fix start site held
+    verbatim, and it must still die -- if it ever stops dying, the supervised half
+    below has stopped measuring anything, which is exactly the failure this file's
+    "prove the test can still fail" rule is about. What the control shows on the
+    way through is the defect's whole shape:
+
+    * the workload stamp FREEZES and stays frozen past the bound (printed ages),
+      while the serving plane keeps reporting every 200 ms -- a HEALTHY runtime;
+    * the bound then kills the process (rc 1) on that frozen stamp;
+    * the dump carries the fired marker and reads as the SILENCE leg, which is the
+      wrong cause;
+    * and ``tick_deaths`` is EMPTY, so nothing in the artifact separates this from
+      a loop that genuinely parked.
+
+    The supervised run is the same child with the production wiring, and it must
+    survive four bounds: the stamp resumes, the death is in the log with its
+    exception and in the dump as a named plane, and no bound fires at all.
+    """
+    bare_dir = tmp_path / "bare"
+    bare_dir.mkdir(parents=True, exist_ok=True)
+    bare = _run_script(
+        _DEAD_BEATER_CHILD,
+        bare_dir,
+        args=(str(DEAD_BEATER_BOUND_S), str(bare_dir), str(REPO), "bare"),
+        timeout=180.0,
+    )
+
+    assert bare.returncode == 1, (
+        f"the CONTROL no longer dies, so this cell cannot tell a fix from a blind rig: "
+        f"rc={bare.returncode} stdout={bare.stdout!r} stderr={bare.stderr!r}"
+    )
+    assert "beater-raised" in bare.stdout, bare.stdout
+    assert "survived" not in bare.stdout, "the control has to die for the pair to mean anything"
+    bare_workload, bare_serving = _stamp_ages(bare.stdout)
+    assert bare_workload, f"the control printed no stamp samples: {bare.stdout!r}"
+    assert max(bare_workload) >= DEAD_BEATER_BOUND_S * 0.8, (
+        f"the workload stamp never froze ({max(bare_workload):.2f}s of {DEAD_BEATER_BOUND_S}s), "
+        f"so the rig is not reproducing the defect: {bare.stdout!r}"
+    )
+    assert max(bare_serving) < DEAD_BEATER_BOUND_S / 2, (
+        f"the serving plane was not healthy ({max(bare_serving):.2f}s), so this run says "
+        f"nothing about a runtime that was otherwise working: {bare.stdout!r}"
+    )
+    bare_pid = int(bare.stdout.split("armed:", 1)[1].split()[0])
+    bare_text = _dump_for(bare_dir, bare_pid).read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in bare_text, bare_text[-2000:]
+    assert stall_watchdog.fired_leg(bare_pid, bare_dir / "logs") == (
+        stall_watchdog.LEG_SILENCE
+    ), f"the control's artifact no longer reads as the silence leg, which is the lie: {bare_text}"
+    assert stall_watchdog.tick_deaths(bare_pid, bare_dir / "logs") == (), (
+        "the control recorded a tick death; without the supervisor there is nothing to "
+        "record it, so this means the record is being written by something else"
+    )
+
+    # -- THE FIX: the same child, the production start site --------------------
+    supervised_dir = tmp_path / "supervised"
+    supervised_dir.mkdir(parents=True, exist_ok=True)
+    supervised = _run_script(
+        _DEAD_BEATER_CHILD,
+        supervised_dir,
+        args=(str(DEAD_BEATER_BOUND_S), str(supervised_dir), str(REPO), "supervised"),
+        timeout=180.0,
+    )
+
+    assert supervised.returncode == 0, (
+        f"the runtime died anyway: rc={supervised.returncode} "
+        f"stdout={supervised.stdout!r} stderr={supervised.stderr!r}"
+    )
+    assert "survived" in supervised.stdout, (
+        f"the child never reached four bounds, so survival is not established: "
+        f"{supervised.stdout!r} stderr={supervised.stderr!r}"
+    )
+    workload, serving = _stamp_ages(supervised.stdout)
+    assert workload, f"the child printed no stamp samples: {supervised.stdout!r}"
+    assert max(workload) < DEAD_BEATER_BOUND_S, (
+        f"the workload stamp approached the bound ({max(workload):.2f}s of "
+        f"{DEAD_BEATER_BOUND_S}s): the tick was not re-created, or it was re-created too "
+        f"late to matter: {supervised.stdout!r}"
+    )
+    assert max(serving) < DEAD_BEATER_BOUND_S / 2, (
+        f"the serving plane stopped reporting, so survival is not the supervision's doing: "
+        f"{supervised.stdout!r}"
+    )
+
+    # THE LOG: WARNING, with the exception, at the moment of death.
+    assert "WARNING" in supervised.stdout, supervised.stdout
+    assert "WORKLOAD tick died" in supervised.stdout, supervised.stdout
+    assert (
+        "RuntimeError: rig: the workload tick's beat raised" in supervised.stdout
+    ), supervised.stdout
+    assert "re-creating it (death 1 inside" in supervised.stdout, supervised.stdout
+
+    # THE RECORD: beside the plane's own stamp, in the dump, readable back.
+    supervised_pid = int(supervised.stdout.split("armed:", 1)[1].split()[0])
+    supervised_dump = _dump_for(supervised_dir, supervised_pid)
+    assert stall_watchdog.tick_deaths(supervised_pid, supervised_dir / "logs") == (
+        stall_watchdog.WORKLOAD,
+    ), f"the dump does not name the dead tick: {supervised_dump.read_text(encoding='utf-8')}"
+    supervised_text = supervised_dump.read_text(encoding="utf-8")
+    assert "RuntimeError: rig: the workload tick's beat raised" in supervised_text
+    assert (
+        stall_watchdog.FIRED_MARKER not in supervised_text
+    ), "a bound fired in the run that is supposed to have survived"
+    assert stall_watchdog.fired_leg(supervised_pid, supervised_dir / "logs") is None
+
+
+def _beater_module_functions(source: str) -> dict[str, ast.AST]:
+    """The module-level function bodies of ``process``, by name, as AST nodes.
+
+    AST and not text for the cells below: they pin the WIRING and the SHAPE of the
+    supervisor, and a rewritten comment or docstring that happens to mention a name
+    must not be able to fail them (agent review round 1, NIT 2 — the earlier
+    version asserted the ABSENCE of a substring in ``inspect.getsource``, which is
+    a pin on prose as much as on code).
+    """
+    return {
+        node.name: node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _task_starters(node: ast.AST) -> list[ast.Call]:
+    """Every task-starting call under ``node`` — ``ensure_future``/``create_task``.
+
+    WHOLE-AST, AT ANY DEPTH, and that is the round-2 NIT. The earlier version looked
+    only at the MODULE's own function bodies, while the sentence these cells carry
+    was about the module: a ticker armed outside any function — a module-level
+    expression, a ``lambda``, a class body — would have slipped past the check.
+    Either the sentence or the check had to move, and the check moved, because the
+    property being pinned is about the module and not about its functions.
+    """
+    starters: list[ast.Call] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        func = child.func
+        if isinstance(func, ast.Attribute):
+            called = func.attr
+        elif isinstance(func, ast.Name):
+            called = func.id
+        else:
+            continue
+        if called in {"ensure_future", "create_task"}:
+            starters.append(child)
+    return starters
+
+
+def _started_name(starter: ast.Call) -> str | None:
+    """The NAME of the coroutine ``starter`` was handed, or ``None``."""
+    if len(starter.args) != 1 or not isinstance(starter.args[0], ast.Call):
+        return None
+    inner = starter.args[0].func
+    if isinstance(inner, ast.Name):
+        return inner.id
+    if isinstance(inner, ast.Attribute):
+        return inner.attr
+    return None
+
+
+def _module_aliases(module: ast.Module) -> dict[str, str]:
+    """Module-level ``name = other_name`` bindings, for resolving an ALIASED starter.
+
+    AGENT REVIEW ROUND 3, N1: the round-2 check matched the name written at the call site, so
+    ``_orphan = _beat_stall_watchdog`` followed by ``ensure_future(_orphan(stop))`` was a second
+    real arm site the check counted as one — the other half of the round-2 NIT. Only single-name
+    targets whose value is a single name are followed, and only at module level, which is enough
+    for an alias and cannot invent a resolution the language would not make.
+    """
+    aliases: dict[str, str] = {}
+    for node in module.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = node.value.id
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.value, ast.Name)
+            and isinstance(node.target, ast.Name)
+        ):
+            aliases[node.target.id] = node.value.id
+    return aliases
+
+
+def _resolves_to(name: str, aliases: dict[str, str]) -> set[str]:
+    """``name`` and every module-level alias it stands for, transitively."""
+    seen = {name}
+    while (nxt := aliases.get(name)) is not None and nxt not in seen:
+        name = nxt
+        seen.add(name)
+    return seen
+
+
+def _starts_coroutine(starter: ast.Call, name: str, aliases: dict[str, str]) -> bool:
+    """Whether ``starter`` hands ``name`` — or an alias of it — to a task starter."""
+    started = _started_name(starter)
+    return started is not None and name in _resolves_to(started, aliases)
+
+
+def test_a_failing_record_cannot_defeat_the_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A TERMINAL STATE A DIAGNOSTIC CAN SWITCH OFF IS NOT TERMINAL (round 2, MINOR 2).
+
+    The give-up decision used to be re-derived AFTER the record write, so anything that
+    made that write raise skipped the ``return``: the guard caught it and the loop went
+    round again. Reproduced by the reviewer as 130 ticks, 130 guard tracebacks and no
+    give-up line in 2 s, with the plane never stamped — a failing REPORT defeating the
+    fail-safe, which is this PR's own defect shape wearing a different hat.
+
+    The lever is the module's own record function raising, and the cell demands the
+    supervisor still reaches its decision: the tick is created exactly
+    ``STALL_BEAT_RESTARTS + 1`` times, the give-up is logged, and the missing record is
+    reported as a missing record rather than as a death that did not happen.
+
+    THE ``wait_for`` IS WHAT MAKES THIS CELL RED RATHER THAN WEDGED on the un-protected
+    code, where the loop has no exit at all.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    def unwritable_record(plane: str, reason: str) -> bool:
+        raise OSError("rig: the record cannot be written")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+    monkeypatch.setattr(stall_watchdog, "note_tick_death", unwritable_record)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=20.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor never reached its decision ({deaths} creations), so a record that "
+        f"cannot be written defeats the give-up and makes the terminal state optional: {messages}"
+    )
+    assert any("GIVES UP" in message for message in messages), messages
+    assert sum("could not be written" in message for message in messages) == deaths, messages
+
+
+class _ExplodingLogger:
+    """A logger whose calls raise — optionally only for the messages it is told to.
+
+    ``RecursionError`` rather than a synthetic ``RuntimeError``: in this venv
+    ``StreamHandler.emit`` re-raises it instead of routing it to ``handleError``, so a runtime
+    wedged enough to blow the recursion limit can reach this path for real. That is why a log
+    call must not be able to break the path it reports on (agent review round 4, MINOR).
+
+    ``only`` is for a cell that still needs the OTHER lines to arrive — the cancellation cell
+    asserts the record's own warning is present, so only its own line explodes there — and
+    ``None`` explodes on everything.
+    """
+
+    def __init__(self, real: logging.Logger, only: str | None = None) -> None:
+        self._real = real
+        self._only = only
+
+    def warning(self, message: str, *args: object, exc_info: bool = False) -> None:
+        if self._only is None or self._only in message:
+            raise RecursionError("rig: maximum recursion depth exceeded while reporting")
+        self._real.warning(message, *args, exc_info=exc_info)
+
+
+def test_a_failing_record_does_not_replace_a_cancellation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same finding's sibling: the CANCELLATION must not depend on the record either.
+
+    An un-totaled ``note_tick_death`` in the cancellation path raised where the shutdown
+    path had already committed to re-raising, so the supervisor ended ``OSError`` where it
+    was asked for ``cancelled`` — a diagnostic replacing a terminal state, one branch over
+    from the give-up that the cell above covers. Round 4 added the LOG LINE beside that
+    write to the same cell: it now raises for its own message only, so the assertion below
+    about the record's warning still holds while the branch is shown to end ``cancelled``
+    with no report possible either.
+
+    The REAL tick is left in place (it sleeps), so the cancellation lands on the object
+    production creates and the assertion is about how the supervisor ENDS.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(
+        process,
+        "logger",
+        _ExplodingLogger(process.logger, only="was cancelled while the session was live"),
+    )
+
+    def unwritable_record(plane: str, reason: str) -> bool:
+        raise OSError("rig: the record cannot be written")
+
+    monkeypatch.setattr(stall_watchdog, "note_tick_death", unwritable_record)
+
+    async def scenario() -> None:
+        supervisor = asyncio.ensure_future(process._watch_stall_beats(asyncio.Event()))
+        for _ in range(200):
+            ticks = [
+                task
+                for task in asyncio.all_tasks()
+                if getattr(task.get_coro(), "__name__", "") == "_beat_stall_watchdog"
+            ]
+            if ticks:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("the supervisor never created a tick to cancel")
+        ticks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await supervisor
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(scenario(), timeout=20.0))
+
+    assert any("could not be written" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+def test_a_failing_dump_path_cannot_defeat_the_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE CLAUSE IS PART OF THE GIVE-UP, NOT JUST THE WRITE (agent review round 3, M2).
+
+    Round 2 made the RECORD total and left the sentence around it building
+    ``stall_watchdog.dump_path()`` at the call site — and ``dump_path`` reaches ``log_dir()``,
+    so rigging THAT to raise, with the record left total and succeeding, still skipped the
+    ``return``: the reviewer measured 121 creations, no ``GIVES UP`` line, and a supervisor
+    that never came back — spawning a task on every pass. The fix moved the whole clause inside
+    the total call, so there is nothing left between the decision and the return.
+
+    Same shape as the round-2 cell, one line down, and ``wait_for`` is again what makes it red
+    rather than wedged on the un-protected code.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    def unnameable_dump(pid: int | None = None, directory: Path | None = None) -> Path:
+        raise OSError("rig: the dump path cannot be resolved")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+    monkeypatch.setattr(stall_watchdog, "dump_path", unnameable_dump)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=20.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor never reached its decision ({deaths} creations), so a path lookup that "
+        f"cannot resolve defeats the give-up — round 2's finding one line down: {messages}"
+    )
+    assert any("GIVES UP" in message for message in messages), messages
+    assert any("dump path could not be resolved" in message for message in messages), messages
+
+
+def test_a_failing_log_cannot_defeat_the_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REPORT MUST NOT BREAK THE PATH IT REPORTS ON (agent review round 4, MINOR).
+
+    Round 2 made the record total and round 3 made its clause total; the give-up's own
+    ``logger.warning`` still sat between the decision and the ``return`` — as did the guard's,
+    which is the one that keeps the supervision alive at all. Rigged, the give-up never
+    happened: the log's exception reached the guard, the guard slept and the loop went round
+    again (321 creations in 6 s, against 4 for the control). Every log call in the supervision
+    now goes through ``_safe_warning``, so the logger here raises on EVERY message — and the
+    recovery stamp raises too, which is what drives each cycle into the guard, so that call is
+    exercised rather than assumed.
+
+    The records are the point: with the log impossible, the dump still carries every death.
+    A missing log line is a missing diagnostic, never a missing event.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(process, "logger", _ExplodingLogger(process.logger))
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    def unwritable_stamp(plane: str) -> None:
+        raise OSError("rig: the recovery stamp cannot be written")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+    monkeypatch.setattr(stall_watchdog, "beat", unwritable_stamp)
+
+    asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=20.0))
+
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor never reached its decision ({deaths} creations) while its logger "
+        f"raised, so a report that cannot be made defeats the give-up"
+    )
+    assert stall_watchdog.tick_deaths(os.getpid(), tmp_path) == (stall_watchdog.WORKLOAD,) * (
+        process.STALL_BEAT_RESTARTS + 1
+    ), "the dump lost deaths when the log could not be written: the record depends on the report"
+
+
+def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
+    """The fix is WIRED, and wired in ONE place.
+
+    The cells above drive ``_watch_stall_beats`` directly, so a revert of the one
+    line in ``amain`` that selects it would leave all of them green while
+    production went back to an unobserved tick — the same shape
+    ``test_the_only_arm_site_is_the_runtime_entry_point`` exists for on the other
+    side of this module.
+
+    The second assertion is the other half: the tick's coroutine is handed to a task
+    starter exactly ONCE in this module — **at any depth, not just inside a module-level
+    function, and through an alias if one is used** (agent review round 2, NIT, and round
+    3, N1: the check first saw only function bodies, and then only the name written at the
+    call site, while its sentence claimed both) — so a second arm site beside the
+    supervisor cannot appear unnoticed.
+    """
+    from local_operator.session.runtime import process
+
+    source = Path(process.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    functions = _beater_module_functions(source)
+    aliases = _module_aliases(module)
+    assert any(
+        _starts_coroutine(starter, "_watch_stall_beats", aliases)
+        for starter in _task_starters(functions["amain"])
+    ), "amain does not start the supervisor, so a real runtime can run with an unobserved tick"
+    ticks = [
+        starter
+        for starter in _task_starters(module)
+        if _starts_coroutine(starter, "_beat_stall_watchdog", aliases)
+    ]
+    assert len(ticks) == 1, (
+        f"the tick's coroutine is handed to a task starter {len(ticks)} times in this module "
+        f"(at any depth, aliases resolved): with zero the runtime has no bound ticker at all, "
+        f"and with two the second one is unobserved — the defect this PR removes"
+    )
+
+
+def test_the_supervisors_attempts_are_spaced_by_the_tick_itself() -> None:
+    """No sleep of the supervisor's own on the normal path.
+
+    WHY THIS IS A STRUCTURAL PIN AND NOT A MEASUREMENT. The spacing that makes a
+    hot failure bounded is the tick's own leading sleep — ``_beat_stall_watchdog``
+    is wait-then-beat — so an attempt cannot cost less than one heartbeat however
+    the supervisor is written. An extra ``await asyncio.sleep(HEARTBEAT_INTERVAL_S)``
+    here is exactly what the round-1 draft had, and it is what made its grace
+    figure wrong (agent review round 1, MINOR 2); the guard is the ONE place that
+    may sleep, for the case where even the tick's own sleep cannot run. A
+    wall-clock cell would re-derive this from a loaded host; the structure is the
+    fact.
+    """
+    from local_operator.session.runtime import process
+
+    functions = _beater_module_functions(Path(process.__file__).read_text(encoding="utf-8"))
+    supervisor = functions["_watch_stall_beats"]
+    in_a_handler: set[int] = set()
+    for handler in (node for node in ast.walk(supervisor) if isinstance(node, ast.ExceptHandler)):
+        in_a_handler.update(
+            line
+            for child in ast.walk(handler)
+            if isinstance(line := getattr(child, "lineno", None), int)
+        )
+    sleeps = [
+        node.lineno
+        for node in ast.walk(supervisor)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "sleep"
+    ]
+    assert sleeps, "the supervisor never yields to the loop at all"
+    outside = [line for line in sleeps if line not in in_a_handler]
+    assert not outside, (
+        f"the supervisor sleeps on its normal path (lines {outside}), which makes one attempt "
+        f"cost two heartbeats: every grace and deadline figure in its docstring would be "
+        f"wrong again"
+    )
