@@ -472,13 +472,15 @@ def _search_tools(
         # (the per-tool read, whose two arms are the model's answer to "when").
         # LENGTH IS LOAD-BEARING on this arm — ``used`` below gates which matched
         # tools are shown AND enabled — so this line is held at or under the length
-        # of the text it replaced (157 characters, measured; this is 156), and the
+        # of the text it replaced (157 characters, measured; this is 155), and the
         # timing it cannot spell out in the budget is what the tool's own URL
-        # reply states precisely.
+        # reply states precisely. The clause names the TOOL LIST rather than "here":
+        # the result below this header carries each match's input schema, so "no
+        # schema advertised here" would be contradicted by its own payload.
         lines.append(
             'Call discovered tools from eval with tool("name", **arguments); '
             "validation and approvals still apply. "
-            "No schema advertised here; a tool's own URL says when."
+            "No schema added to your tool list; its URL says when."
         )
     else:
         # The same rule for a host that builds the resolver WITHOUT a deferrer

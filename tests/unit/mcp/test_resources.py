@@ -334,18 +334,28 @@ def test_the_search_header_a_session_renders_states_when_a_schema_arrives() -> N
     round 2's correction; QA round 2, Q-r2-1). Its length is not cosmetic: the line
     is appended before ``used = sum(map(len, lines))``, and that running total
     decides which matched tools are shown AND enabled against
-    ``MAX_SEARCH_RESULT_CHARS`` — measured, a 63-character growth flipped a
-    boundary case from 4 enabled matches to 3 (QA round 2, Q-r2-2). So the
-    rendered line is pinned to the length of the text it replaced, and the arm no
-    shipped caller reaches states the same rule in more words.
+    ``MAX_SEARCH_RESULT_CHARS``.
+
+    WHICH ARM THE BOUNDARY NUMBER BELONGS TO (review round 3, F3-2): QA's flip — a
+    growth of 63 characters taking 4 enabled matches to 3 at ``used`` 31,968 ->
+    32,031 — was measured on the OTHER arm, the ``defer=None`` one no shipped
+    caller reaches (161 -> 224 after round 1's rewrite, 238 now). The arm pinned
+    HERE moved the other way across these rounds, 157 -> 155, so the shipped
+    path's running total sits two characters LOWER than it did, not closer to the
+    cap. The mechanism is shared (both lines enter ``used``); the direction is not.
     """
     rendered = make_mcp_resolver(FakeManager(), lambda *a: None, defer=lambda *a: None)
     result = rendered("mcp://?search=authenticated+user&limit=2")
     assert result is not None
     header = next(line for line in result.splitlines() if line.startswith("Call discovered"))
-    assert "No schema advertised here" in header
-    assert "a tool's own URL says when" in header
-    assert len(header) == 156, "the rendered search header grew; see this test's docstring"
+    # The clause names the tool LIST, not "here": the entries below this header
+    # carry each match's input schema, so a claim about "here" would be
+    # contradicted by the result it heads (review round 3, F3-1).
+    assert "No schema added to your tool list" in header
+    assert "its URL says when" in header
+    # 155 today, from 157: the pin is what makes the next copy edit argue for the
+    # budget rather than spend it silently.
+    assert len(header) == 155, "the rendered search header grew; see this test's docstring"
 
     unreachable = make_mcp_resolver(FakeManager(), lambda *a: None)
     enabled_result = unreachable("mcp://?search=authenticated+user&limit=2")
