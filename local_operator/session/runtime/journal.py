@@ -853,8 +853,17 @@ def install_moved(row: TurnJournalRow) -> bool:
     return (_now() - age) <= alive_until
 
 
-def _stall_bound_leg(row: TurnJournalRow) -> str | None:
-    """Which leg of the runtime's stall bound ended it, or ``None`` when it did not.
+def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, ...]]:
+    """``(which leg of the runtime's stall bound ended it, which tickers had died)``.
+
+    ``(None, ())`` when this turn left no dump of its own.
+
+    THE TWO FACTS COME OUT OF ONE READ OF ONE FILE, deliberately: the narration
+    consumes them together (agent review round 1, MINOR 3), because a bare
+    SILENCE leg must not be reported as "the loop went silent" while the same
+    artifact says the plane's own reporter was gone. Two separate readers would be
+    two chances for the pair to disagree about which file they came from, which is
+    the same class of error the fence below guards in the time direction.
 
     THE DUMP IS THE EVIDENCE AND THE MTIME IS THE KEYS. A file written after this
     row's turn began can only be about this run — the dump's last write IS the
@@ -888,14 +897,14 @@ def _stall_bound_leg(row: TurnJournalRow) -> str | None:
 
         path = stall_watchdog.dump_path(row.pid)
         if not path.exists() or path.stat().st_mtime < row.started_at:
-            return None
-        return stall_watchdog.fired_leg(row.pid)
+            return None, ()
+        return stall_watchdog.fired_leg(row.pid), stall_watchdog.tick_deaths(row.pid)
     except Exception:  # noqa: BLE001 — an unreadable dump is not a dead session
         logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)
-        return None
+        return None, ()
 
 
-def _stall_bound_detail(leg: str) -> str:
+def _stall_bound_detail(leg: str, tick_deaths: tuple[str, ...] = ()) -> str:
     """The clause that tells the bound's two legs apart on every surface.
 
     The CLASS is deliberately one token for both (see
@@ -905,13 +914,29 @@ def _stall_bound_detail(leg: str) -> str:
     over a thread parked in ``queue.get``: a wait, not a wedge, which is a design
     decision this bound tolerates right up to the point where nothing has
     reported for the whole bound.
+
+    A SILENCE LEG OVER A DUMP THAT NAMES A DEAD TICKER IS A THIRD READING, and it
+    is the one the operator actually needs (agent review round 1, MINOR 3). The
+    leg is a PREDICATE — "no plane reported for the whole bound" — and it stays
+    one, because a dead ticker does not fire anything; it is the REASON the plane
+    had nothing left to report with, and the two send a reader to opposite
+    places. Without this the automated verdict kept calling a runtime whose
+    reporter had died a runtime whose loop had gone quiet, which is the exact
+    false attribution the tick-death record exists to end — and it survived in
+    the one surface that is not a human reading the file.
     """
-    from local_operator.session.runtime.stall_watchdog import LEG_PROGRESS
+    from local_operator.session.runtime.stall_watchdog import LEG_PROGRESS, WORKLOAD
 
     if leg == LEG_PROGRESS:
         return (
             "its own stall bound fired: the loops kept running while the work "
             "stopped advancing, and every thread's stack is in its dump"
+        )
+    if WORKLOAD in tick_deaths:
+        return (
+            "its own stall bound fired: its workload tick had already died (recorded in "
+            "its dump), so the silence is the REPORTER's rather than the loop's, and every "
+            "thread's stack is in its dump"
         )
     return (
         "its own stall bound fired: no plane reported for the whole bound, and "
@@ -933,7 +958,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        exit hook, writes no journal row and reaches no reaper, so without this
        the loudest possible ending — a runtime that dumped every thread and
        killed itself — was narrated as ``unattributed``. See
-       :func:`_stall_bound_leg` for how a fired dump is told from a file a
+       :func:`_stall_bound_evidence` for how a fired dump is told from a file a
        SIGKILL left, and :data:`incidents.STALL_BOUND_CAUSE` for what its absence
        cost.
 
@@ -1000,12 +1025,12 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         render_cut_off_reason,
     )
 
-    leg = _stall_bound_leg(row)
+    leg, tick_deaths = _stall_bound_evidence(row)
     if leg is not None:
         return (
             "error",
             STALL_BOUND_CAUSE,
-            render_cut_off_reason(STALL_BOUND_CAUSE, detail=_stall_bound_detail(leg)),
+            render_cut_off_reason(STALL_BOUND_CAUSE, detail=_stall_bound_detail(leg, tick_deaths)),
         )
     signal = signal_exit_token(row.exit_cause)
     if signal:
