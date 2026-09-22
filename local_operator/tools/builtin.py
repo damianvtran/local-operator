@@ -138,6 +138,7 @@ from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
     credential_dump_notice,
+    credential_forms,
     has_shape_anchor,
     pem_body_line,
     pem_end_line,
@@ -2491,6 +2492,18 @@ class _PipeRedactor:
     it is the same in kind as the shape rule: a value too long to be complete in
     the buffer is split here too, registered or not.
 
+    **Both of those rules run over the SPELLINGS of a value, not its bytes.**
+    A value the mask catches reversed, in hex or base64 is also a value the cut
+    must not halve, and its spellings are longer than it is: the escaped form is
+    four characters per byte, so a 32-character secret is a 128-character needle
+    and can straddle a cut its verbatim form would never reach. So the release
+    point's KNOWN-value rule and the hold both take ``self.forms``
+    (:func:`~local_operator.redaction_shapes.credential_forms`), which is the
+    same spelling list the mask below uses — one policy, so "the mask would have
+    caught it" and "the cut was moved off it" cannot disagree about what a value
+    looks like. The cost is one ``str.find`` per spelling per feed, over a buffer
+    already bounded by the rules above.
+
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
     painted live is unrecoverable, while a partial line's bytes arrive as soon
@@ -2538,7 +2551,18 @@ class _PipeRedactor:
 
     def _set(self, values: Iterable[str]) -> None:
         self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
-        self.lookbehind = max((len(value) for value in self.secrets), default=1) - 1
+        # EVERY SPELLING, not just the verbatim one, and that is why the list is
+        # kept separate from ``self.secrets``: the MASK derives the same spellings
+        # for itself (``scrub_secrets_with_hits`` takes the raw values), and the CUT
+        # RULE below needs them as needles — because a value printed reversed or in
+        # hex is a value the mask must catch AND a value the release point must not
+        # cut in half. ``self.secrets`` stays raw because that is what the mask takes.
+        self.forms = sorted(
+            {form for value in self.secrets for form in credential_forms(value)},
+            key=len,
+            reverse=True,
+        )
+        self.lookbehind = max((len(form) for form in self.forms), default=1) - 1
 
     def refresh(self, values: Sequence[str]) -> None:
         """Adopt a newly-widened value set mid-stream.
@@ -2784,10 +2808,13 @@ class _PipeRedactor:
         cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
         if cap_forced:
             cut = self._cut_past_a_split_header(text, len(text) - _PIPE_DEFERRAL_LIMIT)
-        # Never cut through a KNOWN value. The newline rule above already
-        # prevents that for any value without a newline in it, which is every
-        # credential in practice; this keeps the guarantee for the ones with
-        # one, and for the cap-forced cut above.
+        # Never cut through a KNOWN value, in ANY of its spellings. The newline
+        # rule above already prevents that for a spelling without a newline in
+        # it, which is every verbatim credential in practice; this keeps the
+        # guarantee for the ones with one (and for the newline-joined spelling),
+        # for the cap-forced cut above, and — the case this was widened for — for
+        # a TRANSFORMED spelling, which is longer than the value and therefore
+        # straddles a cut the value itself would not.
         #
         # A SHAPE gets the same rule, for the same reason and by a stricter
         # mechanism — see _shape_safe_spans / _cut_outside: the cap is the one
@@ -2828,9 +2855,9 @@ class _PipeRedactor:
             previous_cut = cut
             if spans:
                 cut = self._cut_outside(cut, spans)
-            for secret in self.secrets:
-                start = text.find(secret, max(cut - len(secret) + 1, 0))
-                if 0 <= start < cut < start + len(secret):
+            for form in self.forms:
+                start = text.find(form, max(cut - len(form) + 1, 0))
+                if 0 <= start < cut < start + len(form):
                     cut = start
             if cut and (self._in_key_block or block_open):
                 break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1

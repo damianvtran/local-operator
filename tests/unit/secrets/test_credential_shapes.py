@@ -72,7 +72,7 @@ from local_operator.redaction_shapes import (
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
-from local_operator.variables import VariableStore
+from local_operator.variables import VariableStore, redact_secret_values
 from tests.unit.secrets.credential_shape_corpus import (
     COMPACT_TOKEN_PAIR,
     COUNT_QUALIFIER_NAMES,
@@ -2133,6 +2133,192 @@ def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
     redactor.feed(lines.encode())
     assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
     assert end_spy.calls == 0, f"the END classifier was asked about {end_spy.calls} prose lines"
+
+
+# --- the exact-VALUE pass: which SPELLINGS of a known value are masked -------
+#
+# The incident these pin: an agent could not read a hostname the mask kept
+# replacing, so it printed the value REVERSED and walked straight past the
+# filter. A value's reversal, base64, hex, escape, percent and separator forms
+# are all the same credential, so all of them are masked; the negative half — an
+# ordinary string that merely LOOKS transformed must stay byte-identical — is as
+# much of the contract as the positive half, because this pass runs over every
+# tool result and a mask that eats ordinary output blinds the agent.
+
+#: Synthetic and opaque on purpose: no scheme, no issuer prefix, no spelling the
+#: SHAPE table recognises. What these tests measure is the exact-value policy,
+#: so a value the shape pass could mask by itself would prove nothing.
+SPELLED_VALUE = "q7fh2zp4mx9wk3ta6bn1dv8rs5"
+
+
+def _spellings(value: str) -> dict[str, str]:
+    """The cheap transforms of ``value``, in the spellings a command emits."""
+    import base64
+    import json
+    import urllib.parse
+
+    raw = value.encode()
+    standard = base64.b64encode(raw).decode()
+    urlsafe = base64.urlsafe_b64encode(raw).decode()
+    return {
+        "verbatim": value,
+        "reversed (the incident's evasion)": value[::-1],
+        "base64": standard,
+        "base64 unpadded": standard.rstrip("="),
+        "base64 urlsafe": urlsafe,
+        "base64 urlsafe unpadded": urlsafe.rstrip("="),
+        "hex lower": raw.hex(),
+        "hex upper": raw.hex().upper(),
+        "backslash-x escaped": "".join(f"\\x{b:02x}" for b in raw),
+        "backslash-x escaped, upper digits": "".join(f"\\x{b:02X}" for b in raw),
+        "percent-encoded": urllib.parse.quote(value, safe=""),
+        "percent-encoded, form": urllib.parse.quote_plus(value, safe=""),
+        "json escaped": json.dumps(value)[1:-1],
+        "space-spread": " ".join(value),
+        "dash-spread": "-".join(value),
+    }
+
+
+@pytest.mark.parametrize("label", sorted(_spellings(SPELLED_VALUE)))
+def test_every_cheap_spelling_of_a_registered_value_is_masked(label: str) -> None:
+    """Every enumerated spelling, one case each, so a family cannot rot silently.
+
+    Parametrised rather than looped on purpose: a loop that stops early on the
+    first failure hides which families were never reached, and the whole point
+    of a closed spelling list is that each entry is inspectable on its own.
+    """
+    spelling = _spellings(SPELLED_VALUE)[label]
+    text = f"printed={spelling} done"
+    masked = redact_secret_values(text, [SPELLED_VALUE])
+    assert spelling not in masked, f"{label} survived the mask"
+    assert masked == "printed=[redacted] done"
+
+
+def test_the_incidents_own_evasion_is_a_regression_case() -> None:
+    """The reverse-printed hostname that started this, spelled as it was printed.
+
+    Not a generic reversal test: the incident's value is a HOSTNAME, printed
+    reversed because the mask kept replacing it, which is the deliberate
+    control bypass the policy has to contain rather than the accident it also
+    catches.
+    """
+    host = "qa-app.qa.gominerva.com"
+    assert host[::-1] == "moc.avrenimog.aq.ppa-aq"
+    masked = redact_secret_values(f"host is {host[::-1]}", [host])
+    assert "moc.avrenimog" not in masked
+    assert masked == "host is [redacted]"
+
+
+def test_a_value_under_the_floor_keeps_its_verbatim_coverage_only() -> None:
+    """The over-masking floor, stated as a contract rather than left implied.
+
+    A short value's permutations are strings ordinary output already contains
+    (``atled`` is ``delta`` backwards), so they are not enumerated. What must
+    not change is the pre-existing guarantee: the value ITSELF is still masked.
+    """
+    short = "k3y-8812"
+    assert len(short) < redaction_shapes._TRANSFORM_MIN_VALUE_LEN
+    assert redaction_shapes.credential_forms(short) == (short,)
+    assert redact_secret_values(f"id={short}", [short]) == "id=[redacted]"
+
+
+def test_ordinary_text_that_looks_transformed_is_left_byte_identical() -> None:
+    """The negative half: over-masking is a defect in this codebase.
+
+    Deliberately includes text that a naive "looks encoded" rule would eat — a
+    base64 blob, a hex dump, an escaped JSON body, a percent-encoded URL — and
+    the reversal of a real word, which is what a short value's family would
+    have masked.
+    """
+    ordinary = (
+        "payload=aGVsbG8gd29ybGQgdGhpcyBhIGJhc2U2NCBibG9i",
+        "0000  51 37 66 68 32 7a 70 34  6d 78 39 77 6b 33 74 61",
+        '{"note": "caf\\u00e9 \\"quoted\\" \\\\ path"}',
+        "https://example.test/a%20b/c%2Fd?x=1",
+        "the delta between atled and delta is nil",
+    )
+    for text in ordinary:
+        assert redact_secret_values(text, [SPELLED_VALUE]) == text
+
+
+def test_every_spelling_of_a_longer_value_is_masked_before_a_prefix_value() -> None:
+    """Longest-first ordering, preserved one level down under normalisation.
+
+    A value that is a prefix of another must not run first and leave the longer
+    one's remainder on screen — and the same rule has to hold for the SPELLINGS,
+    which is the part normalisation could silently get wrong.
+    """
+    shorter = SPELLED_VALUE
+    longer = SPELLED_VALUE + "EXTRA9TAIL"
+    for transform in (lambda text: text, lambda text: text[::-1]):
+        masked = redact_secret_values(
+            f"{transform(shorter)} {transform(longer)}", [shorter, longer]
+        )
+        assert transform(longer) not in masked
+        assert transform(shorter) not in masked
+        assert masked.count(REDACTION_MARKER) == 2
+
+
+def test_the_spelling_list_is_closed_and_bounded() -> None:
+    """A structural bound: the pass runs on every result, so its cost is a contract.
+
+    Asserted on the LIST rather than on a wall clock (see AGENTS.md, "Prefer a
+    structural invariant to a numeric one"): the number of spellings per value
+    is what makes the pass bounded, and a family added later without a bound
+    fails here rather than in a review conversation about CPU.
+    """
+    forms = redaction_shapes.credential_forms(SPELLED_VALUE)
+    assert len(forms) <= 24, f"the policy grew to {len(forms)} spellings per value"
+    assert len(set(forms)) == len(forms), "a duplicated spelling costs a whole-text search"
+    assert forms == tuple(sorted(forms, key=len, reverse=True)), "longest first"
+    # A longer value's escaped form is the widest term in the hold window, and a
+    # caller sizes its window from this — so it must be derived, not guessed.
+    assert redaction_shapes.longest_redaction_form([SPELLED_VALUE]) == max(len(f) for f in forms)
+
+
+@pytest.mark.parametrize("label", sorted(_spellings(SPELLED_VALUE)))
+def test_the_stream_masker_masks_a_spelling_split_at_every_offset(label: str) -> None:
+    """The chunk-boundary hole, swept at every split point rather than sampled.
+
+    A window-sized hold is a claim about what can straddle a cut, so a test that
+    tried three offsets would pass with a window that happens to be long enough
+    for those three. Swept exhaustively, for every family, because the hold is
+    sized from the WIDEST spelling while the leak happens at the narrowest cut.
+    """
+    spelling = _spellings(SPELLED_VALUE)[label]
+    payload = f"prefix {spelling} suffix\n"
+    for offset in range(len(payload) + 1):
+        masker = redaction_shapes.StreamMasker([SPELLED_VALUE])
+        published = masker.push(payload[:offset]) + masker.push(payload[offset:])
+        published += masker.push("", final=True)
+        assert spelling not in published, f"{label} leaked when split at {offset}"
+        assert REDACTION_MARKER in published, f"{label} not masked when split at {offset}"
+
+
+def test_the_stream_masker_delays_nothing_when_no_value_is_registered() -> None:
+    """The window is sized from the value set, so an empty set costs no latency."""
+    masker = redaction_shapes.StreamMasker([])
+    assert masker.push("a line with no terminator") == "a line with no terminator"
+    assert masker.withheld == 0
+
+
+def test_a_transformed_spelling_split_across_feeds_is_still_masked_in_the_pipe() -> None:
+    """The bash pipe filter's cut rule, extended to the SPELLINGS.
+
+    The pipe already held back for a verbatim value; a spelling is LONGER than
+    the value it comes from (the escaped form is four characters per byte), so
+    the cut could land inside one and publish it in two unmasked halves — in the
+    live view, which is the one surface no later pass re-reads.
+    """
+    for label, spelling in _spellings(SPELLED_VALUE).items():
+        payload = f"before {spelling} after\n".encode()
+        for offset in range(len(payload) + 1):
+            redactor = builtin._PipeRedactor([SPELLED_VALUE])
+            published = redactor.feed(payload[:offset]) + redactor.feed(payload[offset:])
+            published += redactor.feed(b"", final=True)
+            assert (
+                spelling.encode() not in published
+            ), f"{label} leaked in the stream when split at {offset}"
 
 
 # --- the store: containment, and the incident path ---------------------------
