@@ -1070,8 +1070,16 @@ class FakeSessionShell(Session):
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
-    def refresh_tools(self, tools) -> None:
+    def refresh_tools(self, tools) -> bool:
+        """Swap the inventory and report it as reaching the next model call.
+
+        The real ``Session`` publishes its tools array once per turn, so its
+        return value is what the resolver's reply promises. This shell has no
+        turn loop and no array, so every swap is immediately effective — the
+        signature is matched rather than the behaviour imitated.
+        """
         self.tools = list(tools)
+        return True
 
     def add_dispose_hook(self, hook, *, last: bool = False) -> None:
         # ``last`` mirrors ``Session.add_dispose_hook``, including the ordering it

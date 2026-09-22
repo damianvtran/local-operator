@@ -426,7 +426,7 @@ def _search_tools(
     query: str,
     server: str,
     limit: int,
-    enable: Callable[[str, str], None],
+    enable: Callable[[str, str], bool | None],
     *,
     deferred: bool,
     deny_reason: str | None,
@@ -470,7 +470,16 @@ def _search_tools(
             "Discovery keeps the advertised schema prefix unchanged."
         )
     else:
-        lines.append("Matched tools are enabled in the next request's tool definitions.")
+        # The same promise the per-tool detail read makes, in one clause: the
+        # session publishes its tools array at most once per turn
+        # (``Session._wire_tools``), so an enable read mid-turn reaches the
+        # request's definitions at the next TURN. This header is composed before
+        # the enables below run, so it states the rule rather than the outcome.
+        lines.append(
+            "Matched tools are enabled — their schemas reach the request's tool "
+            "definitions at the next model call, or the next turn if this turn's "
+            "list is already published."
+        )
     used = sum(map(len, lines))
     included = 0
     for _, name, raw, tool in ranked[:limit]:
