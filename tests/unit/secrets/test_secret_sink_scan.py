@@ -242,6 +242,22 @@ def test_an_ordinary_command_is_never_touched() -> None:
         assert result.verdict == "none", (command, result)
 
 
+def test_the_prefilter_is_sound_about_which_text_can_hold_a_source() -> None:
+    """The prefilter is what keeps the scan off ordinary commands, so it is
+    asserted rather than assumed: text it rejects cannot produce a value, and the
+    quoting-piece spelling (`lop sec"ret" get X`) is exactly why it cannot key on
+    the literal phrase alone.
+    """
+    from local_operator.harness.secret_sinks import may_carry_a_shell_source
+
+    assert not may_carry_a_shell_source("ls -la /tmp")
+    assert not may_carry_a_shell_source("make build")
+    assert not may_carry_a_shell_source("terraform apply -auto-approve")
+    assert may_carry_a_shell_source("lop secret get NAME")
+    assert may_carry_a_shell_source('echo "$(lop secret get NAME)"')
+    assert may_carry_a_shell_source('lop sec"ret" get NAME')
+
+
 def test_fail_closed_at_the_source_boundary_only() -> None:
     """Unparseable text refuses ONLY when a source could really be in it.
 

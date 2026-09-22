@@ -1673,6 +1673,13 @@ class _ShellAnalyzer:
         name = flow_in.name
         path_hit, path_span = self._literal_path_hit(stage)
 
+        # -- a length sink ends the value's journey --------------------------
+        # `lop secret get NAME | wc -c | tr -d ' '` must not refuse the `tr`:
+        # what reaches it is a number. This is the same claim `handlers._set`
+        # makes by printing `len(value)` on purpose.
+        if command in _LENGTH_ONLY:
+            return _Flow()
+
         # -- the stage IS the source ----------------------------------------
         source = self._source_verb(stage)
         if source is not None:
@@ -2449,8 +2456,7 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
         lines.append(f"  do:     {finding.rewrite}")
         lines.append(f"  rule {finding.rule} exists because: {spec.why}")
         if len(result.findings) > 1:
-            others = ", ".join(item.rule for item in result.findings[1:])
-            lines.append(f"  also refused by: {others}")
+            lines.append(f"  also refused by: {', '.join(result.labels[1:])}")
     lines.append(
         "  still allowed: `lop secret list`, `lop secret get --help`, "
         "`lop secret describe NAME`, `lop secret get NAME | wc -c`, and the "
