@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -338,14 +339,18 @@ async def test_execute_bash_refuses_a_printing_command_before_anything_runs(
 
 
 @pytest.mark.asyncio
-async def test_execute_bash_refuses_by_name_a_session_credential_that_is_echoed(
-    tmp_path: Path,
-) -> None:
-    """A session credential is in the child's environment, so `echo $NAME` prints it.
+async def test_a_session_credential_is_out_of_the_scan_s_blast_radius(tmp_path: Path) -> None:
+    """Documented BOUNDARY, not an oversight: this scan's source is the store.
 
-    Matched by NAME against the store's own ``credential_env()``, never by shape:
-    the harness injected this value into the child, so the child really can print
-    it, and it really does land in this result.
+    ``echo $NAME`` for a credential the harness injected into the child really
+    does put a value in this result, and the design doc's source list includes
+    that namespace — but the delegation ruled the gate condition to be
+    "text that fetches from ``lop secret``", and the wider rule is not free: it
+    refuses the command two existing defences measure
+    (``test_bash_injects_session_credentials_and_redacts_them_from_output``,
+    whose subject is the mask, and the R1 fd-2 crash tail). This test pins the
+    boundary so a later change that widens it has to come here and say so — and
+    asserts the existing mask still does its job in the meantime.
     """
 
     class _CredentialStore(VariableStore):
@@ -354,21 +359,14 @@ async def test_execute_bash_refuses_by_name_a_session_credential_that_is_echoed(
         def credential_env(self) -> dict[str, str]:
             return {"SESSION_TOKEN": _SYNTHETIC}
 
+    assert scan_command('printf %s "$SESSION_TOKEN"').verdict == "none"
     context = ToolContext(cwd=str(tmp_path), variables=_CredentialStore(cwd=str(tmp_path)))
-    refused = await builtin.execute_bash(
-        "bash-inline", {"command": 'echo "$SESSION_TOKEN"'}, AbortSignal(), None, context
+    result = await builtin.execute_bash(
+        "bash-inline", {"command": 'printf %s "$SESSION_TOKEN"'}, AbortSignal(), None, context
     )
-    assert refused.is_error
-    assert "SESSION_TOKEN" in "".join(str(getattr(p, "text", "")) for p in refused.content)
-    # ... and the sanctioned use of the SAME name is untouched.
-    allowed = await builtin.execute_bash(
-        "bash-inline-ok",
-        {"command": 'test -n "$SESSION_TOKEN" && echo unset'},
-        AbortSignal(),
-        None,
-        context,
-    )
-    assert not allowed.is_error, "".join(str(getattr(p, "text", "")) for p in allowed.content)
+    assert not result.is_error, result.text
+    assert _SYNTHETIC not in result.text, "the mask must still scrub an echoed credential"
+    assert "[redacted]" in result.text
 
 
 @pytest.mark.asyncio
@@ -421,12 +419,13 @@ class _AuthEchoHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args: object) -> None:  # keep the test output clean
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        """Silence the request log; http.server's own signature is positional."""
         return
 
 
 @pytest.fixture
-def local_authorizer() -> str:
+def local_authorizer() -> Iterator[str]:
     """A localhost endpoint that verifies the header and never echoes it."""
     handler = type("_Handler", (_AuthEchoHandler,), {"expected": _SYNTHETIC})
     server = http.server.HTTPServer(("127.0.0.1", 0), handler)

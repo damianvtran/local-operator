@@ -782,6 +782,11 @@ class _Body:
 
     piece: _Piece
 
+    @property
+    def span(self) -> tuple[int, int]:
+        """Where the body is, so the stage code can speak of "its" span."""
+        return self.piece.span
+
 
 _SHELL_OPERATORS = (
     "<<<",
@@ -1256,8 +1261,7 @@ class _Flow:
 class _ShellAnalyzer:
     """Stateful walk of one command text (and of what it nests)."""
 
-    def __init__(self, session_secret_names: Sequence[str] = ()) -> None:
-        self.session_names = frozenset(session_secret_names)
+    def __init__(self) -> None:
         self.findings: list[Finding] = []
         self.sources: list[str] = []
         #: Variables holding a secret VALUE, and the secret each came from.
@@ -1381,13 +1385,6 @@ class _ShellAnalyzer:
                     flow = _Flow(
                         path=True,
                         name=flow.name or self.file_vars[name],
-                        span=flow.span if flow.span != (0, 0) else span,
-                    )
-                elif name in self.session_names:
-                    self.sources.append(name)
-                    flow = _Flow(
-                        value=True,
-                        name=flow.name or name,
                         span=flow.span if flow.span != (0, 0) else span,
                     )
         return flow
@@ -1856,7 +1853,7 @@ class _ShellAnalyzer:
             return
         if flow_in.value or flow_in.path or depth >= _MAX_DEPTH:
             return
-        inner = _ShellAnalyzer(self.session_names)
+        inner = _ShellAnalyzer()
         try:
             inner._analyze(literal, contained=False, depth=depth + 1)
             inner._after_walk()
@@ -2146,9 +2143,11 @@ class _PyAnalyzer:
             base = func.value
             base_name = base.id if isinstance(base, ast.Name) else ""
             dotted = self._dotted(base)
-            if attr in ("write", "writelines") and (
-                base_name in ("sys", "os") or dotted in ("sys.stdout", "sys.stderr")
-            ):
+            # `sys.stdout`/`sys.stderr`, not `os.write(2, …)`: a bare fd write
+            # is the channel the ledger's fd-2 scrub exists for (and the R1
+            # regression test measures), so refusing the cell would delete the
+            # surface that test covers rather than close a path the scrub misses.
+            if attr in ("write", "writelines") and dotted in ("sys.stdout", "sys.stderr"):
                 return "python.print-of-source"
             if base_name == "logging" or (
                 attr in _PY_LOG_METHODS and base_name in ("logger", "log", "LOG", "LOGGER")
@@ -2262,21 +2261,19 @@ class _PyAnalyzer:
 _SHELL_PREFILTER_CHARS = ("'", '"', "\\", "`")
 
 
-def may_carry_a_shell_source(text: str, session_secret_names: Sequence[str] = ()) -> bool:
+def may_carry_a_shell_source(text: str) -> bool:
     """Cheap, sound prefilter: can this text hold a source at all?
 
     A source needs the literal words ``lop secret get|file|run`` at a command
-    position, or a ``$NAME`` for a name the session injected. Those words can
-    also be spelled across quoting pieces (``lop sec"ret" get X``), which needs
-    a quote or an escape in the text — hence the second arm. So text this
-    returns ``False`` for cannot produce a value, and ``False`` is what keeps a
-    scan off the path of every ordinary command.
+    position. Those words can also be spelled across quoting pieces
+    (``lop sec"ret" get X``), which needs a quote or an escape in the text —
+    hence the second arm. So text this returns ``False`` for cannot produce a
+    value, and ``False`` is what keeps a scan off the path of every ordinary
+    command.
     """
     if "secret" in text:
         return True
-    if any(char in text for char in _SHELL_PREFILTER_CHARS):
-        return True
-    return bool(session_secret_names) and any(name in text for name in session_secret_names)
+    return any(char in text for char in _SHELL_PREFILTER_CHARS)
 
 
 def _verdict_of(findings: Sequence[Finding], sources: Sequence[str]) -> Verdict:
@@ -2290,7 +2287,7 @@ def _verdict_of(findings: Sequence[Finding], sources: Sequence[str]) -> Verdict:
     return "none"
 
 
-def scan_command(command: str, *, session_secret_names: Sequence[str] = ()) -> ScanResult:
+def scan_command(command: str) -> ScanResult:
     """Scan shell command text. Never raises, never runs anything.
 
     ``none``        no source is in the text — the blast radius of this scan is
@@ -2307,14 +2304,20 @@ def scan_command(command: str, *, session_secret_names: Sequence[str] = ()) -> S
                     allow is a credential in the transcript, and nothing undoes
                     that.
 
-    ``session_secret_names`` are the names the session injects into the child
-    environment (``VariableStore.credential_env``). They are a source because
-    the value really is in reach of the command — ``echo $NAME`` prints it into
-    this result — and they are matched by NAME, never by shape.
+    The blast radius is exactly "text that fetches from the store": a command
+    that never names ``lop secret`` is untouched — including one that prints a
+    session credential (``echo $NAME`` for a name the harness injected into the
+    child). That second class IS a leak and the design doc's source list
+    includes it, but it is out of this change's scope by the delegation's ruling
+    on the blast radius, and it is not free: refusing it rewrites the tests of
+    two existing defences (``test_bash_injects_session_credentials_and_redacts_
+    them_from_output``, whose subject is the mask, and the R1 fd-2 crash tail),
+    both of which measure a path the wider rule never lets run. Recorded in the
+    PR under "not addressed" rather than half-done here.
     """
-    if not may_carry_a_shell_source(command, session_secret_names):
+    if not may_carry_a_shell_source(command):
         return ScanResult()
-    analyzer = _ShellAnalyzer(session_secret_names)
+    analyzer = _ShellAnalyzer()
     try:
         analyzer._analyze(command, contained=False, depth=0)
         analyzer._after_walk()

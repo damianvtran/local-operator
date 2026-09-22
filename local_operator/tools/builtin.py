@@ -3366,12 +3366,10 @@ async def execute_bash(
     # refusal, not a malformed argument, and not a prompt — `execute_bash`
     # deliberately has no second approval gate (the loop's gate already ran), so
     # asking here would be the double-answer that comment exists to prevent.
-    # Session credentials are sources by NAME because the child inherits them:
-    # `echo $NAME` prints a real value into this result.
-    scan = _scan_secret_sinks(
-        params.command,
-        session_secret_names=tuple(extra) if isinstance(extra, dict) else (),
-    )
+    # The source is the store: a command that never names `lop secret` is
+    # untouched, so ordinary work — and the session-credential flow, which rides
+    # the child's environment and is the mask's business — is unaffected.
+    scan = _scan_secret_sinks(params.command)
     if scan.refused:
         return _error(
             tool_call_id,

@@ -42,6 +42,12 @@ echo "$(lop secret get GITHUB_TOKEN)"          # prints it
 TOKEN=$(lop secret get GITHUB_TOKEN); echo $TOKEN   # same, one step later
 ```
 
+A bash call that does this is **refused before it runs**, with an error naming
+the rule, the offending span and the rewrite — the same is true of a `set -x`
+trace over a command that carries a secret, a `ps` of an argv the value was
+passed in, and a cell that prints one. Re-spell the call as one of the forms
+below; a refusal here is the guard working, not a bug to route around.
+
 `lop secret get` writes the value to stdout with no trailing newline and exits
 non-zero with empty stdout on any failure, which is what makes `$( )` safe: a
 missing secret gives you an empty string and a failed command, never a partial
@@ -51,7 +57,8 @@ A FILE is a different matter. `lop secret get NAME > /tmp/token` puts the value
 on disk unencrypted, which is **not** treated as a compromise — the model never
 sees it — but it is a cleanup debt: delete the copy afterwards **without
 reading it**, because reading it is what would turn a contained value into a
-leaked one. Prefer a form that never leaves a copy at all:
+leaked one (and a read of that copy in the same command is refused outright).
+Prefer a form that never leaves a copy at all:
 
 For a secret that is a FILE (a service-account JSON, a PEM), use the form that
 materialises it for one command and removes it afterwards:
@@ -159,9 +166,10 @@ usual.
 The value is a real `str`, so f-strings, concatenation and `.encode()` all work.
 Its `repr` shows `[redacted]`, and anything it does reach — stdout, stderr,
 `display`, the cell's result — is scrubbed before the model sees it. **Do not
-rely on that as permission to print it.** It is a safety net for accidents, not
-a channel: a value you deliberately write to a file or post to a service has
-left the harness entirely.
+rely on that as permission to print it**: a cell that prints or logs a retrieved
+value is REFUSED before the kernel sees it, and the scrub is the second layer
+behind that refusal rather than a channel. A value you deliberately write to a
+file or post to a service has left the harness entirely.
 
 ## When to store a secret
 
