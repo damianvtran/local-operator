@@ -727,11 +727,17 @@ async def test_the_reaper_abandons_a_stalled_drain_and_retries_it(
     assert runtime.retiring == [("stale-build", NEW.label(), True, LEAVING_FOR_BUILD)]
     assert not stop.is_set() and not handle.disposed, "in-flight work is not aborted on the latch"
 
-    assert await _wait_for(lambda: handle.releases == 1), (
-        "the stalled drain was never abandoned: a released latch is what keeps this "
-        "runtime able to take work again"
+    assert await _wait_for(lambda: runtime.failures), (
+        "the stalled drain was never abandoned: the failed handover is what says why "
+        "this runtime is still serving the build it loaded"
     )
-    assert runtime.failures, "the abandoned handover was never published"
+    # ORDERED AFTER THE PUBLISH ON PURPOSE. ``_abandon_move`` releases the latch
+    # BEFORE it publishes, so waiting on the release and then reading ``failures``
+    # raced the publish on a loaded worker (measured: green in this file alone, red
+    # inside the runtime slice). Waiting on the publish proves both happened.
+    assert handle.releases == 1, (
+        "the latch was never released, so this runtime cannot take work again"
+    )
     # THE COMMITMENT OUTLIVES THE ABANDON, and both halves are asserted because a
     # re-latch would break the first without failing the second: the drain object
     # stays (a second ``begin_drain`` re-runs ``Session.retire_wakes_to_inbox``,

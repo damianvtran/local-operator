@@ -1410,8 +1410,17 @@ def test_the_only_arm_site_is_the_runtime_entry_point() -> None:
     # ``disarm``. Its plane name travels with the beat, which is why the set is
     # more than one symbol — the point of the pin is that the serving plane cannot
     # create, move or cancel the process-global timer.
+    # The serving plane reports progress, and — since its tick can now RECORD its own
+    # death (#1425's instrument, which is what lets a reader tell a dead reporter from
+    # a silent plane) — that it died. NOTHING ELSE: no ``arm``, no ``disarm``, no
+    # deadline arithmetic. Its plane name travels with the beat, which is why the set
+    # is more than one symbol — the point of the pin is that the serving plane cannot
+    # create, move or cancel the process-global timer, and recording a tick's death
+    # does none of those.
     assert "beat" in touched, f"the serving plane never reports progress: {touched}"
-    assert touched <= {"beat", "SERVING"}, f"the serving plane reaches the watchdog for {touched}"
+    assert touched <= {"beat", "SERVING", "note_tick_death"}, (
+        f"the serving plane reaches the watchdog for {touched}"
+    )
 
 
 @pytest.mark.slow
