@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from local_operator.network import audit as audit_mod
 from local_operator.network import identity, relay, store, types, wire
 
 NETWORK = "n_0123456789abcdef01234567"
@@ -582,3 +584,211 @@ def test_another_network_is_refused_even_when_this_one_already_applied_it(root: 
 
     assert excinfo.value.code == "bad_rotation_statement"
     assert survivor.rotation_proof == statement, "the row must keep THIS network's proof"
+
+
+# ---------------------------------------------------------------------------
+# The handlers' own record: the audit line, and what the record lock does NOT cover
+# ---------------------------------------------------------------------------
+
+#: The third device the rehandshake test removes. It cannot be either end of the link —
+#: the sender authors the rotation, and THIS device must stay an active member for the
+#: frame to be applicable at all (``_members_inconsistent``, ``expect_self_active``).
+_THIRD = "d_" + "c" * 32
+
+#: How long the modelled slow peer below may wait for its release. Deliberately longer
+#: than the bound the test gives the concurrent writer, so a writer that only got in
+#: AFTER the peer wait ended cannot be mistaken for one that overlapped it.
+_PEER_WAIT_PATIENCE_S = 60.0
+
+#: The bound the concurrent record write is given. A BOUND, NOT A LATENCY MEASUREMENT:
+#: what is asserted is that the write completed while the peer wait was still open, so
+#: the reading does not move with this host's load — the failure it catches is a lock
+#: held for the whole peer wait, which is a deadlock-shaped failure, not a slow one.
+_CONCURRENT_WRITE_BOUND_S = 10.0
+
+
+def _handler_link(network_id: str, device_id: str) -> relay.PeerLink:
+    """A real ``PeerLink`` carrying exactly the two fields these handlers read.
+
+    ``__new__`` RATHER THAN ``__init__``: a link is built from a completed handshake
+    over a live socket, and neither handler under test touches the wire —
+    ``_op_identity_rotate`` and ``_op_epoch`` read ``network_id`` (which record to edit)
+    and audit with ``device_id`` (who dialled). The object is a ``PeerLink`` BY TYPE
+    (rather than a duck of one, which the type checker rightly refuses), so the handlers
+    are driven for real and these tests are about the audit line and the lock instead of
+    about a fake of either. It is never started, sent on, or closed, so every other
+    attribute is unset ON PURPOSE: a handler that grows a third read off the link has to
+    extend this helper rather than assume one.
+    """
+    link = relay.PeerLink.__new__(relay.PeerLink)
+    link.network_id = network_id
+    link.device_id = device_id
+    return link
+
+
+def test_the_device_rotated_audit_line_counts_only_the_rotations_that_applied(
+    root: Path,
+) -> None:
+    """``device_rotated`` is one line per row that MOVED — pinned as a COUNT, not a presence.
+
+    The audit log is what an incident is reconstructed from, so a line for a row that
+    did not move is worse than a missing one: it is a false entry on the record. Three
+    deliveries of the SAME statement are driven through the real ``_op_identity_rotate``
+    and the count is asserted after each — a genuine apply, the duplicate delivery the
+    queued frame becomes once the member table has overtaken it, and a statement signed
+    for another network (the ordinary case: an admin who is also in another network signs
+    one statement PER network).
+
+    Presence alone would not catch the failure this guards: with ``applied`` inverted,
+    the duplicate adds a line while the first still leaves one, so a ``>= 1`` assertion
+    passes on the broken code.
+    """
+    record, _state = _record()
+    _admit_peer(record)
+    lane = root / "peer"
+    old = identity.mint(lane, name="peer")
+    lane_row = record.member(PEER)
+    assert lane_row is not None
+    lane_row.device_id = old.device_id
+    lane_row.public_key = old.public_key
+    new, _previous = identity.rotate(lane, name="peer")
+    statement = identity.rotation_statement(old, new, NETWORK)
+    foreign = identity.rotation_statement(old, new, "n_ffffffffffffffffffffffff")
+    store.save(record, root)
+    log = audit_mod.AuditLog(root)
+    server = relay.RelayServer(root=root, audit=log)
+    link = _handler_link(NETWORK, PEER)
+    frame: dict[str, Any] = {"op": "net_identity_rotate", "req": 1, "statement": statement}
+
+    def lines() -> list[dict[str, Any]]:
+        return [row for row in log.tail(limit=100) if row.get("event") == "device_rotated"]
+
+    assert lines() == [], "the log starts with no rotation on this network"
+
+    # THE GENUINE DELIVERY: the row moves to the successor, and that is one line.
+    first = server._op_identity_rotate(link, frame)
+    assert first["detail"]["device_id"] == new.device_id
+    recorded = lines()
+    assert len(recorded) == 1, "a rotation that moved a row is exactly one line"
+    # The line is pinned to the hop it claims, so the count cannot be satisfied by a
+    # line about something else on the same network.
+    assert recorded[0]["network_id"] == NETWORK
+    assert recorded[0]["detail"]["old_device"] == old.device_id
+    assert recorded[0]["detail"]["new_device"] == new.device_id
+
+    # THE DUPLICATE DELIVERY: the row is already the successor, so nothing moved —
+    # not even the verifier ran — and a second line would be the false entry.
+    duplicate = server._op_identity_rotate(link, frame)
+    assert duplicate["detail"]["device_id"] == new.device_id
+    assert len(lines()) == 1, "a delivery that rewrote nothing must not add a line"
+
+    # THE FOREIGN REFUSAL: signed for another network, refused before anything moved.
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        server._op_identity_rotate(link, {**frame, "statement": foreign})
+    assert excinfo.value.code == "bad_rotation_statement"
+    assert len(lines()) == 1, "a refused delivery moved no row, so it is not an event"
+
+
+def test_the_record_lock_is_not_held_across_the_epoch_rehandshake(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent write on the same network gets in WHILE the peer wait is running.
+
+    ``_op_epoch``'s applied branch closes and redials every link of the network, and
+    both halves of that wait on a socket (``link.send`` up to ``op_wait_s`` and
+    ``link.close`` up to ``CLOSE_FLUSH_S``, per link). Held inside the record's
+    read-modify-write, that wait serialises every other writer of the network — the
+    heartbeat, the membership pull, the CLI — behind one peer's socket. The move is
+    therefore load-bearing, and this test is the one that enters the branch it lives in:
+    every other ``_ctl_member_rm``-shaped test removes the peer it is linked to, so the
+    receiver takes ``removed_by_this_rotation`` (``applied=False``) and never rehandshakes.
+
+    THE SLOW PEER IS A MODELLED STUB, and it has to be: a real socket cannot be made to
+    block deterministically at these frame sizes, so a real one would make the test a
+    race rather than a proof. What the stub owes the test is only that the wait is still
+    OPEN when the concurrent write lands, and the assertions are written on THAT rather
+    than on a wall-clock latency — an elapsed-time assertion would move with this host's
+    load, while the fault being guarded is the lock held for the whole wait.
+    """
+    record, state = _record()
+    _admit_peer(record)
+    relay.admit(
+        record,
+        device_id=_THIRD,
+        public_key=wire.b64u(b"c" * 32),
+        name="tablet",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        added_by=SELF,
+        added_via="invite",
+        root=None,
+        persist=False,
+    )
+    store.save(record, root)
+    store.save_secrets(state, root)
+    log = audit_mod.AuditLog(root)
+    server = relay.RelayServer(root=root, audit=log)
+    # The sender's own copy of the network, advanced to epoch 2 by removing the third
+    # device. It is NEVER saved here: this device must still be at epoch 1 when the
+    # frame arrives, and the frame has to be strictly greater than our epoch.
+    sender_record = types.NetworkRecord.from_json(record.to_json())
+    sender_state = types.SecretState.from_json(state.to_json())
+    outcome = relay.remove_member(
+        sender_record, sender_state, device_id=_THIRD, by=PEER, persist=False
+    )
+    assert outcome.epoch == 2
+    frame = relay.epoch_frame(sender_record, sender_state, reason="member_removed")
+    frame["req"] = 1
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_peer_wait(network_id: str, *, reason: str) -> None:
+        assert network_id == NETWORK
+        assert reason == "epoch_stale"
+        entered.set()
+        release.wait(_PEER_WAIT_PATIENCE_S)
+
+    monkeypatch.setattr(server, "_rehandshake_network", slow_peer_wait)
+    reply: dict[str, Any] = {}
+
+    def serve() -> None:
+        reply.update(server._op_epoch(_handler_link(NETWORK, PEER), frame))
+
+    epochs_seen: list[int] = []
+    overlapped: list[bool] = []
+    write_error: list[BaseException] = []
+
+    def write_record() -> None:
+        try:
+            with store.mutate(NETWORK, root) as live:
+                epochs_seen.append(live.epoch)
+                # Read INSIDE the lock: this is the instant the writer holds it, and the
+                # peer wait must still be running at it.
+                overlapped.append(not release.is_set())
+        except BaseException as exc:  # noqa: BLE001 — reported through ``write_error``
+            write_error.append(exc)
+
+    worker = threading.Thread(target=serve, name="mesh-epoch-apply", daemon=True)
+    writer = threading.Thread(target=write_record, name="mesh-record-write", daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(_CONCURRENT_WRITE_BOUND_S), "the applied branch must rehandshake"
+        writer.start()
+        writer.join(_CONCURRENT_WRITE_BOUND_S)
+        assert not writer.is_alive(), (
+            "a record write on the same network must not wait for this peer's socket: "
+            "the rehandshake belongs OUTSIDE the record's read-modify-write"
+        )
+        assert write_error == [], f"the concurrent write failed: {write_error!r}"
+        assert overlapped == [True], "the write only landed after the peer wait had ended"
+        # The applied record is on disk BEFORE the wait starts, so the concurrent writer
+        # reads the epoch the rotation wrote rather than the one it replaced.
+        assert epochs_seen == [2]
+    finally:
+        release.set()
+        worker.join(_CONCURRENT_WRITE_BOUND_S)
+
+    assert not worker.is_alive(), "the epoch frame must be answered once the peer is back"
+    assert reply["detail"]["applied"] is True
+    assert audit_mod.events_logged(log).count("epoch_rotated") == 1

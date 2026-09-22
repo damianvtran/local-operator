@@ -592,6 +592,13 @@ def _statement_names_network(record: NetworkRecord, statement: Any) -> bool:
     comparison made in the table path and missed in the frame path, the peer that
     learned the change from the frame held the device's new key while the peer that
     learned it from the table refused it, and the two counted one member differently.
+
+    PRESENCE IS THE VERIFIER'S, THE VALUE IS THIS ONE'S.
+    :func:`local_operator.network.identity.verify_rotation_statement` requires the field
+    (a statement naming no network is malformed) and deliberately does not compare it,
+    because only the caller holds the record it would be applied to; every caller that
+    believes a statement compares through here. Stated rather than implied, so a reader
+    of either site is not left deciding which of the two is authoritative.
     """
     if not isinstance(statement, dict):
         return False
@@ -616,12 +623,13 @@ def _statement_covers(
     TWO CHECKS ON TOP OF IT, because a statement can be replayed where it does not
     belong:
 
-    * ``network_id`` is checked HERE and is not checked by the verifier, and it is
-      checked through :func:`_statement_names_network` — the SAME comparison the frame
-      path makes, so the two routes to a row cannot drift apart. A statement is signed
-      for ONE network (a statement usable anywhere would be a skeleton key for the
-      device's other memberships), so a statement signed for another network must not
-      move a row in this one.
+    * ``network_id`` is COMPARED here — the verifier requires the field and does not
+      compare it, because only the caller holds the record the statement would be applied
+      to — and it is compared through :func:`_statement_names_network`, the SAME
+      comparison the frame path makes, so the two routes to a row cannot drift apart. A
+      statement is signed for ONE network (a statement usable anywhere would be a skeleton
+      key for the device's other memberships), so a statement signed for another network
+      must not move a row in this one.
     * The row and the statement must name the same hop — ``old_device_id`` is the
       predecessor's own id, ``new_*`` is the successor's, and the predecessor's id is
       in ``previous_ids``. The two representations are written together by the same
@@ -4005,6 +4013,17 @@ class RelayServer:
                 )
                 rehandshake = True
         if rehandshake:
+            # THE LINK'S NETWORK ID, NOT THE RECORD'S, and deliberately: after the move
+            # above this call sits OUTSIDE the ``store.mutate`` block, so a record bound
+            # inside it would be a name read after another writer may already have
+            # replaced the file. The scope of this redial is "every live link of the
+            # network this frame arrived on" — the id the link's handshake carried, which
+            # is both the key ``self.links`` is written under and the key
+            # ``store.mutate`` just took (``store.record_path``), and the value
+            # ``_rehandshake_network`` itself selects links by. The record's content field
+            # agrees with it for every record this build writes (``save`` derives the path
+            # FROM that field), so the two are equal today and the link is the one that
+            # stays right if they ever are not.
             self._rehandshake_network(link.network_id, reason="epoch_stale")
         return {
             "op": "ack",
