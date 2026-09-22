@@ -326,6 +326,7 @@ _STRING_ACTIONS_SPELLINGS = (
     "array-and-envelope-tail",
     "single-action-array",
     "inside-action_batch",
+    "action_batch-as-string",
     "inside-tool-call-wrapper",
 )
 
@@ -337,10 +338,12 @@ def test_a_json_encoded_actions_string_is_the_same_decision(spelling: str) -> No
     The DECISION must be the legacy batch byte for byte: this tolerance changes
     what the decoder can READ and never what executes. ``array-only`` is the
     clean case and ``array-and-envelope-tail`` is the shape the bundle actually
-    carries; the last two pin that the string spelling composes with the other
-    framing tolerances instead of defeating them -- inside ``action_batch`` it is
-    the same key, and inside a generic tool call it is one decision behind two
-    framing layers.
+    carries; the last three pin that the string spelling follows the SAME keys
+    and wrappers the array itself already may arrive under, instead of becoming
+    a framing-dependent exception -- inside ``action_batch`` it is the same key,
+    as a string in ``action_batch``'s own position it is the spelling this module
+    already accepts for the array, and inside a generic tool call it is one
+    decision behind two framing layers.
     """
 
     current = observation()
@@ -356,6 +359,12 @@ def test_a_json_encoded_actions_string_is_the_same_decision(spelling: str) -> No
         body = _string_actions_body(actions, note="One action.")
     elif spelling == "inside-action_batch":
         body = json.dumps({"action_batch": {"actions": json.dumps(actions)}})
+    elif spelling == "action_batch-as-string":
+        # ``{"action_batch": [...]}`` is already an accepted spelling of the
+        # array, so the string form of it is the same defect at the same place.
+        # Refusing it here would make the tolerance depend on WHICH key the
+        # array was framed under, which is the split this module refuses.
+        body = json.dumps({"action_batch": json.dumps(actions)})
     else:
         body = _wrapped("tool_name-parameters", _string_actions_body(actions, note="Wrapped."))
 
