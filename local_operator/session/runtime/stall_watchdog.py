@@ -401,10 +401,12 @@ class _ProgressClock:
     measures and by nothing else: the cadence is derived FROM the window
     (``_sample_interval``), so it holds about ``PROGRESS_SAMPLES_PER_WINDOW``
     entries. A COUNT cap must not be added beside the time prune — the first
-    revision had one at ``3 x PROGRESS_SAMPLES_PER_WINDOW``, and a cadence slower
-    than the cap assumed (a 45 s window driven a second at a time) then filled the
-    cap BEFORE the window could be spanned, so the leg could never fire at all.
-    The prune is exact; a count is a second and wrong bound on the same thing.
+    revision had one at ``3 x PROGRESS_SAMPLES_PER_WINDOW``, and it binds in the
+    wrong direction: a cap can only ever hold fewer samples than the window needs,
+    so any FINER interval than ``window / 36`` (a 45 s window driven a second at a
+    time is 45 looks) leaves the retained span short of the window forever and the
+    leg can never fire at all. The prune is exact at every cadence; a count is a
+    second and wrong bound on the same thing.
 
     ``motion`` is the last motion tuple seen, and ``history`` is empty whenever
     the last sample disagreed with leg 1 or leg 2 — those two are the ONLY things

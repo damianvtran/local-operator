@@ -1332,9 +1332,11 @@ def test_the_progress_leg_needs_all_three_facts_at_once(
     # ROUND 1'S SHAPE: one scheduled-out sample no longer discards the run.
     assert fires([1.0] * 20 + [0.0] + [1.0] * 40) is not None
     # ROUND 2'S SHAPE, both directions. A burn buys a run only while it is INSIDE
-    # the window: 4 s of a core in a 45 s window is a mean of 0.089 and fires at
-    # sample 46 (the reviewer's own measurement), while 2 s of it is 0.044 and
-    # never fires however long the run continues.
+    # the window: a 4 s burst in a 45 s window fires at sample 46, and a 2 s one
+    # never fires however long the run continues. The mean AT that fire is 0.0667,
+    # not the 0.089 the burst length over the window suggests: the retained span
+    # opens AT the burst's first second, so the CPU counted inside the window is
+    # the 3 s after it, over 45 s.
     assert fires([1.0] * 4 + [0.0] * 60) == 46
     assert fires([1.0] * 2 + [0.0] * 60) is None
     # ...and the alternation that never fired at the previous head, because the
