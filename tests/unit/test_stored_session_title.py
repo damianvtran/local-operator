@@ -9,6 +9,7 @@ could not find the session at all.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from local_operator import procstate
@@ -365,6 +366,43 @@ def test_a_sidecar_with_no_text_falls_back_to_the_scan(tmp_path: Path):
     session = _session(tmp_path, "opening", ("Scannable Title", False))
     write_session_title(session, "", user_set=False, past_names=[])
     assert stored_session_title(session) == "Scannable Title"
+
+
+def test_a_legacy_title_key_is_still_read(tmp_path: Path):
+    """The ``title`` key is the shape a mesh build already WROTE to real stores.
+
+    ``network.relay._op_session_create`` built this payload inline under
+    ``title`` before it was routed through :func:`write_session_title`, and
+    those directories exist on the devices that ran it. Refusing the key would
+    not remove the records; it would make the name inside them unrecoverable,
+    because the file holds it and no reader would ever look. So the fallback is
+    deliberate — this pins it, and pins that it costs nothing on a correct
+    record, which the next test covers.
+    """
+    session = tmp_path / "sessions" / "legacy"
+    session.mkdir(parents=True)
+    (session / TITLE_SIDECAR_NAME).write_text(
+        json.dumps({"title": "Legacy Name", "names": ["Legacy Name"]}), encoding="utf-8"
+    )
+    sidecar = _read_title_sidecar(session)
+    assert sidecar is not None
+    assert sidecar.text == "Legacy Name"
+    assert sidecar.names == ("Legacy Name",)
+    # No transcript at all: the sidecar is the ONLY source, which is exactly
+    # the mesh-minted-session shape (a name, and nothing else, on disk).
+    assert stored_session_title(session) == "Legacy Name"
+
+
+def test_the_current_spelling_wins_over_a_legacy_title(tmp_path: Path):
+    """``text`` outranks ``title``, so the fallback can never shadow a real title."""
+    session = tmp_path / "sessions" / "both-keys"
+    session.mkdir(parents=True)
+    (session / TITLE_SIDECAR_NAME).write_text(
+        json.dumps({"text": "Current Name", "title": "Legacy Name"}), encoding="utf-8"
+    )
+    sidecar = _read_title_sidecar(session)
+    assert sidecar is not None
+    assert sidecar.text == "Current Name"
 
 
 def test_the_sidecar_write_preserves_directory_mtime(tmp_path: Path):

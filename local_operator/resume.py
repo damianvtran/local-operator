@@ -572,6 +572,11 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
     whole picker down — the exact failure a corrupt ``origin.json`` once caused.
     A missing or malformed sidecar yields ``None`` so the caller falls back to
     the window scan, never an exception.
+
+    ONE SPELLING IS CURRENT — ``text`` — and the ``title`` key is read as a
+    fallback because a build of the mesh branch wrote it (see the note on the
+    fallback itself). :func:`write_session_title` is the only writer of the
+    current spelling, which is how the two stay agreed.
     """
     try:
         raw = (session_dir / TITLE_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
@@ -584,6 +589,20 @@ def _read_title_sidecar(session_dir: Path) -> SessionTitle | None:
     if not isinstance(payload, dict):
         return None
     text = payload.get("text")
+    if not isinstance(text, str):
+        # THE LEGACY SPELLING, kept deliberately, and this is the one place a
+        # reader may still meet it. A build of the mesh branch wrote its
+        # sidecar under ``title`` (``network.relay._op_session_create``, before
+        # that write was routed through :func:`write_session_title`), and those
+        # directories exist on the devices that ran it. Refusing the key would
+        # not make those records go away, it would make the name inside them
+        # UNRECOVERABLE — the file holds it and no reader will ever look —
+        # while the only cost of accepting it is one ``.get`` on a path reached
+        # solely when ``text`` is absent. ``text`` therefore WINS whenever it
+        # is present and this cannot shadow a correct record; it answers only
+        # for the records already written. Removable once no store carries the
+        # old spelling, which is not a condition a reader can check.
+        text = payload.get("title")
     if not isinstance(text, str):
         return None
     raw_names = payload.get("names")
@@ -2150,6 +2169,70 @@ class SessionRow(NamedTuple):
 #: network panel painted a bare id in the same condition, so one missing fact read
 #: two ways on two surfaces of the same screen (design round 1, D8).
 UNNAMED_DEVICE = "unnamed device"
+
+
+#: The relay's ``reason`` tokens, in the words a person reads. See
+#: :func:`peer_reason_words` for why the token itself is not the answer.
+PEER_REASON_WORDS: dict[str, str] = {
+    "no_endpoint": "no address published for it",
+    "not_a_member": "it is not a member of this network",
+    "member_removed": "it was removed from this network",
+}
+
+
+def peer_reason_words(reason: str) -> str:
+    """The relay's ``reason`` token said in words, and never empty.
+
+    A REASON IS EITHER A TOKEN OR A SENTENCE, and the rule follows from that.
+    ``connect_failed:ConnectionRefusedError`` is a token — a stage, a colon with
+    no space after it, and a Python class name — and a user surface that printed
+    it named the transport's failure mode where the reader needs "that device is
+    not there" (design round 1, D3, which is where the gloss table below comes
+    from). ``asked, and it did not answer`` is a SENTENCE the relay already wrote
+    for a person; it is returned unchanged, because glossing it away would
+    replace a specific answer with a shorter, blander one. A ``stage: <sentence>``
+    (``not_attempted: the listing budget ran out…``) keeps its sentence and loses
+    only the stage word.
+
+    ONE FUNCTION, THREE SURFACES. It moved here from the network panel (UX round
+    3, U23) because by the last round three surfaces printed the same token three
+    ways: the panel said the words, while the sidebar's tooltip and the
+    ``--all-peers`` listing each printed the raw token. The sibling family is
+    supposed to read as one voice (UX round 2, U14), and the panel is a Textual
+    widget the CLI cannot import — so the shared spelling had to sit in this
+    module, which both sides already import and which is where the screen's other
+    shared strings (``UNNAMED_DEVICE``, ``UNTITLED_CONVERSATION``) live for the
+    same reason.
+
+    Prefix-matched on the stage before the ``:`` rather than on the exception
+    class, because the tail is whatever the dial raised: a vocabulary of Python
+    class names would be a second registry to keep, and the distinction a reader
+    needs is "nothing answered", not which exception said so. The token is not
+    lost — ``lop network peers`` prints it per candidate, which is the detail
+    view these summaries are a summary OF.
+    """
+    token = (reason or "").strip()
+    if not token:
+        return "it did not answer"
+    if token in PEER_REASON_WORDS:
+        return PEER_REASON_WORDS[token]
+    stage, sep, tail = token.partition(":")
+    if not sep or not tail:
+        # Not a ``stage:tail`` pair, so whatever this is (a token this module has
+        # no entry for, or a sentence with a colon in it) was written for a
+        # reader already.
+        return token
+    if " " in tail.strip():
+        # ``stage: <sentence>`` — the sentence IS the gloss.
+        return tail.strip()
+    if stage == "connect_failed":
+        return "it did not answer"
+    if token.startswith("unreachable:"):
+        return "no address of it answered"
+    # The default is also the answer for a stage whose tail names a failure this
+    # module has never seen: an unreadable reason is still "it did not answer" to
+    # the person reading the row.
+    return "it did not answer"
 
 
 #: What a SESSION with no stored name is called, on every surface that has to

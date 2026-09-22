@@ -164,3 +164,67 @@ async def test_resume_of_a_peers_session_names_the_device_and_mints_nothing(
         link.close("test")
     finally:
         server_b.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_guard_speaks_without_the_sidebar_ever_having_polled(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 3, U20: the SAME guard, on a COLD cache, must still speak.
+
+    The test above warms the producer's cache first — ``peer_session_rows`` is
+    called before the app runs — and that is the surface which hid this: the cache
+    is filled by the SIDEBAR's poll, so a user who has not opened the sidebar this
+    session got no guard at all. Measured A/B on one build and one id: cold, the
+    composer cleared and nothing was said, twice; after opening the sidebar for a
+    few seconds, the identical command printed the guard's sentence.
+
+    Nothing here warms the cache, and the assertion is the guard's own sentence.
+    The refresh is gated on this device holding no directory for the id, so the
+    read this test exercises is the one a LOCAL resume never pays.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    _seed(server_b.root, REMOTE_ID)
+    link, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    assert link is not None, reason
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    try:
+        # PRECONDITION: the cache really is cold. Read through the module's own
+        # state rather than by calling the producer, which would warm it.
+        from local_operator.session import peer_rows as peer_rows_mod
+
+        assert peer_rows_mod._CACHE == {}, "the cache is warm, so this test proves nothing"
+        assert not (server_a.root / "sessions" / REMOTE_ID).is_dir()
+
+        from local_operator.tui.app import OperatorApp
+        from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+        launched: list[str | None] = []
+
+        def _resume_factory(resume_id: str | None = None) -> Any:
+            launched.append(resume_id)
+            return _factory(FakeSession())
+
+        app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(40):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            app._run_slash_command(f"/resume {REMOTE_ID}")
+            await pilot.pause()
+            await pilot.pause()
+            shown = " ".join(_notices(app))
+            assert server_b.identity.name in shown, (
+                "the guard was silent on a cold cache — which is the U20 defect, "
+                f"byte-for-byte: {shown!r}"
+            )
+            assert "--engage warms it" in shown, shown
+
+        assert launched == [], "the guard let a peer's id reach the resume factory"
+        assert not (server_a.root / "sessions" / REMOTE_ID).exists()
+        link.close("test")
+    finally:
+        server_b.stop()

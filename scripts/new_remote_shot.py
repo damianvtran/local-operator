@@ -1,6 +1,6 @@
 """Capture the ``/new`` device picker, in both states a user meets.
 
-Usage: python scripts/new_remote_shot.py OUT.svg {with-peers|no-peers} [100x30]
+Usage: python scripts/new_remote_shot.py OUT.svg {with-peers|no-peers} [110x34]
 
 WHY THESE TWO FRAMES (design round 2, D15/D16). The picker this branch added —
 one row per paired peer, each row carrying the whole ``remote <peer>`` argument —
@@ -16,6 +16,13 @@ the composer with ``/new `` alone. The two frames are the two states:
   pre-select a row whose only outcome was a red refusal and the notice naming the
   remedy was suppressed by it. Here the frame must show the notice and no row
   under the cursor.
+
+BOTH ARE CAPTURED IN THE SAME APP STATE, and the script refuses rather than
+hoping (QA round 12, Q-12-2): at 110x30 the pair differed by the whole boot
+composition — 77 glyphs of the welcome splash's mark in one frame and none in
+the other, because the picker's own rows take the vertical room the mark's height
+ladder needs — so what a reviewer compared was not just the picker. See
+``DEFAULT_SIZE`` for the measurement and for the grid both are taken at.
 
 EVERY PEER HERE IS A FIXTURE: ``network.peers.known_peers`` is replaced before the
 app reads it, so no real device id or peer name leaves this machine — the rules
@@ -73,6 +80,22 @@ PEERS = (
 
 VARIANTS = ("with-peers", "no-peers")
 
+#: The grid both variants are captured at, and WHY NOT 110x30 (QA round 12,
+#: Q-12-2). At 30 rows the two frames were NOT the same state: the peerless one
+#: painted 77 glyphs of the welcome splash's mark and the with-peers one painted
+#: NONE, because the picker's own rows take the vertical room the mark's height
+#: ladder needs — measured at 110x30 as 0 vs 77, and at 110x34 and 110x40 as 77
+#: vs 77, stable across repeated runs rather than a race. A pair meant to differ
+#: by the picker's content differed by the whole boot composition as well, so the
+#: comparison a reviewer makes off it was not like for like. 34 rows is the
+#: shortest grid at which BOTH states paint the same splash, and it is the height
+#: UX round 3 walked this flow at.
+DEFAULT_SIZE = (110, 34)
+
+#: The mark glyphs the welcome splash draws. Used only to check the frame is in
+#: the settled state below; `local_operator.tui.widgets.welcome` owns the art.
+_MARK_GLYPHS = frozenset("█▀▄")
+
 
 async def main() -> None:
     if len(sys.argv) < 3:
@@ -83,7 +106,7 @@ async def main() -> None:
     variant = sys.argv[2]
     if variant not in VARIANTS:
         raise SystemExit(f"unknown variant {variant!r}; expected one of {'|'.join(VARIANTS)}")
-    size = (100, 30)
+    size = DEFAULT_SIZE
     if len(sys.argv) > 3:
         refuse_flag_shaped_argument(sys.argv[3], what="SIZE")
         cols, rows = sys.argv[3].split("x")
@@ -120,6 +143,22 @@ async def main() -> None:
             raise SystemExit("the no-peers picker listed a row; the frame would show the U4 state")
         if variant == "with-peers" and not editor._picker.is_open():
             raise SystemExit("the with-peers picker listed nothing; the frame would show no picker")
+        # BOTH FRAMES IN THE SAME STATE (QA round 12, Q-12-2), asserted on the
+        # artifact rather than trusted to the size: the welcome splash must be up
+        # in BOTH, or the pair differs by the boot composition as well as by the
+        # picker — which is exactly what shipped. The census reads the exported
+        # SVG, the same bytes the reviewer reads, and the mark is the part of that
+        # splash a short terminal sheds first.
+        exported = app.export_screenshot()
+        mark = sum(exported.count(glyph) for glyph in _MARK_GLYPHS)
+        if mark == 0:
+            raise SystemExit(
+                "the welcome splash's mark is not in this frame, so the two states are not "
+                "comparably captured: the with-peers frame loses it when the picker's rows "
+                "take the room it needs (measured at 110x30), which made a pair that "
+                f"differed by the whole boot composition. Capture at {DEFAULT_SIZE[0]}x"
+                f"{DEFAULT_SIZE[1]} or taller — see DEFAULT_SIZE."
+            )
         save_capture(app, out)
     print(f"wrote {out}")
 

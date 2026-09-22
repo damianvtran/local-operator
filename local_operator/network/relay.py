@@ -3471,17 +3471,25 @@ class RelayServer:
         (``resume.py``'s ``TITLE_SIDECAR_NAME``). Anything else — an absent
         file, a torn one — is no name rather than a guess, and every surface
         already has a fallback for that.
-        """
-        from local_operator.resume import TITLE_SIDECAR_NAME
 
-        try:
-            path = self.root / "sessions" / session_id / TITLE_SIDECAR_NAME
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return ""
-        if not isinstance(data, dict):
-            return ""
-        return str(data.get("title") or "")
+        READ THROUGH THE PRODUCT'S OWN READER, which is the point rather than
+        a style choice: this used to parse the sidecar itself under a ``title``
+        key no product reader knew, so the relay's row and the sidebar's row
+        disagreed about the SAME file — the relay naming a session the moment
+        it was created, the catalogue painting ``Untitled conversation`` over
+        it one turn later. ``stored_session_title`` is the answer the rest of
+        the product gives to this exact question (sidecar first, then the
+        transcript's journalled title), so a row minted here is named as the
+        device the user is looking at would name it.
+
+        Kept within its budget: one stat and a sub-kilobyte read for the
+        sidecar, plus the reader's two bounded transcript windows when there is
+        no sidecar — what every other row on this listing already pays. Runs on
+        the relay's thread for a listing, so nothing here dials.
+        """
+        from local_operator.resume import stored_session_title
+
+        return stored_session_title(self.root / "sessions" / session_id)
 
     def _stored_rows(self) -> list[dict[str, Any]]:
         """Sessions with a directory and no live record — the idle half.
@@ -3988,14 +3996,34 @@ class RelayServer:
 
         name = str(frame.get("name") or "")
         if name:
-            try:
-                (session_dir / "title.json").write_text(
-                    json.dumps({"title": name, "names": [name]}), encoding="utf-8"
-                )
-            except OSError:
-                # Cosmetic: a title that could not be written is the fork's
-                # borrowed-name case, not a failed create.
-                pass
+            # THROUGH ``resume.write_session_title``, never a hand-rolled
+            # ``title.json`` of our own. This write used to build the payload
+            # inline under a ``title`` key while the product's reader
+            # (``resume._read_title_sidecar``) reads ``text`` — so a session
+            # the user had just named became nameless the moment it took a turn
+            # and the catalogue ranked it, painting ``Untitled conversation``
+            # over a name the user had typed. A second writer with its own idea
+            # of the format is the entire defect; this is the same writer the
+            # product's ``/rename`` and the desktop's birth-title use, so the
+            # two spellings cannot drift apart again.
+            #
+            # It also buys three things the raw ``write_text`` never had: the
+            # atomic temp+replace that makes the file safe to read while a
+            # session rewrites it, the directory-mtime preservation that keeps
+            # a purely-bookkeeping write from re-ranking recency, and the
+            # whitespace normalisation every other reader assumes.
+            #
+            # ``user_set=True`` is the frame's own claim: ``--name`` is a name
+            # the USER typed, and the product's nearest analogue
+            # (``desktop_wakes._birth_title``) sets that flag exactly when the
+            # title came from the user rather than from a prompt.
+            #
+            # Best effort by contract (``write_session_title`` documents it):
+            # a title that could not be written is the fork's borrowed-name
+            # case, not a failed create.
+            from local_operator.resume import write_session_title
+
+            write_session_title(session_dir, name, user_set=True, past_names=[])
 
         engage_error = self._engage_locally(session_id, cwd=cwd)
         if engage_error:

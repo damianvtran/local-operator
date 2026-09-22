@@ -386,6 +386,125 @@ def test_a_promptless_create_is_still_a_row_on_both_devices(
         _stop_all(served)
 
 
+def test_a_named_create_writes_the_sidecar_the_product_reads(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name in a create frame must land in the PRODUCT'S sidecar format.
+
+    QA round 12's major, pinned at the file rather than at a UI: the relay used
+    to build ``title.json`` inline under a ``title`` key while every product
+    reader (``resume._read_title_sidecar``) reads ``text``, so the name a user
+    typed was present on disk and invisible to every surface that lists a
+    session. This asserts the three keys the product's writer produces, so the
+    writer and the reader cannot drift apart again without a red test — a test
+    that only asserted ``stored_session_title`` would pass on the broken writer
+    once the reader learned the legacy key, which is exactly the loophole this
+    closes.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 11,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "name": "receipt-naming",
+                "prompt": "",
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        session_id = reply["detail"]["session_id"]
+        session_dir = server_b.root / "sessions" / session_id
+
+        payload = json.loads((session_dir / "title.json").read_text(encoding="utf-8"))
+        assert payload.get("text") == "receipt-naming", (
+            "the sidecar must carry the product's own key: "
+            f"resume._read_title_sidecar reads 'text', the payload is {payload}"
+        )
+        assert payload.get("names") == ["receipt-naming"], payload
+        # ``--name`` is a name the USER typed; the product's birth-title
+        # analogue (desktop_wakes._birth_title) sets the flag on exactly that
+        # condition. Recorded here so the relay's claim is auditable rather
+        # than merely written.
+        assert payload.get("user_set") is True, payload
+
+        # AND THE PRODUCT READS IT, which is the user-visible half.
+        from local_operator.resume import session_name, stored_session_title
+
+        assert stored_session_title(session_dir) == "receipt-naming"
+        assert session_name(session_dir) == "receipt-naming"
+        link.close("test")
+    finally:
+        _stop_all(served)
+
+
+def test_the_name_survives_the_turn_that_makes_the_catalogue_rank_it(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 12's repro, end to end: name, take a turn, list — the name stays.
+
+    The promptless create is listed off the relay's own empty-mint half, which
+    reads the sidecar directly; the moment the session has an activity file the
+    CATALOGUE ranks it and the name comes from ``resume.session_name`` instead.
+    On the code QA measured, that hand-over is where the name vanished: the
+    sidecar held ``title``, the catalogue read ``text``, and the row painted
+    ``Untitled conversation``. Both halves and BOTH devices are asserted here,
+    because the user reads the creator's listing, not the owner's.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 12,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "name": "receipt-naming",
+                "prompt": "",
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        session_id = reply["detail"]["session_id"]
+
+        # THE TURN, in QA's own shape: an activity file appears, so the
+        # session leaves the empty-mint half and the catalogue takes over.
+        transcript = server_b.root / "sessions" / session_id / "transcript.jsonl"
+        transcript.write_text("", encoding="utf-8")
+        served[session_id].stop()
+
+        own = [row for row in server_b.local_session_rows() if row["session_id"] == session_id]
+        assert own, "the owner cannot list the session it minted"
+        assert own[0]["conversation_name"] == "receipt-naming", (
+            "the owner's own listing lost the name the user typed: "
+            f"{own[0]['conversation_name']!r}"
+        )
+
+        rows = _call(server_a.root, "peer_session_rows")["detail"]
+        remote = [row for row in rows["sessions"] if row["session_id"] == session_id]
+        assert remote, rows
+        assert remote[0]["conversation_name"] == "receipt-naming", remote[0]
+
+        # ...and through the SIDEBAR's producer, which is what the user reads.
+        from local_operator.session.peer_rows import clear_cache, peer_session_rows
+
+        clear_cache()
+        produced = [row for row in peer_session_rows(server_a.root) if row.id == session_id]
+        assert produced, "the created session is not on the creator's sidebar"
+        assert produced[0].name == "receipt-naming", produced[0]
+        link.close("test")
+    finally:
+        _stop_all(served)
+
+
 def test_a_create_frame_that_names_a_session_id_is_refused(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

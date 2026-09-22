@@ -1528,6 +1528,33 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
 _STOP_ENDED_OUTCOMES = frozenset({"stopped", "killed", "already-gone", "not_running"})
 
 
+#: What a stop outcome leaves the user with, when it leaves them with anything
+#: (UX round 3, U21).
+#:
+#: WHY A REMEDY AND NOT THE TOKEN. This receipt printed the relay's own sentence
+#: and then ``rung: none  outcome: not_running`` under it — the stop ladder's rung
+#: name and the wire word for the outcome, on the surface a user reads after asking
+#: for something to stop. For an outcome that ENDED the session the sentence above
+#: already says what happened, so the second line was pure noise; for
+#: ``not_running`` it was the worse half of a dead end, because the session stays
+#: in the listing and nothing on screen said so.
+#:
+#: The keys are the peer's own vocabulary (`relay._STOP_OUTCOME_WORD`, which
+#: renders `control.StopOutcome.method`), and an outcome with no entry prints no
+#: second line rather than a guess: the peer's sentence is the answer, and a
+#: remedy invented here for a state this side cannot see would be the kind of
+#: claim `_STOP_ENDED_OUTCOMES` itself refuses to make about ``ok``.
+_STOP_REMEDIES: dict[str, str] = {
+    # The session is in the listing and the user has just been told it is not
+    # running: say why it is still there, or the frame reads as a stale row.
+    "not_running": "It stays in your sessions until it is removed on that device.",
+    # ``skipped`` is the ladder declining to signal a target with a turn in
+    # flight — a deliberate leave-alone, and the one outcome whose remedy is a
+    # flag on this very command.
+    "skipped": "A turn is in flight there; --force stops it anyway.",
+}
+
+
 def _cmd_sessions(args: argparse.Namespace) -> int:
     """``lop network sessions`` — the session plane, across the mesh.
 
@@ -1587,14 +1614,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             timeout=240.0,
         )
         outcome = str(_reported(detail, "outcome", verb="stop") or "")
-        return _emit(
-            args,
-            {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail},
-            [
-                str(detail.get("detail") or ""),
-                f"rung: {detail.get('rung')}  outcome: {detail.get('outcome')}",
-            ],
-        )
+        # THE REMEDY, IN WORDS (UX round 3, U21) — and never a rung name. See
+        # `_STOP_REMEDIES` for why an outcome with no remedy prints no second line.
+        lines = [str(detail.get("detail") or "")]
+        remedy = _STOP_REMEDIES.get(outcome)
+        if remedy:
+            lines.append(remedy)
+        return _emit(args, {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail}, lines)
 
     if engage:
         if not peer:
@@ -1609,10 +1635,15 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             timeout=120.0,  # a spawn, bounded by the relay's own engage deadline
         )
         engaged = bool(_reported(detail, "engaged", verb="engage"))
+        # ONE FACT, SAID ONCE (UX round 3, U21), the same rule the create receipt
+        # above now follows: the relay's own sentence is the line, and the boolean
+        # was a second copy of it — ``engaged: True`` printed beside
+        # ``runtime joining``, a flag and its own English translation. The
+        # machine-readable ``engaged`` key stays in the ``--json`` payload.
         return _emit(
             args,
             {"ok": engaged, **detail},
-            [str(detail.get("detail") or ""), f"engaged: {engaged}"],
+            [str(detail.get("detail") or "") or ("engaged" if engaged else "not engaged")],
         )
 
     if getattr(args, "create", False):
@@ -1643,15 +1674,24 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
         if prompt:
-            lines.append(f"first prompt admitted: {bool(detail.get('admitted'))}")
+            # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
+            # ``first prompt admitted: True`` AND the relay's own sentence for the
+            # same fact (``prompt admitted``) — a flag and its own English
+            # translation, on two lines, about one event. The sentence is the
+            # receipt's register and the boolean was the second copy; the
+            # machine-readable ``admitted`` key is untouched in the ``--json``
+            # payload (`**detail` below), which is where a consumer reads it.
+            admitted = bool(detail.get("admitted"))
+            lines.append(
+                str(detail.get("detail") or "")
+                or ("prompt admitted" if admitted else "the prompt was not admitted")
+            )
         else:
             lines.append(
                 "no prompt sent — the session exists on that device; "
                 f"/network sessions --peer {peer} lists it, --engage warms it, "
                 "--stop ends it"
             )
-        if detail.get("detail"):
-            lines.append(str(detail["detail"]))
         return _emit(args, {"ok": bool(minted), **detail}, lines)
 
     if not peer and not getattr(args, "all_peers", False):
@@ -1729,9 +1769,18 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         if isinstance(block, dict) and not block.get("reachable")
     ]
     for device_id, block in unasked:
+        # THE WORDS, NOT THE TOKEN (UX round 3, U23). This line printed the
+        # relay's raw reason — ``connect_failed:ConnectionRefusedError`` — on a
+        # surface a user reads, which is a Python class name in place of a fact.
+        # The gloss is the shared one (`resume.peer_reason_words`, design round 1
+        # D3) so this listing, `/sessions`'s own `--all-peers` line and the
+        # sidebar tooltip say the same thing about the same state. The raw token
+        # is still what ``lop network peers`` prints per candidate.
+        from local_operator.resume import peer_reason_words
+
         lines.append(
             f"{str(block.get('name') or device_id)}: unreachable "
-            f"({str(block.get('reason') or 'it did not answer')})"
+            f"({peer_reason_words(str(block.get('reason') or ''))})"
         )
     if not remote:
         # The sentence is narrowed to what was actually established. Reaching

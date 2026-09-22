@@ -2611,15 +2611,33 @@ CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
 
 #: What ``/new``'s picker says when this device knows no peers, widest first.
 #:
-#: THE TAIL IS THE PART THAT MUST SURVIVE. ``/network invite`` is the one sentence
-#: this surface is the only place to say — it is where a user with no peers is
-#: standing when they need it — and the row it paints in is ~56 cells at a
-#: 110-column terminal, so a single long sentence was cropped mid-clause
-#: ("then /network join on…"). The narrow rung keeps the invite verb whole rather
-#: than promising a second verb it then loses (design round 2, D16).
+#: BOTH VERBS, AS LONG AS BOTH FIT — and then ``join``, which is the one that
+#: must not be lost (UX round 3, U17). The first rung is the full chain and needs
+#: ~91 cells, so it paints only on a very wide terminal; the rung below it is the
+#: one the dock actually has room for at 110 columns, and design round 2's D16
+#: measured that this is the ONLY place the product tells a peerless user how a
+#: first peer comes to exist. ``join`` is the half that has to survive the tight
+#: widths: the user standing at an empty ``/new`` with a token in hand is the one
+#: who cannot act, and the inviter is already told what to run by the invite the
+#: mint prints. So every rung names ``join``, and ``invite`` rides along while
+#: the cells allow it rather than being promised and then cropped (the failure
+#: mode the previous ladder's own docstring recorded).
+#:
+#: RESOLVED AT PAINT TIME against the row's real budget (``set_notice_rungs``),
+#: so these are rungs and not a choice made per caller: which one shows is a
+#: property of the terminal, and it re-fits on resize.
 NO_PEERS_NOTICE_RUNGS: tuple[str, ...] = (
     "No peers yet — /network invite mints a token; /network join redeems it on the other device.",
-    "No peers yet — /network invite mints a token.",
+    "No peers yet — /network join <token>, or /network invite to mint one.",
+    # Both verbs spelled as COMMANDS for as long as the row can hold them: a bare
+    # ``invite`` is a word, not something the user can type, and the rung below
+    # this one only reaches the bare verb once the command spelling has stopped
+    # fitting. Measured on the picker's own row budget: this rung paints at 100
+    # and at 110 columns.
+    "No peers yet — /network join <token> or /network invite",
+    "No peers yet — /network join <token>, or invite",
+    "No peers yet — /network join <token>",
+    "No peers yet — /network join",
 )
 
 #: Said after Esc unredacts a typed secret back into the composer as plaintext.
@@ -8916,9 +8934,12 @@ class OperatorApp(App[None]):
         generation = self._sidebar_refresh_generation
         self._sidebar_refresh_pending = True
 
-        def collect() -> tuple[list[CatalogEntry], list[str], int | None]:
+        def collect() -> tuple[list[CatalogEntry], list[str], int | None, list[tuple[str, str]]]:
             from local_operator.paths import config_dir
-            from local_operator.session.peer_rows import peer_session_rows
+            from local_operator.session.peer_rows import (
+                peer_session_rows,
+                unanswered_peers,
+            )
             from local_operator.tui.session_catalog import (
                 load_catalog,
                 subagent_population,
@@ -8942,6 +8963,14 @@ class OperatorApp(App[None]):
             # uncached listing here would be the one thing on the sidebar's
             # path that talks to the network. A device in no mesh adds no rows.
             entries = [*entries, *(CatalogEntry(row) for row in peer_session_rows(root))]
+            # AND THE PEERS THAT SAID NOTHING (UX round 3, U16). The relay names
+            # them in the same answer the rows came from — `unanswered_peers`
+            # reads the cache entry `peer_session_rows` just filled, so this is
+            # not a second fan-out and the two halves cannot disagree about a
+            # mesh that moved between them. Without it a peer that stopped
+            # answering lost its whole section silently: §8.3 drops its ROWS,
+            # and a section built from rows dropped the fact with them.
+            silent = [(peer.name, peer.reason) for peer in unanswered_peers(root)]
             # Read on a SLOW cadence, never per poll: `subagent_population` is
             # a second whole-store scan (+2.36 ms, +21% measured with the layer
             # off) and the count it answers changes when a delegated run
@@ -8951,11 +8980,11 @@ class OperatorApp(App[None]):
             if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
                 total = subagent_population(root)
             self._subagent_population_poll += 1
-            return entries, pins, total
+            return entries, pins, total, silent
 
         async def refresh() -> None:
             try:
-                entries, pins, total = await asyncio.to_thread(collect)
+                entries, pins, total, silent = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
                     or not self._session_sidebar.display
@@ -8965,6 +8994,7 @@ class OperatorApp(App[None]):
                 self._session_sidebar.current_id = str(getattr(session, "session_id", ""))
                 self._session_sidebar.set_entries(entries)
                 self._session_sidebar.set_pins(pins)
+                self._session_sidebar.set_silent_peers(silent)
                 if total is not None:
                     self._session_sidebar.set_subagent_total(total)
                 self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
@@ -14017,13 +14047,32 @@ class OperatorApp(App[None]):
             # list, so a row selected from the sidebar now names one — and
             # without this guard the resume factory would look it up in THIS
             # machine's store, fail, and report a missing session about a session
-            # that is running perfectly well one device over. CACHE-ONLY:
-            # `peer_session_row` never reads and never dials, so the guard costs
-            # a tuple scan on the path every /resume takes. Opening a remote
-            # session needs `projection.resolve_owner` wired into the factory,
-            # which has no consumer in this tree yet — so the refusal says what
-            # DOES reach it rather than pretending the row was dead.
-            remote = peer_session_row(concrete, config_dir())
+            # that is running perfectly well one device over.
+            #
+            # CACHE-ONLY ON THE HIT, ONE READ ON THE MISS. `peer_session_row`
+            # never reads and never dials, so a row this device already knows about
+            # costs a tuple scan on the path every /resume takes.
+            #
+            # A MISS IS NOT AN ANSWER, THOUGH (UX round 3, U20). That cache is
+            # filled by the SIDEBAR's poll, so a user who has not opened the sidebar
+            # this session — the common case for someone who copied an id out of
+            # `/network sessions --all-peers` or a chat message — got NO guard at
+            # all: the composer cleared and nothing was said, measured A/B on one
+            # build and one id. So a miss triggers ONE listing read, and the gating
+            # is what keeps the hot path hot: the read happens only when this device
+            # holds NO directory for the id, so resuming a LOCAL session never pays
+            # it, and `peer_session_rows`'s own TTL makes a repeat of a genuinely
+            # unknown id free rather than a second dial. Opening a remote session
+            # needs `projection.resolve_owner` wired into the factory, which has no
+            # consumer in this tree yet — so the refusal says what DOES reach it
+            # rather than pretending the row was dead.
+            root = config_dir()
+            remote = peer_session_row(concrete, root)
+            if remote is None and not (root / "sessions" / concrete).is_dir():
+                from local_operator.session.peer_rows import peer_session_rows
+
+                peer_session_rows(root)
+                remote = peer_session_row(concrete, root)
             if remote is not None and remote.owner_device:
                 self._system_notice(
                     f"{concrete} is running on {remote.owner_label or UNNAMED_DEVICE} — "
@@ -15267,7 +15316,21 @@ class OperatorApp(App[None]):
         addressing = peer.token
         if len({match.device_id for match in resolve_peer(addressing)}) != 1:
             addressing = peer.device_id
-        argv = ["sessions", "--peer", addressing, "--create", "--name", peer.label]
+        # NO `--name` HERE, and its absence is the fix rather than an omission
+        # (UX round 3, U19). This used to pass ``peer.label``, so the session the
+        # user created from a device row was TITLED with the device's own name:
+        # the sidebar then painted a session row reading `pixel-8` underneath the
+        # `⇄ pixel-8` heading that already said which device holds it — two
+        # adjacent lines, one a device and one a session, and a name no user
+        # typed. It also survived a restart, because the name was on disk.
+        #
+        # Unnamed is the honest state and it is the one the LOCAL path already
+        # has: a bare `/new` starts an untitled session, the row paints the shared
+        # `Untitled conversation` string, and the session is named when the user
+        # names it or the owner's own auto-namer titles the first substantive
+        # turn. Nothing is lost by it — the peer tier's heading carries the
+        # device, which is what the bogus name was duplicating.
+        argv = ["sessions", "--peer", addressing, "--create"]
         if prompt:
             argv += ["--prompt", prompt]
         self._run_network_cli(
@@ -36648,16 +36711,6 @@ class OperatorApp(App[None]):
             # (`remote <peer>`), so with peers listed every row runs, and the
             # first Enter fills a working command.
             #
-            # A DEVICE WITH NO PEERS KEEPS THE BARE ROW, and it is there to be
-            # SEEN rather than to be run: the list needs a row to open at all
-            # (`CommandPicker.is_open` is `bool(self._matches)`, so an empty set
-            # shows nothing — including the notice that says what creates the
-            # first peer). Nothing else on this device is a working `/new remote`
-            # argument, so the row that says the form exists is the honest offer,
-            # and the notice beside it names the remedy. A peer the user wants to
-            # name by id that is not in the list is typed directly: the argument
-            # is free text and these rows only offer it.
-            #
             # Reachability is not shown as a state here because it is not known
             # here — the create call answers it with the peer's own reason, and a
             # fabricated "reachable" column would be the one lie this surface
@@ -36675,8 +36728,17 @@ class OperatorApp(App[None]):
             # in, what role it holds — were absent: the network is named here, the
             # role is the detail column, and the unnamed case says the shared
             # `unnamed device` string (D8) rather than ellipsizing a hex id in both
-            # columns. The peer's id is not shown: it is what the row INSERTS, not
-            # a fact anyone picks by, and for a NAMED peer the token IS the label.
+            # columns.
+            #
+            # WHICH OF THE TWO CARRIES THE ID (design round 3, D25). The ROW does
+            # not show the peer's id — its `display` is the device's name, or the
+            # shared `unnamed device` string, and the id is not a fact anyone picks
+            # by. The row's VALUE still IS the id for a peer that has no name,
+            # because `remote <token>` is the only argument that addresses one —
+            # so selecting that row puts the token in the composer, and the preview
+            # then paints it in full. That preview is the honest wire value the
+            # create call receives; the sentence used to leave the second half out
+            # and was contradicted by the frame the moment the cursor moved.
             peer_choices: list[ArgumentChoice] = []
             try:
                 from local_operator.network.peers import known_peers

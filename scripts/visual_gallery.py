@@ -89,8 +89,12 @@ def cases() -> list[dict[str, Any]]:
                 # peers (the rows must read as a device selection) and one that
                 # knows none — the state every new user starts in (design round
                 # 2, D15/D16). At 110 columns, which is where the reported row
-                # truncation was measured.
-                args += [variant, "110x30"]
+                # truncation was measured, and at 34 ROWS so the two frames are
+                # the same app state (QA round 12, Q-12-2): at 30 rows the
+                # picker's own rows take the room the boot splash's mark needs,
+                # so the with-peers frame painted none of it while the peerless
+                # one painted all of it — see the script's DEFAULT_SIZE.
+                args += [variant, "110x34"]
             elif script == "stop_ladder_shot.py":
                 args += [variant, "100x30"]
             elif script == "org_chart_shot.py":

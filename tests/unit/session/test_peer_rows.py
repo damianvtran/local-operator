@@ -249,3 +249,79 @@ def test_an_isolated_root_does_not_read_another_installs_answer(
     other = _Catalog([_Facts("d_bb", "pixel-8", reachable=True)], [_Row("s_9", "d_bb")])
     rows = peer_session_rows(tmp_path / "two", catalog=other)
     assert [row.id for row in rows] == ["s_9"]
+
+
+# ---------------------------------------------------------------------------
+# UX round 3, U16 — the peer that did not answer, which only ever produced rows
+# ---------------------------------------------------------------------------
+
+
+def _silent_peer_catalog() -> _Catalog:
+    """One peer that did not answer, and one that did with a single row."""
+    return _Catalog(
+        [
+            _Facts(
+                "d_silent",
+                "pixel-8",
+                reachable=False,
+                reason="connect_failed:ConnectionRefusedError",
+            ),
+            _Facts("d_live", "radiant-m4", reachable=True),
+        ],
+        [_Row("row-1", "d_live")],
+    )
+
+
+def test_a_peer_that_did_not_answer_is_reported_though_it_has_no_rows() -> None:
+    """THE FACT §8.3 WAS DROPPING. A peer that does not answer contributes no
+    rows — right, and it used to contribute nothing else either, because this
+    module only ever returned rows: the sidebar's section was built from them, so
+    the whole tier vanished and the list read as complete. The relay reports the
+    device with ``reachable: false`` and its reason in the SAME answer; this is
+    the half that carries it to a surface."""
+    catalog = _silent_peer_catalog()
+    assert [row.id for row in peer_session_rows(Path("/tmp/x"), catalog=catalog)] == ["row-1"]
+    unanswered = peer_rows_mod.unanswered_peers(Path("/tmp/x"), catalog=catalog)
+    assert [(peer.device_id, peer.name, peer.reason) for peer in unanswered] == [
+        ("d_silent", "pixel-8", "connect_failed:ConnectionRefusedError")
+    ]
+
+
+def test_the_rows_and_the_silent_peers_come_from_one_read() -> None:
+    """They are one relay answer, so a caller that asks for both must not be able
+    to see two different fan-outs of a mesh that is moving underneath it."""
+    catalog = _silent_peer_catalog()
+    peer_session_rows(Path("/tmp/x"), catalog=catalog)
+    peer_rows_mod.unanswered_peers(Path("/tmp/x"), catalog=catalog)
+    assert catalog.calls == 1, "the second call re-read the catalogue"
+
+
+def test_a_peer_that_answered_contributes_nothing_and_a_row_excludes_its_device() -> None:
+    """Two ways to be wrong here, both pinned: reporting a peer that simply has no
+    sessions as "gone" (it contributed no rows, but it answered), and reporting a
+    device twice — once as a section with rows, once as a silent heading.
+
+    Each case gets its OWN root: the cache is keyed by root for its TTL, so a
+    second read under the same root would answer the first one's question.
+    """
+    only_live = _Catalog([_Facts("d_live", "radiant-m4", reachable=True)], [])
+    assert peer_rows_mod.unanswered_peers(Path("/tmp/answered"), catalog=only_live) == ()
+
+    # A device the peers answer marks unreachable but WHICH ALSO produced a row:
+    # the row is the section, and the heading already carries `(unreachable)`.
+    both = _Catalog(
+        [_Facts("d_mixed", "pixel-8", reachable=False, reason="asked, and it did not answer")],
+        [_Row("row-1", "d_mixed")],
+    )
+    assert len(peer_session_rows(Path("/tmp/mixed"), catalog=both)) == 1
+    assert peer_rows_mod.unanswered_peers(Path("/tmp/mixed"), catalog=both) == ()
+
+
+def test_a_cold_cache_is_not_an_answer_about_silent_peers() -> None:
+    """``peer_session_row`` is deliberately cache-only (it fronts every
+    ``/resume``), but a selector that answered "no peer is silent" merely because
+    nobody had polled yet would be the silent-empty failure U16 is about. A cold
+    call reads."""
+    catalog = _silent_peer_catalog()
+    assert peer_rows_mod.unanswered_peers(Path("/tmp/x"), catalog=catalog)
+    assert catalog.calls == 1

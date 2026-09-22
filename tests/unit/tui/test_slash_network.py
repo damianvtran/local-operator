@@ -701,17 +701,21 @@ def test_the_pending_frame_does_not_call_the_relay_not_running() -> None:
     """MEASURED ON THE LOADING FACE, which is the one it was filed against.
 
     ``relay: not running on this device`` painted under This device while the
-    Relay section seven lines below painted ``asking the relay…`` — the same frame
+    Relay section seven lines below painted its own pending line — the same frame
     contradicting itself about the one fact both lines are about. While the live
     answer is out, the disk record is the input the answer is about, not an
     answer, so the pending sentence is the same on both lines.
+
+    The pending word is ONE word since design round 3's D23 (``checking``; it was
+    ``asking the relay…`` on this section and ``relay: checking…`` on the device
+    line), which is why the two assertions below are about the same verb.
     """
     from local_operator.tui.widgets.network_panel import build_network_report
 
     text = build_network_report(_panel_local()).plain
     assert "relay: checking…" in text, text
     assert "not running on this device" not in text, text
-    assert "asking the relay…" in text, text
+    assert "  checking…" in text, text
 
 
 def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
@@ -736,3 +740,80 @@ def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
     assert "checking with the relay…" not in text, text
     assert "from this device's records" in text, text
     assert "no peers yet" in text, text
+
+
+# ---------------------------------------------------------------------------
+# Design round 3 D23 / UX round 3 U22 — the pending word, and the log path's indent
+# ---------------------------------------------------------------------------
+
+
+def test_one_pending_word_for_one_pending_fact() -> None:
+    """D23: the frame said "the relay has not answered yet" three ways.
+
+    ``relay: checking…`` on the device line, ``checking with the relay…`` on the
+    two sections that inherit the answer, and ``asking the relay…`` in the Relay
+    section — three spellings of one state on one screen. The verb is one word
+    now; what differs is only the OBJECT, which is the fact each line is about.
+    """
+    from local_operator.tui.widgets.network_panel import build_network_report
+
+    text = build_network_report(_panel_local()).plain
+    assert "asking the relay…" not in text, text
+    assert "relay: checking…" in text, text
+    assert "checking with the relay…" in text, text
+    # The Relay section's own pending line: the same verb, and its subject is the
+    # relay the heading three lines above already names.
+    assert "  checking…" in text, text
+
+
+def test_a_wrapped_log_path_keeps_the_sections_indent() -> None:
+    """U22: the value dropped to column 0 when it wrapped, so the tail of a path
+    read as a different section."""
+    from local_operator.tui.widgets.network_panel import _indented_value
+
+    prefix = "  log:        "
+    long_path = "/Users/someone/Library/Application Support/local-operator/logs/network.log"
+    wrapped = _indented_value(prefix, long_path, 60)
+    lines = wrapped.splitlines()
+    assert len(lines) > 1, wrapped
+    assert lines[0].startswith(prefix)
+    for continuation in lines[1:]:
+        assert continuation.startswith(" " * len(prefix)), repr(continuation)
+    # Nothing is lost: the wrapped form re-joins to the original value.
+    assert "".join([lines[0][len(prefix) :], *(ln[len(prefix) :] for ln in lines[1:])]) == long_path
+    # A value that fits is untouched — there is no second code path for it.
+    assert _indented_value(prefix, "/short/log", 60) == prefix + "/short/log"
+
+
+# ---------------------------------------------------------------------------
+# UX round 3 U23 — the reason, in words
+# ---------------------------------------------------------------------------
+
+
+def test_a_reason_token_is_said_in_words_and_a_sentence_is_left_alone() -> None:
+    """U23, at the function every surface now shares.
+
+    ``connect_failed:ConnectionRefusedError`` is a stage, a colon with no space
+    and a Python class name: a user surface that prints it names the transport's
+    failure mode where the reader needs "that device is not there" (design round 1,
+    D3). ``asked, and it did not answer`` is a SENTENCE the relay already wrote for
+    a person, and glossing that one away would replace a specific answer with a
+    blander one — which is why the rule splits on what the field holds rather than
+    on which surface is reading it.
+    """
+    from local_operator.resume import peer_reason_words
+
+    assert peer_reason_words("connect_failed:ConnectionRefusedError") == "it did not answer"
+    assert peer_reason_words("connect_failed:TimeoutError") == "it did not answer"
+    assert peer_reason_words("no_endpoint") == "no address published for it"
+    assert peer_reason_words("") == "it did not answer"
+    # A sentence survives, and a ``stage: <sentence>`` keeps its sentence and
+    # loses only the stage word.
+    assert peer_reason_words("asked, and it did not answer") == "asked, and it did not answer"
+    assert (
+        peer_reason_words("not_attempted: the listing budget ran out before this member was probed")
+        == "the listing budget ran out before this member was probed"
+    )
+    # NEVER EMPTY is the contract every caller paints into a clause.
+    for token in ("", "  ", "connect_failed:", "unreachable:TimeoutError"):
+        assert peer_reason_words(token).strip(), token

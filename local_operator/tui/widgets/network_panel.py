@@ -47,7 +47,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from local_operator.resume import UNNAMED_DEVICE
+from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
 from local_operator.tui.network_cli import LISTING_TIMEOUT_S, NetworkRun, run_network
 from local_operator.tui.widgets.aside_panel import ASIDE_COPY_KEY
 
@@ -69,15 +69,6 @@ _MIN_CARD_WIDTH = 40
 _ID_CELLS = 12
 
 
-#: The relay's ``reason`` tokens, in the words a person reads. See
-#: :func:`peer_reason_words` for why the token itself is not the answer.
-_PEER_REASON_WORDS: dict[str, str] = {
-    "no_endpoint": "no address published for it",
-    "not_a_member": "it is not a member of this network",
-    "member_removed": "it was removed from this network",
-}
-
-
 def short_id(value: str) -> str:
     """The first :data:`_ID_CELLS` cells of an id — the ONE abbreviation.
 
@@ -88,34 +79,6 @@ def short_id(value: str) -> str:
     the three columns read together.
     """
     return value[:_ID_CELLS] if len(value) > _ID_CELLS else value
-
-
-def peer_reason_words(reason: str) -> str:
-    """The relay's ``reason`` token said in words, and never empty.
-
-    WHY NOT THE TOKEN ITSELF (design round 1, D3). ``reason`` is a PROTOCOL
-    detail: ``connect_failed:ConnectionRefusedError`` is a stage, a colon with no
-    space after it, and a Python exception class. The panel is a user surface —
-    it named the transport's failure mode where the reader needs "that device is
-    not there" — and it was the only place in the product that spelled the
-    condition that way, while the sidebar says the same fact as ``(unreachable)``.
-    The raw token is not lost: ``lop network peers`` prints it per candidate, and
-    that is the detail view this panel is a summary OF.
-
-    Prefix-matched on the stage before the ``:`` rather than on the exception
-    class, because the tail is whatever the dial raised: a vocabulary of Python
-    class names would be a second registry to keep, and the distinction a reader
-    needs is "nothing answered", not which exception said so.
-    """
-    token = (reason or "").strip()
-    if token in _PEER_REASON_WORDS:
-        return _PEER_REASON_WORDS[token]
-    if token.startswith("unreachable:"):
-        return "no address of it answered"
-    # The default is also the answer for a stage whose tail names a failure this
-    # module has never seen: an unreadable reason is still "it did not answer" to
-    # the person reading the row.
-    return "it did not answer"
 
 
 #: The copy chord, the SAME constant `/info` and the aside bind rather than a
@@ -182,6 +145,32 @@ class NetworkLocal:
     relay_pid: int = 0
     networks: list[NetworkEntry] = field(default_factory=list)
     peers: list[PeerEntry] = field(default_factory=list)
+
+
+def _indented_value(prefix: str, value: str, width: int) -> str:
+    """A section's ``label: value`` line that keeps its indent when it wraps.
+
+    UX round 3, U22. The relay block's log path is the longest value this panel
+    paints, and when it did not fit, the widget wrapped it and the tail resumed
+    at column 0 — so the end of a path read as the start of a new section, beside
+    a block whose every other line is indented under its label. The body is ONE
+    ``Text`` and the wrap happens in Rich at the container's edge, where no
+    hanging indent can be asked for, so the value is broken HERE against the same
+    ``width`` the caller already passes for its rows: every continuation line
+    gets the prefix's own number of cells, and the block stays a block.
+
+    Cells, not characters, for the prefix's indent: it is ASCII spaces by
+    construction (the panel's own field labels), so the two agree, and taking the
+    width in the same units the caller measured keeps this out of the business of
+    guessing. A value that fits is returned unchanged — one code path, no
+    special case for the common one.
+    """
+    indent = " " * len(prefix)
+    budget = max(1, width - len(prefix))
+    if len(value) <= budget:
+        return prefix + value
+    chunks = [value[index : index + budget] for index in range(0, len(value), budget)]
+    return prefix + f"\n{indent}".join(chunks)
 
 
 def capture_local(root: Path | None = None) -> NetworkLocal:
@@ -688,7 +677,7 @@ class NetworkScreen(ModalScreen[None]):
         # is still asking, the only thing this half knows is that the LIVE answer
         # has not landed; the disk record beside it is not an answer, it is the
         # input the answer is about. Painting it as one put "relay: not running on
-        # this device" directly above the Relay section's "asking the relay…" —
+        # this device" directly above the Relay section's own pending line —
         # the frame contradicting itself about the one fact both lines are about.
         # So the pending sentence here is the SAME pending sentence there, and the
         # verdict is said once, by the section that measured it.
@@ -792,7 +781,7 @@ class NetworkScreen(ModalScreen[None]):
         suffix = "" if epoch is None else f" · epoch {epoch}"
         self._header(body, f"{label} · members{suffix}")
         if self.detail is None:
-            body.append("  asking the relay…\n", style="dim")
+            body.append("  checking…\n", style="dim")
             return
         members = self.detail.get("members_detail")
         if not isinstance(members, list) or not members:
@@ -895,7 +884,17 @@ class NetworkScreen(ModalScreen[None]):
     def _relay_section(self, body: Text, width: int) -> None:
         self._header(body, "Relay")
         if self.status_run is None:
-            body.append("  asking the relay…\n", style="dim")
+            # ONE PENDING WORD FOR ONE PENDING FACT (design round 3, D23). This
+            # section, the two below it and the device line above it were three
+            # spellings of "the relay has not answered yet" — ``asking the
+            # relay…`` here, ``checking with the relay…`` on the sections that
+            # inherit its answer, and ``relay: checking…`` on the device line.
+            # The verb is now ONE word everywhere: ``checking``. What differs is
+            # only its OBJECT, which is the fact each line is actually about —
+            # the section notes say what they are waiting ON (``checking with the
+            # relay…``), and the two lines whose whole subject is the relay do
+            # not say its name twice.
+            body.append("  checking…\n", style="dim")
             return
         payload = self.status_run.payload()
         if payload is None:
@@ -916,7 +915,7 @@ class NetworkScreen(ModalScreen[None]):
             body.append("  relay:      not running\n")
         log = str(payload.get("log") or "")
         if log:
-            body.append(f"  log:        {log}\n", style="dim")
+            body.append(_indented_value("  log:        ", log, width) + "\n", style="dim")
 
     def render_lines_for_test(self) -> list[str]:
         """The screen as plain strings — what a user actually reads.

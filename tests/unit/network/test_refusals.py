@@ -968,10 +968,19 @@ def test_an_unasked_device_is_named_in_every_empty_listing(
         merged = capsys.readouterr().out
         assert "lop-mesh-peer-b: unreachable" in merged, merged
         assert "no sessions are held by other devices right now" not in merged, merged
+        # AND IN WORDS, NOT IN A TRACEBACK CLASS NAME (UX round 3, U23). This
+        # line used to print the relay's raw reason — ``connect_failed:
+        # ConnectionRefusedError`` — on the surface a user reads, while the
+        # network panel beside it said the same fact in words. The gloss is the
+        # shared one (`resume.peer_reason_words`), so the sibling family is one
+        # voice; the raw token is still what ``lop network peers`` prints.
+        assert "ConnectionRefusedError" not in merged, merged
+        assert "unreachable (it did not answer)" in merged, merged
 
         assert net_cli.main(_sessions_args(peer="lop-mesh-peer-b", json=False)) == 0
         named = capsys.readouterr().out
         assert "lop-mesh-peer-b: unreachable" in named, named
+        assert "ConnectionRefusedError" not in named, named
         assert "no sessions are held by" not in named, named
     finally:
         server.stop()
@@ -1114,3 +1123,102 @@ def test_force_without_a_stop_is_a_usage_error(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--force applies to --stop only" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# UX round 3 U21 — the verb receipts, as a user reads them
+# ---------------------------------------------------------------------------
+
+
+def test_a_create_receipt_says_the_prompt_landed_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U21: ``first prompt admitted: True`` AND ``prompt admitted`` was one fact twice.
+
+    The relay's own sentence is the receipt's register; the boolean was a second
+    copy of it on the next line, and it is the sentence that stays. The
+    ``--json`` payload keeps ``admitted`` for a consumer to branch on, which is
+    what the second assertion here pins.
+
+    The relay ANSWER is stubbed, deliberately: what changed is the receipt's
+    rendering, and the wire shape it renders is pinned where it is produced
+    (``tests/unit/network/test_session_plane.py`` drives the real create over two
+    relays). A live create would engage a runtime to re-prove the half this test
+    is not about.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    detail = {
+        "session_id": "deadbeefcafe",
+        "admitted": True,
+        "duplicate": False,
+        "detail": "prompt admitted",
+        "record": None,
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(detail))
+
+    assert (
+        net_cli.main(
+            _sessions_args(
+                peer="lop-mesh-peer-b", create=True, prompt="port the parser", json=False
+            )
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "session: deadbeefcafe" in out, out
+    assert "prompt admitted" in out, out
+    assert "first prompt admitted" not in out, out
+
+    assert (
+        net_cli.main(_sessions_args(peer="lop-mesh-peer-b", create=True, prompt="port the parser"))
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["admitted"] is True, payload
+
+
+def test_a_stop_receipt_offers_the_remedy_and_never_a_rung(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U21: ``rung: none  outcome: not_running`` was machine vocabulary, and the
+    session stays in the listing with nothing said about it.
+
+    Two outcomes, because the fix is asymmetric on purpose: one that ENDED the
+    session prints the relay's own sentence and nothing else (the sentence is what
+    happened), and the one that did not prints the remedy the user needs to stop
+    looking for the row.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+
+    def _answer(outcome: str, rung: str) -> None:
+        monkeypatch.setattr(
+            net_cli,
+            "_relay_answer",
+            lambda op, **fields: {
+                "outcome": outcome,
+                "rung": rung,
+                "pid": 0,
+                "session_id": "deadbeefcafe",
+                "detail": "deadbeefcafe is not running on lop-mesh-peer-b.",
+            },
+        )
+
+    _answer("not_running", "none")
+    assert (
+        net_cli.main(_sessions_args(peer="lop-mesh-peer-b", stop="deadbeefcafe", json=False)) == 0
+    )
+    out = capsys.readouterr().out
+    assert "is not running on lop-mesh-peer-b." in out, out
+    assert "It stays in your sessions until it is removed on that device." in out, out
+    assert "rung:" not in out, out
+    assert "outcome:" not in out, out
+
+    _answer("stopped", "sigterm")
+    assert (
+        net_cli.main(_sessions_args(peer="lop-mesh-peer-b", stop="deadbeefcafe", json=False)) == 0
+    )
+    out = capsys.readouterr().out
+    assert "rung:" not in out, out
+    assert "outcome:" not in out, out
+    # A clean stop needs no second line: the relay's sentence is the answer.
+    assert out.strip() == "deadbeefcafe is not running on lop-mesh-peer-b.", out
