@@ -17,19 +17,16 @@ here: the evaluation runner resolves the names its spec lists, and a provider
 key is not one of them.
 
 The legacy ``CredentialManager`` mapping (``~/.local-operator/credentials.env``)
-is consulted as a TRANSITION fallback for a name the store does not hold, so an
-install that has not migrated yet keeps resolving. That fallback disappears with
-the rest of the plaintext store.
+is NO LONGER consulted (PR2a). It used to be a TRANSITION fallback for a name
+the store did not hold; the plaintext file is no longer a credential source, so
+a ref the store does not hold is reported missing rather than served from the
+file. This is the last reader leg to leave, and it leaves with the rest.
 
-``CredentialManager.get_credential`` returns an empty ``SecretStr`` for an
-unknown key rather than raising, and it also falls back to ``os.environ`` for
-a name it does not hold. The fallback is deliberately NOT used here: the
-runner's contract is that the environment is reachable only through an
-explicit ``EnvSecretResolver`` over names the caller listed, and a store
-resolver that quietly served ambient variables would make "resolved from the
-store" a false claim in the operator's own proof. The legacy leg therefore
-reads the manager's loaded mapping directly (``get_credentials``), never the
-env-falling-back getter.
+The store resolver never touches the environment: the runner's contract is that
+the environment is reachable only through an explicit ``EnvSecretResolver`` over
+names the caller listed, and a store resolver that quietly served ambient
+variables would make "resolved from the store" a false claim in the operator's
+own proof.
 """
 
 from __future__ import annotations
@@ -37,26 +34,19 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from local_operator.evaluation.adapters.api import ResolvedSecret
-from local_operator.evaluation.runner.secrets import (
-    MissingSecret,
-    build_resolved_secret,
-)
+from local_operator.evaluation.runner.secrets import build_resolved_secret
 
 
 class CredentialStoreResolver:
     """Resolve ``SecretRef`` names from the harness secret store.
 
     ``credential_manager`` is the object whose ``config_dir`` locates the
-    encrypted store and whose ``get_credentials()`` provides the legacy
-    transition fallback. It is typed ``Any`` so this module never imports
+    encrypted store. It is typed ``Any`` so this module never imports
     ``local_operator.credentials`` at module scope; the store is imported
     lazily in :meth:`resolve` for the same reason.
 
-    The encrypted store is read first, in the AGENT namespace, so a
-    ``LOP_PROVIDER_*`` row can never satisfy an evaluation ref. Only a name the
-    store does not hold falls through to the legacy mapping — which is why
-    ``get_credentials`` and not the env-falling-back getter is used (see the
-    module docstring).
+    The encrypted store is read in the AGENT namespace, so a
+    ``LOP_PROVIDER_*`` row can never satisfy an evaluation ref.
     """
 
     def __init__(self, credential_manager: Any) -> None:
@@ -66,10 +56,11 @@ class CredentialStoreResolver:
         """Agent-class store values by name, or ``{}`` when no store is readable.
 
         Best-effort, matching the readers elsewhere: an absent, locked or
-        damaged store is "this leg has nothing" rather than a failure, so the
-        legacy fallback (or ``MissingSecret``) still decides the outcome. A
-        single unreadable row is skipped, not fatal — one damaged record must
-        not hide every other credential, the store's own ``list`` rule.
+        damaged store is "this leg has nothing" rather than a failure, so a name
+        the store cannot produce is reported missing rather than turning the
+        resolve into an error. A single unreadable row is skipped, not fatal —
+        one damaged record must not hide every other credential, the store's own
+        ``list`` rule.
         """
         from local_operator.secrets.access import open_store, retrieve_secret
         from local_operator.secrets.errors import SecretStoreError
@@ -96,22 +87,13 @@ class CredentialStoreResolver:
         return values
 
     def resolve(self, names: Sequence[str]) -> tuple[ResolvedSecret, ...]:
-        try:
-            legacy = self._manager.get_credentials()
-        except Exception as error:
-            # The store's own error could quote the file path; it never quotes
-            # a value, but the chained cause is still kept off the message so
-            # the diagnostic stays "name only".
-            raise MissingSecret(names[0] if names else "") from error
         stored = self._stored_secrets()
         resolved: list[ResolvedSecret] = []
         for name in names:
-            # Encrypted store first (agent namespace); the legacy mapping is the
-            # transition fallback for a name it does not hold.
-            if name in stored:
-                value = stored[name]
-            else:
-                secret = legacy.get(name)
-                value = secret.get_secret_value() if secret is not None else ""
-            resolved.append(build_resolved_secret(name, value))
+            # The encrypted store, agent namespace. A name the store does not
+            # hold resolves to an EMPTY value — the legacy plaintext fallback
+            # this used to consult is GONE (PR2a), so a ref the operator never
+            # stored is honestly missing rather than quietly served from a file
+            # the store's own resolution no longer reads.
+            resolved.append(build_resolved_secret(name, stored.get(name, "")))
         return tuple(resolved)

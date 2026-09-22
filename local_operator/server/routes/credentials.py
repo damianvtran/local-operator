@@ -54,8 +54,9 @@ async def list_credentials(
 
     Lists the provider-class STORE rows (presented with the reserved
     ``LOP_PROVIDER_`` prefix stripped, so a caller sees the env-key spelling it
-    configured) UNIONED with the legacy ``CredentialManager`` keys, so an install
-    mid-migration sees every name it can configure. The desktop Settings section
+    configured) UNIONED with the store's plain agent-class rows. The legacy
+    ``CredentialManager`` file keys this used to union are GONE (PR2a) — the
+    plaintext file is no longer a credential source. The desktop Settings section
     that consumed this is being removed separately; the endpoint stays correct
     for any other client.
     """
@@ -91,8 +92,6 @@ async def list_credentials(
                 )
             except (SecretStoreError, OSError):
                 logger.warning("credential store unavailable", exc_info=True)
-        # Legacy file keys, which still back providers not yet migrated.
-        keys.update(credential_manager.list_credential_keys(non_empty=True))
 
         result = CredentialListResult(keys=sorted(keys))
 

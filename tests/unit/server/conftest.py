@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
@@ -206,7 +205,7 @@ def test_app_client(temp_dir):
         original_state["env_config"] = app.state.env_config
 
     # Set up test-specific state
-    mock_credential_manager = CredentialManager(config_dir=temp_dir)
+    mock_credential_manager = CredentialManager.readonly(config_dir=temp_dir)
     mock_config_manager = ConfigManager(config_dir=temp_dir)
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
@@ -230,7 +229,15 @@ def test_app_client(temp_dir):
     )
     _ = mock_scheduler_service.start()
 
-    mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
+    # PR2a: the plaintext/legacy getter is gone, so the fixture arms a
+    # provider-class STORE ROW for RADIENT_API_KEY — the tier the Radient
+    # resolver actually reads now. Written through the production writer so
+    # the row name and namespace cannot drift from the reader.
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.access import open_store
+
+    open_store(temp_dir, create=True)
+    store_provider_key("RADIENT_API_KEY", "test-credential", base=temp_dir)
 
     app.state.credential_manager = mock_credential_manager
     app.state.config_manager = mock_config_manager
