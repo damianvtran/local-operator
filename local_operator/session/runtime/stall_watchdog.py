@@ -319,6 +319,37 @@ FIRED_MARKER = "Timeout ("
 #: one; :func:`fired_pids` is what distinguishes the two.
 ARM_MARKER = "[stall watchdog] "
 
+#: What the header states a FIRE IS, because this artifact is opened by a reader who
+#: has nothing else in hand, and its previous wording asserted a verdict the module
+#: never computes.
+#:
+#: THE MISFIRE IT EXISTS TO PREVENT, measured 2026-09-22: a fire landed on the build
+#: carrying #1419 43 s after install, on a runtime that was MID-TURN AND WORKING,
+#: running a dense loop of short tool calls -- and that pid was STILL ALIVE
+#: afterwards, same pid, with no successor runtime ever coming up. An operator
+#: session read the pile of those dumps as a body count, published "31 bound-kills",
+#: and the count reached the v0.62.2 release notes before anyone asked whether a
+#: process had died. The file did not contradict the reading: its header said a dump
+#: below it meant the bound ENDED the runtime.
+#:
+#: WRITTEN AT ARM TIME, SO IT MUST BE TRUE OF EVERY FIRE IT CAN PRECEDE, and a fire
+#: can precede a process that carries on. The timer expiring is an OBSERVATION ABOUT
+#: THE TIMER; the process's death is a SEPARATE fact, and the exit that would join
+#: the two may never come. A reader asking whether the runtime is still there
+#: therefore reads the PID, never this file -- the same line this module's own
+#: readers draw ("a bound fired" is all :func:`fired_pids` says, and
+#: :func:`fired_leg` names only which leg).
+OBSERVATION_NOT_VERDICT = (
+    "IF A DUMP FOLLOWS THIS HEADER IT IS AN OBSERVATION, NOT A VERDICT: the watchdog's timer "
+    "expired without a re-arm from this process's own loops, and that is ALL it measured. It is "
+    "NOT a statement that the runtime stopped -- the timer can expire on a process that is "
+    "mid-turn and working -- so THIS PROCESS MAY STILL BE ALIVE ON THIS SAME PID, and may carry "
+    "on serving, AFTER this dump is written. What would turn the observation into a death is the "
+    "exit faulthandler takes once it has dumped (this timer is armed with exit=True), and THAT "
+    "EXIT MAY NEVER COME. So a fire is not by itself a body count, and THE PID, NOT THIS FILE, "
+    "IS WHAT SAYS WHETHER THE RUNTIME IS STILL THERE."
+)
+
 #: The planes whose progress this bound tracks. Named rather than spelled at
 #: each tick site: the two names are the whole vocabulary, and an unknown one is
 #: a programmer error rather than a third plane (see :func:`beat`).
@@ -764,12 +795,21 @@ def arm(
             handle.write(
                 f"{ARM_MARKER}pid {pid or os.getpid()} armed for {bound:g}s at {time.time():.0f} "
                 f"({time.strftime('%Y-%m-%d %H:%M:%S')}); the runtime's own loops re-arm this "
-                f"timer, so a dump below means this process made no progress for {bound:g}s. "
-                f"IF A DUMP FOLLOWS THIS HEADER, the bound ENDED this runtime -- incidents "
-                f"class {_bound_class()} -- and because the timer fires from a C thread that "
-                f"runs no Python, THIS FILE IS THE ONLY PLACE THAT CLASS IS WRITTEN. A "
-                f"further line below it carrying the words 'no progress' means the reason was a "
-                f"loop SPINNING without advancing; its absence means the runtime went SILENT. "
+                f"timer as they run, so what its expiry measures is {bound:g}s WITH NO RE-ARM FROM "
+                f"THEM -- a fact about the TIMER, never a reading of what this process was "
+                f"doing.\n"
+                f"{OBSERVATION_NOT_VERDICT}\n"
+                f"AND IF A FIRE IS THE CLASS THIS DUMP COUNTS AS, this is the only record of it: "
+                f"because that exit runs from a C thread that runs no Python, the incidents class "
+                f"{_bound_class()} is written here and nowhere else, which is why death "
+                f"attribution opens this file for a pid that IS gone. A further line below "
+                f"carrying the words 'no progress' means the re-arm stopped while the loops that "
+                f"produce it were still ticking and burning CPU; its absence means no tick "
+                f"reached the timer at all. WHY THIS FILE IS STILL NAMED {DUMP_PREFIX}-<pid>.log "
+                f"WHEN A FIRE IS NOT A STALL: it is written at ARM time, so one exists for every "
+                f"armed runtime, healthy ones included, and this fleet's incident taxonomy and "
+                f"death-attribution reader are keyed to that path -- renaming it is a "
+                f"cross-module change, taken whole or not at all rather than half-done here. "
                 f"NEITHER MARKER IS SPELLED HERE, and that is load-bearing rather than tidy: "
                 f"readers test for each as a SUBSTRING, so a header quoting one would make "
                 f"every armed file -- including one left by a SIGKILL -- read as a fired bound "
