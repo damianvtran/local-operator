@@ -1396,7 +1396,8 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> 
     scoped to spooled turns — an ordinary wake's bookkeeping is the ledger's job,
     not this one's (see :mod:`local_operator.wakes.deliveries`).
 
-    ``reason`` is ``_engage_one``'s own outcome word, and only
+    ``reason`` is an outcome word — ``_engage_one``'s own, or the belt's
+    ``raised`` (see the constant) — and only
     :data:`_SPOOLED_ATTEMPT_REASONS` move the walk. A ``started`` engage is the
     success case: the record is then cleared by the drain that discharges it
     (``inbox.settle_owed_turn``), never here — the supervisor must not decide that
@@ -1404,14 +1405,17 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> 
     """
     if reason not in _SPOOLED_ATTEMPT_REASONS:
         return
-    # ON THE LOOP, DELIBERATELY (review round 3, R3-4). The sibling ledger write
-    # beside this one goes through ``asyncio.to_thread``, and this does not: the
-    # record is one ~200-byte JSON file read, rewritten and ``os.replace``d with
-    # no fsync (``spooled._write``), so it is a couple of syscalls against a
-    # process whose slice is ten seconds — while the ledger's write is a
-    # read-modify-write of a directory that may hold every session on the host.
-    # Threading this would buy nothing and would make the callback awaitable,
-    # which the engage's own call sites are not.
+    # ON THE LOOP, DELIBERATELY (review round 3, R3-4; premises corrected in
+    # R4-1, which was right to check them). The sibling ledger write beside this
+    # one goes through ``asyncio.to_thread`` and this does not, on the only
+    # argument that survives reading both: this is ONE small atomic write — one
+    # ~200-byte JSON file, flushed and fsynced by ``spooled._write`` — and it
+    # happens at most once per attempted raise for a session, never closer than
+    # ``spooled.RETRY_BASE_S`` apart, against a process whose slice is ten
+    # seconds. The earlier version of this comment argued from a contrast with
+    # the ledger that does not exist (that write reads one record too); the
+    # decision does not need it. Threading this would also make the callback
+    # awaitable, which the engage's own call sites are not.
     try:
         from local_operator.wakes.spooled import note_attempt, read_spooled_turn
 
