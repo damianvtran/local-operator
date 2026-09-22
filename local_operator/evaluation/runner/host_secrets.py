@@ -90,9 +90,7 @@ class CredentialStoreResolver:
             return {}
         for name in names:
             try:
-                values[name] = retrieve_secret(name, base, role="agent").decode(
-                    "utf-8", "replace"
-                )
+                values[name] = retrieve_secret(name, base, role="agent").decode("utf-8", "replace")
             except (SecretStoreError, OSError, ValueError):
                 continue
         return values
@@ -117,4 +115,3 @@ class CredentialStoreResolver:
                 value = secret.get_secret_value() if secret is not None else ""
             resolved.append(build_resolved_secret(name, value))
         return tuple(resolved)
-

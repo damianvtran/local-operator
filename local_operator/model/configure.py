@@ -59,7 +59,6 @@ from local_operator.model.registry import (
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
-from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.model.configure")
 
@@ -1646,22 +1645,6 @@ def _listing_can_correct(info: ModelInfo) -> bool:
 _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 
 
-def _credential_file_names(provider: str) -> list[str]:
-    """The ``CredentialManager`` keys worth trying for ``provider``.
-
-    Delegates to :func:`~local_operator.providers.registry.credential_file_names`,
-    which is where this question is answered for the whole repo. It lived here
-    first; the mobile picker needed the identical answer, and two readers of the
-    two ``env_keys`` forms is exactly how one of them ends up handling only the
-    plain-string form and dropping ``anthropic``. Kept as a module-private alias
-    rather than deleted because this module's call sites read better against a
-    local name and the indirection costs nothing.
-    """
-    from local_operator.providers.registry import credential_file_names
-
-    return credential_file_names(provider)
-
-
 def _catalogue_api_key(provider: str) -> str:
     """An explicit API key for ``provider`` from the provider store, env, or the
     legacy credential file, else "".
@@ -1689,6 +1672,7 @@ def _catalogue_api_key(provider: str) -> str:
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
     """
+    canonical = "test" if provider == "noop" else provider
     try:
         from local_operator.providers.registry import provider_env_key
 

@@ -103,7 +103,6 @@ def test_prompt_for_credential(temp_config, monkeypatch):
     credential = manager.prompt_for_credential("NEW_API_KEY")
     assert credential.get_secret_value() == SECRET
 
-
     # The key is saved as a provider-class STORE row, not the plaintext file.
     from local_operator.secrets.access import open_store
     from local_operator.secrets.store import provider_secret_name

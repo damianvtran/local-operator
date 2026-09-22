@@ -76,7 +76,6 @@ from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
     provider_env_key,
-    resolve_env_key,
 )
 
 if TYPE_CHECKING:  # the legacy reader stays an optional, import-guarded tier

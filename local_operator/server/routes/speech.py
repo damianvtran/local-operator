@@ -3,6 +3,7 @@ from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.clients._http import APIError
@@ -157,11 +158,9 @@ async def create_agent_speech(
             # Store-first like the rest of the provider-key surface.
             from local_operator.providers.registry import provider_env_key
 
-            api_key = provider_env_key(
-                "openrouter", base=credential_manager.config_dir
-            )
-            if api_key:
-                model_info_client = OpenRouterClient(api_key)
+            raw_key = provider_env_key("openrouter", base=credential_manager.config_dir)
+            if raw_key:
+                model_info_client = OpenRouterClient(SecretStr(raw_key))
             else:
                 logger.warning("OpenRouter hosting selected but OPENROUTER_API_KEY not found.")
         elif hosting == "radient":
