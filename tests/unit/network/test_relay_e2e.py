@@ -398,6 +398,61 @@ def test_a_replayed_invite_is_refused(
     assert "handshake_refused" in _events(server_a)
 
 
+def test_an_admission_does_not_revert_what_landed_during_the_human_step(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listener's admission is a read-modify-write that SPANS the human step.
+
+    THE WIDEST WINDOW IN THE PACKAGE, and the one this cell exists for: the listener
+    reads its record, shows a code, waits for a person to compare it, and then writes
+    the admission from the copy it read. Everything another writer landed in those
+    seconds used to be reverted by that write — and nothing reported it, because the
+    file that landed was a well-formed record stamped with a HIGHER sequence than the
+    one it clobbered. The writers that land there are the ones whose loss is
+    expensive: the heartbeat's endpoint sync, a membership pull, and a peer's epoch
+    rotation with the member list that travels with it.
+
+    WHAT THE CELL DOES: the human step is where the concurrent write lands, because
+    that IS the window, and the write is the relay's own control op (mint a second
+    invite) rather than a store poke — so two real write sites are exercised, not a
+    simulation of one. Both must be on disk afterwards, beside the member the pairing
+    admitted. Pre-fix the second invite is gone: the admission wrote back the record
+    the listener had read before it ever showed the code.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    _type_the_code(monkeypatch)
+    minted_in_the_window: list[str] = []
+
+    def human_step(self: relay.RelayServer, **kwargs: Any) -> types.PairDecision:
+        # WHILE THE HUMANS TALK, another writer lands on the same record.
+        minted = self._ctl_invite({"network": record.network_id})  # noqa: SLF001
+        minted_in_the_window.append(minted["invite_id"])
+        return types.PairDecision(
+            invite_id=kwargs["invite_id"],
+            decision="admit",
+            matched=True,
+            reason="",
+            answered_by="human",
+        )
+
+    monkeypatch.setattr(relay.RelayServer, "_inviter_human_step", human_step)
+    joined = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    assert joined is not None and not isinstance(joined, str), joined
+
+    assert minted_in_the_window, "the concurrent writer never ran: no window was exercised"
+    after = store.load(record.network_id, server_a.root)
+    assert after.invite(minted_in_the_window[0]) is not None, (
+        "the admission wrote back the copy it read before the human step, and the "
+        "invite another writer minted in that window is gone"
+    )
+    assert after.member(server_b.identity.device_id) is not None, "the pairing admitted nobody"
+    assert len(after.active_members()) == 2
+    assert after.invites[0].state == "consumed"
+
+
 def _drop_after_the_hello(
     server: relay.RelayServer, *, host: str, port: int, envelope: Any
 ) -> None:

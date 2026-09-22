@@ -10,6 +10,26 @@ the repository's other staged write already documents: it is durability of
 *process*, not of *host* (no fsync of the directory, so a rename outlives a crashed
 process but not a power cut).
 
+THE LOCK SERIALISES WRITES, AND A CALLER'S OWN READ-MODIFY-WRITE NEEDS THE SAME
+LOCK TOO. Both of the guarantees above are about ONE write: two callers of
+``save`` cannot tear the file or mint the same sequence, and neither of those
+covers the wider window a caller opens with ``load`` → mutate → ``save``. A record
+materialised before another writer's ``save`` still carries the pre-write
+membership, epoch and tombstones, and writing it back REVERTS them — the same
+loss the sequence fix closed, one level up, and silent for the same reason
+(nothing on the read path can tell a stale write from a fresh one).
+:func:`mutate` is the whole of the answer: it holds this target's lock and reads
+INSIDE it, so the record a body edits cannot predate a write it never saw.
+
+The lock, and therefore :func:`mutate`, is IN-PROCESS — the same boundary the
+write lock has always had, because the writers are several threads of one relay
+process. TWO PROCESSES writing one record are outside it, and ONE such writer is
+still open rather than merely hypothetical: ``network/cli.py:_cmd_rename`` saves
+without asking a live relay first, where every other mutating verb routes through
+``_relay_call`` and writes locally only when nothing answers. Closing that one
+needs a lock the filesystem holds (``flock``), not this one, so it is named here
+rather than left to be rediscovered.
+
 THE SECRET LIVES IN A SEPARATE FILE FROM THE RECORD, deliberately. The record is
 what ``lop network show --json`` dumps, what a future syncer copies, and what the
 control socket returns; keeping key material out of it means there is no
@@ -289,6 +309,47 @@ def save(record: NetworkRecord, root: Path | None = None) -> Path:
             json.dump(payload, handle, ensure_ascii=False)
 
         return _stage_private(target, emit)
+
+
+@contextmanager
+def mutate(network_id: str, root: Path | None = None) -> Iterator[NetworkRecord]:
+    """Read-modify-write ONE record, holding its write lock across the whole span.
+
+    THE FAULT THIS CLOSES, in the words of the site that had it: the pair
+    listener read a record, asked a HUMAN to compare a code, and then wrote the
+    admission back — minutes later, from the snapshot it had read (relay.py,
+    ``_run_pair_listener``). Anything another thread wrote in the meantime was
+    reverted by that write, and the things in flight there are exactly the ones
+    that must not be lost: a peer's epoch rotation (members, epoch, the secret
+    that goes with it) and a membership pull (a newly admitted member). Nothing
+    reported it, because the file that landed was a well-formed record with a
+    HIGHER sequence — the write was newer than the one it clobbered, and only its
+    CONTENT was older.
+
+    So the rule is: the record a body edits is read AFTER this lock is taken, and
+    the body's ``save`` happens before the lock is released. Two bodies therefore
+    run one after the other — the second reads what the first wrote — and no
+    caller can hold a pre-write snapshot across another's write.
+
+    THE HELPER DOES NOT WRITE ON ITS OWN, and that is deliberate: the body calls
+    :func:`save` when it changed something, exactly as it did before. A body that
+    RAISES after mutating has to decide whether its change must survive the
+    exception (the join path writes a consumed invite and re-raises on purpose),
+    and a write-on-exit could not make that decision for it. Passing the SAME
+    ``root`` the body passes to ``save`` matters: the lock is keyed on the target
+    path as this process spells it, so a different spelling is a different lock and
+    the nested write is no longer serialised against the outer one.
+
+    KEEP THE BODY TIGHT. It holds a lock other threads want — the relay's
+    heartbeat and membership loops write this same record — so a body that waits on
+    a peer, a human or a clock belongs OUTSIDE the block, with the read RE-VALIDATED
+    inside it (the join path's own rule: "the record on disk is the authority").
+
+    Raises ``FileNotFoundError`` when the record is not there, like :func:`load`.
+    """
+    target = record_path(network_id, root)
+    with _write_lock(target):
+        yield load(network_id, root)
 
 
 def save_secrets(state: SecretState, root: Path | None = None) -> Path:

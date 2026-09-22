@@ -627,8 +627,10 @@ def test_a_silently_refused_handshake_is_named_locally(
     # A COMPLETED HANDSHAKE CLEARS IT, so a peer that restarted mid-handshake does not
     # leave a permanent accusation. (The transition is a direct call because the
     # refusal that set it is a removal on the peer's side here, and a removed id
-    # cannot be re-admitted — which is the next test.)
-    b.server._clear_refusal_mark(marked)  # noqa: SLF001
+    # cannot be re-admitted — which is the next test.) It takes the network id, not
+    # ``marked``: the mark is one field of a record other writers edit, so the helper
+    # re-reads inside the store's lock rather than writing this copy back.
+    b.server._clear_refusal_mark(marked.network_id)  # noqa: SLF001
     assert store.load(record.network_id, b.root).stale == ""
 
 
