@@ -306,6 +306,21 @@ class NetworkSettings:
 #: on a couple of endpoints, not to wait out an unreachable fleet.
 LISTING_PROBE_BUDGET_S = 12.0
 
+#: How long a CLIENT of the control socket should allow for a listing verb: the
+#: relay's own probe budget plus slack, because a client must OUTWAIT the server
+#: it asked rather than inventing its own, shorter deadline — a client that gave
+#: up first would report a running relay as silent, and the operator would read
+#: "no peers" for a mesh that was merely slow.
+#:
+#: ONE HOME, and that is the point rather than tidiness. The number used to be an
+#: inline ``+ 8.0`` in three places (``network/cli.py``'s ``_listing_timeout``,
+#: the session-plane listing in ``cli.py``, and the TUI's documented budget), and
+#: the peer catalogue read by the sidebar (``network/projection.py``) took the
+#: control socket's 5 s default instead and silently returned nothing (QA round
+#: 10, Q-R10-1). Three deadlines for one fan-out is how a surface comes to
+#: disagree with the CLI about whether a peer answered.
+LISTING_CLIENT_TIMEOUT_S = LISTING_PROBE_BUDGET_S + 8.0
+
 #: How long ONE candidate address may take to ACCEPT a connection before it is
 #: written off. Sized for the question a probe asks — "does anything answer at
 #: this address?" — not for the handshake that follows it: a healthy path connects
@@ -3355,7 +3370,105 @@ class RelayServer:
             if row.get("session_id") in seen:
                 continue
             rows.append(row)
+        for row in self._mesh_hosted_rows(seen):
+            rows.append(row)
         return rows
+
+    def _mesh_hosted_rows(self, seen: set[str]) -> list[dict[str, Any]]:
+        """Sessions this device hosts FOR the mesh that no other half lists yet.
+
+        A MESH-HOSTED SESSION IS A ROW BEFORE ITS FIRST TURN (QA round 10,
+        Q-R10-3). ``_stored_rows`` reads the ordinary catalogue, whose
+        membership rule is retention's activity clock (``_ACTIVITY_FILES``): a
+        directory carrying neither activity file "has never been worked in", is
+        outside the ranked set entirely, and is only ever a ``remove_empty``
+        candidate. A session THIS device minted at a peer's request has no turn
+        yet — the runtime engages, finds no work and no viewer, and idle-exits
+        (measured: `idle for 3.0s … exiting cleanly`) — so the id the requesting
+        device was handed by ``net_session_create`` was a row on neither
+        machine: not in the peer's own catalogue, and therefore not in the
+        viewer's federated listing either. The user asked for that session and
+        was told its id; a listing that cannot show it is the same silent-empty
+        failure this slice already paid for once.
+
+        ``mesh.json`` IS THE MEMBERSHIP TEST, and the reason is that the stamp
+        is exactly the record of "this session exists here because of the
+        mesh": an ordinary local session carries a stamp too, but a LOCAL one
+        (``placement.mode == "local"``), so the filter is "stamped, and not a
+        plain local row" rather than "has a stamp". That keeps this addition
+        off every pre-existing local session — the catalogue's membership rule
+        for those is unchanged, which is the property eight other surfaces
+        read.
+
+        Read on the RELAY's thread from a listing, so it is a single
+        ``scandir`` of ``sessions/`` plus one ``stat`` per entry the catalogue
+        did not rank, and it never dials.
+        """
+        from local_operator.session.catalog import session_directory_name
+        from local_operator.session.placement import read_stamp
+
+        rows: list[dict[str, Any]] = []
+        try:
+            # Closed explicitly: this runs on the relay's thread for every
+            # listing, and an iterator left to the GC holds a directory fd.
+            with os.scandir(self.root / "sessions") as scan:
+                entries = list(scan)
+        except OSError:
+            # Same boundary as `_stored_rows`: a store that cannot be walked
+            # contributes no rows and leaves the live ones standing.
+            return rows
+        for entry in entries:
+            if entry.name in seen or not session_directory_name(entry.name):
+                continue
+            stamp = read_stamp(self.root, entry.name)
+            if stamp is None or stamp.placement.mode == "local":
+                continue
+            seen.add(entry.name)
+            rows.append(
+                {
+                    "session_id": entry.name,
+                    "conversation_name": self._stored_name(entry.name),
+                    "cwd": "",
+                    "model_label": "",
+                    "busy": False,
+                    "pending": None,
+                    "detached": True,
+                    # The stamp's own creation time, because there is no
+                    # transcript to date the row from: the activity clock this
+                    # listing normally ranks on is exactly what this session has
+                    # not written yet.
+                    "started": float(stamp.created_at or 0.0),
+                    "pid": 0,
+                    "kind": "daemon",
+                    "capabilities": [],
+                    "state": "stored",
+                    "age_s": 0.0,
+                    "placement": stamp.placement.to_json(),
+                    "origin": dict(stamp.origin) if stamp.origin else None,
+                    "archived": None,
+                }
+            )
+        return rows
+
+    def _stored_name(self, session_id: str) -> str:
+        """A name for a session the catalogue has not ranked, or ``''``.
+
+        The title sidecar is what ``/new remote <peer> <name>`` writes, and it
+        is a sidecar precisely so a row can be named without a transcript
+        (``resume.py``'s ``TITLE_SIDECAR_NAME``). Anything else — an absent
+        file, a torn one — is no name rather than a guess, and every surface
+        already has a fallback for that.
+        """
+        from local_operator.resume import TITLE_SIDECAR_NAME
+
+        try:
+            path = self.root / "sessions" / session_id / TITLE_SIDECAR_NAME
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        return str(data.get("title") or "")
 
     def _stored_rows(self) -> list[dict[str, Any]]:
         """Sessions with a directory and no live record — the idle half.
@@ -3940,7 +4053,7 @@ class RelayServer:
                 "outcome": "not_running",
                 "pid": 0,
                 "session_id": session_id,
-                "detail": f"{session_id} is not running on this device.",
+                "detail": f"{session_id} is not running on {self._own_label()}.",
             }
         outcome = asyncio.run(
             control.stop_session(
@@ -3999,7 +4112,7 @@ class RelayServer:
         from local_operator.session.runtime.launch import WarmErrand, engage_runtime
 
         if not (self.root / "sessions" / session_id).is_dir():
-            return f"this device does not hold a session {session_id}"
+            return f"{self._own_label()} does not hold a session {session_id}"
         started = cwd or str(Path.home())
         try:
             asyncio.run(
@@ -4014,8 +4127,67 @@ class RelayServer:
                 )
             )
         except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
-            return f"this device could not start that session: {exc}"
+            return self._engage_failure_detail(session_id, exc)
         return ""
+
+    def _own_label(self) -> str:
+        """This device's name, or its id when nobody named it."""
+        return str(self.identity.name or self.identity.device_id)
+
+    def _peer_label(self, device_id: str) -> str:
+        """A peer's NAME when this device knows one, else the token it was asked for.
+
+        THE LABEL THE USER TYPED (UX round 1, U6). A viewer resolves the name a
+        person typed (`device-b`) to the id it puts on the wire, so a refusal
+        composed from the WIRE token answered about
+        `d_82b36b3c77a7b799f694f5cdd3dfe4d` at the instant the user had typed a
+        word they could recognise. Falls back to the token rather than to an
+        invented name: "I do not know what to call this device" must not read as
+        a device called something.
+        """
+        if not device_id:
+            return device_id
+        try:
+            for record in store.list_networks(self.root):
+                for member in record.active_members():
+                    if member.device_id == device_id and member.name:
+                        return str(member.name)
+        except Exception:  # noqa: BLE001 — a refusal's words are not worth a raise
+            pass
+        return device_id
+
+    def _engage_failure_detail(self, session_id: str, exc: BaseException) -> str:
+        """Why a runtime could not start, in words that name WHOSE device failed.
+
+        THE DEVICE, NOT "this device" (UX round 1, U6). This sentence is composed
+        HERE, on the device that owns the session, and is then brokered to the
+        OTHER device's user — so its point of view was the wrong one: the runtime
+        start failed on the peer, and the operator was told "this device could
+        not start that session", which sends them to debug the machine that is
+        working. The name is the one the peer knows itself by (already in the
+        member row every surface shows), falling back to its id.
+
+        AND NO PYTHON PATH (same finding). ``RuntimeStartupError``'s message ends
+        with the SPAWNED CHILD's terminal traceback line —
+        ``module.path.HostingNotConfiguredError: …`` — which reached a user-facing
+        transcript. The curated, user-facing sentence the same failure already
+        carries (``actionable``: the class attribute on ``ActionableConnectionError``
+        or the vetted string on ``RuntimeStartupError``) is preferred, and when
+        the cause was NOT one of the known configuration conditions the detail is
+        the device's own log rather than an unvetted traceback line.
+        """
+        where = self._own_label()
+        flag = getattr(exc, "actionable", None)
+        if flag is True:
+            reason = str(exc)
+        else:
+            reason = flag if isinstance(flag, str) else ""
+        if reason:
+            return f"could not start a runtime for session {session_id} on {where}: {reason}"
+        return (
+            f"could not start a runtime for session {session_id} on {where}; that "
+            "device's own log has the cause (`lop network doctor`)"
+        )
 
     def _set_model_on(self, session_id: str, model: dict[str, Any]) -> dict[str, Any]:
         """Apply a create's model choice through the runtime's own `set_model`.
@@ -4408,7 +4580,9 @@ class RelayServer:
             return {
                 "op": "error",
                 "req": req,
-                "message": f"{peer} cannot be reached from this device right now",
+                "message": (
+                    f"{self._peer_label(peer)} cannot be reached from this device right now"
+                ),
             }, None
         stream_id = "s" + os.urandom(8).hex()
         stream = _Stream(
@@ -5637,7 +5811,8 @@ class RelayServer:
         if link is None:
             raise MeshRefusal(
                 "peer_unreachable",
-                f"{peer} cannot be reached from this device right now, so it was not asked",
+                f"{self._peer_label(peer)} cannot be reached from this device right now, "
+                "so it was not asked",
             )
         reply = link.request(
             {"op": op, "req": self._next_relay_req(), "locality": "remote", **fields},

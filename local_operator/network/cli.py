@@ -359,15 +359,23 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -
     return 0 if payload.get("ok", True) else 1
 
 
-#: Slack added to the relay's own listing budget before a control call gives up.
-#: The relay bounds its peer probe (``LISTING_PROBE_BUDGET_S``); this is the
-#: client, and it must outwait the server it is asking rather than inventing its
-#: own, shorter deadline.
-_LISTING_TIMEOUT_SLACK_S = 8.0
+#: The listing verbs' client-side deadline is `relay.LISTING_CLIENT_TIMEOUT_S`:
+#: the relay's own probe budget plus slack, so a client outwaits the server it
+#: asked instead of inventing its own, shorter deadline. It is NOT spelled here
+#: — three inline ``+ 8.0`` copies of one deadline is how the sidebar's peer
+#: catalogue came to use the socket default and silently list nothing (QA round
+#: 10, Q-R10-1).
 
 
 def _listing_timeout() -> float:
-    return float(_import_relay().LISTING_PROBE_BUDGET_S) + _LISTING_TIMEOUT_SLACK_S
+    """How long a listing verb waits for THIS device's relay.
+
+    The number lives beside the relay's own probe budget
+    (``relay.LISTING_CLIENT_TIMEOUT_S``) rather than here, because it is the
+    same wait the sidebar's peer catalogue makes with no command line in front
+    of it: one fan-out, one deadline.
+    """
+    return float(_import_relay().LISTING_CLIENT_TIMEOUT_S)
 
 
 #: The refusal code the whole `lop network` family carries when this device's own
@@ -674,11 +682,26 @@ def _cmd_ls(args: argparse.Namespace) -> int:
     rows = live if live else [_summarise(record) for record in records]
     if not rows:
         return _emit(args, {"ok": True, "networks": []}, ["no networks on this device"])
+    # THE LOCAL HALF OF THE STATE, STATED ON EVERY ROW (QA round 10, Q-R10-5).
+    # ``trust`` answers "does this device still trust the network", which is not
+    # the question an operator asks of the row: a network whose secret was
+    # deleted by ``/network disconnect`` is trusted and unusable, and this line
+    # used to say only ``active``. The secret file is a fact of THIS device, so
+    # it is read once here and stamped on the rows whichever path built them —
+    # the relay's checked table and the local ``_summarise`` fallback.
+    missing: set[str] = set()
+    for record in records:
+        if not store.secrets_path(record.network_id).exists():
+            missing.add(record.network_id)
+    for row in rows:
+        if isinstance(row, dict):
+            row["secret_missing"] = row.get("network_id") in missing
     lines: list[str] = []
     for row in rows:
         lines.append(
             f"{row['name']}  {row['network_id']}  epoch {row['epoch']}  {row['role']}  "
             f"{row['members']} member(s)  {row['trust']}"
+            + ("  [no secret — rejoin]" if row.get("secret_missing") else "")
             + (f"  [{row['stale']}]" if row.get("stale") else "")
             + membership_marker(row)
         )
@@ -1606,15 +1629,30 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             timeout=120.0,  # a spawn plus its first turn's admission
         )
         minted = str(_reported(detail, "session_id", verb="create") or "")
-        return _emit(
-            args,
-            {"ok": bool(minted), **detail},
-            [
-                f"session: {minted or '-'}",
-                f"admitted: {bool(detail.get('admitted'))}",
-                str(detail.get("detail") or ""),
-            ],
-        )
+        prompt = str(getattr(args, "prompt", "") or "")
+        # THE RECEIPT NAMES THE DEVICE, AND DOES NOT CALL AN ABSENT PROMPT A
+        # FAILURE (UX round 1, U2/U3). ``admitted`` is the relay's word for "the
+        # first prompt was admitted" — ``_op_session_create`` sets it only
+        # inside ``if prompt:`` — so the promptless create, which is the first
+        # thing a user types, printed ``admitted: False`` beside ``ok: True``
+        # and read as a failure for a session the peer had just minted, spawned
+        # and taken a runtime for. The DEVICE is named because the session is
+        # not on this machine and is not opened: without it the one fact a user
+        # needs next (which peer to ask) is only in the command they typed a
+        # moment ago and have already scrolled past. The machine-readable
+        # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
+        lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        if prompt:
+            lines.append(f"first prompt admitted: {bool(detail.get('admitted'))}")
+        else:
+            lines.append(
+                "no prompt sent — the session exists on that device; "
+                f"/network sessions --peer {peer} lists it, --engage warms it, "
+                "--stop ends it"
+            )
+        if detail.get("detail"):
+            lines.append(str(detail["detail"]))
+        return _emit(args, {"ok": bool(minted), **detail}, lines)
 
     if not peer and not getattr(args, "all_peers", False):
         raise MeshRefusal(
@@ -1835,9 +1873,31 @@ def _cmd_trust(args: argparse.Namespace) -> int:
         {"ok": True, **live, "applied_locally": applied_locally},
         [
             f"{record.name} is now {target}"
-            + (" (the relay is not running: applied locally)" if applied_locally else "")
+            + (" (the relay is not running: applied locally)" if applied_locally else ""),
+            *_secret_caveat(record),
         ],
     )
+
+
+def _secret_caveat(record: Any) -> list[str]:
+    """What TRUST does not answer: whether this device can still USE the network.
+
+    A TRUST RECEIPT THAT SAYS ``active`` FOR A NETWORK WITH NO SECRET (QA round
+    10, Q-R10-5). ``disconnect`` deletes this device's secret and keeps the
+    record, so the very next verb in the family refuses — correctly, in the
+    words ``store.require_secrets`` owns — while the receipt for the act the
+    user just performed read as ``usable``. The state a person acts on is the
+    pair of facts, so both are stated, in the refusal's own vocabulary rather
+    than a second one for the same condition.
+    """
+    from local_operator.network.store import secrets_path
+
+    if secrets_path(record.network_id).exists():
+        return []
+    return [
+        "⚠ this device has no secret for it (deleted by `/network disconnect`), so it "
+        "is trusted but not usable: rejoin with `lop network join` and a fresh invite"
+    ]
 
 
 def _cmd_uninstall(args: argparse.Namespace) -> int:

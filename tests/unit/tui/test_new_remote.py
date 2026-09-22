@@ -267,8 +267,17 @@ async def test_the_picker_offers_remote_then_every_known_peer(
         # validator then refused could not pass.
         spec = slash_command_for("/new")
         assert spec is not None
-        for token in ("remote damian-mbp", "remote d_bbbb", "remote"):
+        for token in ("remote damian-mbp", "remote d_bbbb"):
             assert command_argument_is_used(spec, token)
+        # ...AND THE ROW UNDER THE CURSOR IS ONE THE HANDLER RUNS (UX round 1,
+        # U4). The list opens with its first row highlighted, so a leading
+        # keyword-only row meant the first Enter filled the buffer with a bare
+        # `remote` and the second answered a red "Use /new remote <peer>…" — the
+        # picker refusing the syntax it had just offered. With a peer to offer,
+        # every row is a whole working argument and the bare row is not listed.
+        assert (
+            "Create it on another device" not in painted
+        ), "the keyword-only row is back, and it is the row the picker pre-selects"
 
 
 @pytest.mark.asyncio

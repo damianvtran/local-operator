@@ -143,7 +143,13 @@ NETWORK_SUBCOMMAND_HELP: dict[str, str] = {
     "peers": "Reachable peers right now",
     "rename": "Rename a network locally",
     "rm": "Forget a network locally",
-    "sessions": "Sessions on other devices: list, engage, stop",
+    # THE FLAG IS NAMED, because the bare form is REFUSED (UX round 1, U5): the
+    # session plane acts on a session that lives on ONE device, so the CLI
+    # requires `--peer <device>` or `--all-peers` and answers
+    # "name a device with --peer, or ask every device with --all-peers"
+    # otherwise. A row that offered the bare verb would be the U4 shape one
+    # verb over — an offer the handler refuses.
+    "sessions": "Sessions on other devices: list, engage, stop (--peer <dev> or --all-peers)",
     "show": "Members, roles and endpoints",
     "status": "Relay health and this device's links",
     "trust": "Trust an untrusted network again",

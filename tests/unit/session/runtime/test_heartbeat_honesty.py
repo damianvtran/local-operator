@@ -98,6 +98,20 @@ async def test_the_beat_publishes_the_gap_it_measured_and_the_cpu_it_burned(
     so it must carry the last measurement forward rather than blanking it. A
     blanked field would read as "no reading taken", which is exactly the
     ambiguity the pair exists to remove.
+
+    THE TURN BOUNDARY IS STUBBED, AND THAT IS THE FIX FOR TWO RED SHARD-1 RUNS
+    (PR #1348). The `busy` bit is not this test's subject; it is the cheapest
+    transition republish to trigger. But the beat re-derives it from the
+    handle on EVERY tick — the loop's own comment calls it "the FLOOR for the
+    record's busy bit, not its fix" — so a `set_busy(True)` here is overwritten
+    by the next beat whenever this assertion loses a race to the heartbeat
+    thread. MEASURED, with this file's 0.05 s interval on a loaded host: `busy`
+    reads True immediately after the write and False one tick later. At the
+    production 15 s the window is enormous, which is why it looked solid and
+    passed locally; on a contended shard the same code is a coin flip. The
+    handle is therefore pinned to the state the test is driving, so both
+    writers state one fact, and the carry-forward assertion is made on
+    `note_leaving` — a republish the loop never recomputes and so cannot undo.
     """
     monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL_S", BEAT_INTERVAL_S)
     runtime = await _boot(tmp_path)
@@ -119,7 +133,18 @@ async def test_the_beat_publishes_the_gap_it_measured_and_the_cpu_it_burned(
         assert isinstance(record.cpu_since_beat_s, float) and record.cpu_since_beat_s >= 0.0
         measured = record.beat_lag_s
 
-        # A TRANSITION REPUBLISH DOES NOT BLANK IT.
+        # A TRANSITION REPUBLISH DOES NOT BLANK IT, and the two transitions
+        # below are chosen so that this cannot be a race:
+        #
+        # * `set_busy` IS the turn-boundary publish the handle makes, but the
+        #   beat also derives it, so the handle is made to agree with the value
+        #   the test drives (see the docstring): one fact, two writers, and the
+        #   reading below is then a fact rather than a race.
+        # * `note_leaving` is a transition the beat never recomputes, so the
+        #   record read back is the one THAT publish wrote — which is what makes
+        #   "the measurement was carried forward" an observation instead of an
+        #   inference.
+        monkeypatch.setattr(runtime._handle, "is_conversationally_active", lambda: True)
         runtime.set_busy(True)
         republished = _published(runtime._record.pid)
         assert republished is not None and republished.busy is True
@@ -128,6 +153,16 @@ async def test_the_beat_publishes_the_gap_it_measured_and_the_cpu_it_burned(
         ), "a turn-boundary republish dropped the last measurement"
         assert republished.cpu_since_beat_s is not None
         assert republished.beat_lag_s >= measured
+
+        runtime.note_leaving("finishing work in flight before the exit")
+        carried = _published(runtime._record.pid)
+        assert carried is not None
+        assert carried.leaving == "finishing work in flight before the exit"
+        assert (
+            carried.beat_lag_s is not None
+        ), "a republish the heartbeat cannot overwrite dropped the measured gap"
+        assert carried.beat_lag_s >= measured
+        assert carried.cpu_since_beat_s is not None
 
         # ...and the two readings are about the same runtime: the beat that took
         # them ran in this process, so the record's pid is this one.

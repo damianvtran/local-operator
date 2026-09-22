@@ -148,11 +148,28 @@ SUBAGENT_ROWS = [
 #: Pinned in the capture. One ACTIVE row, to show that a pin LIFTS a row out of
 #: the section it ranked into, and one SUBAGENT row, to show a pinned agent run
 #: staying visible in ★ Pinned while the layer itself is off.
+#: ``LO_SIDEBAR_SHOT_MESH=<config-root>`` sources the mesh tier from the REAL
+#: producer — ``session.peer_rows.peer_session_rows`` against that root's own
+#: relay — instead of the hand-stamped ``PEER_ROWS`` below.
+#:
+#: WHY THIS EXISTS (QA round 10, Q-R10-1). The published frame used to be the
+#: ONLY rendering of a peer tier this tree could produce: ``PEER_ROWS`` is
+#: stamped by hand, and its comment recorded that "the projection that will
+#: produce them is not in this tree yet". The projection arrived in this branch
+#: and did not work — ``RelayPeerCatalog._call`` read the reply ENVELOPE, so a
+#: device with a peer answering held zero remote rows and the sidebar painted
+#: ``No conversations yet``. A screenshot captured from a fixture cannot show
+#: that, and did not. With this knob the frame is the surface the product
+#: produces, from a real relay's answer.
+#:
+#: ``scripts/mesh_sidebar_shot.py`` builds the two-device mesh and invokes this
+#: script with the knob set; the fixture stays the default so the deterministic
+#: goldens and every other gallery frame are unchanged.
+MESH_ROOT = os.environ.get("LO_SIDEBAR_SHOT_MESH") or ""
+
 #: The mesh (R6) rows: one live peer's two sessions and one UNREACHABLE peer's
-#: session. Hand-stamped with the mobility fields rather than loaded, exactly as
-#: every other row in this fixture is — the projection that will produce them is
-#: not in this tree yet (``docs/design/mesh-ui.md`` §2.8.1 records why), so the
-#: capture drives the surface through the contract the producer must satisfy.
+#: session. Used when ``LO_SIDEBAR_SHOT_MESH`` is unset; the published README
+#: frame is captured from the REAL producer instead (see above).
 #:
 #: Two devices, not one, because the pair is what the section rule is about: each
 #: peer is its own contiguous section with its own heading, and a single-device
@@ -321,23 +338,38 @@ def _entries(show_subagents: bool = SHOW_SUBAGENTS, peers: bool = False) -> list
         for session_id, label, agent, age in subagent_rows
     ]
     if peers:
-        entries += [
-            CatalogEntry(
-                SessionRow(
-                    session_id,
-                    NOW - age * 60,
-                    name,
-                    live_state=state,
-                    locality="remote",
-                    owner_device=device,
-                    owner_device_name=label,
-                    reachable=reachable,
-                    unreachable_reason=reason,
-                )
-            )
-            for session_id, name, age, state, device, label, reachable, reason in PEER_ROWS
-        ]
+        entries += [CatalogEntry(row) for row in _remote_rows()]
     return entries
+
+
+def _remote_rows() -> list[SessionRow]:
+    """The mesh tier: the REAL producer's rows when a mesh is named, else the fixture.
+
+    The producer is called with the mesh's own config root, so this covers the
+    whole production path — this device's relay, its control socket, the
+    fan-out to each peer over a live link, and the unwrap that was missing
+    (Q-R10-1). It comes back empty when anything on that path is broken, which
+    is the point: a frame that cannot show a remote row is the failure the
+    published screenshot used to hide.
+    """
+    if MESH_ROOT:
+        from local_operator.session.peer_rows import peer_session_rows
+
+        return list(peer_session_rows(Path(MESH_ROOT)))
+    return [
+        SessionRow(
+            session_id,
+            NOW - age * 60,
+            name,
+            live_state=state,
+            locality="remote",
+            owner_device=device,
+            owner_device_name=label,
+            reachable=reachable,
+            unreachable_reason=reason,
+        )
+        for session_id, name, age, state, device, label, reachable, reason in PEER_ROWS
+    ]
 
 
 def _serve_fixture_to_app_poll() -> list[str]:
@@ -509,7 +541,10 @@ async def main() -> None:
             )
     FOCUS_LIST = focus
     if focus and peers:
-        CURSOR_ID = PEER_ROWS[0][0]
+        # The caret goes on a REMOTE row — the only state that shows the caret
+        # and the locality mark on one row — whichever source supplied them.
+        remote = _remote_rows()
+        CURSOR_ID = remote[0].id if remote else CURSOR_ID
 
     if NEUTRAL_CWD:
         os.environ["HOME"] = str(Path(os.environ["HOME"]).resolve())
