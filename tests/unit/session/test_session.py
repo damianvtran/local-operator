@@ -5479,10 +5479,11 @@ async def _session_with_lost_media(tmp_path, monkeypatch):
     assert any(
         isinstance(block, ImageContent) and block.data == ""
         for message in replayed
+        if isinstance(message, Message)
         for block in message.content
     ), "replay must degrade the lost reference to empty data — the premise of the bug"
 
-    session = make_session(tmp_path, ScriptedStream(["ok"]))
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
     session._context.messages = replayed
     return session, transcript
 
@@ -5537,7 +5538,7 @@ async def test_render_for_compaction_omits_missing_media(tmp_path, monkeypatch):
 async def test_a_real_image_on_the_keep_images_path_still_reaches_the_wire(tmp_path):
     """The companion negative case at the session level: the pass must not be
     silently dropping every image it sees."""
-    session = make_session(tmp_path, ScriptedStream(["ok"]))
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
     session._context.messages = [
         Message(
             role="user",
