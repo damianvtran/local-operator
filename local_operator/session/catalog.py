@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.info.model import format_duration
-from local_operator.resume import SessionRow
+from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session.archived import archived_ids
 from local_operator.session.creation import session_category, session_created_at
 
@@ -695,7 +695,7 @@ def decorate_rows(
                     SessionRow(
                         session_id,
                         float(getattr(record, "started_at", 0.0) or 0.0),
-                        str(getattr(record, "conversation_name", "") or "Untitled conversation"),
+                        str(getattr(record, "conversation_name", "") or UNTITLED_CONVERSATION),
                         created_at=session_created_at(session_dir),
                         degraded=degraded,
                         # Stamped from the store's own answer, never the

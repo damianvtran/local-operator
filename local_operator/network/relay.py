@@ -3367,9 +3367,22 @@ class RelayServer:
                 }
             )
         for row in self._stored_rows():
-            if row.get("session_id") in seen:
+            session_id = str(row.get("session_id") or "")
+            if session_id in seen:
                 continue
             rows.append(row)
+            # RECORD WHAT THIS PASS APPENDED, or the NEXT pass re-emits it
+            # (design round 2 D17 / UX round 2 U11). ``_mesh_hosted_rows`` is
+            # handed ``seen`` and skips only what is in it, and this loop used
+            # to add nothing — so every mesh-stamped session the ordinary
+            # catalogue had ALREADY ranked came back a second time from the
+            # mesh-hosted half, once named and once under its bare id: three
+            # sessions on a peer listed as five rows, two of them phantoms a
+            # user cannot tell from real ones. A promptless remote create
+            # escaped only because no turn means no catalogue rank, i.e. the
+            # bug hid exactly where the mesh-hosted half was needed.
+            if session_id:
+                seen.add(session_id)
         for row in self._mesh_hosted_rows(seen):
             rows.append(row)
         return rows

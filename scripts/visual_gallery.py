@@ -84,6 +84,13 @@ def cases() -> list[dict[str, Any]]:
                 # nothing but the relay's answer. It writes into the case's own
                 # directory and the gallery globs both SVGs.
                 args = ["{directory}", "100x30"]
+            elif script == "new_remote_shot.py":
+                # The two states of the `/new` device picker: a device that knows
+                # peers (the rows must read as a device selection) and one that
+                # knows none — the state every new user starts in (design round
+                # 2, D15/D16). At 110 columns, which is where the reported row
+                # truncation was measured.
+                args += [variant, "110x30"]
             elif script == "stop_ladder_shot.py":
                 args += [variant, "100x30"]
             elif script == "org_chart_shot.py":

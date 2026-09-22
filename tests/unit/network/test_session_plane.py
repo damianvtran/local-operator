@@ -408,6 +408,35 @@ def test_a_create_frame_that_names_a_session_id_is_refused(
     link.close("test")
 
 
+def test_a_mesh_hosted_session_the_catalogue_ranks_is_listed_once(
+    peer_pair: Devices,
+) -> None:
+    """ONE row per session, whichever pass of the listing produced it.
+
+    ``local_session_rows`` composes three passes — the live registry, the
+    ordinary catalogue, and the mesh-hosted half — and the last two OVERLAP by
+    construction: a session this device hosts for the mesh carries a
+    ``placement.mode="peer"`` stamp (what ``_mesh_hosted_rows`` filters on) and,
+    once it has had a turn, the catalogue ranks it too (what ``_stored_rows``
+    reads). The stored pass appended without recording what it appended, so the
+    mesh-hosted pass re-emitted every stamped session the catalogue had already
+    listed — three sessions on a peer painted as five sidebar rows, two of them
+    phantoms (design round 2 D17 and UX round 2 U11, the same fact found twice).
+
+    The PHANTOM'S NAME is why this is not cosmetic: the catalogue half and the
+    mesh-hosted half name one session differently (a stored title versus a bare
+    id), so the second row read as a session the user never created.
+    """
+    _server_a, server_b, _host, _port = peer_pair
+    _own_locally(server_b.root, SESSION, server_b.identity.device_id)
+
+    rows = server_b.local_session_rows()
+    ids = [row["session_id"] for row in rows]
+    assert ids.count(SESSION) == 1, (
+        "a mesh-hosted session the catalogue already ranked was listed twice: " f"{rows}"
+    )
+
+
 def test_the_federated_listing_carries_locality_and_peer_for_both_halves(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -422,6 +451,12 @@ def test_the_federated_listing_carries_locality_and_peer_for_both_halves(
         _warm(server_b.root, SESSION)
         _dial_to(server_a, record, host_b, port_b)
         payload = _call(server_a.root, "peer_session_rows")["detail"]
+        # NO ID TWICE: the merge is a UNION of two device listings, so a repeated
+        # id here means one pass re-emitted what another had already produced —
+        # and the dict comprehension below would have collapsed it silently
+        # (design round 2 D17 / UX round 2 U11).
+        listed = [row["session_id"] for row in payload["sessions"]]
+        assert len(listed) == len(set(listed)), listed
         by_id = {row["session_id"]: row for row in payload["sessions"]}
         assert by_id["local-one"]["locality"] == "local"
         assert by_id["local-one"]["peer"] is None

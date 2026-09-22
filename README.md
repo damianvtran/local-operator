@@ -332,7 +332,7 @@ compare on two screens.
   <img src="./static/tui-mesh-sidebar.png" alt="The Local Operator sidebar: another device's two sessions grouped under a heading that names it, each row carrying the locality mark; the cursor row shows both its caret and the mark. Above them sit the pinned and active sections of this device's own sessions." width="720">
 </p>
 
-<p align="center"><i>A device in a mesh: another machine's sessions carry the <code>⇄</code> mark and group under it, beside this device's own pinned, active and previous sessions. Captured from a real two-device mesh — the rows come from the peer's own listing, over a live link, not from a fixture.</i></p>
+<p align="center"><i>A device in a mesh: another machine's sessions carry the <code>⇄</code> mark and group under it, beside this device's own pinned and active sessions. Captured from a real two-device mesh — the rows come from the peer's own listing, over a live link, not from a fixture.</i></p>
 
 <p align="center">
   <img src="./static/tui-mesh-network.png" alt="The /network screen: this device's name and abbreviated id, the networks it is in with their role and member count, its peers with reachability and the reason for any that did not answer, and the relay's install and running state" width="620">

@@ -35,7 +35,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from local_operator.resume import SessionRow
+from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 
 #: How long one projection answer is reused. Chosen against the sidebar's own
 #: two-second poll: long enough that a peer listing is a rare event, short enough
@@ -144,7 +144,14 @@ def _read(root: Path | None, catalog: object | None) -> tuple[SessionRow, ...]:
             SessionRow(
                 session_id,
                 float(getattr(peer_row, "started", 0.0) or 0.0),
-                str(getattr(peer_row, "conversation_name", "") or session_id),
+                # ONE NAME FOR ONE CONDITION, shared with the local half
+                # (design round 2, D14). This fell back to the session's own
+                # 12-hex id while a nameless row THIS device holds paints
+                # ``Untitled conversation`` (``session/catalog.py``), so one
+                # missing name read two ways on the same screen — and the id
+                # was on the row a reader can least resolve by looking around
+                # them.
+                str(getattr(peer_row, "conversation_name", "") or UNTITLED_CONVERSATION),
                 live_state=_live_state(peer_row),
                 pending=getattr(peer_row, "pending", None),
                 kind=str(getattr(peer_row, "kind", "") or ""),

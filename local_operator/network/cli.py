@@ -1665,9 +1665,36 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     # of falling through to an empty set. When the relay IS up, the peer block per
     # row is what labels an empty answer (``reachable`` + ``reason``).
     payload = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    # Bound to a narrow local first: `payload.get` is `Any | None`, and the two
+    # comprehensions below iterate it as a mapping (`projection.RelayPeerCatalog`
+    # takes the same precaution for the same reason).
+    raw_facts = payload.get("peers")
+    facts: dict[str, Any] = raw_facts if isinstance(raw_facts, dict) else {}
     remote = [row for row in (payload.get("sessions") or []) if isinstance(row, dict)]
+    matched: list[dict[str, Any]] = []
     if peer:
         wanted = peer.lower()
+        # THE DEVICES THE LISTING NAMED, FROM THE ANSWER'S OWN PEER BLOCK rather
+        # than from a second lookup: the fan-out already resolved every member
+        # this device holds, so an empty peer set for this token is the SAME
+        # fact the write half refuses on (``--create --peer ghost``).
+        matched = [
+            block
+            for device_id, block in facts.items()
+            if isinstance(block, dict)
+            and (str(device_id).lower() == wanted or str(block.get("name") or "").lower() == wanted)
+        ]
+        if not matched:
+            # AN UNKNOWN TOKEN IS REFUSED, NOT ANSWERED (QA round 11, Q-R11-3).
+            # This used to fall through to the empty-listing sentence — a claim
+            # about EVERY device, made false by the peer that was holding
+            # sessions at that moment — while the write half of the same family
+            # refused the identical token correctly. One vocabulary, so a typo
+            # reads the same whichever half of the family it reaches.
+            raise MeshRefusal(
+                "unknown_peer",
+                f"this device is not in a network with anything called {peer!r}",
+            )
         remote = [
             row
             for row in remote
@@ -1677,14 +1704,52 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     lines = []
     for row in remote:
         block = row.get("peer") or {}
+        # A ROW THIS DEVICE HOLDS IS NAMED AS SUCH, not as ``?`` (UX round 2,
+        # U13). The federated listing includes this machine's own rows
+        # (``locality``/``peer: None``), and the device column rendered the
+        # absent peer block as a question mark — so the one column that answers
+        # "which device holds what" answered "unknown" about the device the user
+        # is sitting at.
+        holder = str(block.get("name") or block.get("device_id") or "").strip()
+        if not holder:
+            holder = str(payload.get("device_name") or "this device")
         lines.append(
-            f"{row.get('session_id')}  {block.get('name') or block.get('device_id') or '?'}"
+            f"{row.get('session_id')}  {holder}"
             f"  {row.get('state') or '?'}  {row.get('conversation_name') or ''}".rstrip()
         )
+    # A DEVICE THAT COULD NOT BE ASKED IS NAMED, IN EVERY CASE (Q-R4-1, UX round
+    # 2 U14). The sibling family already does this (``lop sessions --all-peers``
+    # prints ``<device>: unreachable (<reason>)``), and this one used to answer
+    # with a complete-looking listing that silently omitted the device: with a
+    # peer's relay down, ``--all-peers`` said "no sessions are held by other
+    # devices right now" — a claim about EVERY device, established about none.
+    unasked = [
+        (device_id, block)
+        for device_id, block in sorted(facts.items())
+        if isinstance(block, dict) and not block.get("reachable")
+    ]
+    for device_id, block in unasked:
+        lines.append(
+            f"{str(block.get('name') or device_id)}: unreachable "
+            f"({str(block.get('reason') or 'it did not answer')})"
+        )
+    if not remote:
+        # The sentence is narrowed to what was actually established. Reaching
+        # here with every peer asked means the global one is true; with a peer
+        # unasked it is not, and the failure line above already says which
+        # device is missing from the answer.
+        if peer:
+            block = matched[0]
+            if block.get("reachable"):
+                lines.insert(0, f"no sessions are held by {block.get('name') or peer} right now")
+        elif unasked:
+            lines.insert(0, "no sessions are held by the devices that answered")
+        else:
+            lines.insert(0, "no sessions are held by other devices right now")
     return _emit(
         args,
         {"ok": True, "sessions": remote, "peers": payload.get("peers") or {}},
-        lines or ["no sessions are held by other devices right now"],
+        lines,
     )
 
 

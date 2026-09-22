@@ -682,3 +682,57 @@ async def test_the_panels_disconnect_key_names_the_selected_network(
         await pilot.pause()
         assert app.query_one(Editor).text == "/network disconnect n_00"
         assert run.calls == []
+
+
+# ---------------------------------------------------------------------------
+# design round 2, D20 — the loading frame's one relay fact
+# ---------------------------------------------------------------------------
+
+
+def _panel_local() -> Any:
+    from local_operator.tui.widgets.network_panel import NetworkLocal
+
+    return NetworkLocal(
+        device_id="d_self", device_name="this-mbp", identity_present=True, relay_state=""
+    )
+
+
+def test_the_pending_frame_does_not_call_the_relay_not_running() -> None:
+    """MEASURED ON THE LOADING FACE, which is the one it was filed against.
+
+    ``relay: not running on this device`` painted under This device while the
+    Relay section seven lines below painted ``asking the relay…`` — the same frame
+    contradicting itself about the one fact both lines are about. While the live
+    answer is out, the disk record is the input the answer is about, not an
+    answer, so the pending sentence is the same on both lines.
+    """
+    from local_operator.tui.widgets.network_panel import build_network_report
+
+    text = build_network_report(_panel_local()).plain
+    assert "relay: checking…" in text, text
+    assert "not running on this device" not in text, text
+    assert "asking the relay…" in text, text
+
+
+def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
+    """The other half of D20: once the answer IS in, the sections inherit it.
+
+    ``checking with the relay…`` is a promise the frame has already broken when
+    the Relay section's own answer says the relay is not running — there is
+    nothing to check with — and the Peers section then also has to paint the rows
+    it already holds rather than nothing at all.
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    screen = NetworkScreen(_panel_local())
+    screen.status_run = NetworkRun(
+        ("status",),
+        0,
+        stdout=json.dumps({"installed": True, "identity_present": True, "relay_running": False}),
+    )
+    text = "\n".join(screen.render_lines_for_test())
+    assert "checking with the relay…" not in text, text
+    assert "from this device's records" in text, text
+    assert "no peers yet" in text, text

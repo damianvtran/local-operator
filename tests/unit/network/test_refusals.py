@@ -882,6 +882,102 @@ def test_with_the_relay_up_a_member_that_does_not_answer_is_blamed_on_that_membe
 
 
 # ---------------------------------------------------------------------------
+# QA round 11 / UX round 2 — the merged listing's own three silences
+# ---------------------------------------------------------------------------
+
+
+def test_a_listing_that_names_an_unknown_peer_refuses_in_the_family_s_words(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 11, Q-R11-3: a typo'd device must not be answered with a global.
+
+    ``--peer ghost`` used to filter the listing down to nothing and print "no
+    sessions are held by other devices right now" with rc 0 — a claim about EVERY
+    device, made false by the peer that was holding sessions at that moment —
+    while ``--create --peer ghost`` on the same token refused correctly. Both
+    halves now name the same condition in the same words, and this asserts the
+    REACHABLE peer is still listed normally beside it (a refusal that refused too
+    much would pass the first half of this test).
+    """
+    server = _live_relay(root, monkeypatch)
+    try:
+        _admit_a_member_that_cannot_answer(
+            server, name="lop-mesh-peer-b", endpoints=["127.0.0.1:1"]
+        )
+        assert net_cli.main(_sessions_args(peer="ghost", json=False)) == 1
+        captured = capsys.readouterr()
+        assert not captured.out
+        assert "not in a network with anything called 'ghost'" in captured.err
+
+        # …and the same token on the WRITE half, so the two sentences cannot
+        # drift apart the way they did.
+        assert net_cli.main(_sessions_args(peer="ghost", create=True, json=False)) == 1
+        write_half = capsys.readouterr().err
+        assert "not in a network with anything called 'ghost'" in write_half
+    finally:
+        server.stop()
+
+
+def test_a_row_this_device_holds_is_not_attributed_to_nobody(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UX round 2, U13: ``--all-peers`` includes this machine's own rows.
+
+    The federated listing merges this device's rows in beside the peers', and the
+    device column rendered the absent peer block as ``?`` — so the ONE column that
+    answers "which device holds what" said "unknown" about the device the reader
+    is sitting at, and the row's own help text ("sessions on other devices") was
+    false about its first line.
+    """
+    server = _live_relay(root, monkeypatch)
+    try:
+        _a_stored_session_with_an_unread_completion(root)
+        assert net_cli.main(_sessions_args(all_peers=True, json=False)) == 0
+        out = capsys.readouterr().out
+        row = [line for line in out.splitlines() if _UNSEEN_ROW in line]
+        assert row, out
+        assert "?" not in row[0], row[0]
+        # The relay's own name for this device when it has one, and the honest
+        # fallback when it does not — never a question mark.
+        assert server.identity.name in row[0] or "this device" in row[0], row[0]
+    finally:
+        server.stop()
+
+
+def test_an_unasked_device_is_named_in_every_empty_listing(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UX round 2, U14: with a peer's relay down the listing stated a fact it
+    had not established.
+
+    ``--all-peers`` answered "no sessions are held by other devices right now"
+    while one device had never been asked — a complete-looking answer about a
+    set the command had not reached, and the sibling family
+    (``lop sessions --all-peers``) already prints ``<device>: unreachable
+    (<reason>)`` for exactly that. Both spellings are asserted: the merged one
+    names the missing device, and the NAMED one does not follow the failure line
+    with a claim about a device it could not ask.
+    """
+    server = _live_relay(root, monkeypatch)
+    try:
+        _admit_a_member_that_cannot_answer(
+            server, name="lop-mesh-peer-b", endpoints=["127.0.0.1:1"]
+        )
+
+        assert net_cli.main(_sessions_args(all_peers=True, json=False)) == 0
+        merged = capsys.readouterr().out
+        assert "lop-mesh-peer-b: unreachable" in merged, merged
+        assert "no sessions are held by other devices right now" not in merged, merged
+
+        assert net_cli.main(_sessions_args(peer="lop-mesh-peer-b", json=False)) == 0
+        named = capsys.readouterr().out
+        assert "lop-mesh-peer-b: unreachable" in named, named
+        assert "no sessions are held by" not in named, named
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
 # Q-R7-1 — the NEEDS column's one shape, in the HUMAN spelling
 # ---------------------------------------------------------------------------
 
