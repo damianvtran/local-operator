@@ -192,9 +192,7 @@ def _stamp_ages(stdout: str) -> tuple[list[float], list[float]]:
     """
     samples = [
         (float(workload), float(serving))
-        for workload, serving in re.findall(
-            r"ages workload=([\d.]+) serving=([\d.]+)", stdout
-        )
+        for workload, serving in re.findall(r"ages workload=([\d.]+) serving=([\d.]+)", stdout)
     ]
     return [workload for workload, _ in samples], [serving for _, serving in samples]
 
@@ -1978,9 +1976,7 @@ def test_a_dead_workload_ticker_is_logged_recorded_and_re_created(
     monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
 
     with caplog.at_level(logging.WARNING, logger=process.__name__):
-        asyncio.run(
-            asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=30.0)
-        )
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=30.0))
 
     # RE-CREATED TO THE BUDGET AND THEN STOPPED: one more death than re-creations,
     # which is the arming plus every retry. A supervisor that never gave up would
@@ -1990,18 +1986,18 @@ def test_a_dead_workload_ticker_is_logged_recorded_and_re_created(
         f"{process.STALL_BEAT_RESTARTS + 1}: the restart budget is not what the constant says"
     )
     pid = os.getpid()
-    assert stall_watchdog.tick_deaths(pid, tmp_path) == (
-        stall_watchdog.WORKLOAD,
-    ) * (process.STALL_BEAT_RESTARTS + 1), (
+    assert stall_watchdog.tick_deaths(pid, tmp_path) == (stall_watchdog.WORKLOAD,) * (
+        process.STALL_BEAT_RESTARTS + 1
+    ), (
         "the artifact does not name every death, so a dump reader still cannot tell a "
         "dead tick from a silent loop"
     )
     text = stall_watchdog.dump_path(pid, tmp_path).read_text(encoding="utf-8")
     assert text.index(stall_watchdog.ARM_MARKER) < text.index(stall_watchdog.TICK_DEATH_MARKER)
     assert f"RuntimeError: tick death {deaths}" in text, text
-    assert stall_watchdog.FIRED_MARKER not in text, (
-        "this cell wrote a fired-bound dump; the record has to be readable on its own"
-    )
+    assert (
+        stall_watchdog.FIRED_MARKER not in text
+    ), "this cell wrote a fired-bound dump; the record has to be readable on its own"
 
     # THE LOG, which is the half that reaches an operator who never opens the dump.
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
@@ -2015,17 +2011,21 @@ def test_a_dead_workload_ticker_is_logged_recorded_and_re_created(
     assert "is not re-created again" in warnings[-1].getMessage()
 
 
-def test_recording_a_tick_death_with_nothing_armed_is_a_no_op() -> None:
+def test_recording_a_tick_death_with_nothing_armed_is_a_no_op(tmp_path: Path) -> None:
     """The in-process case: no dump file exists, and that must not be an error.
 
     A TUI host and a test never go through the runtime entry point, so nothing
     arms -- and the tick can still die there. ``note_tick_death`` returning False
     is what lets the supervisor say "this log line is the only trace" instead of
     raising inside the handler that exists to survive a death.
+
+    The read is pointed at ``tmp_path`` rather than left to the default log
+    directory: the default resolves from ``HOME``, and a test must never so much
+    as read the operator's live store when the case under test does not need it.
     """
     assert stall_watchdog.is_armed() is False
     assert stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, "RuntimeError: x") is False
-    assert stall_watchdog.tick_deaths(os.getpid()) == ()
+    assert stall_watchdog.tick_deaths(os.getpid(), tmp_path) == ()
 
 
 def test_a_dead_workload_ticker_no_longer_takes_a_healthy_runtime_with_it(
@@ -2120,9 +2120,9 @@ def test_a_dead_workload_ticker_no_longer_takes_a_healthy_runtime_with_it(
     # THE LOG: WARNING, with the exception, at the moment of death.
     assert "WARNING" in supervised.stdout, supervised.stdout
     assert "WORKLOAD tick died" in supervised.stdout, supervised.stdout
-    assert "RuntimeError: rig: the workload tick's beat raised" in supervised.stdout, (
-        supervised.stdout
-    )
+    assert (
+        "RuntimeError: rig: the workload tick's beat raised" in supervised.stdout
+    ), supervised.stdout
     assert "re-creating it in" in supervised.stdout, supervised.stdout
 
     # THE RECORD: beside the plane's own stamp, in the dump, readable back.
@@ -2133,9 +2133,9 @@ def test_a_dead_workload_ticker_no_longer_takes_a_healthy_runtime_with_it(
     ), f"the dump does not name the dead tick: {supervised_dump.read_text(encoding='utf-8')}"
     supervised_text = supervised_dump.read_text(encoding="utf-8")
     assert "RuntimeError: rig: the workload tick's beat raised" in supervised_text
-    assert stall_watchdog.FIRED_MARKER not in supervised_text, (
-        "a bound fired in the run that is supposed to have survived"
-    )
+    assert (
+        stall_watchdog.FIRED_MARKER not in supervised_text
+    ), "a bound fired in the run that is supposed to have survived"
     assert stall_watchdog.fired_leg(supervised_pid, supervised_dir / "logs") is None
 
 
