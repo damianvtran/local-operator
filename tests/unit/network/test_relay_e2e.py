@@ -282,8 +282,17 @@ def test_a_wrong_transcription_burns_the_invite_and_admits_nothing(
     assert refreshed.member(server_b.identity.device_id) is None
     assert refreshed.invites[0].state == "consumed"
     assert refreshed.invites[0].outcome == "sas_mismatch"
-    assert "pairing_refused" in _events(server_a)
-    assert "pairing_awaiting_confirmation" not in _events(server_a)
+    # WAITED FOR, NOT READ ONCE. This row is written by the relay's own accept-loop
+    # thread AFTER it has already flushed the abort frame to the joiner, so the
+    # joiner learns it was refused while the inviter's durable row is still one
+    # flush away. `_await_event` has the measurement: the gap is ~90 us in the
+    # tightest run on this host, which is inside a single scheduler quantum, and it
+    # inverted on CI (two heads, two shards) as `'pairing_refused' in []`. The
+    # invite-state assertions above are unaffected: the inviter saves those BEFORE
+    # it answers the joiner, which is why only this line could see the window.
+    events = _await_event(server_a, "pairing_refused")
+    assert "pairing_refused" in events
+    assert "pairing_awaiting_confirmation" not in events
     assert not store.record_path(record.network_id, server_b.root).exists()
 
 
@@ -1006,6 +1015,43 @@ def test_the_relay_writes_no_session_state() -> None:
 
 def _events(server: relay.RelayServer) -> list[str]:
     return [str(record.get("event")) for record in server.audit.tail(limit=500)]
+
+
+def _await_event(server: relay.RelayServer, event: str, *, timeout: float = 5.0) -> list[str]:
+    """The relay's audit events, waiting for ``event`` to land first.
+
+    Several of these cells drive the OTHER device's ceremony through a real socket
+    and then assert about the row the RELAY's own thread writes — which it writes
+    after it has already answered the joiner, so the cell can observe the refusal
+    before the inviter's durable record exists. A relay-backed write is concurrent
+    with the test thread by construction; a single read is therefore a read of a
+    window the cell does not own.
+
+    Bounded, and it does not weaken the assertion it guards: an event that never
+    lands still fails the caller's ``in`` check, five seconds later.
+
+    What each cell's margin actually is, measured on 2026-09-22 while the host ran
+    at load ~48 (the probe and its transcripts are not committed; the numbers are
+    from `AuditLog.record` and `_events` timestamps):
+
+    * the wrong-transcription refusal (this module's ``pairing_refused``):
+      min -0.09 ms over 32 runs, i.e. the row beat the joiner's raise by 90 us at
+      its tightest, and the cell reads ~0.2 ms after the raise. That is the one
+      that failed in CI, and the reason is here: nothing separates the two sides
+      but scheduling.
+    * the declined confirmation: -2.5 ms at its worst over 4 runs.
+    * the unanswered confirmation: the inviter records 117-329 ms AFTER the joiner
+      gives up, and the cell's read landed ~150 ms after the row.
+
+    So only the first one needs the wait to be honest; the two slower paths are
+    left as they were rather than converted for symmetry.
+    """
+    deadline = time.time() + timeout
+    events = _events(server)
+    while event not in events and time.time() < deadline:
+        time.sleep(0.02)
+        events = _events(server)
+    return events
 
 
 def test_a_stale_peer_record_is_reaped_and_the_relay_reports_its_links(

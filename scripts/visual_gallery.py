@@ -97,8 +97,17 @@ def cases() -> list[dict[str, Any]]:
                 # outside this census while being the source of a committed
                 # artifact (`static/tui-mesh-sidebar.png`), so a reviewer had to
                 # rebuild the rig by hand to re-derive that frame. The size is
-                # the script's own default and the committed PNG's native
-                # 800x510 (100x30) — the frame it ships, not a new one.
+                # the script's own default, 800x510 (100x30) — the NOMINAL grid
+                # of the frame it ships, not a new one.
+                #
+                # NOMINAL IS NOT THE COMMITTED PNG'S PIXEL SIZE (design round 5,
+                # D33): `static/tui-mesh-sidebar.png` is 1440x918, this same
+                # frame at 1.8x, because this census rasterizes at 1:1. Compare
+                # the two only after normalizing the zoom — `rsvg-convert -z 1.8`
+                # — or the difference measured is the rescale. The table of the
+                # three mesh artifacts and their zooms is in
+                # docs/VISUAL_CAPTURE.md, "A fresh capture against a committed
+                # PNG", and pinned by tests/unit/tui/test_visual_gallery.py.
                 args += ["100x30"]
             elif script == "network_shot.py":
                 # Both of the panel's phases from one boot, so the pair differs by

@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+from fractions import Fraction
+from math import ceil
 from pathlib import Path
 
 import pytest
@@ -141,3 +143,53 @@ print(json.dumps({'home': os.environ['HOME'], 'config': os.environ['LOCAL_OPERAT
     assert roots["config"].startswith(roots["home"])
     assert not Path(roots["home"]).exists(), "temporary capture HOME leaked after exit"
     assert sentinel.read_text() == "do not modify"
+
+
+#: One committed README figure and the census grid its script captures it at.
+#: The census rasterizes at 1:1 and the artifact is a ZOOM of that, so these two
+#: numbers are never the same pixels — which is the whole of design round 5's D33.
+COMMITTED_MESH_ARTIFACTS = (
+    ("tui-mesh-sidebar.png", (100, 30)),
+    ("tui-mesh-network.png", (100, 30)),
+    ("tui-mesh-picker.png", (110, 34)),
+)
+
+#: The capture preset's pixels per cell, from `visual_capture.CaptureProfile`.
+CAPTURE_CELL = (8, 17)
+
+#: The zoom the mesh figures are re-shot at. A Fraction, not 1.8, because the
+#: picker's height does not land on a whole pixel (110x34 at 1.8 is 1040.4, and
+#: the committed file is 1041): the artifact's height is that product rounded UP,
+#: so a check written against a binary float is checking the float.
+COMMITTED_ZOOM = Fraction(9, 5)
+
+
+@pytest.mark.parametrize(("name", "grid"), COMMITTED_MESH_ARTIFACTS)
+def test_committed_mesh_artifact_is_the_census_frame_at_the_documented_zoom(
+    name: str, grid: tuple[int, int]
+) -> None:
+    """A comparison across these two sizes must not be possible to make by accident.
+
+    `docs/VISUAL_CAPTURE.md` ("A fresh capture against a committed PNG") carries
+    the table this pins, because a reader who compares a fresh 1:1 census raster
+    with a committed artifact measures the rescale filter and reports it as a
+    difference in the app: on the picker's own pair, upscaling the 880x578 raster
+    to the artifact's 1584x1041 shows 3.1% of pixels differing where the honest
+    answer is zero.
+
+    Re-shooting a README figure at another zoom is allowed — it is a deliberate
+    act, and this is where it becomes visible. The failure names the zoom to
+    update.
+    """
+    Image = pytest.importorskip("PIL.Image")
+    with Image.open(ROOT / "static" / name) as artifact:
+        committed = artifact.size
+    nominal = (grid[0] * CAPTURE_CELL[0], grid[1] * CAPTURE_CELL[1])
+    expected = tuple(ceil(axis * COMMITTED_ZOOM) for axis in nominal)
+    assert committed == expected, (
+        f"static/{name} is {committed[0]}x{committed[1]}, but its census grid "
+        f"{grid[0]}x{grid[1]} rasterizes to {nominal[0]}x{nominal[1]} and the documented "
+        f"zoom is {COMMITTED_ZOOM} ({expected[0]}x{expected[1]}). A reader comparing a fresh "
+        "census raster with this figure would be comparing two scales: update the table in "
+        "docs/VISUAL_CAPTURE.md and this constant with the new zoom."
+    )

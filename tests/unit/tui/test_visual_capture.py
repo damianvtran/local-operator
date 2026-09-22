@@ -15,6 +15,7 @@ from scripts.visual_capture import (
     CaptureProfile,
     save_capture,
     settle_status_line,
+    svg_text_runs_by_row,
     terminal_svg,
 )
 
@@ -58,6 +59,34 @@ def test_grapheme_shaping_and_following_ascii_origin(cluster: str) -> None:
     assert spans[0].get("x") == "0"
     assert spans[1].text == "X"
     assert spans[1].get("x") == str(8 * cell_len(cluster))
+
+
+def test_a_phrase_is_read_back_from_the_export_that_split_it() -> None:
+    """A census must reassemble the row, because neither half of a row is a substring.
+
+    This is the trap two censuses were written into (design round 5, D32): the
+    check asserted `"latest is v" in exported`, and that is FALSE on a frame that
+    paints the row, for two independent reasons — ``terminal_svg`` gives every
+    grapheme cluster its own ``<tspan>``, and the spaces it writes are U+00A0. So
+    the assertion could never fail, which is worse than no census because it reads
+    as one. Measured on the real pre-pin capture of the welcome splash, whose
+    banner row is ``'!\\xa0latest\\xa0is\\xa0v0.62.2\\xa0—\\xa0/update\\n'`` once
+    reassembled and 0 hits as a raw substring search.
+
+    Both halves are pinned on bytes this module's own export produced, not on a
+    hand-written fragment, so a change to either the splitting or the padding
+    fails here rather than silently disarming every census that reads a row.
+    """
+    console = Console(width=20, height=1, record=True)
+    console.print("latest is v", end="")
+    exported = terminal_svg(console.export_svg(), 20, 1, CaptureProfile())
+
+    assert "latest is v" not in exported, "the export no longer splits this row"
+    assert "\u00a0" in exported, "the export no longer pads with U+00A0"
+
+    rows = svg_text_runs_by_row(exported)
+    assert rows == [["latest is v"]], rows
+    assert any("latest is v" in "".join(runs) for runs in rows)
 
 
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
