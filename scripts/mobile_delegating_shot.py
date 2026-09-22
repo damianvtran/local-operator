@@ -114,6 +114,20 @@ def main() -> None:
             page.shot(outdir / f"{name}.png")
             report[name] = json.loads(page.js(GEOMETRY_JS))
             print(f"{name}: {json.dumps(report[name]['rows'], indent=1)}", flush=True)
+
+            # D1'S PAIR, IN THE RIG RATHER THAN IN A SCRATCH FIXTURE (design round
+            # 2). Navigate to the nested session and read the roster header it
+            # lands on: the chip on the row above counts the WHOLE TREE (the
+            # record), this header counts DIRECT children (the panel passes
+            # `parentJobId={null}` and the roster filters on it). Two numbers, two
+            # populations, one tap apart — captured together so the deferral has
+            # a frame to rest on.
+            view = f"nested-view-{width}x{height}"
+            report[view] = {"tap": json.loads(page.js(NESTED_TAP_JS))}
+            time.sleep(2.0)
+            report[view].update(json.loads(page.js(NESTED_VIEW_JS)))
+            page.shot(outdir / f"{view}.png")
+            print(f"{view}: {report[view]}", flush=True)
         page.close()
     finally:
         chrome.close()
@@ -123,7 +137,56 @@ def main() -> None:
         except subprocess.TimeoutExpired:
             fixture.kill()
     (outdir / "delegating-mobile-geometry.json").write_text(json.dumps(report, indent=2))
+    for width, height in VIEWPORTS:
+        left = outdir / f"delegating-{width}x{height}.png"
+        right = outdir / f"nested-view-{width}x{height}.png"
+        if left.exists() and right.exists():
+            _compose(left, right, outdir / f"nested-list-vs-view-{width}x{height}.png")
+            print(f"composed nested-list-vs-view-{width}x{height}.png", flush=True)
     print("shots:", ", ".join(f"{key}.png" for key in report))
+
+
+def _compose(left: Path, right: Path, out: Path) -> None:
+    """One image carrying both numbers — the list chip and the view's roster header.
+
+    Two frames would need a reader to hold the first in their head while looking at
+    the second, and this finding is exactly about a pair of numbers being compared.
+    Pillow is already a dependency of this repo's capture path (``visual_capture``).
+    """
+    from PIL import Image
+
+    a = Image.open(left)
+    b = Image.open(right)
+    canvas = Image.new("RGB", (a.width + b.width, max(a.height, b.height)), (10, 10, 10))
+    canvas.paste(a, (0, 0))
+    canvas.paste(b, (a.width, 0))
+    canvas.save(out)
+
+
+#: The roster header's own text, from the span the panel renders it in
+#: (``subagents-panel.tsx``: ``{label} {running}/{direct.length} running``).
+NESTED_VIEW_JS = r"""
+(() => {
+  const spans = Array.from(document.querySelectorAll('span'));
+  const hit = spans.find((s) => /^\d+\/\d+ running$/.test((s.textContent || '').trim()));
+  const header = hit && hit.parentElement ? hit.parentElement.textContent.trim() : null;
+  return JSON.stringify({ roster: hit ? hit.textContent.trim() : null, header });
+})()
+"""
+
+#: TAP THE ROW, do not set the hash: this app routes on a hash the router owns, so
+#: a ``goto`` to a differing-fragment URL is a same-document no-op and left the
+#: capture sitting on the list (measured). A click is also the real gesture — the
+#: finding is about what one tap changes.
+NESTED_TAP_JS = r"""
+(() => {
+  const nodes = Array.from(document.querySelectorAll('a,button,[role="link"],[role="button"]'));
+  const hit = nodes.find((n) => (n.textContent || '').includes('Parent with nested descendants'));
+  if (!hit) return JSON.stringify({ tapped: false });
+  hit.click();
+  return JSON.stringify({ tapped: true, href: hit.getAttribute('href') || '', tag: hit.tagName });
+})()
+"""
 
 
 if __name__ == "__main__":

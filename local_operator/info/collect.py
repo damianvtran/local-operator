@@ -371,7 +371,7 @@ def collect_sessions(
                 # Same getattr defaulting as the live-state fields above.
                 version=getattr(rec, "version", "") or "",
                 source_ref=getattr(rec, "source_ref", "") or "",
-                # NOT coerced to 0 — see ``_reported_count``. The default is
+                # NOT coerced to 0 — see ``reported_subagent_count``. The default is
                 # ``None`` and stays ``None``: a runtime predating these fields
                 # has not told us it has no subagents, and ``or 0`` here would
                 # silently turn every older peer into a confident zero in the

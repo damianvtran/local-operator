@@ -1712,6 +1712,21 @@ def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for() -> None:
     entry.ended = True
     assert daemon.table._merge_summaries({}) == []
 
+    # ...and a DAMAGED count is not a count. This summary is a fourth consumer of
+    # the two fields, so it applies the same rule the other three do: a float
+    # would otherwise reach the wire, where the client's `typeof … === "number"`
+    # accepts it and the chip prints `4.5 subagents` as measured fact (round 2,
+    # MINOR 1).
+    entry.ended = False
+    for damaged in (4.5, True, "3", -1, [2]):
+        # A FOREIGN VALUE ON PURPOSE (`# type: ignore` is the point):
+        # ``from_json`` validates nothing, so this is what a damaged record hands
+        # the reader — the population the rule exists for.
+        entry.record.subagents_running = damaged  # type: ignore[assignment]
+        rows = daemon.table._merge_summaries({})
+        assert rows[0]["subagents_running"] is None, (damaged, rows[0])
+    entry.record.subagents_running = 2
+
 
 # --- the phone's listing: membership, so an unreadable store is not an empty one --
 
