@@ -1,8 +1,9 @@
 # Hardening `lop secret` against accidental agent credential leaks
 
-**Status:** proposal, not implementation. This document is the design decision for
-the `secret-get-hardening` programme (PRs A–D). It exists so that whoever writes
-the code does not have to re-derive the constraints below from the source.
+**Status:** design record, with the programme's decisions in **§0** — what
+shipped, what is deferred, and why. Written before the code; §0 was added after
+the operator's ruling on the single decision this document escalated. Read §0
+first if you want the state of the tree rather than the reasoning.
 
 **Predecessors this extends, rather than replaces:** `docs/design/secret-store.md`
 (the store, its four access surfaces, §6 redaction, §8 what each design stops, §9
@@ -19,6 +20,68 @@ their raw output are in Appendix A. Three of the handoff's claims did not surviv
 that: they are corrected in §1.3, and the corrections change what PR C has to do.
 
 ---
+
+## 0. Decision record: what this programme implements, and what is deferred
+
+Recorded after the design above was accepted in part. **Read this section first**
+if you want the state of the tree rather than the reasoning behind it; it also
+names the one decision that is the operator's to make.
+
+### 0.1 R1 — the `get` default — is DEFERRED, not rejected
+
+The recommendation in §2.3 stands as written: A1 (the harness supplies the bytes
+for a proven consumer sink, so that `get` can become value-or-nothing) is right
+about the *mechanism*. The ruling is that it must not ship on a manager's or a
+coder's authority, because it **deliberately breaks a documented, load-bearing
+contract for every caller, not only for the harness path**:
+
+* `secrets/cli.py:1-38` states the stdout contract as *the* hard requirement of
+  the CLI half — the exact stored bytes, no trailing newline — because "one
+  banner line, one ANSI colour code, one progress note on stdout and every
+  consumer silently receives a corrupted credential — which fails as a confusing
+  401 from a remote service, not as an error anyone traces back to here";
+* the pre-execution scan cannot see a value retrieved **inside a script the agent
+  merely invokes** (`bash scripts/deploy.sh`, where the script interpolates `lop
+  secret get`). PR #1429 records this as one of its own gaps, so a change to
+  `get`'s default would reach callers the harness will never scan;
+* it would change the meaning of the operator's own documented forms in
+  `guides/credentials/GUIDE.md` — `lop secret get NAME > /tmp/token`
+  (`GUIDE.md:50-54`) and `lop secret get NAME | shasum -a 256`
+  (`GUIDE.md:120-123`) — and the brief for this programme requires the documented
+  consumer form to keep working.
+
+Changing a CLI contract that the operator's documentation and tooling depend on is
+the operator's decision. **The default-changing half therefore ships only on their
+word**, and the recommendation is preserved in full — §2.2's option table and
+§2.3's semantics (exit 3, the refusal text, the `describe` descriptor, the audit
+events of §2.3(5)) — so a follow-up can start from it without re-deriving
+anything. The constraint that binds any opt-in, whichever shape it takes, and the
+reason A1 was chosen over a flag or an environment variable, is unchanged: **it
+must not be silently settable by the agent in the same call it uses.**
+
+### 0.2 What ships now, and the invariant that holds it together
+
+| workstream | branch | PR | what it does | what it does not |
+|---|---|---|---|---|
+| **B** — pre-execution refusal | `feat/secret-sink-scan` | **#1429** | §3, as designed: keys on the data FLOW (a secret-bearing source reaching a printing sink) and refuses the `bash`/`eval` call before any child exists, naming the rule, the span and the rewrite | §3.4's tainted-path ledger (scoped out, recorded as its own gap), a script invoked by name, flow across calls |
+| **C** — the scrubber's deterministic holes | `fix/redaction-transform-hardening` | **#1428** | §5.2's transform normalisation (wider family list, 12-character floor) and the eval worker's streamed frames | the multi-line release-point defect — measured still live on its head; see the amendment in §5.1 |
+| **A** (additive) | `feat/secret-identity-surface` | **#1430** | `lop secret describe NAME --length --fingerprint` (value-free identity; equal values fingerprint equal) and `lop secret get NAME --reveal`, which prints bytes only when stdin and stdout are both a terminal, audited as `reveal` | **R1** — `get`'s default is unchanged (0.1) |
+
+**The invariant this programme keeps: `get`'s byte contract is unchanged** —
+exact stored bytes, no trailing newline, `rc 2` with empty stdout on failure, and
+its ordinary `get`/`ok` audit row. Every control above is additive beside that
+contract, or a refusal standing in front of it; none of them alters it.
+
+### 0.3 D is not built, and this is the reason
+
+One line: **the classification layer's own contract forbids it** — "Nothing here
+may gate a capability, change an approval tier or alter a tool's availability"
+and "No history, no compaction summary, **no tool results**"
+(`classification/__init__.py:20-28`) are precisely the two things a pre-execution
+guard is. §4 carries the full reasoning, including the constraints a purpose-built
+seam would have to satisfy. It is revisited only on evidence that the
+deterministic layer's residual is material — the measured count §4 names — not on
+the argument that a model might be more accurate.
 
 ## 1. The problem as I found it
 
@@ -711,6 +774,28 @@ for the same outcome — retention dropping one PEM marker publishes ~1,958 body
 lines raw, "end to end … identical in the spill file and served over `read
 spill://`".
 
+> **Amendment after shipping — measured on PR #1428's head (`f111faac`).** The
+> fix direction above is *not* what shipped, and the defect is still live.
+> Re-running probe A.2 against that head still reports `RAW-BYTE LEAK: True` with
+> the same released bytes, and its `_release_point` shows why: the cut is still
+> placed after the last newline, and the pull-back loop still searches for a form
+> that is **fully present** in the accumulated text (`text.find(form, …)`) — so a
+> multi-line value whose first line has arrived and whose second has not is
+> invisible to it. #1428 did widen the hold, over every *spelling* of a value and
+> over cap-forced cuts, behind a bounded window (`_STREAM_HOLD_LIMIT`), and it
+> found a **second chunked seam this document missed**: the eval worker's
+> streamed frames (`tools/eval_worker.py`, `_StreamingTextIO.write`), which
+> masked per write and now release through a windowed masker at end of cell. The
+> live case's scope, stated exactly: it needs a chunk boundary to fall inside a
+> multi-line value — deterministic for a value larger than one
+> `stream.read(65536)`, and for a line-buffered writer, but not for a small value
+> arriving in one write (probe A.2's "whole" case masks correctly). A PEM body
+> has its own independent masker on this path (`_mask_open_key_block`), so the
+> exposed shapes are the multi-line values that are *not* PEM: a pretty-printed
+> service-account JSON, a multi-line `.env`, any multi-line opaque value. The
+> unshipped fix — hold back the longest suffix that is a *proper prefix* of a
+> known value, independently of presence — is still the smallest one.
+
 ### 5.2 Transform normalisation: one home, and it is the shape module
 
 The transform hole (§1.3(b)) is a property of the *exact-value* pass
@@ -748,6 +833,21 @@ over-masking is a defect, `redaction_shapes.py:58-70`):
   must be reported as an event (identity, not just mask) so the notice fires even
   when the mask succeeds.
 
+> **As shipped (PR #1428), and where it differs from this recommendation.** The
+> transforms live in the shape module, as recommended, with one home and both
+> surfaces reading it. The shipped family list is **wider** than the one
+> recommended here: reversed, base64 (standard and URL-safe, padded and
+> unpadded), hex (`xxd -p`), percent (`quote`/`quote_plus`), JSON-escaped (raw
+> and ASCII-escaped) and separator-spread (space, `-`, `.`, `:`, `\n`),
+> enumerated for values of at least `_TRANSFORM_MIN_VALUE_LEN = 12` characters.
+> The floor is the over-masking control that makes the wider list acceptable —
+> precisely the mitigation recommended above for the interleave case this
+> document had proposed leaving as residue, and the reason the list could be
+> widened without breaking the module's all-or-none invariant. The PR's own
+> stated residuals are the honest remainder: rot13, gzip, a double base64, a
+> per-character shift, a value below the floor (verbatim only), and a spelling
+> longer than its 64 KiB hold.
+
 ### 5.3 Coordination with the open work, checked rather than assumed
 
 * **PR #1422** (`fix/redaction-step-cost`, open, `MERGEABLE`, 3 files:
@@ -776,11 +876,15 @@ over-masking is a defect, `redaction_shapes.py:58-70`):
 
 ## 6. Residual paths: does any path still put a value in the model's context without an explicit, audited, gate-able opt-in?
 
-**Yes, and here they are.** After A+B+C the store's own surfaces are
-capability-gated; these are the paths that remain, ordered by how reachable they
-are from a *normal* turn. A named hole is worth more than a clean-sounding
-summary, so nothing below is rounded off, and the last two are structural rather
-than fixable.
+**Yes, and here they are.** These are the paths that remain after what actually
+shipped (§0.2), ordered by how reachable they are from a *normal* turn. A named
+hole is worth more than a clean-sounding summary, so nothing below is rounded off.
+
+**Status tags**, applied per item and current as of the decision record:
+*closed* — a shipped control now covers the path; *narrowed* — part of the path is
+closed and the remainder is named; *open* — nothing shipped covers it; *guide-only*
+— no control of this shape can cover it, so the only honest remedy is a change to
+`guide://credentials` rather than a mechanism.
 
 **6.1 The file on disk, read back later (the biggest one).** `lop secret get X >
 /tmp/token` is sanctioned (`GUIDE.md:50-54`, and the brief requires the redirect
@@ -789,7 +893,14 @@ harness knows the path — hence §3.4's ledger. With the ledger: closed inside 
 session, still open across sessions, resumes, sibling agents and subagents; and
 the plaintext file itself is what anything outside the session reads.
 *Without* the ledger: open by default, and the only net is the shape pass, which
-is spelling-based (6.2).
+is spelling-based (6.2). **Status: open — and now the largest one.** PR #1429
+scoped §3.4's ledger **out** and recorded it as its own gap ("only a write *and*
+read in the same call"), so today the redirect is allowed, the result tells the
+model to delete the copy unread, and a later `cat` of that path hits only the
+shape pass in-session — nothing at all across sessions, resumes and sibling
+agents. **Partly guide-only:** the in-session, same-call case is a real control
+waiting to be built; the rest is words in `GUIDE.md`, which #1429 and #1430 both
+already touch.
 
 **6.2 Values that never went through the seam.** A value the session never
 retrieved is invisible to the exact-value pass by definition: the remote
@@ -798,19 +909,34 @@ environment (`kubectl exec … env`, the motivating case in
 file by a different tool. Only the shape pass applies, and its own docstring
 states the residual: "It does NOT recognise an opaque value with none of these
 spellings around it" (`redaction_shapes.py:35-40`). No opt-in exists to gate,
-because the store was never asked.
+because the store was never asked. **Status: open, guide-only** — a control built
+on "the store knows the value" cannot cover a value the store never saw, so the
+remedy is instructional (do not paste, do not echo a remote environment, redact at
+the point of use), not mechanical.
 
-**6.3 Transforms outside the normaliser.** Even with §5.2 landing: rot13,
-per-character interleave, piecewise slicing (`${v:0:8}${v:8}`, `v[:8] + v[8:]`),
-gzip/deflate, UTF-16 or latin-1 re-encoding, `xxd`/`od` output, and any custom
-re-spelling. Probe A.3 shows the current answer for the interleave and piecewise
-cases is "neither pass masks". A transform is a *deliberate* act; the design's
-honest goal is that transforms are *detected and reported*, not impossible.
+**6.3 Transforms outside the normaliser.** The transforms §5.2 shipped (see its
+as-shipped note) cover reversed, base64, hex, percent, JSON-escaped and
+separator-spread spellings for values of 12 characters or more. Outside them:
+rot13, gzip/deflate, a double base64, a per-character shift, UTF-16 or latin-1
+re-encoding, `od`/`xxd` variants the list does not enumerate, piecewise slicing
+(`${v:0:8}${v:8}`, `v[:8] + v[8:]`), any custom re-spelling — and, for a value
+under the floor, everything but the verbatim form. **Status: narrowed
+(PR #1428); open for the list's own stated residuals.** A transform is a
+*deliberate* act; the honest goal is that cheap transforms are *detected and
+reported*, not that transforms are impossible.
 
 **6.4 Live surfaces and the spill bytes (from §5.1).** Bytes the pipe filter
 released raw (multi-line values) are in the live card, the peek buffer, the abort
 receipt and the spill file. Masked at a *read* result only when the session has
 the value registered; the spill's bytes on disk stay plaintext regardless.
+**Status: narrowed (PR #1428) — and the multi-line case is still open.** #1428
+replaced the eval worker's per-`write` masking with a bounded windowed masker and
+closed the transform spellings on the pipe path, but it does not change the
+release point's newline rule, so the multi-line straddle measured in §5.1's
+amendment still releases raw bytes into the live card, the peek buffer and the
+spill buffer. **Partly guide-only:** the fix is a mechanism (§5.1), but until it
+lands, the instruction that matters — do not `cat` a file-shaped secret into a
+live view — is a guide sentence.
 
 **6.5 System-prompt blocks.** Named by the shapes module itself
 (`redaction_shapes.py:43-50`): "the **system-prompt blocks**
@@ -820,7 +946,12 @@ therefore reaches the model verbatim; the session is not the source of that valu
 and cannot contain it." A credential in a checked-in file, a skill, a guide or
 `AGENTS.md` reaches the model with no scrub, no notice and no opt-in. (The same
 docstring names `mcp/redaction.py` as values-only — that one is *not* a hole,
-because its surfaces are not model-visible.)
+because its surfaces are not model-visible.) **Status: open, guide-only.** No
+control this programme builds is on that path: the session is not the source of
+the value and cannot contain it. The only remedies are to keep credentials out of
+checked-in files (a repository-hygiene rule, and the reason `guide://credentials`
+says never to write one into the repo) and, for the operator, to treat any
+credential that has ever sat in a tracked file as exposed.
 
 **6.6 Surfaces the model reads that are only partly on the hook path.** The
 loop's hook covers tool results (`loop.py:3090-3096`, `session.py:9314+`) and
@@ -832,13 +963,20 @@ I did **not** verify the scrub coverage of every non-tool channel (a `send`/`hub
 peer message, an `ask` question's text, a notice row) and I am not going to assert
 it either way: the evidence that would settle it is a value-typed probe through
 `ask` and `send` with a registered value, and that belongs in QA's matrix, not in
-a design claim.
+a design claim. **Status: narrowed / partly unverified.** #1429 refuses the
+in-command printing shapes on these surfaces' inputs (a `lop secret get` in a
+`send` argument is a source reaching a printing sink), and #1428's windowed
+maskers cover the bash live path and the eval frames; the per-line text path and
+the cross-channel question above are unchanged, and this document still declines
+to claim either way.
 
 **6.7 The default tier enforces nothing.** `access.py:360-388` plus design §8:
 a broker *denial* falls through to a local decrypt in the `keyfile` tier, and the
 tier is the security boundary. Everything this programme calls "gate-able" is
 harness-enforced; the store's own boundary is only real after `lop secret harden`.
 This is the reason §1.3(c) exists as a constraint rather than a footnote.
+**Status: open by design** — this is a tier choice, not a defect, and the remedy
+(`lop secret harden`) is the operator's.
 
 **6.8 A TTY reached through a pty.** `--reveal` is refused without a TTY, and the
 `console` tool drives a real TTY (`builtin.py:13750-13787`, whose description
@@ -846,31 +984,72 @@ explicitly invites the agent to *read* surfaces the user opened). So an agent ca
 reach a reveal by typing into a console surface. It is visible (the operator's own
 console tab) and audited (`reveal`, outcome `tty`, with pid and executable), which
 is the most this control can claim — it is an audited deliberate act, not a silent
-one.
+one. **Status: narrowed (PR #1430).** The reveal is now `get NAME --reveal`, it is
+refused unless **stdin and stdout are both a terminal**, an environment variable
+is explicitly not an opt-in (measured: `LOP_REVEAL=1` changes nothing), and it
+writes a `reveal` row distinguishable from the `get` a pipeline writes. The pty
+route remains: an agent driving a console surface reaches a real terminal, which
+is why the audit row — not the TTY check — is the control that matters.
 
 **6.9 `ps -ww` and friends inside an approved call.** With A1 the value lands in
 the consumer's argv or environment; any same-uid reader in the same call can lift
-it from there. §3.3 makes the in-command shapes refuse, but the *general* case —
+source, the *general* case —
 a value in argv/env while another process is watching the machine — is the
-store's long-standing §2.2/§9 residual, unchanged.
+store's long-standing §2.2/§9 residual. **Status: narrowed (PR #1429)** for the
+in-command shapes it can see; **open** for a watcher outside the command (another
+process sampling `ps` or `/proc` while the value is in argv), which no
+pre-execution scan can close.
 
 **6.10 The model already holding the value.** Once a value is in context (by any
 of the above, or by the user pasting it), nothing in this programme gates its
 re-use, re-spelling or retyping into a response, a peer message, a scratchpad, a
 commit message. The guide forbids it (`GUIDE.md:151-166`); no mechanism enforces
 it. This is the ceiling of a control built on top of "the model does not have the
-value".
+value". **Status: open, guide-only** — and it is the reason the programme's other
+items matter: every closed path above is one fewer way to *get* here.
 
-**Direct answer to the operator's question.** *Yes.* After A+B+C a value can still
-reach the model's context with no explicit, audited, gate-able opt-in — through
-6.1 (a sanctioned plaintext copy read back later, cross-session), 6.2 (a value the
-store never saw), 6.3 (a transform the normaliser does not know), 6.5 (a
-credential in a checked-in file the session injects into its prompt), and 6.10
-(re-use of a value already in context). 6.1 is the one worth closing in this
-programme (the ledger in §3.4); 6.2, 6.5 and 6.10 are outside the reach of a
-store-level control, and the honest thing to do with them is to state them in
-`GUIDE.md`'s "What this actually protects against" section rather than let the
-programme's success imply otherwise.
+**6.11 The deferred `get` default: raw bytes for callers the scan cannot see.**
+Because R1 is deferred (§0.1), `lop secret get` still writes exact bytes to stdout
+for **every** caller. What stands in front of that is #1429's scan, which refuses
+the shapes it can see and — by its own recorded design — does not model a script
+invoked by name (`bash scripts/deploy.sh`, whose body interpolates `lop secret
+get`), a `python -c` on the bash surface, an encoded or generated command, or flow
+across separate calls. So the incident's *form* still works from those routes:
+the value is fetched raw, and the nets behind it are the exact-value pass (only
+for a session that registered the value) and the shape pass (only for spellings
+it knows). **Status: open, and it is the price of the deferral** — stated so the
+deferral is a decision rather than an oversight. The remedy is the R1 follow-up in
+§0.1, which needs the operator's word; until then the honest position is the one
+`GUIDE.md` already takes, that the harness refuses what it can prove and the rest
+is the operator's residual risk. **Guide-only in the meantime.**
+
+**Direct answer to the operator's question.** *Yes.* After everything that
+shipped (B, C, and the additive half of A — §0.2), a value can still reach the
+model's context with no explicit, audited, gate-able opt-in, through:
+
+* **6.11** — `get` still prints raw bytes for a caller the scan cannot see (the
+  consequence of deferring R1). The largest one, and the only one a *decision*
+  rather than a bug fixes;
+* **6.1** — a sanctioned plaintext copy read back later: closed in-session by the
+  ledger §3.4 (not shipped), open across sessions, resumes and sibling agents;
+* **6.2** — a value the store never saw;
+* **6.3** — a transform outside the shipped list, or any transform of a value
+  below the 12-character floor;
+* **6.4** — bytes the pipe filter released raw (the multi-line straddle §5.1's
+  amendment measures as still live);
+* **6.5** — a credential in a checked-in file the session injects into its prompt;
+* **6.6 / 6.7 / 6.9** — the surfaces and tiers whose coverage is partial or by
+  design;
+* **6.10** — re-use of a value already in context.
+
+Which of them only a guide change can address: **6.2, 6.5, 6.10, and 6.11's
+interim state** — no control of this programme's shape reaches them (the store was
+never asked; the file is not the session's; the value is already in context; the
+caller is outside the harness). Those belong in `GUIDE.md`'s "What this actually
+protects against" section, stated plainly, rather than left for the programme's
+success to imply otherwise. **6.1, 6.3 and 6.4 are mechanical and remain worth
+building** (the ledger, the remaining transforms, the proper-prefix hold), and
+**6.11** is the operator's call per §0.1.
 
 ---
 
@@ -948,6 +1127,12 @@ coverage of non-tool channels — peer messages, `ask` question text, notices
 `handlers._get` (the argument is structural — one writer of the value bytes —
 but I did not exhaustively grep for a second writer).
 
+**Amended after shipping.** §0 records what was implemented, and §5.1's amendment
+and §6's status tags were added from re-measurement against the shipped heads
+rather than from their summaries: §5.1's multi-line case was re-run on PR #1428's
+head and still leaks, and the eval worker's streamed frames were a second chunked
+seam that this document did not find on its own (credited there).
+
 **Open questions the implementer should settle by test, not by argument:** the
 exact set of quoting contexts the A1 rewrite must reproduce byte-for-byte; whether
 the `supply` verdict should be refused (rather than rewritten) when the value
@@ -988,24 +1173,50 @@ the same pid is §1.3(c): the denial was a fallback, not a refusal.
 
 ### A.2 `_PipeRedactor` and the chunk boundary
 
+Measured against `origin/main` at `0caf7a32` (the base this document was written
+against), worktree `secret-get-hardening`, with synthetic values chosen so this
+record carries nothing credential-shaped — an earlier run used an issuer-prefixed
+token and the harness's own shape pass flagged it on every read, which is why the
+values here are neutral. Two echoed chunk reprs in the captured output were masked
+by the session's own redactor while it was captured; they are shown as they came
+back.
+
 ```
 module under test: <worktree>/local_operator/tools/builtin.py
 
-[single-line split]        secret='sk-live-0123456789abcdef'
-  chunks=[b'prefix sk-live-01', b'23456789abcdef suffix\n']
-  released=b'prefix [redacted] suffix\n'          RAW-BYTE LEAK: False
-[single-line whole]        released=b'out: [redacted]\n'      RAW-BYTE LEAK: False
-[multi-line split at newline]  secret='line-one-aaaa\nline-two-bbbb'
-  chunks=[b'out: line-one-aaaa\n', b'line-two-bbbb\n']
-  released=b'out: line-one-aaaa\nline-two-bbbb\n'  RAW-BYTE LEAK: True
-[multi-line whole]         released=b'out: [redacted]\n'      RAW-BYTE LEAK: False
-[single-line then newline] released=b'[redacted]\n'           RAW-BYTE LEAK: False
+[single-line split] value is 28 bytes
+  chunks=[b'prefix probe-value-01', b'23456789abcdef suffix\n']
+  released=b'prefix [redacted] suffix\n'
+  RAW-BYTE LEAK: False
+
+[single-line whole] value is 28 bytes
+  chunks=[b'out: [redacted]\n']
+  released=b'out: [redacted]\n'
+  RAW-BYTE LEAK: False
+
+[multi-line split at newline] value is 29 bytes
+  chunks=[b'out: probe-line-one\n', b'probe-line-two\n']
+  released=b'out: probe-line-one\nprobe-line-two\n'
+  RAW-BYTE LEAK: True
+
+[multi-line whole] value is 29 bytes
+  chunks=[b'out: [redacted]\n']
+  released=b'out: [redacted]\n'
+  RAW-BYTE LEAK: False
+
+[single-line, value then newline] value is 28 bytes
+  chunks=[[redacted], b'\n']
+  [redacted]\n'
+  RAW-BYTE LEAK: False
 ```
 
-The leak needs the value to contain a newline *and* to be split by a chunk
-boundary before `final=True` — which, for a value that is one line per 64 bytes
-(a PEM body), is every chunk that contains a newline inside the value.
-
+The leak needs the value to contain a newline *and* a chunk boundary to fall
+inside it: every chunk holding a newline that is inside a multi-line value
+releases the part before that newline, and by `final=True` the remainder sits in a
+buffer that no longer holds the whole value, so nothing matches. Re-measured on PR
+#1428's head (`f111faac`, checked out into a throwaway worktree and removed
+afterwards): **`RAW-BYTE LEAK: True`, same released bytes** — see §5.1's
+amendment.
 ### A.3 Transforms: what the pipeline masks, and what only the shape pass catches
 
 Value: `opaqueToken9f3a1c77d4e5` (a value the session knows).
