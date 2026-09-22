@@ -4849,9 +4849,14 @@ class ServingSessionHandle(SessionHandle):
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_receipt,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
+            goal_report,
         )
         from local_operator.slash_commands import unknown_flag_refusal
 
@@ -4859,27 +4864,64 @@ class ServingSessionHandle(SessionHandle):
         if not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         if not arg:
-            current = getattr(session, "goal", "")
-            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
-            return SlashResult(kind="notice", text=text, style="info")
-        # The clear forms are matched as the WHOLE argument, so `--clear` can
-        # never be stored as the goal body: nothing below runs for it, and no
-        # turn is started (`goal_set` is what the viewer submits).
-        if arg.lower() in GOAL_CLEAR_ARGS:
+            return SlashResult(
+                kind="notice",
+                text=goal_report(
+                    getattr(session, "goal", ""), getattr(session, "goal_status", "")
+                ),
+                style="info",
+            )
+        # A FLAG is matched as the WHOLE argument (`goal_flag_form`), so `--clear`
+        # can never be stored as the goal body: nothing below runs for a flag, and
+        # no turn is started (`goal_set` is the one receipt that submits).
+        form = goal_flag_form(arg)
+        if form == "clear":
             # Name what went: the receipt is rendered by a viewer that may have no
             # other way to see the goal (design D4/U3), so the echo is built by
-            # the same shared helper every other host uses.
+            # the same shared helper every other host uses. DELETE records nothing.
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            session.delete_goal()
             self._notify()
             return SlashResult(kind="notice", text=receipt, style="info")
+        if form == "done":
+            entry = session.mark_goal_done()
+            self._notify()
+            return SlashResult(
+                kind="notice",
+                # `None` means there was nothing to settle OR it was already
+                # settled; both must say so rather than print a second "goal done".
+                text=(
+                    goal_done_receipt(session.goal)
+                    if entry is not None
+                    else "goal already done — /goal --dismiss clears it"
+                ),
+                style="info",
+            )
+        if form == "dismiss":
+            dismissed = session.dismiss_goal()
+            self._notify()
+            return SlashResult(
+                kind="notice", text=goal_dismissed_receipt(dismissed), style="info"
+            )
+        if form == "history":
+            rows = goal_history_items(session.history_view())
+            # The `team_list` shape: rows in `data.items`, so both existing hosts
+            # render it without a new renderer, and a one-line notice beside it
+            # because a receipt `data` is not something every surface paints.
+            return SlashResult(
+                kind="block",
+                text=goal_history_notice(len(rows)),
+                data={"type": "goal_history", "items": rows},
+            )
         refusal = unknown_flag_refusal("goal", arg)
         if refusal is not None:
             # One refusal string for every host: a runtime that stored `--stop` as
             # the goal while the TUI refused it is the host-disagreement class the
             # shared vocabularies in this module exist to remove (UX U6).
             return SlashResult(kind="notice", text=refusal, style="warning")
-        stored = session.set_goal(arg)
+        # `arm_goal` rather than `set_goal`: the same text write, plus the record's
+        # supersede/arm ordering, which is what makes `/goal B` non-destructive.
+        stored = session.arm_goal(arg)
         self._notify()
 
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
