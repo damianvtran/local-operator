@@ -142,12 +142,17 @@ indistinguishability is the whole of this section.
 
 So a tick's death is now three things, and it has to be all three: the
 supervisor that drives the tick LOGS it at WARNING with the exception
-(``process._watch_stall_beats``), RE-CREATES the task a bounded number of
-times, and records it HERE — :func:`note_tick_death`, a line written into this
+(``process._watch_stall_beats``), RE-CREATES the task while the deaths stay
+inside a rolling budget — ``process.STALL_BEAT_RESTARTS`` deaths inside
+``process.STALL_BEAT_WINDOW_S``, and the supervisor is itself guarded so that a
+fault in its own recovery path cannot end the supervision unobserved either —
+and records it HERE, :func:`note_tick_death`, a line written into this
 process's own dump beside the plane's own stamp, because the dump is the only
 artifact that survives the exit this bound makes. A dump carrying a tick-death
 line therefore says "the workload tick stopped" where the same dump used to
-say nothing at all, and :func:`tick_deaths` is the reader for it.
+say nothing at all, and :func:`tick_deaths` is the reader for it — as is the
+journal's incident narration, which prefers that fact to the bare silence leg
+when a dump carries both.
 
 A DEAD TICK STILL LETS THE BOUND FIRE, deliberately. Nothing here unbounds a
 plane whose ticker is gone: a plane nothing can stamp is a plane whose silence

@@ -979,6 +979,27 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     assert cause == STALL_BOUND_CAUSE, cause
     assert "no plane reported" in reason, reason
 
+    # (e) A FIRE OVER A DUMP THAT NAMES A DEAD TICKER: still the SILENCE leg -- the
+    # predicate is what fired -- but the narration must carry the second fact, which
+    # is the reason the plane had nothing left to report WITH. Without this the
+    # automated verdict kept calling a runtime whose reporter had died a runtime
+    # whose loop had gone quiet (agent review round 1, MINOR 3): the one surface
+    # where the false attribution survived not being a human reading the file.
+    dump.write_text(
+        f"[stall watchdog] armed\n"
+        f"{stall_watchdog.TICK_DEATH_MARKER}{stall_watchdog.WORKLOAD}: RuntimeError: the "
+        f"rigged beat raised\n"
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n",
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert cause == STALL_BOUND_CAUSE, cause
+    assert "REPORTER" in reason, reason
+    assert (
+        "no plane reported" not in reason
+    ), f"a dump recording the ticker's own death is still narrated as a silent loop: {reason}"
+
     # (d) A DUMP OLDER THAN THIS TURN IS NOT THIS TURN'S. The file is keyed by pid
     # alone, so a recycled pid would otherwise let another runtime's freeze be
     # narrated as this row's death.
