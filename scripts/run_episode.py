@@ -53,7 +53,6 @@ import asyncio
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import time
 import uuid
@@ -100,10 +99,16 @@ from local_operator.evaluation.runner.secrets import (
     MissingSecret,
     SecretResolver,
 )
+from local_operator.update import BuildStamp
 
 EXIT_OK = 0
 EXIT_EPISODE = 1
 EXIT_PREFLIGHT = 2
+
+# The harness identity this script seals into a manifest is read from the
+# INSTALL that is executing, never from a file beside the script: see
+# ``_harness_version`` for the measurement that made that a rule.
+UNKNOWN_HARNESS_VERSION = "0.0.0"
 
 # Slack between the wall budget and the cloud lease. Mirrors the provider's own
 # TTL_SLACK_SECONDS: the lease must outlast the wall by enough to cover boot,
@@ -182,61 +187,73 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _harness_git_revision() -> str:
-    """The installed harness's git revision, or a digest of its version.
+def _harness_identity() -> BuildStamp:
+    """The executing install's comparable build token (version plus git ref).
 
-    A source checkout answers ``git rev-parse``; a wheel install does not,
-    and the manifest still needs a 64-hex value, so the version string is
-    hashed as a stable stand-in and the real version rides in ``metadata``.
+    One call, two fields, one definition of "the build": read fresh from the
+    install this process is running -- the same token ``lop --version`` and a
+    runtime's own boot sample are stamped from -- so the harness version, the
+    git revision and anything else recorded from it cannot disagree about which
+    build produced a bundle.
     """
 
-    repo = Path(__file__).resolve().parents[1]
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        completed = None
-    if completed is not None and completed.returncode == 0:
-        head = completed.stdout.strip()
-        if len(head) == 40:
-            # A 40-hex SHA-1 is not the 64-hex the manifest wants; hash it so
-            # the field is stable and the raw commit lands in metadata.
-            return _digest(head)
-    return _digest(_harness_version())
+    from local_operator import update
+
+    return update.installed_build()
 
 
 def _harness_version() -> str:
-    """The version of the code that is RUNNING, not of the last install.
+    """The version of the harness install that is EXECUTING this episode.
 
-    ``importlib.metadata.version`` reports whatever the editable install was
-    last registered at, which on a development checkout lags the tree by any
-    number of releases (a 0.44.31 head sealed ``0.43.5``). When this script
-    runs from a checkout the source of truth is that checkout's
-    ``pyproject.toml``; the install metadata is only the fallback for a wheel
-    install, where the two cannot disagree.
+    NOT a file beside this script. Until this changed, the recorded version came
+    from ``<script dir>/../pyproject.toml`` whenever one was there, on the
+    argument that a checkout is more current than install metadata. Measured,
+    that argument is wrong in the direction that matters: the paid campaign ran
+    the interpreter of a COPY of this tree (a venv with the 0.61.11 wheel
+    installed, ``pyproject.toml`` untouched at the last released version), and
+    every sealed bundle it produced declared ``0.61.9`` -- the working tree the
+    script happened to be sitting in, which is not the code that ran. Evidence
+    whose declared harness version is not the build that produced it cannot be
+    compared to anything.
+
+    So the source of truth is the running install's own metadata, resolved by
+    ``local_operator.update.installed_version``: that function answers "what is
+    the install this interpreter is running", including the one case where a
+    checkout IS the install (an editable install proven through PEP 610
+    ``direct_url.json``, whose ``dist-info`` version is a snapshot of an earlier
+    state). Nothing here reads a working-tree file, so a stray checkout next to
+    the script cannot answer for the build.
+
+    ``0.0.0`` when this interpreter has no install of the harness at all (a bare
+    ``PYTHONPATH`` checkout): the manifest needs an identifier, and a fabricated
+    version would be worse than an obviously absent one.
     """
 
-    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    if pyproject.is_file():
-        import tomllib
+    return _harness_identity().version or UNKNOWN_HARNESS_VERSION
 
-        try:
-            with pyproject.open("rb") as handle:
-                declared = tomllib.load(handle)["project"]["version"]
-            if isinstance(declared, str) and declared:
-                return declared
-        except (OSError, KeyError, TypeError, ValueError):
-            pass
-    from importlib.metadata import PackageNotFoundError, version
 
-    try:
-        return version("local-operator")
-    except PackageNotFoundError:
-        return "0.0.0"
+def _harness_git_revision() -> str:
+    """The git ref the executing install records, hashed, or its version's.
+
+    THE OTHER IDENTITY THAT WAS READ FROM THE CHECKOUT, and mislabelled the same
+    way: a 40-hex SHA from ``git -C <script dir>/.. rev-parse HEAD`` is the tree
+    the SCRIPT sits in, which is not necessarily the tree that is running -- in
+    the paid campaign it was the shared checkout while the build was a venv copy
+    of it, so the sealed revision described code that never executed.
+
+    Now the ref comes from the install's own record (``.lop-source``, what
+    ``lop-update`` and a PyPI upgrade write into the install root) through the
+    same ``installed_build`` call the version uses. An install with no recorded
+    ref -- a wheel built elsewhere, an editable checkout -- falls back to the
+    digest of its version: it cannot name a commit that was never recorded, and
+    must not pretend to.
+
+    64 hex either way: the manifest field is a ``Digest``, and hashing keeps it
+    the same shape whether or not a commit was available.
+    """
+
+    stamp = _harness_identity()
+    return _digest(stamp.source_ref or stamp.version or UNKNOWN_HARNESS_VERSION)
 
 
 def _task_digest(selector: AdapterSelector, task_id: str) -> str:
