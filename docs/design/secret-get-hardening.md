@@ -67,21 +67,83 @@ must not be silently settable by the agent in the same call it uses.**
 | **C** — the scrubber's deterministic holes | `fix/redaction-transform-hardening` | **#1428** | §5.2's transform normalisation (wider family list, 12-character floor) and the eval worker's streamed frames | the multi-line release-point defect — measured still live on its head; see the amendment in §5.1 |
 | **A** (additive) | `feat/secret-identity-surface` | **#1430** | `lop secret describe NAME --length --fingerprint` (value-free identity; equal values fingerprint equal) and `lop secret get NAME --reveal`, which prints bytes only when stdin and stdout are both a terminal, audited as `reveal` | **R1** — `get`'s default is unchanged (0.1) |
 
+Each of those PRs carries its own gap list and this record does not restate them
+all: **#1429** records gaps 1, 3, 6 and 8 — the tainted-path ledger, the
+session-credential namespace, `cmp` in the length-only sink list, and the `supply`
+verdict §3.2 proposed (absent because A1 is deferred, §0.1). This document is
+itself **PR #1432** on `design/secret-get-hardening`: it ships no code, and every
+control it recommends lands as its own PR.
+
 **The invariant this programme keeps: `get`'s byte contract is unchanged** —
 exact stored bytes, no trailing newline, `rc 2` with empty stdout on failure, and
 its ordinary `get`/`ok` audit row. Every control above is additive beside that
 contract, or a refusal standing in front of it; none of them alters it.
 
-### 0.3 D is not built, and this is the reason
+### 0.3 D — DECIDED: a new purpose-built enforcement seam, never the classification layer
 
-One line: **the classification layer's own contract forbids it** — "Nothing here
-may gate a capability, change an approval tier or alter a tool's availability"
-and "No history, no compaction summary, **no tool results**"
-(`classification/__init__.py:20-28`) are precisely the two things a pre-execution
-guard is. §4 carries the full reasoning, including the constraints a purpose-built
-seam would have to satisfy. It is revisited only on evidence that the
-deterministic layer's residual is material — the measured count §4 names — not on
-the argument that a model might be more accurate.
+**Decision (the operator's, recorded here so it is not re-litigated).** Workstream
+D's home is a **new, purpose-built enforcement seam with its own data-minimal
+contract**. It is **not** the classification layer.
+`docs/design/classification-layer.md` §5/§6 are **NOT amended**: the advisory
+classification layer stays advisory and out of the enforcement path, exactly as its
+own contract requires —
+
+> "The classifier's answers are **advisory**. Nothing in this layer may gate a
+> capability, change an approval tier, or alter a tool's availability." (§6;
+> `classification/__init__.py:20-21` in the module's own words.)
+>
+> "**Transcript-reading.** Only the newest user message, an optional short
+> pre-redacted context string, and the candidate roster ever leave the process
+> (§5). No history, no compaction summary, no tool results."
+> — `classification/__init__.py:25-27`, the layer's own restatement of §5's
+> budget; §6 of the design doc is where the advisory clause above is written.
+
+Any variant of this document's recommendation that amended that contract — §4
+records the option and why it looked attractive — is **withdrawn on the operator's
+decision.** It is not a live option and should not be re-opened: a reader who wants
+enforcement goes to the new seam, and a reader who wants recommendations keeps the
+advisory layer.
+
+**D is secondary: A/B/C remain the PRIMARY controls.** The precedence is a
+property of the design rather than a scheduling preference:
+
+* a classifier may only ever **ADD a refusal**. It may never authorise a reveal,
+  never mint or widen a capability, never lower an approval tier, and never cause a
+  value to be handed to a caller (which is the authority §3.2's `supply` verdict
+  would have needed, had A1 not been deferred — §0.1);
+* **the deterministic guard must hold on its own when the classifier is
+  unavailable**: the seam **fails closed to A/B's behaviour — never fails open**.
+  A timeout, a provider outage, a malformed reply, a disabled setting or a
+  quota exhaustion must never weaken a refusal that A or B would have produced, and
+  must never turn one of their refusals into an allow. §4 states the property from
+  the other side ("unavailable classifier ⇒ A+B unchanged"); here it is a decision
+  rather than a suggestion.
+
+**What the follow-up must carry, so it costs nothing to pick up.** The seam is
+defined by four things, and none of them is optional:
+
+1. **Its own data-minimal contract, stating exactly what leaves the process**: the
+   bounded and pre-redacted text of the step under judgement — no history, no
+   compaction summary, no tool results, no other step's text, no store metadata, no
+   secret names, and never a value. The redaction is the seam's own boundary, for
+   the reason `harness/redaction.py:24-30` scrubs a call summary before storing it
+   ("a credential can be typed into the call itself … and a report about a
+   redaction must not be the next place the value appears"), and the payload is
+   size-bounded before it is sent.
+2. **The gating condition, narrower than "the step mentions `lop secret`"**: the
+   *residual* spans — text that already reached `unresolved` in B's scan. The lexer
+   answered the syntactic question, and paying a model to re-ask it is the cost §4
+   warns about.
+3. **Refuse-only authority**: `deny`, or `undecided → deny`. The seam has no way to
+   say "yes" to anything.
+4. **Its fail mode, as a decision**: unavailable ⇒ the deterministic layer's
+   verdict stands, refusals included.
+
+**Whether D is built at all is still gated on measurement, and §4 is that
+measurement.** The decision above fixes the seam's home, its authority and its fail
+mode for whoever builds it; it does not by itself justify building it. The
+right answer remains to build nothing if the deterministic layer's residual is not
+material.
 
 ## 1. The problem as I found it
 
@@ -666,7 +728,16 @@ The policy, and its justification against the true-positive cost:
 
 ---
 
-## 4. PR D: the classifier layer
+## 4. PR D: the classifier layer — the seam question, and when building it is worth it
+
+> **Amended by the decision record (§0.3).** The operator has ruled: D's home is a
+> **new, purpose-built enforcement seam**, `docs/design/classification-layer.md`
+> §5/§6 are **not amended**, and any variant of the recommendation below that
+> amended that contract is **withdrawn on the operator's decision** (§0.3). What
+> this section retains is its second half — the reasoning that decides whether such
+> a seam is worth building at all, and the counter-argument to the option that is
+> now withdrawn. The "new seam vs amendment" question it frames is settled in
+> favour of the new seam; read it for the constraints, not for the choice.
 
 **Recommendation: do NOT build PR D now.** Build the deterministic layer, measure
 its residual, and revisit with data. The reasoning, clause by clause.
