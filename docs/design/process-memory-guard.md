@@ -203,7 +203,7 @@ see the group:
 
 - **Soft (`soft_mb`, 0.8 × ceiling) — the `memory.high` analog, advisory only.**
   Crossing it does not slow anything (we cannot throttle in userspace); it emits
-  ONE live advisory on the update stream ("memory 2.7/3.3 GB") and arms the
+  ONE live advisory on the update stream ("memory 3.9/4.9 GB") and arms the
   fidelity arm. Repeated ticks over the soft line do not re-emit.
 - **Hard (`ceiling_mb`) — the `memory.max`/`oom.group` analog, a kill.** When the
   measured group usage is `>= ceiling_mb`, kill the *whole group* with the
@@ -264,18 +264,21 @@ credential-dump advisory follows at `tools/builtin.py:3320-3337`).
   no backticks, no markdown):**
 
   ```text
-  MEMORY LIMIT EXCEEDED: this command's process group reached 3.4 GB, over the
-  3.3 GB budget for one command on this device (36 GB total, 6.5 GB available).
+  MEMORY LIMIT EXCEEDED: this command's process group reached 5.0 GB, over the
+  4.9 GB budget for one command (on a 36 GB host).
   The command was killed; the session is fine. Reduce peak memory and retry:
   stream instead of loading all rows, lower the batch size, or process the input
   in chunks. To allow a deliberately large command, pass memory_mb on the bash
   call or raise bash.memory.limit_mb in settings.
   ```
 
-  The numbers are the *measured* group peak and the ceiling; naming them is what
-  lets the model size the retry. It must not name a "safe" number it cannot know.
+  This example assumes 36 GiB physical RAM and 6.5 GiB effective availability
+  (no swap-pressure adjustment): `min(0.75 × 6,656, 6,656 − 1,024,
+  0.25 × 36,864) = 4,992 MB`, displayed as 4.9 GB. The 5.0 GB peak is illustrative;
+  the live result names the *measured* group peak and calculated ceiling so the
+  model can size the retry without being promised a "safe" number.
 - **Soft advisory (live):** one line on the update stream when the group first
-  crosses `soft_mb`, e.g. `memory 2.7/3.3 GB — approaching the command budget`,
+  crosses `soft_mb`, e.g. `memory 3.9/4.9 GB — approaching the command budget`,
   emitted through the existing `_emit_update()` channel so the operator sees the
   pressure before the kill. It is advisory only and never a kill.
 
@@ -552,15 +555,21 @@ as an e-group/session selector, not `pgid` — so the implementation keeps the
 portable full-table read and filters in Python. Folded into the fidelity arm, the
 per-pid footprint read is spent only near the soft line (§4.2).
 
-**Small-device floor.** No 8 GB / 16 GB device was available to measure. The
-arithmetic itself is the hazard: an 8 GB device at ~1 GB available resolves to
-`min(512, 1024-1024) = 0 MB`, which would kill every command on its first tick.
-The implementation therefore floors the auto ceiling at `_MIN_CEILING_MB = 64 MB`,
-a **judgement, not a calibrated number** (stated as such in the code). It is set
-low on purpose: the aim is to keep *ordinary* commands alive on a pressured small
-host — measured here, a `git status` peaks at ~3 MB, a shell pipeline at ~4 MB and
-a trivial `python3 -c` at ~15 MB of interpreter, so a 64 MB ceiling clears all of
-them — not to license a big job, which asks for `memory_mb=` or `mode=manual`.
+**Small-device floor.** No 8 GiB / 16 GiB device was available to measure. With
+8,192 MB physical RAM and 1,024 MB effective availability, the revised formula
+reserves `min(1,024, 8,192//16) = 512 MB`; its three bounds are 768 MB (75% of
+available), 512 MB (available less reserve), and 2,048 MB (25% physical cap), so
+the raw ceiling is **512 MB** and the 64 MB default floor does not change it. The
+floor matters when the nonnegative raw ceiling falls below 64 MB: it keeps ordinary
+commands viable, but remains bounded by the 25% physical cap. If measured free swap
+is below 256 MB, effective availability is first reduced to
+`min(available, free_swap + 256 MB)`, which can bring the ceiling down to that
+floor. The implementation therefore sets `_MIN_CEILING_MB = 64 MB`, a **judgement,
+not a calibrated number** (stated as such in the code). It is set low on purpose:
+the aim is to keep *ordinary* commands alive on a pressured small host — measured
+here, a `git status` peaks at ~3 MB, a shell pipeline at ~4 MB and a trivial
+`python3 -c` at ~15 MB of interpreter, so a 64 MB ceiling clears all of them — not
+to license a big job, which asks for `memory_mb=` or `mode=manual`.
 
 64 MB is the **default** floor, not the only one: `compute_budget(floor_mb=...)`
 lets a caller whose command is not an ordinary one name its own, which is how
