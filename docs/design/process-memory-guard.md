@@ -554,3 +554,53 @@ host — measured here, a `git status` peaks at ~3 MB, a shell pipeline at ~4 MB
 a trivial `python3 -c` at ~15 MB of interpreter, so a 64 MB ceiling clears all of
 them — not to license a big job, which asks for `memory_mb=` or `mode=manual`.
 
+64 MB is the **default** floor, not the only one: `compute_budget(floor_mb=...)`
+lets a caller whose command is not an ordinary one name its own, which is how
+§12's build path prices a package-manager child. The floor is a parameter rather
+than a number a second consumer re-derives, because the reserve arithmetic has one
+owner and the floor is the only part of it that is a judgement about the command.
+
+## 12. Phase 2's first consumer: the mobile bundle build (2026-09-21)
+
+The prediction in §10 was tested the same day, by the second instance of the
+incident this guard exists for. `mobile/install.py::_run_build_step` bounded a
+build child by **time only** (`_BUILD_STEP_TIMEOUT = 600.0`), and that file records
+the incident's rate in two docstrings: *"+100 processes and +5 GB every 25 s until
+the host had 0.1 GB free"*, and *"28 processes and 3.2 GB RSS in 8 s"* for the
+version probe. The arithmetic is the argument: **0.2 GB/s x 600 s is on the order
+of 120 GB** of growth before that time bound could fire, against a 36 GB host. A
+bound three orders of magnitude too late cannot protect against the failure it was
+added for, and the one place the code RELIED on it is `_pin_mismatch`'s deliberate
+fail-open ("the bound protects that case") — so the fail-open was resting on a
+bound that does not hold at the recorded rate. This was the incident that took the
+operator's machine down, twice in one day.
+
+What landed, and what it says about the seam §10 predicted ("phase 2 is wiring,
+not design"):
+
+- The build step samples its group's RSS and kills the **group** on breach, using
+  this module's `Guard` and `compute_budget` unchanged in shape. `Guard.sample_sync`
+  is the one addition: the install path is synchronous, so there is no loop for
+  `sample`'s `asyncio.to_thread` hop to be scheduled on.
+- The budget arithmetic gained ONE parameter, `floor_mb` (above), for the measured
+  reason in the floor paragraph: 120.8 MB for a package-manager child against 3-15 MB
+  for the commands the default floor was sized on.
+- The wait had to change shape too, and that is the part worth remembering: a single
+  blocking `communicate(timeout=bound)` **cannot** enforce a memory ceiling, because
+  nothing reads the group while it blocks. The build step now takes its wait in
+  `guard.tick_s` slices with a sample between them, and re-entering `communicate` is
+  lossless (documented) and non-duplicating (pinned by a test).
+- The fail-open in `_pin_mismatch` is **left alone**, deliberately. It can now rest
+  on a bound that holds: a probe that has started resolving the pin grows at the
+  measured 0.4 GB/s, so it is stopped at the ceiling a few ticks in — inside the
+  probe's own 20 s `_PIN_PROBE_TIMEOUT`, which by itself permitted roughly another
+  8 GB before it could fire.
+- Discriminating measurement, on a real process group (leader + descendant, against
+  a 110 MB ceiling): **guarded, the step ended in 0.728 s with the group killed and
+  both pids gone; with the memory budget disabled — the single blocking
+  `communicate` the code had before — the same child was still running at 3 s and
+  only the clock stopped it.**
+
+§2's exemption list is otherwise unchanged: the eval kernel and the detached
+`exec_worker` remain unguarded, and the seam for them is still this `Guard`.
+
