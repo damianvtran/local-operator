@@ -1,8 +1,16 @@
 # Design: an idle parent that owns running subagents
 
-Status: proposed. Base: `origin/main` @ `e7be1fe1`; all `file:line` are against that commit. The
-shape is already decided (the catalogue derives a distinct state when the parent's own turn is not
-busy and N>=1 children run; the count travels as data); this file records WHY.
+Status: shipped in this PR. Base: `origin/main` @ `dad3b92f`; all `file:line` are against that commit
+(or the tree this PR produced, where the line moved). The shape was decided before the code was
+written (the catalogue derives a distinct state when the parent's own turn is not busy and children
+run; the count travels inside the label); this file records WHY.
+
+**Revised after the shape was implemented.** Two spellings changed between the proposal and the
+landed change, and this file has been corrected rather than left as a plausible-looking record of a
+state that does not exist: the LABEL is the count's own sentence (`2 subagents running`, and its
+`· N queued` addend) rather than `Delegating (2 subagents)`, and the desktop icon is `Share2` — the
+app's own "Delegated work" glyph — rather than `CornerDownRight`. The phone's mark is two accent
+dots, not a ring. The reasons are in §2 and §5.
 
 ## The defect
 
@@ -25,10 +33,10 @@ The fact is already in the readers' hands: `SessionRecord.subagents_running` / `
 | surface | today | after |
 | --- | --- | --- |
 | code | `idle` / `attached` | **`delegating`** |
-| label | "Ready" | **"Delegating (2 subagents)"** / "Delegating (1 subagent)" |
+| label | "Ready" | **"2 subagents running"** ("1 subagent running"; "· N queued" addend; "N subagents queued" alone) |
 | TUI glyph | `●` | **`⇉`**, ink `accent`, static |
-| desktop icon | `Circle` | **`CornerDownRight`**, ink `text-info`, static |
-| phone slot | empty | **static dim ring**; chip stays `N subagent(s)` |
+| desktop icon | `Circle` | **`Share2`**, ink `text-accent`, static |
+| phone slot | empty | **two 4px accent dots**; chip `N subagent(s)`, or `N queued` when nothing is running |
 
 ## 1. A new CODE, not a count-only field
 
@@ -47,15 +55,18 @@ label, and both come from the row (section 4). An unknown code fails visibly (`H
 
 - Code `delegating`, a present participle like `busy`/`leaving`. Rejected: `subagents` (a noun is not
   a state) and `delegated` (reads finished).
-- Label `Delegating ({n} subagent{'s' if n != 1 else ''})` — the `Scheduled (2 wakes)` shape — and it
-  must not pluralise at 1 (`tests/unit/tui/test_session_sidebar.py:1445`).
-- Noun **subagent(s)**: the record's field name, `/info`'s word (`info/render.py:435`), the composer's
-  word; the phone's `{n} agent(s)` chip (`mobile/web/src/screens/session-list.tsx:187-193`) is the
-  outlier and is renamed in the mobile PR. Counter-argument: "subagent" is longer in a right-cluster
-  chip, so a narrow phone truncates the title sooner — geometry is unaffected, and design/UX may
-  overrule on a rendered frame.
+- Label **the count's own sentence**, built by `catalog.delegating_label` in three shapes:
+  `2 subagents running` / `1 subagent running` (singular at one, the `Scheduled (1 wake)` rule —
+  `tests/unit/tui/test_session_sidebar.py`), `2 subagents running · 3 queued` when both facts exist,
+  and `2 subagents queued` when nothing is spending yet.
+- **Lead with a count, not with "Delegating".** Rejected on the words: a state whose whole content is
+  "the parent's own turn is NOT running" must not open with a gerund that implies the opposite. It
+  also puts the number first, where a one-cell glyph cannot carry it.
+- Noun **subagent(s)**: the record's field name, `/info`'s word (`info/render.py:435`), and the
+  TUI's own stop notice (`tui/app.py:20950`). The phone's chip is renamed to it in this PR;
+  "agent" alone is ambiguous in a product with an "Agents" page of reusable profiles.
 - One string serves the TUI tooltip, the desktop `title`/`sr-only` (both `row.status.label`) and the
-  chip beside the phone's slot.
+  phone's chip.
 
 ## 3. Precedence rung
 
@@ -67,7 +78,7 @@ sits above `busy` today (`:315-316`).
 pending -> approval | answer     wedged | busy
 shows_completion_mark -> complete | error | interrupted
 attached -> attached ("Open")
-+ delegating -> delegating ("Delegating (N subagents)")   <-- NEW
++ delegating -> delegating ("2 subagents running")   <-- NEW
 armed wake -> scheduled          idle -> idle ("Ready" / "Running headless (exec)")
 dormant -> dormant               cold receipt -> complete | error | interrupted
                                  else recent
@@ -95,11 +106,20 @@ new word, for this reason.
   same two lines (the hand transcription is already held in parity by
   `tests/unit/server/test_desktop_feed.py`). No new IO: both come off a record the callers already
   read, so the 10 Hz doorbell budget (`desktop_feed.py:110-119`) is untouched.
-- ONE predicate, on the ROW, so glyph and words cannot disagree: delegating is `not leaving and
-  live_state in {"idle","attached"} and (subagents_running or 0) >= 1`. `status_code`/`status` read it
-  and so does `row_state_mark`. The row-level home also avoids a new import edge between
-  `session_picker` and `session.catalog`, and makes the pairing structural rather than a promise —
-  the reason `shows_completion_mark` exists.
+- ONE predicate, on the ROW, so glyph and words cannot disagree:
+  `SessionRow.delegating` (`resume.py`) is `not leaving and
+  (subagents_running or 0) + (subagents_queued or 0) >= 1`, returning the normalised pair (or
+  `None`). `status_code`/`status` read it and so does `row_state_mark`. **It answers only the COUNT
+  question**: `pending`/`busy`/`wedged`/`attached`/an unseen completion are louder facts each ladder
+  already tests above this rung in its own order, and folding them into the property would give the
+  two callers a second, hidden precedence to keep in step — the failure it exists to remove. The one
+  exception is `leaving`, which is a GATE rather than a rung: `status_code` has no leaving arm at
+  all, so without it a draining row whose `live_state` was idle would publish `delegating` beside a
+  "Leaving…" tooltip and draw `⇉` next to the words. The row-level home also avoids a new import
+  edge between `session_picker` and `session.catalog`, and makes the pairing structural rather than a
+  promise — the reason `shows_completion_mark` exists. `_counted` refuses a non-`int`
+  (`from_json` does no type validation and this is the first ARITHMETIC on those fields) rather than
+  letting a corrupt record raise inside the sidebar's poll loop.
 - Wire LIST row: free — `desktop_sessions.py:3284-3290` projects `entry.row._asdict()`. Declare both
   on `server/models/desktop_sessions.py::SessionRow` and on the UI's hand-written mirror
   `SessionCatalogueRow` (`src/shared/desktop-session-contract.ts:9-33`); `None` serialises as JSON
@@ -117,28 +137,38 @@ new word, for this reason.
 
 ## 5. The phone's second derivation
 
-The phone moves onto the record; it does not keep its projection count. `daemon.py:550-552` counts
-`status == "running"` over the live projection while the record counts `RUNNING_SUBAGENT_STATUSES` —
-two definitions of one number, and the projection can be stale or absent. The fix follows the same
-function's pattern for `leaving`/`updating` (`daemon.py:538-546`): read
-`entry.record.subagents_running`, preserving `None`. A durable-only row has no entry and so no count:
-no ring, no chip — honest (no live record, nothing claimed), NOT a divergence to fix. Cost:
-`number | null` in `types.ts`, and the projection derivation dies with its test.
+The phone moves onto the record; it does not keep its projection count. The old `_merge_summaries`
+counted `status == "running"` over the live projection while the record counts
+`RUNNING_SUBAGENT_STATUSES` — two definitions of one number, and the projection can be stale or absent.
+The fix follows the same function's pattern for `leaving`/`updating` (`daemon.py`): read
+`entry.record.subagents_running` and `subagents_queued`, preserving `None`. A durable-only row has no
+entry and so no count: no mark, no chip — honest (no live record, nothing claimed), NOT a divergence
+to fix. Cost: `number \| null` in `types.ts`.
+
+**The phone's two arms, and why its mark is not a ring.** The slot is the only place this app can
+carry the state — it has no `attached` or wake arms to lose to — so two 4px accent dots keep the
+12px slot's geometry and give the state a SHAPE distinct from the single unread dot one rung above it
+in the same ink (the TUI's own argument for the arrow). A ring read as a quieter dot at this size. The
+chip then carries the count as text, in the shared noun, and is hidden on `null` and on 0 — with the
+pair's 2×4px inside the reserved box, the title's start x is untouched.
 
 ## 6. PR split and order
 
-1. **local-operator — the state model** (Python + TUI + the phone's daemon field + this document):
-   `resume.py`, `catalog.py`, `desktop_feed.py`, `session_picker.py`, `daemon.py`, tests. Everything
-   else depends on it.
+1. **local-operator — the state model, TUI and the phone** (Python + TUI + the phone's daemon field +
+   `mobile/web/**` + this document): `resume.py`, `catalog.py`, `desktop_feed.py`,
+   `session_picker.py`, `daemon.py`, `mobile/web/src/{types.ts,screens/session-list.tsx}`, tests.
+   Everything else depends on it.
 2. **local-operator-ui**: the `delegating` arm in `chat-session-status.tsx`, the contract mirror,
    `.mjs` cases, a Neighbours story row, a rendered before/after pair. Parallel development, merged
    AFTER (1) so its evidence comes from a backend that actually emits the code.
-3. **local-operator — mobile web only** (`local_operator/mobile/web/**`): slot rung, noun, `types.ts`,
-   web test, rendered phone frames. Its own PR because `ci_scope.py:130-141` makes a web-only diff
-   INERT for every Python job (`:300-310`) — fast CI, and `mobile-web.yml` owns its only typecheck;
-   folding it into (1) would attach web evidence to a Python review round. Watch `web/.gitignore:9-46`:
-   a source-only change can emit an unstyled bundle that exits 0, so the rendered frame is the
-   evidence, not the build.
+
+The mobile web change was originally proposed as its own PR — a web-only diff is INERT for every
+Python job (`ci_scope.py`) and `mobile-web.yml` owns its only typecheck — and it now rides PR 1 with
+the rest. The cost is that web evidence lands on a round that also reviews Python; the gain is that a
+single round reviews the ONE vocabulary in every place it is rendered, which is the property this
+change is most likely to regress. Watch `web/.gitignore` either way: a source-only change can emit an
+unstyled bundle that exits 0, so the rendered frame is the evidence, not the build (the build's own
+`check-bundle.mjs` is the other guard — it reported `293 classes for 230 tokens` here).
 
 **Overlap — coordinate, do not edit:** PR #1436 touches `resume.py`, `session/catalog.py`,
 `tui/widgets/session_picker.py`, `server/models/desktop_sessions.py`,
@@ -146,35 +176,59 @@ no ring, no chip — honest (no live record, nothing claimed), NOT a divergence 
 `canonical-sessions-store.ts`, `desktop-session-contract.ts`. Land this after (or rebased onto) #1436;
 the parity test and the glyph->words `ALLOWED` map are the conflict hotspots.
 
-## 7. Tests that must move, and must be added
+## 7. Tests that moved, and that were added
 
-Move (vocabulary pins): `tests/unit/tui/test_session_sidebar.py:1479-1556` (the exhaustive
-glyph->words map and `checked == 75`: add the count dimension `None, 0, 2` plus the new entry and
-update the product — round 1's finding was exactly a pairing no frame covered), `:1423` (tooltip vs
-glyph), `:788` (mark column); `tests/unit/server/test_desktop_feed.py` (parity gains the two fields);
-`tests/unit/session/runtime/test_registry.py:562-590` (carry the absent-≠-0 pin to the row); UI
-`scripts/chat-session-status.test.mjs` (add `delegating`; re-point the unknown-code case at a
-still-unknown code), `chat-session-status.stories.tsx`, `scripts/session-status-feed.test.mjs` (assert
-the frame is STILL a triple); mobile `types.ts` + a slot-ladder web test + the daemon summary test.
+Moved (vocabulary pins): `tests/unit/tui/test_session_sidebar.py` (the exhaustive glyph->words map,
+now `checked == 675` — the count dimension `None, 0, 2` on BOTH counts, because a pairing no
+hand-picked row covers is exactly how this mark goes wrong; round 1's finding was a pairing no frame
+covered), the tooltip-vs-glyph test, the rendered mark-column test;
+`tests/unit/server/test_desktop_feed.py` (parity gains the delegating arm);
+`tests/unit/mobile/test_daemon.py` (the summary shape).
 
-Add (the state must be falsifiable):
+Added (the state must be falsifiable), all landed in this PR:
 
-- catalogue truth table: `idle`+2 -> `delegating` with the exact label; `idle`+1 -> "Delegating
-  (1 subagent)"; `idle`+`None` -> `idle` (never `delegating`, never "0"); `idle`+0 -> `idle`;
-  `busy`/`wedged`/`pending`/unseen-complete/`attached`/armed-wake/`leaving`/cold rows keep their rung.
-- feed: `0 -> 2` and `2 -> 1` each publish exactly one `session_status` frame; a heartbeat rewrite
-  publishes none; a `None` row publishes none.
-- TUI: `cell_len(DELEGATING_MARKER) == 1`.
-- ORDER: a delegating row keeps `session_category`'s tier and its `rank` — adding a state must not
-  move a row (`catalog.py:82-163` is the record of that mistake).
+- `tests/unit/session/test_catalog_delegating.py` — the catalogue truth table: the three label shapes
+  with the singular at one; `idle`+`None` -> `idle` (never `delegating`); `idle`+0 -> `idle`; a
+  corrupt count neither raising nor inventing a state; and every precedence collision
+  (`pending`/`busy`/`wedged`/unseen-complete/interrupted/error/`attached`/armed-wake/`leaving`/cold)
+  asserted TWICE per case — with and without children — so the rung can only be added below them.
+- `tests/unit/server/test_desktop_feed.py` — the U3 edge test: `0 -> 2` and `2 -> 1` each publish
+  exactly one `session_status` frame, a heartbeat rewrite publishes none, a record reporting nothing
+  republishes the rung it leaves, and the frame is asserted to still be a `{code, label, revision}`
+  TRIPLE.
+- `tests/unit/tui/test_session_sidebar.py` — `cell_len(DELEGATING_MARKER) == 1`, and a RENDERED row
+  showing the arrow in the mark column without moving the title.
+- `tests/unit/session/test_catalog_delegating.py` — ORDER: a delegating row keeps
+  `session_category`'s tier and its `rank` (adding a state must not move a row; `rank`'s docstring is
+  the record of that mistake), and the absent-≠-0 case carried from the record to the row through the
+  real scan.
+- `mobile/web/src/session-list.delegating.test.tsx` — the slot rung and the chip against the real
+  card: the pair of dots, the singular, queued-only, the two rungs that outrank it (unread, then
+  streaming — which still count their children), and `null`/0 rendering NOTHING rather than a zero.
 
 ## Risks to watch
 
 - **Glyph crowding**: `⇉` (U+21C9, Neutral width, `cell_len == 1`) shares ink with the busy spinner;
-  shape is the discriminator. If a rendered column shows the pair reading as one thing, re-ink before
-  re-shaping.
+  shape — and being STATIC — is the discriminator. If a rendered column shows the pair reading as one
+  thing, re-ink before re-shaping.
 - **`leaving` + children** is rare but reachable; one test keeps the `ALLOWED` map from ever needing
   an exception.
 - **Stale numeric count** in a client that later draws it, and **renderer coupling**: a backend
   shipping `delegating` before the app shows `HelpCircle` — loud and correct, but the PR order above
   is what makes the app's evidence real.
+- **The desktop row has room for exactly one trailing statement** (`chat-sidebar.tsx`
+  `rowTrailingStatement`, three failed layouts recorded), so the count deliberately does NOT get its
+  own chip there: it rides `status.label` into the row's `title` and `sr-only`, and the row shows the
+  icon alone. A future design that wants the number visible inline is a change to that slot's
+  contract, not to this state.
+
+## Not in scope — deferred, with the repro
+
+A pre-existing GATE-LIFECYCLE defect is visible in the same neighbourhood and is deliberately NOT
+fixed here: a settled child's gate clears the parent's published `pending` while another card is
+still parked, because `ServingSessionHandle._announce_settled()` clears unconditionally. The repro
+lives in `tests/unit/session/runtime/test_parked_gates.py`, and the fix sketch is one condition — only
+clear the published gate when the card being settled is the one that published it. It is unfixed
+because it is a change to gate lifecycle rather than to this row's vocabulary, and it would be
+reviewed as a different change with a different blast radius. Recorded on the PR as a
+`deferred — <reason>` finding so it is not lost.
