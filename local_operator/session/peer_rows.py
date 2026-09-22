@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
+from local_operator.session.catalog import live_state_from_flags
 
 #: How long one projection answer is reused. Chosen against the sidebar's own
 #: two-second poll: long enough that a peer listing is a rare event, short enough
@@ -255,19 +256,29 @@ def _live_state(peer_row: object) -> str:
     """The peer's own state token, in THIS list's vocabulary.
 
     ``SessionRow.live_state`` is the token ``row_state_mark`` ranks: ``busy``,
-    ``idle``, ``attached``, ``wedged`` or ``""``. The federated row's ``state``
-    is the peer's own word for the same thing (``to_row_json``), so it is passed
-    through when it is one of the four, and otherwise derived from the two
-    booleans the transport does define — a session another terminal is watching
-    is ``attached``, and a session with work in flight is ``busy``. An
-    unrecognised word becomes ``""``: a cold row, which renders as "no claim"
-    rather than as a state this list invented.
+    ``idle``, ``attached``, ``wedged`` or ``""``. The federated row's ``state`` is
+    the peer's own word for the same thing (``to_row_json``), so it is passed
+    through when it is one of the four. Two of the peer's other words are decided
+    here instead:
+
+    * ``stored`` — the relay's word for a session that exists on the peer with NO
+      runtime behind it (``RelayPeerCatalog._stored_rows``, which stamps each such
+      row ``detached: True`` because nothing can be watching a session that is not
+      running). That is the same condition the local half paints with an empty
+      ``live_state`` — a cold row, no claim — so it must not reach the flag ladder
+      below: that ladder answers for a RUNNING session, and letting a stored row
+      into it made the peer group claim a live, watched session that does not
+      exist.
+    * anything else — derived from the two booleans the transport does define,
+      through the SAME reading the local half uses
+      (``session.catalog.live_state_from_flags``), so the two halves of one list
+      cannot answer "is this running, and is anyone watching it" differently. In
+      particular ``detached`` means NOBODY IS WATCHING: a live but unwatched peer
+      session is ``idle``, never ``attached``.
     """
     state = str(getattr(peer_row, "state", "") or "")
     if state in ("busy", "idle", "attached", "wedged"):
         return state
-    if bool(getattr(peer_row, "detached", False)):
-        return "attached"
-    if bool(getattr(peer_row, "busy", False)):
-        return "busy"
-    return ""
+    if state == "stored":
+        return ""
+    return live_state_from_flags(peer_row)

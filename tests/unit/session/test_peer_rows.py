@@ -173,22 +173,82 @@ def test_rows_carry_every_field_the_surfaces_read() -> None:
 
 
 def test_a_peer_answer_vocabulary_is_mapped_not_invented() -> None:
-    """The peer's own ``state`` passes through when this list knows the word."""
+    """The peer's own ``state`` passes through when this list knows the word.
+
+    Everything else falls to the transport's own booleans, through the SAME
+    reading the local half uses (``session.catalog.live_state_from_flags``) —
+    there is no second vocabulary here, invented or otherwise.
+    """
     catalog = _Catalog(
         [_Facts("d_aa", "radiant-m4", reachable=True)],
         [
             _Row("s_1", "d_aa", state="wedged"),
             _Row("s_2", "d_aa", state="attached"),
-            # An unrecognised token is a COLD row, not a new state this list
-            # invented for a word it does not know.
+            # A word this list does not know: the booleans decide, and
+            # ``detached: False`` says a terminal is watching it.
             _Row("s_3", "d_aa", state="philosophising"),
-            # No token at all: the transport's own booleans decide.
+            # No token at all, and no viewer: a runtime nobody is watching is
+            # IDLE — the ``detached`` bit names the absence of a viewer, so it
+            # can never be the ``attached`` token.
             _Row("s_4", "d_aa", state="", detached=True),
             _Row("s_5", "d_aa", state="", busy=True),
         ],
     )
     states = [row.live_state for row in peer_session_rows(catalog=catalog)]
-    assert states == ["wedged", "attached", "", "attached", "busy"]
+    assert states == ["wedged", "attached", "attached", "idle", "busy"]
+
+
+def test_a_stored_peer_row_is_never_painted_open() -> None:
+    """``detached: True`` means NOBODY IS WATCHING, never "Open" (UX round 5).
+
+    The relay's stored half (``RelayPeerCatalog._stored_rows``) stamps every row
+    it mints ``state: "stored"``, ``detached: True`` — a session that exists on
+    the peer with NO runtime behind it, which is the same condition the local
+    half paints with an empty ``live_state``. Read backwards, that bit made the
+    peer half claim every one of them was live: ``○`` in the sidebar and "Open"
+    in the tooltip, on the same screen where a session THIS device holds with no
+    runtime paints cold. The cell is asserted through the RENDERED pair rather
+    than the token alone, because the token is what the glyph and the tooltip
+    are computed from.
+    """
+    from local_operator.session.catalog import CatalogEntry
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        row_state_mark,
+    )
+
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa", name="Moved here last week", state="stored", detached=True)],
+    )
+    (row,) = peer_session_rows(catalog=catalog)
+    assert row.live_state == "", "a session with no runtime is a cold row"
+    assert CatalogEntry(row).status != "Open"
+    glyph, _ink = row_state_mark(row, 0)
+    assert glyph != ATTACHED_MARKER, "the peer group must not claim a viewer it does not have"
+    assert glyph == "", "a cold row draws no state mark"
+
+
+def test_a_live_peer_row_nobody_watches_is_idle_not_cold() -> None:
+    """The other half of the same bit: a RUNNING unwatched session is ``idle``.
+
+    ``state: "live"`` is the registry's word for a session whose pid is alive and
+    heartbeating (``runtime/registry.py``), so the row must keep the mark and the
+    sentence the local half gives the same session — a runtime with nothing to
+    report — rather than falling through to the cold/no-claim case ``stored``
+    gets.
+    """
+    from local_operator.session.catalog import CatalogEntry
+    from local_operator.tui.widgets.session_picker import IDLE_MARKER, row_state_mark
+
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa", name="Review the mesh brief", state="live", detached=True)],
+    )
+    (row,) = peer_session_rows(catalog=catalog)
+    assert row.live_state == "idle"
+    assert CatalogEntry(row).status == "Ready"
+    assert row_state_mark(row, 0) == (IDLE_MARKER, "muted")
 
 
 def test_a_row_from_a_device_the_peers_answer_lacks_is_dropped() -> None:
