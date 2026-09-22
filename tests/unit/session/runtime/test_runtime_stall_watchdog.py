@@ -1290,26 +1290,62 @@ def test_the_progress_leg_needs_all_three_facts_at_once(
     assert [step() for _ in range(8)] == [False] * 8
     assert armed.progress_deadline is None, "a waiting runtime was read as spinning"
 
-    # ALL THREE, and the window is the whole of the claim: the first disagreeing
-    # sample ends the run, and no shorter run may fire.
+    # ALL THREE: no fire before the retained samples span the window, and a fire
+    # once they do.
     state["cpu_per_step"] = 1.0
-    # The sample that sees the work STOP is not the first sample of a run: the
-    # run starts on the next one, which is what "a sample that disagreed ends it"
-    # costs and why the window is measured from there rather than from here.
+    # The sample that sees the work STOP is not judged as the first of a run: the
+    # run starts there, and a window needs a window's worth of samples.
     state["motion"] = "settled"
     assert step() is False, "a sample that saw movement started a run"
-    assert armed.clock.since is None
-    assert step() is False
-    started = armed.clock.since
-    assert started is not None, "the run never started"
-    for _ in range(int(armed.seconds) + 2):
-        if step():
-            break
-    else:
-        raise AssertionError("the progress leg never fired on a sustained spin")
     assert (
-        fake.wall - started >= armed.seconds
-    ), f"the progress leg fired {fake.wall - started}s into a {armed.seconds}s window"
+        armed.clock.mean_rate(armed.seconds) is None
+    ), "a run younger than the window was judged as if it spanned one"
+    fired_at = None
+    for index in range(1, int(armed.seconds) + 6):
+        if step():
+            fired_at = index
+            break
+    assert fired_at is not None, "the progress leg never fired on a sustained spin"
+    assert (
+        fired_at >= armed.seconds
+    ), f"the progress leg fired at sample {fired_at} of a {armed.seconds:g}s window"
+    # ...AND THE RETAINED SAMPLES ARE BOUNDED BY THE WINDOW THEY MEASURE, not by a
+    # count: this driver looks once a second, so a 4 s window holds five or six.
+    assert len(armed.clock.history) <= int(armed.seconds) + 2, len(armed.clock.history)
+
+    # THE STATISTIC, ON THE SCHEDULES BOTH REVIEW ROUNDS MEASURED. Fresh state per
+    # case because each is a claim about what ONE run does, and a real window
+    # (45 samples of a second against the 45 s window) because the burst cases are
+    # about how long a burn stays inside it.
+    def fires(cpu_steps: list[float]) -> int | None:
+        state["motion"] = "settled"
+        state["in_flight"] = False
+        spare = stall_watchdog._Armed(dump, handle, 45.0, 4244, probe)
+        for index, per_step in enumerate(cpu_steps, start=1):
+            fake.wall += 1.0
+            fake.cpu += per_step
+            if stall_watchdog._sample(spare):
+                return index
+        return None
+
+    assert fires([0.0] * 60) is None, "an idle runtime was read as spinning"
+    # ROUND 1'S SHAPE: one scheduled-out sample no longer discards the run.
+    assert fires([1.0] * 20 + [0.0] + [1.0] * 40) is not None
+    # ROUND 2'S SHAPE, both directions. A burn buys a run only while it is INSIDE
+    # the window: 4 s of a core in a 45 s window is a mean of 0.089 and fires at
+    # sample 46 (the reviewer's own measurement), while 2 s of it is 0.044 and
+    # never fires however long the run continues.
+    assert fires([1.0] * 4 + [0.0] * 60) == 46
+    assert fires([1.0] * 2 + [0.0] * 60) is None
+    # ...and the alternation that never fired at the previous head, because the
+    # run kept re-opening on the burn half: a burn/zero 2-cycle is a 50% duty
+    # cycle and is judged as one.
+    assert fires([1.0, 0.0] * 40) is not None
+    # ...and the latency follows the BURN rather than the session's age: after 200
+    # idle samples, a spin fires within a window's worth of burn and not after
+    # 0.05 x 200 = 10 samples of it, which is what a cumulative mean would need.
+    idle_then_spin = fires([0.0] * 200 + [1.0] * 60)
+    assert idle_then_spin is not None and idle_then_spin <= 208, idle_then_spin
     # THE FIRE REUSES THE LIVENESS LEG'S EXIT — the same C timer, armed to expire
     # now, and `exit=True` — so the dump is written and the process leaves.
     assert spy.armed, "the progress fire never reached the C timer"
@@ -1585,3 +1621,154 @@ def test_arming_with_the_real_probe_installs_it(
     assert armed.probe is process_module._progress_probe
     assert armed.thread is not None and armed.thread.is_alive()
     stall_watchdog.disarm()
+
+
+#: The ``sitecustomize`` that makes a REAL spawned runtime spin.
+#:
+#: WHY AN INJECTED THREAD AND NOT A TURN. The shape the progress leg exists for is
+#: a process burning CPU with no progress and nothing in flight; producing it
+#: through the product would take a model call, a tool and minutes of wall time per
+#: run. ``time.process_time()`` is the WHOLE process's CPU, so a daemon thread in
+#: the child puts the process in exactly that state — every loop still ticking
+#: (a Python thread releases the GIL every switch interval, so the workload ticker
+#: and the serving heartbeat keep their cadence), nothing in flight, and a core
+#: being burned. It is injected at interpreter start rather than through the spawn
+#: API because the child under test must be the real ``-m`` entry point with the
+#: real argv: that is the whole point of the cell.
+_SPIN_SITECUSTOMIZE = """\
+import threading
+
+
+def _spin() -> None:
+    while True:
+        sum(range(200_000))
+
+
+threading.Thread(target=_spin, daemon=True, name="stall-rig-spin").start()
+"""
+
+#: The same, plus the one line MAJOR 2's negative removes: ``probe=`` is dropped
+#: from the arm inside the child, so the entry point arms without a probe and the
+#: predicate can never run. Nothing else differs, which is what makes this a
+#: measurement of that argument rather than of the rig.
+_DROP_PROBE_SITECUSTOMIZE = _SPIN_SITECUSTOMIZE + """
+
+from local_operator.session.runtime import stall_watchdog as _sw
+
+_arm = _sw.arm
+
+
+def _arm_without_probe(*args, **kwargs):
+    kwargs.pop("probe", None)
+    return _arm(*args, **kwargs)
+
+
+_sw.arm = _arm_without_probe
+"""
+
+
+def _write_sitecustomize(root: Path, body: str) -> Path:
+    """A ``PYTHONPATH`` directory holding one ``sitecustomize.py``."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sitecustomize.py").write_text(body, encoding="utf-8")
+    return root
+
+
+@pytest.mark.slow
+def test_a_real_runtime_child_fires_the_progress_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ACCEPTANCE EVIDENCE: the leg is LIVE in production, on a spawned child.
+
+    Agent review round 2's MAJOR: the source pin above is a complement, not a
+    proof — three text-preserving mutants (the publication inside ``if False:``, an
+    early ``return (), True`` before the probe reads the handle, and a second
+    probe-less arm site in another module) all left it green with the prediction
+    inert, and a predicate that ships silently disabled with green tests is worse
+    than the gap it closes: it makes the fleet LOOK protected, which is the failure
+    #1363's own docstring warns about.
+
+    So this drives the real ``-m`` child through ``launch._spawn_runtime``, with
+    the bound set the way an operator sets it, and shows the leg FIRING there —
+    `rc == 1`, the fired marker, the progress line, and ``fired_leg`` naming the
+    progress leg. The negative is the same rig with ``probe=`` dropped inside the
+    child: same spin, same bound, and nothing fires. Together they are the joint
+    proof of BOTH wiring lines, because with no probe and no published handle the
+    probe answers "in flight" forever and no progress fire is reachable.
+
+    A ``slow`` cell by construction: the operator-facing bound floors at 45 s
+    (``MIN_BOUND_FLOOR_TICKS`` x ``HEARTBEAT_INTERVAL_S``), so the positive needs
+    its bound plus a boot and the negative has to outlast it. That floor is the
+    reason the bound cannot be shortened here — ``arm`` itself is unfloored, but
+    the entry point reads the environment, which is the path under test.
+    """
+    from local_operator.session.runtime import launch as launch_module
+    from tests.unit.session.runtime.test_runtime_detachment import (
+        _SESSION_ID,
+        _isolate,
+        _log_text,
+        _reap,
+        _seed,
+        _wait_for_record,
+    )
+
+    monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+    bound_s = 45.0
+    spawned: list[tuple[Any, Path]] = []
+
+    def spawn_body(body: str, name: str) -> tuple[Any, Path, Path]:
+        root = tmp_path / name
+        config_dir = root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        _seed(config_dir)
+        _isolate(monkeypatch, config_dir)
+        # AFTER ``_isolate``: it strips every inherited ``LOP_*`` (the child product
+        # reads several of them), so a value set before it would be gone.
+        monkeypatch.setenv("LOP_RUNTIME_STALL_SECONDS", str(int(bound_s)))
+        monkeypatch.setenv("PYTHONPATH", str(_write_sitecustomize(root / "site", body)))
+        child = launch_module._spawn_runtime(_SESSION_ID, str(config_dir), defer_materialise=False)
+        spawned.append((child, config_dir))
+        _wait_for_record(config_dir)
+        return (
+            child,
+            config_dir,
+            config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{child.pid}.log",
+        )
+
+    try:
+        # -- THE POSITIVE: the production path, firing ----------------------
+        child, config_dir, dump = spawn_body(_SPIN_SITECUSTOMIZE, "keep")
+        deadline = time.monotonic() + 180.0
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+        assert child.poll() is not None, (
+            f"the real runtime never left, so the leg did not fire in production:\n"
+            f"{_log_text(config_dir)[-1500:]}"
+        )
+        assert child.returncode == 1, (
+            f"the runtime left with rc={child.returncode}; the bound exits 1:\n"
+            f"{_log_text(config_dir)[-1500:]}"
+        )
+        text = dump.read_text(encoding="utf-8")
+        assert stall_watchdog.FIRED_MARKER in text, text[-2000:]
+        assert (
+            stall_watchdog.PROGRESS_MARKER in text
+        ), f"the bound fired, but not the progress leg:\n{text[-2000:]}"
+        assert stall_watchdog.fired_leg(child.pid, config_dir / "logs") == (
+            stall_watchdog.LEG_PROGRESS
+        ), text[-2000:]
+
+        # -- THE NEGATIVE: the same rig, minus `probe=` in the child --------
+        child, config_dir, dump = spawn_body(_DROP_PROBE_SITECUSTOMIZE, "drop")
+        time.sleep(bound_s * 2)
+        assert child.poll() is None, (
+            f"the probe-less rig exited (rc={child.returncode}); the negative is not a "
+            f"negative:\n{_log_text(config_dir)[-1500:]}"
+        )
+        assert not dump.exists() or stall_watchdog.FIRED_MARKER not in dump.read_text(
+            encoding="utf-8"
+        ), "the leg fired with no probe, so this cell does not measure the wiring"
+        assert stall_watchdog.fired_leg(child.pid, config_dir / "logs") is None
+    finally:
+        for child, config_dir in spawned:
+            _reap(child, config_dir)

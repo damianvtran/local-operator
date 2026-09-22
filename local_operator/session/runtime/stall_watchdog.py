@@ -101,11 +101,12 @@ hold together for a whole window:
    alone is not the predicate: an in-process tool (a render, a local scan) burns
    CPU with no transcript movement for as long as it runs.
 3. CPU ADVANCING. This process burned at least :data:`PROGRESS_CPU_FLOOR` of one
-   core **over the whole run** — a mean, not a per-sample reading; see that
-   constant for the measurement that made it one. A step that WAITS burns none —
-   a model call is a socket read, and a bash child's CPU belongs to the child,
-   never to ``time.process_time`` — while a loop that SPINS burns it. That is the
-   whole discriminator.
+   core, as a **mean over the trailing window** — not a per-sample reading and not
+   a cumulative mean either; see that constant for the two review measurements
+   that made it neither. A step that WAITS burns none — a model call is a socket
+   read, and a bash child's CPU belongs to the child, never to
+   ``time.process_time`` — while a loop that SPINS burns it. That is the whole
+   discriminator.
 
 THE WINDOW IS THE BOUND, and the argument that sized :data:`DEFAULT_STALL_S`
 sizes this one too: 300 s sits above the largest legitimate silence ever measured
@@ -226,6 +227,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import IO, Callable
 
@@ -321,7 +323,7 @@ def min_bound_seconds() -> float:
 MIN_REARM_S = 0.05
 
 #: How many times one window is LOOKED AT, which is the leg's resolution and
-#: nothing more: the decision is a claim about the whole run (see
+#: nothing more: the decision is a claim about the trailing window (see
 #: :data:`PROGRESS_CPU_FLOOR`), so the look count gates nothing and a run of two
 #: samples a window apart is judged on the same terms as one of twenty. This was
 #: the "twelve CONSECUTIVE agreeing samples" requirement until agent review round
@@ -335,27 +337,27 @@ MIN_REARM_S = 0.05
 #: every 0.05 s would wake 6000 times to learn nothing new.
 PROGRESS_SAMPLES_PER_WINDOW = 12
 
-#: The share of ONE core this process must have burned **over the whole run** for
-#: the run to count as SPINNING rather than WAITING.
+#: The share of ONE core this process must have burned, as a MEAN OVER THE
+#: TRAILING WINDOW, for the run to count as SPINNING rather than WAITING.
 #:
-#: A MEAN OVER THE RUN, NOT A PER-SAMPLE RATE, and agent review round 1 is why.
-#: The first revision demanded this figure on every one of twelve consecutive
-#: samples and discarded the whole run on one sample below it. Measured on this
-#: host (load ~160-190) with the incident's own spin shape: per-sample rates
-#: within a run had minima of 0.0183, 0.0223, 0.0250, 0.0305 and 0.0310 against
-#: medians of 0.09-0.27 — so the effective margin at the low end was 0.4-1.2x,
-#: not the 3.8x its justification quoted, and one run in fifteen never fired at
-#: all within twenty times the window. A single scheduled-out sample is exactly
-#: the noise a bound on sustained behaviour must not read as evidence, and
-#: averaging over the run also makes the documented margin the statistic the
-#: predicate actually uses.
+#: NOT A PER-SAMPLE RATE, AND NOT A CUMULATIVE MEAN, and the two review rounds
+#: are why it is neither. Round 1 measured a per-sample gate discarding a whole
+#: run on one scheduled-out sample (per-sample minima of 0.0183-0.0310 against
+#: medians of 0.09-0.27, an effective margin of 0.4-1.2x rather than the 3.8x the
+#: justification quoted, and one rigged run in fifteen that never fired). Round 2
+#: measured what the first repair still got wrong: one baseline held from the
+#: run's start makes this a CUMULATIVE mean that decays as ~1/t through later
+#: silence, so 4 s of full core followed by 41 s of idleness still fired at
+#: sample 46 of a 45 s window, and — the shape that matters for the incident this
+#: leg exists for — a session idle for an hour before it began spinning carried
+#: that hour into the denominator. The mean is taken over the samples retained in
+#: the trailing window (see :meth:`_ProgressClock.mean_rate`), which is the
+#: statistic this justification has always described.
 #:
 #: Sized well above an idle runtime and well below the measurement it exists for:
 #: the incident's session burned 14.3 s of CPU in a 75 s window (19% of a core,
 #: 3.8x this floor), a healthy idle runtime measures 0.006-0.011 of a core, and a
-#: loop waiting on a model, a tool result or a subprocess burns ~0. The floor is
-#: compared against the mean since the run opened, so a burst cannot buy a run and
-#: a wait cannot be carried into one.
+#: loop waiting on a model, a tool result or a subprocess burns ~0.
 PROGRESS_CPU_FLOOR = 0.05
 
 #: The line this module writes into the dump when the PROGRESS leg — not the
@@ -386,49 +388,75 @@ class _ProgressClock:
     timer, and the two legs cannot mask each other: whichever one's condition
     holds sets the single process-wide timer first.
 
-    ``since`` is the instant the CURRENT run of agreeing samples began, and the
-    window is measured from it; ``None`` means the last sample disagreed, so
-    there is no run to measure. Storing the run's start rather than a countdown
-    is what makes the window elastic in the right direction: a sample that
-    arrives late (a loaded host, a GIL-hungry neighbour) does not shorten the
-    run, it only delays the next look.
+    THE RUN IS THE TRAILING WINDOW, NOT "EVERYTHING SINCE THE RUN OPENED", and
+    agent review round 2 is why the two are not the same thing. Keeping one
+    baseline from the run's start makes the CPU statistic a CUMULATIVE mean that
+    decays as ~1/t through later silence, so how long the session happens to
+    have been alive decides whether the same burn is visible: a session idle for
+    an hour before it starts spinning carries that hour into the denominator. The
+    samples retained here are therefore pruned to ``last - window``, which makes
+    the statistic mean exactly what its justification says — the mean over the
+    window — and makes the detection latency depend on the BURN rather than on
+    the session's age. The retained deque is bounded by the same window it
+    measures and by nothing else: the cadence is derived FROM the window
+    (``_sample_interval``), so it holds about ``PROGRESS_SAMPLES_PER_WINDOW``
+    entries. A COUNT cap must not be added beside the time prune — the first
+    revision had one at ``3 x PROGRESS_SAMPLES_PER_WINDOW``, and a cadence slower
+    than the cap assumed (a 45 s window driven a second at a time) then filled the
+    cap BEFORE the window could be spanned, so the leg could never fire at all.
+    The prune is exact; a count is a second and wrong bound on the same thing.
+
+    ``motion`` is the last motion tuple seen, and ``history`` is empty whenever
+    the last sample disagreed with leg 1 or leg 2 — those two are the ONLY things
+    that reset a run, which is what stops a scheduled-out sample from discarding
+    one (review round 1) and what lets a burn/zero alternation accumulate (review
+    round 2).
     """
 
-    __slots__ = ("motion", "since", "cpu", "wall", "samples")
+    __slots__ = ("motion", "history")
 
     def __init__(self) -> None:
         self.motion: object = _NO_SAMPLE
-        self.since: float | None = None
-        # Seeded at construction (the arm, or the sampler's own start) so the
-        # FIRST sample already has an interval to compute a rate over; a zero
-        # interval would divide by ~0 and read as an infinite spin.
-        self.cpu: float = time.process_time()
-        self.wall: float = time.monotonic()
-        #: How many samples this run has, for a reader of a log line rather than
-        #: for the decision: the CPU leg is a MEAN over the run, so no sample
-        #: count is required to fire, and requiring one was the defect review
-        #: round 1 measured (a run at eighteen times the window that never fired).
-        self.samples: int = 0
+        #: ``(wall, process_cpu)`` per sample, oldest first, pruned to the window.
+        self.history: deque[tuple[float, float]] = deque()
 
-    def restart(self, now: float, cpu: float, motion: object) -> None:
-        """Open a NEW run at this instant: no elapsed time, no CPU to average.
+    def restart(self, motion: object) -> None:
+        """End the run: the work moved, or something is in flight.
 
-        Used for every disagreement AND for the sample that opens a run, so there
-        is one spelling of "the run starts here" — a second one is how the two
-        readings the mean is taken over drift apart.
+        ONE spelling of "there is no run", used for both disagreements and by the
+        construction of a new one, because two spellings of that are two chances
+        for the retained samples to disagree with the stamps beside them.
         """
-        self.since = None
-        self.samples = 0
-        self.wall = now
-        self.cpu = cpu
         self.motion = motion
+        self.history.clear()
 
-    def rate(self, now: float, cpu: float) -> float:
-        """This process's CPU since the run opened, as a share of ONE core."""
-        span = now - self.wall
-        if span <= 0:
-            return 0.0
-        return (cpu - self.cpu) / span
+    def observe(self, now: float, cpu: float, window: float) -> None:
+        """Record this sample and drop everything that has aged out of the window.
+
+        The prune keeps the OLDEST sample at or just before ``now - window``, so
+        the retained span is the trailing window and a hair of one extra interval
+        — never shorter, which is what lets :meth:`mean_rate` answer at all.
+        """
+        self.history.append((now, cpu))
+        horizon = now - window
+        while len(self.history) > 1 and self.history[1][0] <= horizon:
+            self.history.popleft()
+
+    def mean_rate(self, window: float) -> float | None:
+        """The mean CPU over the retained window as a share of ONE core.
+
+        ``None`` while the retained samples do not yet span the window: a run
+        younger than the window has no mean to judge, which is the honest answer
+        rather than the mean of however few samples happen to exist.
+        """
+        if len(self.history) < 2:
+            return None
+        first_wall, first_cpu = self.history[0]
+        last_wall, last_cpu = self.history[-1]
+        span = last_wall - first_wall
+        if span < window or span <= 0:
+            return None
+        return (last_cpu - first_cpu) / span
 
 
 class _Armed:
@@ -828,25 +856,20 @@ def _sample(armed: "_Armed") -> bool:
         # is not "possibly true", and a window that kept accumulating across a
         # sample where the process was working would fire on a runtime that had
         # done legitimate work inside it.
-        clock.restart(now, cpu, motion)
-        return False
-    if clock.since is None:
-        # THE RUN OPENS HERE, CLAIMING NOTHING yet: the next sample is the first
-        # that can say anything about CPU, because a mean needs two readings.
-        clock.restart(now, cpu, motion)
-        clock.since = now
-        clock.samples = 1
-        return False
-    clock.samples += 1
-    if clock.rate(now, cpu) < PROGRESS_CPU_FLOOR:
-        # WAITING, NOT SPINNING, and the run is over rather than paused: a model
-        # call, a socket read and a child's CPU all leave this process at ~0, and
-        # letting such a stretch sit inside a run is how a mean gets carried into
-        # a spin it does not belong to. The next sample opens a fresh run.
-        clock.restart(now, cpu, motion)
+        clock.restart(motion)
         return False
     clock.motion = motion
-    if now - clock.since >= armed.seconds:
+    clock.observe(now, cpu, armed.seconds)
+    # THE FLOOR IS TESTED ONLY HERE, against the mean over the trailing window,
+    # and never as a per-sample gate — that is the whole of both review rounds'
+    # predicate findings. Round 1: a per-sample test discarded a run on one
+    # scheduled-out sample. Round 2: restarting the run whenever the mean dipped
+    # carried an early burst through later silence without bound AND never fired
+    # on a burn/zero alternation, because the run kept re-opening on the burn
+    # half. A ``None`` mean means the run is younger than the window, which is
+    # not yet a claim about anything.
+    mean = clock.mean_rate(armed.seconds)
+    if mean is not None and mean >= PROGRESS_CPU_FLOOR:
         _fire_progress(armed, now)
         return True
     return False

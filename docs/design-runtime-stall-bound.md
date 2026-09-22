@@ -197,17 +197,34 @@ equalled by a second footprint clock;
    an assistant message whose tool calls have no answers, the state
    `Session._wire_legal_snapshot` documents, plus the `_compacting` flag);
 3. **CPU advancing** — at least `PROGRESS_CPU_FLOOR` (5%) of one core as a MEAN
-   OVER THE WHOLE RUN (not a per-sample reading: agent review round 1 measured that a
-   single scheduled-out sample discarded a run, leaving an effective margin of
-   0.4-1.2x against a documented 3.8x, and one rigged run in fifteen never fired). A
-   model call is a socket read; a bash child's CPU belongs to the child and never
-   reaches `time.process_time`.
+   OVER THE TRAILING WINDOW. Not a per-sample reading: agent review round 1 measured
+   that a single scheduled-out sample discarded a run, leaving an effective margin of
+   0.4-1.2x against a documented 3.8x, and one rigged run in fifteen never fired. And
+   not a cumulative mean either: round 2 measured that one baseline held from the run's
+   start decays as ~1/t through silence, so a burst is carried and the detection
+   latency depends on how long the session has been alive. The mean is taken over the
+   samples pruned to the window, so the latency follows the BURN. A model call is a
+   socket read; a bash child's CPU belongs to the child and never reaches
+   `time.process_time`.
 
 **The window is the bound**, and the argument that sized 300 s sizes this one: it sits
 above the largest legitimate silence measured on this fleet (205.8 s, 1.5x), and the
 measured false positive for calling a runtime `wedged` at 45 s — 105.8 s and 205.8 s of
 beat gap on sessions whose CPU was advancing — is a starved scheduler, i.e. a session
 DOING work: such a sample fails leg 2 or leg 1.
+
+**The leg is live in production, and that is proven on a spawned child.** The PR's
+first version proved the predicate behaviourally and the wiring only textually —
+three text-preserving mutants (the publication inside `if False:`, an early
+`return (), True` before the probe reads the handle, a probe-less arm site in another
+module) left that pin green with the leg inert. The acceptance evidence is now a real
+`python -m …process` child spawned through `launch._spawn_runtime`, spinning because a
+`PYTHONPATH`-supplied `sitecustomize.py` starts a CPU-burning thread at interpreter
+start (no model, no turn), with `LOP_RUNTIME_STALL_SECONDS=45`: it exits `rc=1` with
+the progress line in its dump and `fired_leg → "progress"`. The same rig with `probe=`
+dropped inside the child does not fire. A predicate that ships silently disabled
+with green tests would make the fleet *look* protected, which is the failure this
+whole design exists to avoid.
 
 **The firing path names its class.** `faulthandler` reaches its timer from a C thread
 and calls `_exit(1)` there, so no exit hook, no journal row and no reaper runs after a
