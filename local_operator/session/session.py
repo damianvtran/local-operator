@@ -174,7 +174,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
-from local_operator.session.goal import GoalState
+from local_operator.session.goal import GoalHistoryEntry, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
 from local_operator.session.naming import (
@@ -2578,6 +2578,11 @@ class Session:
         # nothing has subscribed yet, so hosts read the restored state when
         # they build their chrome.
         self._restore_attachment()
+        # The judged-goal RECORD, beside the attachment above and after it: the
+        # attachment carries the goal's text (every build writes it, including
+        # the ones that predate this record), while status, judge state and
+        # history live in their own sidecar (see `_restore_goal_record`).
+        self._restore_goal_record()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -4181,6 +4186,36 @@ class Session:
         """
         return self._goal_state.agent_name
 
+    @property
+    def goal_status(self) -> str:
+        """The standing goal's lifecycle state: ``"" | "active" | "done"``.
+
+        Reports what the HOLDER knows, not what it should be read as: the
+        migration default for a goal restored from a pre-lifecycle build lives
+        in the frontend fold (``_fold_goal_status``), which is the one place every
+        reader goes through — spreading it here would give the fold and this
+        accessor two chances to disagree.
+        """
+        return self._goal_state.status
+
+    @property
+    def goal_judge(self) -> "dict[str, Any] | None":
+        """The live judge state in its WIRE shape, or ``None`` with no goal set.
+
+        Folded straight onto the frontend state, so this is the same dict a
+        viewer already renders: no caller has to know the holder keeps a
+        dataclass, and ``failures`` deliberately does not ride it (see
+        :meth:`GoalJudgeState.to_wire`).
+        """
+        if not self._goal_state.text:
+            return None
+        return self._goal_state.judge.to_wire()
+
+    @property
+    def goal_history(self) -> "list[dict[str, Any]]":
+        """Settled goals, newest first, as wire dicts (see :meth:`history_view`)."""
+        return self._goal_state.history_view()
+
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
 
@@ -4196,6 +4231,101 @@ class Session:
         self._persist_attachment()
         self.refresh_frontend_state()
         return stored
+
+    def arm_goal(self, text: str) -> str:
+        """``/goal <text>``: set the objective, mark it active, arm the judge.
+
+        The ONE entry point for the four hosts that implement ``/goal``, so the
+        ordering that makes ``/goal B`` non-destructive to ``/goal A`` (see
+        :meth:`GoalState.arm`) cannot be got wrong host by host. Journals and
+        publishes once, the way :meth:`set_goal` pairs them.
+
+        ``set_goal`` remains for the plain "replace the text" act (the mobile
+        relay and the restore path use it): it is the same tail write without
+        the record's settle/arm bookkeeping.
+        """
+        stored = self._goal_state.arm(text)
+        self._persist_attachment()
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return stored
+
+    def mark_goal_done(self, reason: str = "") -> GoalHistoryEntry | None:
+        """Mark the standing goal DONE and record it, or ``None`` if there was none.
+
+        ``reason`` carries the judge's own words when a model verdict asked for
+        this, and stays "" when the user typed ``/goal --done`` — that is a
+        person's judgement with no model behind it, and dressing it in a model's
+        voice would be a lie about who spoke.
+        """
+        entry = self._goal_state.mark_done(reason)
+        if entry is None:
+            return None
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return entry
+
+    def delete_goal(self) -> str:
+        """``/goal --clear``: delete the goal and record NOTHING. Returns what went.
+
+        The attachment is re-journalled because the goal's TEXT is its business
+        too (it is what a downgrade or a pre-lifecycle restore reads) — leaving
+        it behind would resurrect the deleted goal at the next resume.
+        """
+        went = self._goal_state.delete()
+        self._persist_attachment()
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return went
+
+    def dismiss_goal(self) -> bool:
+        """Drop the done chip; ``False`` when there is nothing to dismiss.
+
+        The paired attachment write is deliberate, not redundant: after a
+        dismissal the goal is GONE (that is what the chip was the last trace
+        of), so the text must leave ``attachment.json`` with it.
+        """
+        if not self._goal_state.dismiss():
+            return False
+        self._persist_attachment()
+        self._persist_goal_record()
+        self.refresh_frontend_state()
+        return True
+
+    def history_view(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """``/goal --history``'s payload: settled goals, newest first, wire dicts."""
+        return self._goal_state.history_view(limit)
+
+    def note_goal_judge(
+        self,
+        *,
+        state: str | None = None,
+        run: int | None = None,
+        verdict: str | None = None,
+        reason: str | None = None,
+        failures: int | None = None,
+    ) -> None:
+        """Journal one judge transition and publish it — the judge's only writer.
+
+        Every argument is optional so a caller states only what moved, and the
+        journal is written on TRANSITION only: the judge moves on every turn end,
+        and journalling each tick would be pure I/O for a value that did not move
+        (the rule ``_persist_attachment`` documents for the attachment, which
+        binds harder here).
+        """
+        judge = self._goal_state.judge
+        if state is not None:
+            judge.state = state
+        if run is not None:
+            judge.run = int(run)
+        if verdict is not None:
+            judge.verdict = verdict
+        if reason is not None:
+            judge.reason = reason
+        if failures is not None:
+            judge.failures = int(failures)
+        self._persist_goal_record()
+        self.refresh_frontend_state()
 
     @property
     def active_team_name(self) -> str:
@@ -4312,6 +4442,68 @@ class Session:
             agent=self._goal_state.agent_name or self._unresolved_agent,
             goal=self._goal_state.text,
         )
+
+    def _persist_goal_record(self) -> None:
+        """Journal the judged-goal record to its own sidecar beside the transcript.
+
+        Called on TRANSITION only — a status change, a history append, a judge
+        state change — never per tick: the judge moves on every turn end and a
+        per-turn write would be pure I/O for a value that did not move. The rule
+        ``_persist_attachment`` documents for the attachment binds harder here,
+        which is why the writes are driven from the mutators rather than from
+        every caller.
+
+        Suppressed during a restore for the same reason the attachment write is:
+        a value that just came off disk must not be journalled straight back.
+        Best-effort by contract (see ``write_goal_record``) and guarded against a
+        reduced test double whose transcript has no directory.
+        """
+        from local_operator.resume import write_goal_record
+
+        if self._restoring_attachment:
+            return
+        try:
+            directory = self._transcript.directory
+        except Exception:  # noqa: BLE001 — a reduced host must not lose its turn
+            return
+        write_goal_record(directory, self._goal_state.to_payload())
+
+    def _restore_goal_record(self) -> None:
+        """Rebuild the judged-goal record from ``goal.json``, if there is one.
+
+        Set STRAIGHT onto the holder, never through :meth:`arm_goal`: this is a
+        read of disk state, not a user action, so it must not re-journal (and
+        must not mint a token, which would make the parent's in-flight verdict
+        unmatchable in a session that is merely resuming).
+
+        A missing or unreadable document leaves exactly the pre-lifecycle state —
+        the goal text from ``attachment.json`` and no record — which is the
+        migration case ``_fold_goal_status`` reads as ``active``.
+
+        The ATTACHMENT's text wins when both documents carry one: it is written
+        by every build (including the ones that predate this record), so a
+        divergence means an older build has moved the goal since this record was
+        written and the record's text is the stale one. The record supplies the
+        text only when the attachment had none.
+        """
+        from local_operator.resume import read_goal_record
+
+        try:
+            directory = self._transcript.directory
+        except Exception:  # noqa: BLE001 — a reduced host has no record to restore
+            return
+        payload = read_goal_record(directory)
+        if payload is None:
+            return
+        record = GoalState.from_payload(payload)
+        holder = self._goal_state
+        if not holder.text and record.text:
+            holder.set(record.text)
+        holder.status = record.status
+        holder.judge = record.judge
+        holder.history = record.history
+        holder.token = record.token
+        holder.created_at = record.created_at
 
     def _clear_unresolved(self, slot: str) -> None:
         """Forget a carried unresolved name because the user acted on that slot.
