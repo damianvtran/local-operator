@@ -347,9 +347,15 @@ async def test_remote_creates_the_session_on_the_peer(
             "--peer",
             "damian-mbp",
             "--create",
-            "--name",
-            "damian-mbp",
         ]
+        # AND NO ``--name``, which is the fix rather than an omission (UX round 3,
+        # U19). It used to pass the peer's own label, so the session was TITLED
+        # after the device: the sidebar then painted a session row reading
+        # ``pixel-8`` directly under the ``⇄ pixel-8`` heading that already said
+        # which device holds it, and it survived a restart because the name went
+        # to disk. An unnamed session is named by the owner's own auto-namer on
+        # its first substantive turn — exactly what a bare local ``/new`` gives.
+        assert "--name" not in run.argv, run.argv
 
 
 @pytest.mark.asyncio
@@ -410,10 +416,16 @@ async def test_the_id_form_addresses_an_unnamed_device(
         app._run_slash_command("/new remote d_bbbb")
         await app.workers.wait_for_complete()
         assert run.argv[:3] == ["sessions", "--peer", "d_bbbb"]
-        # The label falls back to the peer's own token rather than being empty: a
-        # nameless peer must not produce a remote session titled "".
-        declared = run.argv[run.argv.index("--name") + 1]
-        assert declared == "d_bbbb"
+        # NO ``--name`` FOR AN UNNAMED PEER EITHER (UX round 3, U19). It used to
+        # fall back to the peer's own token — and the assertion here was that a
+        # nameless peer must not produce a session titled ``""``. Sending NO
+        # name is the better answer to the same worry: the relay's own
+        # ``name = str(frame.get("name") or "")`` writes no sidecar at all, so
+        # the session is UNTITLED (the shared ``Untitled conversation`` string on
+        # every surface) rather than titled with a 12-hex token no user typed —
+        # and it gets its real name from the owner's auto-namer on its first
+        # substantive turn, like a local ``/new``.
+        assert "--name" not in run.argv, run.argv
 
 
 @pytest.mark.asyncio
@@ -555,3 +567,35 @@ async def test_a_single_word_stays_local(
                 break
         assert boots == [None]
         assert run.calls == []
+
+
+def test_every_peerless_notice_rung_names_the_joiner_verb() -> None:
+    """UX round 3, U17: the joiner's verb was unshowable at every width in use.
+
+    The ladder's first rung names both verbs and needs ~91 cells, which the dock's
+    notice row only has on a very wide terminal — so at 110, 80 and 60 columns the
+    user with a token in hand was told about ``invite`` and nothing else, and the
+    ``/network join`` they needed was one verb away in a surface they were not
+    standing in. Every rung names ``join`` now; ``invite`` rides along while the
+    cells allow it rather than being promised and then cropped (a rung that names
+    one verb and loses the other is the failure D16 recorded).
+    """
+    from local_operator.tui.app import NO_PEERS_NOTICE_RUNGS
+
+    assert NO_PEERS_NOTICE_RUNGS, "the peerless notice has no rungs at all"
+    for rung in NO_PEERS_NOTICE_RUNGS:
+        assert "/network join" in rung, rung
+    # The JOINER'S verb comes FIRST in every rung that has to COMPRESS — the
+    # widest rung is the full sentence, where both commands are on screen whole
+    # and the order hides nothing (design round 2, D16's rung, unchanged). The
+    # user standing at an empty `/new` with a token in hand is the one who cannot
+    # act, and the inviter is already told what to run by the invite the mint
+    # prints, so `join` is what leads wherever the row is cutting something.
+    compressed = [rung for rung in NO_PEERS_NOTICE_RUNGS[1:] if "invite" in rung]
+    assert compressed, "no rung names how a first peer is minted"
+    for rung in compressed:
+        assert rung.index("/network join") < rung.index("invite"), rung
+    # Monotone: the ladder is ordered widest-first, which is what lets
+    # `_fitted_notice` pick by `cell_len` rather than by index.
+    widths = [len(rung) for rung in NO_PEERS_NOTICE_RUNGS]
+    assert widths == sorted(widths, reverse=True), widths

@@ -427,3 +427,58 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
         # cell 0, and the title still starts at column 4.
         assert row[1] == "⇄", repr(row)
         assert row[4] == "F", repr(row)
+
+
+@pytest.mark.asyncio
+async def test_a_peer_that_stopped_answering_keeps_a_heading_with_no_rows() -> None:
+    """UX round 3, U16: "my peer has nothing" and "my peer is gone" must differ.
+
+    §8.3 says a peer that does not answer contributes NO ROWS rather than stale
+    ones — right, and not what was filed. The section was built from rows, so the
+    tier went with them: six sessions the user had been looking at simply
+    vanished, and the list read as complete. The heading is the one sentence that
+    explains the frame, and it must be the SAME string a live section carries with
+    ``reachable`` false, because the state is the same state.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("mine", active=True)])
+        assert "⇄ damian-mbp" not in _headings(sidebar.render().plain.splitlines())
+        sidebar.set_silent_peers([("damian-mbp", "connect_failed:ConnectionRefusedError")])
+        await pilot.pause()
+        lines = sidebar.render().plain.splitlines()
+        assert "⇄ damian-mbp (unreachable)" in _headings(lines)
+        # THE REASON IS NOT PAINTED. It is the relay's wire token
+        # (``connect_failed:ConnectionRefusedError``), which UX round 3 filed as
+        # U23 on the listing surface; a heading is not where it gets a second,
+        # unlocalised spelling.
+        assert "ConnectionRefusedError" not in "\n".join(lines)
+        # ...and the peer answering again takes it away, so the line cannot
+        # outlive the state it describes.
+        sidebar.set_silent_peers([])
+        await pilot.pause()
+        assert "⇄ damian-mbp" not in _headings(sidebar.render().plain.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_the_silent_peers_heading_is_chrome_the_keyboard_cannot_land_on() -> None:
+    """A heading-only section must stay OUT of ``entries``.
+
+    ``action_move``, ``_cursor_index`` and ``_switch_session_from`` all index
+    ``self.entries``, so a chrome row that leaked into it would let
+    ``ctrl+shift+down`` "switch" to a device and desync open-from-closed
+    navigation — the exact hazard ``_display_rows`` documents for every header.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("mine", active=True)])
+        sidebar.set_silent_peers([("damian-mbp", "connect_failed:ConnectionRefusedError")])
+        await pilot.pause()
+        lines = sidebar.render().plain.splitlines()
+        heading_y = next(
+            y for y, line in enumerate(lines) if line.strip() == "⇄ damian-mbp (unreachable)"
+        )
+        assert sidebar._entry_at(heading_y) is None, "the silent-peer heading is a click target"
+        assert all(entry.id != "" for entry in sidebar.entries)

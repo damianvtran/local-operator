@@ -381,6 +381,12 @@ the peer, with a trailing sentence as its first prompt:
 /new remote radiant-m4 rebase the auth branch and run the test suite
 ```
 
+<p align="center">
+  <img src="./static/tui-mesh-picker.png" alt="The /new device picker: one row per paired device, each showing the device's name, the network it is in and the role it holds there — radiant-m4 in devmesh as admin, an unnamed device as drive, and pixel-8 in homelab as read — while the composer above previews /new remote radiant-m4." width="620">
+</p>
+
+<p align="center"><i><code>/new</code> lists the devices you paired: the row carries the whole <code>remote &lt;peer&gt;</code> argument, so the first Enter fills a command that runs, and the composer preview always shows exactly what will be sent.</i></p>
+
 The session is minted, spawned and admitted by that device, and the receipt in
 your transcript names it. `/network sessions --peer radiant-m4` then lists what
 that peer is holding, and `--engage <session>` warms one or `--stop <session>`

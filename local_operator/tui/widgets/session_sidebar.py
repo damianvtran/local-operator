@@ -23,7 +23,12 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
-from local_operator.resume import UNNAMED_DEVICE, UNTITLED_CONVERSATION, format_age
+from local_operator.resume import (
+    UNNAMED_DEVICE,
+    UNTITLED_CONVERSATION,
+    format_age,
+    peer_reason_words,
+)
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
@@ -224,6 +229,19 @@ _SECTION_NAMES = {0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
 _SECTION_PEER_RANK = 3
 
 
+def _peer_heading_text(label: str, reachable: bool) -> str:
+    """The ONE spelling of a peer section's heading, for both of its sources.
+
+    Split out because the heading is now DERIVED from two different things: a
+    peer's rows (which carry the device's label and its reachability) and a
+    peer that answered NOTHING (`_silent_peer_rows`, which carries the relay's
+    own report). A second ``f" ⇄ …"`` beside this one is how the two would
+    drift into two vocabularies for one state — and the reader has to be able
+    to tell a live section from a silent one by that suffix alone.
+    """
+    return f" ⇄ {label}" + ("" if reachable else " (unreachable)")
+
+
 #: Prefix a peer section's heading carries in its row kind, so `render` can tell
 #: a device's heading from the four tier names WITHOUT the heading having to be a
 #: key in a table (`header:peer:⇄ damian-mbp`). The label itself is derived once,
@@ -354,6 +372,12 @@ class SessionSidebar(Widget, can_focus=True):
         #: never touch `rank_entries`, which is the partition the mobile relay
         #: shares.
         self._pins: tuple[str, ...] = ()
+        #: Peers that did NOT answer the last listing read, as ``(name, reason)``.
+        #: Handed in by the app's poll from the relay's own answer
+        #: (`peer_rows.unanswered_peers`), and painted as a HEADING-ONLY section —
+        #: see `_silent_peer_rows` for why one line with no rows under it is the
+        #: honest shape rather than a bug in the section machinery.
+        self._silent_peers: tuple[tuple[str, str], ...] = ()
         #: Startup default from `tui.sidebar_show_subagents`; flipped by
         #: `ctrl+a` for THIS session only, never written back to config.
         self.show_subagents: bool = False
@@ -575,8 +599,7 @@ class SessionSidebar(Widget, can_focus=True):
         and indenting it costs no row its width: the tier headings above
         (``★ Pinned``, ``Active Sessions``) keep cell 0 and stay put.
         """
-        label = row.owner_label or UNNAMED_DEVICE
-        return f" ⇄ {label}" + ("" if row.reachable else " (unreachable)")
+        return _peer_heading_text(row.owner_label or UNNAMED_DEVICE, bool(row.reachable))
 
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
         """``(rank, section heading)`` — the ONE key the sort and the paint share.
@@ -688,7 +711,46 @@ class SessionSidebar(Widget, can_focus=True):
             # push the whole pinned tier off a full-height frame.
             insert_at = last_pinned + 1 if last_pinned >= 0 else 0
             rows.insert(insert_at, ("note:pinned-overflow", None))
+        rows.extend(self._silent_peer_rows())
         return tuple(rows)
+
+    def _silent_peer_rows(self) -> list[tuple[str, None]]:
+        """A heading-only section per peer that did not answer. UX round 3, U16.
+
+        WHY A HEADING WITH NOTHING UNDER IT. ``mesh-ui.md`` §8.3 says a peer that
+        does not answer contributes NO ROWS rather than stale ones — dropping the
+        rows is right, and it is not what U16 filed. What it also did was drop
+        the FACT: the section was built from rows, so a peer that stopped
+        answering lost its heading too, and the sidebar then read as a complete
+        list. "My peer has no sessions" and "my peer is gone" became one picture,
+        and the six sessions the user was looking at a minute ago vanished and
+        came back with nothing said either way.
+
+        The heading keeps §8.3's promise (no row claims a state the peer did not
+        send) and restores the one sentence that explains the frame. It is the
+        SAME string a live section would carry with ``reachable`` false, because
+        the state is the same state — see `_peer_heading_text`.
+
+        Chrome, never entries: ``entry=None`` keeps these out of ``self.entries``,
+        which is what `action_move`, `_cursor_index` and `_switch_session_from`
+        index — a silent peer must not be reachable by the keyboard or the
+        pointer, and `_entry_at` already answers ``None`` for every row whose
+        entry is ``None``.
+
+        The relay's ``reason`` is deliberately NOT painted. It is the machine
+        token ``connect_failed:ConnectionRefusedError`` that UX round 3 filed as
+        U23 on the listing surface; the tooltip on a real row shows it, and a
+        heading is not the place to grow a second, unlocalised spelling of it.
+        """
+        if not self._silent_peers:
+            return []
+        rows: list[tuple[str, None]] = []
+        for name, _reason in self._silent_peers:
+            heading = _peer_heading_text(name or UNNAMED_DEVICE, False)
+            rows.append(("blank", None))
+            rows.append((f"header:{_PEER_HEADER_PREFIX}{heading}", None))
+            rows.append(("blank", None))
+        return rows
 
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
         ordered = rank_entries(entries)
@@ -740,6 +802,20 @@ class SessionSidebar(Widget, can_focus=True):
         if pins == self._pins:
             return
         self._pins = pins
+        self.refresh()
+
+    def set_silent_peers(self, peers: Sequence[tuple[str, str]]) -> None:
+        """Replace the peers that did not answer. ``(name, reason)`` per peer.
+
+        Display-only, and refreshes only on an actual change for the same reason
+        `set_pins` does: this runs on every catalog poll, and un-inking the list
+        every two seconds in every open terminal is a cost the user pays without
+        seeing anything move. See `_silent_peer_rows` for what it paints and why.
+        """
+        silent = tuple((str(name), str(reason)) for name, reason in peers)
+        if silent == self._silent_peers:
+            return
+        self._silent_peers = silent
         self.refresh()
 
     def set_subagent_total(self, total: int) -> None:
@@ -1124,8 +1200,12 @@ class SessionSidebar(Widget, can_focus=True):
         if entry.row.is_remote or entry.row.owner_device:
             location = f"on {entry.row.owner_label or UNNAMED_DEVICE}"
             if not entry.row.reachable:
-                reason = entry.row.unreachable_reason or "did not answer"
-                location += f" — unreachable: {reason}"
+                # THE WORDS, NOT THE TOKEN (design round 1, D3; UX round 3, U23).
+                # This tooltip used to print the relay's raw reason —
+                # ``connect_failed:ConnectionRefusedError`` — on a line a user
+                # reads, while the panel beside it said the same fact in words.
+                # One gloss, shared, so the sibling surfaces read as one voice.
+                location += f" — unreachable: {peer_reason_words(entry.row.unreachable_reason)}"
             if entry.row.placement_stale:
                 location += " (last known state)"
         parts = [entry.row.name, status]

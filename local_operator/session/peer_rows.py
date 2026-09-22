@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 
@@ -43,16 +44,41 @@ from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 #: still looking at the list it should appear in.
 _TTL_S = 20.0
 
-#: ``config root`` → ``(monotonic read time, rows)``. Keyed by root so an
-#: isolated ``LOCAL_OPERATOR_CONFIG_DIR`` (every test and capture) cannot read a
-#: real install's answer, and module-level so the sidebar's poll thread and the
-#: app's own guard share ONE read rather than two.
-_CACHE: dict[str, tuple[float, tuple[SessionRow, ...]]] = {}
+#: ``config root`` → ``(monotonic read time, rows, unanswered peers)``. Keyed by
+#: root so an isolated ``LOCAL_OPERATOR_CONFIG_DIR`` (every test and capture)
+#: cannot read a real install's answer, and module-level so the sidebar's poll
+#: thread and the app's own guard share ONE read rather than two. The unanswered
+#: peers ride in the same entry because they are one answer: the relay reports
+#: the device that did not reply WITH the rows the others did, and a second read
+#: for the second half would be the second staleness rule this module avoids.
+_CACHE: dict[str, tuple[float, tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]] = {}
 
 
 def clear_cache() -> None:
     """Forget every cached read. For tests: a fixture's rows must not leak on."""
     _CACHE.clear()
+
+
+class UnansweredPeer(NamedTuple):
+    """A device in this device's networks that did not answer a listing read.
+
+    THE DEVICE THAT IS GONE NEEDS A NAME OF ITS OWN (UX round 3, U16). The
+    relay already reports this — ``_fan_out_catalog`` contributes a
+    ``reachable: false`` block with a reason and NO rows for a peer that does not
+    reply, precisely so "the device exists and is switched off" is sayable — and
+    this module used to DROP it, because it only ever returned rows. The sidebar
+    reads rows, so a peer that stopped answering lost its whole section, and the
+    user's six sessions disappeared with nothing said: "my peer has no
+    sessions" and "my peer is gone" were one picture.
+
+    ``reason`` is the relay's own sentence. It is carried rather than formatted
+    away because the tooltip on a REAL row shows it (``session_sidebar``'s
+    ``location`` line) and the two must say the same thing about the same state.
+    """
+
+    device_id: str
+    name: str
+    reason: str
 
 
 def peer_session_rows(
@@ -78,9 +104,40 @@ def peer_session_rows(
     cached = _CACHE.get(key)
     if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
         return cached[1]
-    rows = _read(root, catalog)
-    _CACHE[key] = (moment, rows)
-    return rows
+    return _read_all(root, catalog, moment, key)[0]
+
+
+def unanswered_peers(
+    root: Path | None = None,
+    *,
+    now: float | None = None,
+    ttl_s: float = _TTL_S,
+    catalog: object | None = None,
+) -> tuple[UnansweredPeer, ...]:
+    """Peers this device could not reach for the last listing read.
+
+    One answer with :func:`peer_session_rows`, not a second read: the relay
+    reports the device that did not reply beside the rows the others did, so both
+    functions read the same cache entry and a caller that asks for both cannot
+    see a peer listed and missing at the same instant.
+
+    IT DOES NOT REQUIRE A PRIOR POLL, and that is deliberate:
+    ``peer_session_row`` is cache-only because it sits in front of every
+    ``/resume``, but a selector that answered "no peers are silent" because
+    nobody had polled yet would be the same silent-empty failure this function
+    exists to remove. A cold call reads, exactly as an empty cache makes
+    :func:`peer_session_rows` read.
+
+    The result is a peer the relay NAMED as unanswered — nothing here guesses
+    from an absent section, which would report every peer with no sessions as
+    gone.
+    """
+    key = "" if root is None else str(root)
+    moment = time.monotonic() if now is None else now
+    cached = _CACHE.get(key)
+    if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
+        return cached[2]
+    return _read_all(root, catalog, moment, key)[1]
 
 
 def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | None:
@@ -102,33 +159,50 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
     return None
 
 
-def _read(root: Path | None, catalog: object | None) -> tuple[SessionRow, ...]:
-    """One projection read, or ``()``. Every failure is an empty list."""
+def _read_all(
+    root: Path | None, catalog: object | None, moment: float, key: str
+) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
+    """One projection read, cached under ``key``, as ``(rows, unanswered)``.
+
+    The ONE read both public functions hand out. It is a function rather than
+    two because the two halves are one relay answer — a caller that asked for the
+    rows and then for the silent peers must not be able to see two different
+    fan-outs of a mesh that is moving underneath it.
+    """
+    rows, unanswered = _read(root, catalog)
+    _CACHE[key] = (moment, rows, unanswered)
+    return rows, unanswered
+
+
+def _read(
+    root: Path | None, catalog: object | None
+) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
+    """One projection read, or ``((), ())``. Every failure is an empty answer."""
     if catalog is None:
         try:
             from local_operator.network import store
         except Exception:  # pragma: no cover - the mesh package is always importable
-            return ()
+            return (), ()
         try:
             if store.find_own_relay(root) is None:
                 # NO RELAY, NO WORK: the zero-peer property, measured as "did
                 # this process issue a call" rather than asserted in a comment.
-                return ()
+                return (), ()
         except Exception:  # noqa: BLE001 - an unreadable store is no projection
-            return ()
+            return (), ()
         try:
             from local_operator.network.projection import RelayPeerCatalog
 
             catalog = RelayPeerCatalog(root)
         except Exception:  # noqa: BLE001
-            return ()
+            return (), ()
     try:
         peers = {peer.device_id: peer for peer in catalog.peers()}  # type: ignore[attr-defined]
         raw = catalog.rows()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - a refused or timed-out relay is no rows
-        return ()
+        return (), ()
     if not peers:
-        return ()
+        return (), ()
     rows: list[SessionRow] = []
     for peer_row in raw:
         session_id = str(getattr(peer_row, "session_id", "") or "")
@@ -162,7 +236,19 @@ def _read(root: Path | None, catalog: object | None) -> tuple[SessionRow, ...]:
                 unreachable_reason=str(facts.reason or ""),
             )
         )
-    return tuple(rows)
+    # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than
+    # by row: a peer the relay marked unreachable contributes no rows, so the two
+    # sets are disjoint by construction — but a device that both answered an
+    # earlier read and failed this one would otherwise be reported twice, once as
+    # a section with rows and once as a silent heading. `answered` is what makes
+    # that impossible without asking the relay twice.
+    answered = {row.owner_device for row in rows}
+    unanswered = tuple(
+        UnansweredPeer(device_id=device_id, name=str(facts.name or ""), reason=str(facts.reason))
+        for device_id, facts in peers.items()
+        if not facts.reachable and device_id not in answered
+    )
+    return tuple(rows), unanswered
 
 
 def _live_state(peer_row: object) -> str:
