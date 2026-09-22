@@ -46,6 +46,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.incidents import CUT_OFF_CAUSES
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
     TRANSCRIPT_FILENAME,
@@ -211,11 +212,24 @@ def restored_job_row(job: Any, record: Any | None) -> Any:
     # settled outcome of its own and cannot be running any more, so it stopped
     # under the process that owned it. One return rather than two identical
     # ones, so the fallthrough reads as intended (review round 1, NIT-1).
+    #
+    # A RECORDED cause beats the blanket one. ``owner-lost`` says "the runtime
+    # under it stopped answering", which is true of a child the parent's
+    # process abandoned — but a child the LOOP itself cut off (its continuation
+    # guard, for instance) recorded a specific cause before the process died,
+    # and relabelling that sends a reader looking for a dead runtime that never
+    # died. Only a cause this build can render is adopted: an unknown token is
+    # left to the fallback rather than shown to an operator unrendered.
+    recorded_cause = ""
+    if record is not None:
+        candidate = str(record_field(record, "cut_off_cause") or "")
+        if candidate in CUT_OFF_CAUSES:
+            recorded_cause = candidate
     return job.model_copy(
         update={
             "status": "interrupted",
             "restored": True,
-            "cut_off_cause": "owner-lost",
+            "cut_off_cause": recorded_cause or "owner-lost",
             **identity,
         }
     )
