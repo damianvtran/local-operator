@@ -79,7 +79,7 @@ from rich.cells import cell_len
 
 from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
-from local_operator.config import ConfigManager
+from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
@@ -151,7 +151,7 @@ from local_operator.scratchpad import (
     scratchpad_dir_of,
     scratchpad_env_injection,
 )
-from local_operator.tools import group_reaper, shell_env
+from local_operator.tools import group_reaper, search_guard, shell_env
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -363,6 +363,28 @@ GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
 #: Directory names never worth walking during grep (VCS internals, vendored
 #: trees, build output). Dotdirs are pruned wholesale in addition.
 _GREP_PRUNE_DIRS = frozenset({"__pycache__", "node_modules", "dist", "build", ".git", ".venv"})
+
+#: Directory names the generated ripgrep config may prune WITHOUT asking. A
+#: deliberate subset of :data:`HEAVY_DIRS`: `out`/`dist`/`build`/`target` are
+#: legitimate source trees in some projects (a Next `out/`, a Go `build/`), and
+#: silently omitting a match the user asked for is worse than a slower search
+#: (review m2). The four here are unambiguous "never source".
+RG_PRUNE_DIRS = frozenset({"node_modules", ".git", "__pycache__", ".venv"})
+
+#: Config path for the search-interception block: ("tools", "search_interception", <key>).
+# The consumer default constants live in tools/search_guard.py, and the /settings
+# rows in settings_io.py mirror this path rather than importing it — the same
+# split bash.shell uses (settings_io must stay cheap for the CLI).
+SEARCH_INTERCEPTION_ENABLED_PATH: tuple[str, ...] = ("tools", "search_interception", "enabled")
+SEARCH_INTERCEPTION_ENABLED_DEFAULT = True
+SEARCH_INTERCEPTION_BLOCK_PATH: tuple[str, ...] = ("tools", "search_interception", "block")
+SEARCH_INTERCEPTION_BLOCK_DEFAULT = True
+SEARCH_INTERCEPTION_RG_CONFIG_PATH: tuple[str, ...] = (
+    "tools",
+    "search_interception",
+    "rg_excludes",
+)
+SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT = True
 #: Marker prefix on approval descriptions for targets outside the workspace.
 OUTSIDE_WORKSPACE_MARKER = "[outside workspace]"
 #: The OTHER reason a target escalates: it could not be resolved at all, so
@@ -2028,6 +2050,79 @@ def _configured_bash_shell() -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _search_interception_config() -> tuple[bool, bool, bool]:
+    """Read the ``tools.search_interception`` keys at CALL time.
+
+    ``(enabled, block, rg_excludes)``. A fresh ``ConfigManager`` per call keeps
+    the keys LIVE in ``/settings``, exactly as ``_configured_bash_shell`` does.
+    Any read failure returns the defaults: config trouble must never change what
+    a command does, and the defaults are the protective choice (the guard on).
+
+    The unreadable-config probe runs FIRST, and that ordering is a correctness
+    property, not a nicety. ``ConfigManager`` does not raise on a broken file —
+    it MOVES it aside (``config.yml.bad.<ts>``) and continues with defaults. This
+    reader runs at the top of every ``execute_bash``, i.e. BEFORE the child
+    environment is built, so an unguarded ``ConfigManager`` here would rename the
+    operator's broken config out from under ``shell_env``'s strict-mode read and
+    silently downgrade a hardened run to ``inherit``. The probe is the same
+    ``shell_env._config_file_is_unreadable`` test the policy loader uses, so this
+    reader cannot diverge from what the config layer considers readable.
+    """
+    enabled = SEARCH_INTERCEPTION_ENABLED_DEFAULT
+    block = SEARCH_INTERCEPTION_BLOCK_DEFAULT
+    rg_excludes = SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT
+    try:
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            # A config that cannot be read is not moved (that is the destructive
+            # step avoided above) and its interception keys are unknown, so the
+            # protective defaults stand.
+            return enabled, block, rg_excludes
+        config = ConfigManager(config_dir())
+        enabled = bool(config.get_nested_value(SEARCH_INTERCEPTION_ENABLED_PATH, enabled))
+        block = bool(config.get_nested_value(SEARCH_INTERCEPTION_BLOCK_PATH, block))
+        rg_excludes = bool(config.get_nested_value(SEARCH_INTERCEPTION_RG_CONFIG_PATH, rg_excludes))
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        pass
+    return enabled, block, rg_excludes
+
+
+#: One generated ripgrep config per session directory, written once. `rg` reads
+#: the file named by ``RIPGREP_CONFIG_PATH`` on every invocation, so a search the
+#: guard does NOT block (a scoped `rg`, or any `rg` under an inline grant) still
+#: inherits the vendor/build prunes and skips trees its author never meant to
+#: walk. It exists because GNU grep has no equivalent default-exclude mechanism
+#: (`GREP_OPTIONS` is removed), so this lever can only cover ripgrep.
+_RG_CONFIG_FILENAME = "rg-search-excludes.conf"
+
+
+def _rg_config_path() -> str | None:
+    """Absolute path to the generated ripgrep exclude config, or None on failure.
+
+    Written under ``local_operator.paths.config_dir()/cache`` so it lives beside
+    the rest of this session's derived state rather than in the user's home. A
+    write failure returns None — the caller then leaves ``RIPGREP_CONFIG_PATH``
+    unset, and an `rg` that would have been slightly faster runs as it always
+    did, which is the correct degradation.
+    """
+    try:
+        cache = config_dir() / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        path = cache / _RG_CONFIG_FILENAME
+        body = "# Generated by local-operator: vendor/build prunes for `rg` under bash.\n"
+        body += "".join(f"--glob=!{name}\n" for name in sorted(RG_PRUNE_DIRS))
+        if not path.exists() or path.read_text(encoding="utf-8") != body:
+            # Atomic replace: a concurrent `bash` call in another task must never
+            # read a half-written config (review n2).
+            tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            os.replace(tmp, path)
+        return str(path)
+    except Exception:  # noqa: BLE001 — a missing nicety must never fail the command
+        return None
+
+
 def _configured_memory_budget(override_mb: float | None) -> memory_guard.Budget:
     """Resolve this command's memory budget from config + host, at CALL time.
 
@@ -2899,6 +2994,23 @@ async def execute_bash(
         return _validation_error(tool_call_id, "bash", exc)
     if not params.command.strip():
         return _error(tool_call_id, "bash", "command must be a non-empty string")
+
+    # Unbounded-search interception: a recursive grep/find from the repository
+    # root walks vendored and generated trees that cannot hold the answer.
+    # Measured: one such call took 41 s in a repo whose root carries a 5 GB
+    # node_modules. This BLOCKS with a suggestion — it never rewrites the
+    # command — because substituting a path back into arbitrary shell would
+    # silently change what the agent asked for; a refusal is deterministic and
+    # leaves the escape hatch (LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1) intact.
+    # See tools/search_guard.py for the predicate and the false-positive rules.
+    _si_enabled, _si_block, _si_rg = _search_interception_config()
+    interception = search_guard.check_search_interception(
+        params.command, enabled=_si_enabled, block_unbounded=_si_block
+    )
+    if interception is not None:
+        if _si_block:
+            return _error(tool_call_id, "bash", interception)
+        logger.warning("bash: %s", interception)
     # Approval for write/exec tiers is the LOOP's gate (it fires after
     # tool_execution_start so the UI shows the pending call). A second gate
     # here made the user answer twice per action, with the tier name rendered
@@ -2999,6 +3111,14 @@ async def execute_bash(
     injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
+
+    # Lever 2: a generated ripgrep config so an `rg` the guard did NOT block
+    # (a scoped search, or one under an inline grant) still prunes vendor and
+    # build trees. Only `rg` reads this; GNU grep has no equivalent default.
+    if _si_rg:
+        rg_config = _rg_config_path()
+        if rg_config is not None:
+            injections.setdefault("RIPGREP_CONFIG_PATH", rg_config)
 
     # The child environment is built from the session's `shell_environment`
     # policy, not copied wholesale: `inherit` (the default) is the copy this

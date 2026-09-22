@@ -85,6 +85,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic plant of <venv>/bin/'Local Operator'; both paths are venv-derived",
     ),
     (
+        "local_operator/tools/builtin.py::_rg_config_path",
+        "os.replace",
+        # Atomic write of the generated ripgrep exclude config. Both paths come
+        # from `config_dir()/cache/` plus a fixed basename — no session id, no
+        # caller input — so neither can name a path under `sessions/`.
+        "Atomic replace of <config_dir>/cache/rg-search-excludes.conf; both paths config-derived",
+    ),
+    (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
         # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
