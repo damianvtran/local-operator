@@ -1686,6 +1686,32 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
         return True
 
+    def end_drain(self) -> bool:
+        """Release the drain latch: the move this runtime committed to is NOT happening.
+
+        THE UNDO OF :meth:`begin_drain`, and it exists for one caller —
+        ``process._abandon_move``, the arm that gives up a build handover that could
+        not reach idle. Without it the process would keep serving while refusing every
+        admission for the rest of its life, which is the wedge the give-up arm exists
+        to end rather than to create: a runtime that is serving again must be able to
+        TAKE work again, or the session it kept serving is unreachable.
+
+        ``False`` when no drain was latched, so a caller need not check first.
+
+        WHAT IT DOES NOT UNDO, stated because the omission is deliberate: the wakes
+        already diverted to the inbox stay there. Undiverting would mean re-installing
+        the resume catch-up shim :meth:`Session.retire_wakes_to_inbox` replaced, and
+        the rows are not lost either way — ``process._keep_loaded_build`` drains that
+        same spool back IN as part of the abandon, which is the whole reason it runs
+        before this returns.
+        """
+        if not getattr(self, "_draining", False):
+            return False
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        return True
+
     # -- the update window -------------------------------------------------
     #
     # The IDLE handover's admission window. ``begin_retire`` is a one-way door that

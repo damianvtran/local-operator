@@ -117,20 +117,30 @@ guarantee today's only recovery (SIGKILL) already relies on.
 
 **Why the exit is the blunt one.** Past the bound the process must stop being a
 multi-hour freeze, and the graceful rungs cannot be reached from the state being
-detected: `_drain_for_signal`, `_commit_to_leaving` and `_leave_overdue` are
-coroutines on the loop that is blocked, and the `SIGTERM` handler that reaches
-them needs bytecodes the stuck thread never executes — the same fact that makes
-`lop stop` refuse a silent-socket runtime. The timer is therefore armed with
-`exit=True`, so faulthandler writes the dump and `_exit(1)`s from its own C
-thread: write-then-act is structural rather than sequenced.
+detected: `_drain_for_signal` and `_commit_to_leaving` are coroutines on the loop
+that is blocked, and the `SIGTERM` handler that reaches them needs bytecodes the
+stuck thread never executes — the same fact that makes `lop stop` refuse a
+silent-socket runtime. The timer therefore dumps every thread from its own C
+thread, which is structural rather than sequenced, and THEN decides what to do
+with the process: `exit=not held` is re-decided at every re-arm from the same
+work probe the reaper's WORK signal reads, so a runtime with nothing in flight
+`_exit(1)`s exactly as before, while a runtime with a turn, a subagent or a job in
+flight keeps the dump, records the held state (``stall_watchdog.HELD_MARKER``) and
+stays ALIVE — stalled, marked, and ended by a person (`lop stop`, whose SIGKILL
+rung is the only one that reaches a wedge; see `control.py`). Evidence is never
+withheld either way: the bound still fires, still writes the dump and still records
+its class; only `_exit` is refused.
 
-**What is lost, what survives.** The in-flight turn's uncommitted step is lost —
-the same loss a SIGKILL inflicts, because a turn commits its transcript at each
-step and the step in flight has not committed. Everything already committed
-survives, i.e. the conversation, which a successor can be engaged on. The record
-is left behind with a dead pid, which `registry.classify` already reads as
-`stale` and `reclaim` already sweeps: no new vocabulary, and
-`live`/`wedged`/`stale` is untouched.
+**What is lost, what survives.** On the fatal arm (nothing in flight) the
+in-flight turn's uncommitted step is lost — the same loss a SIGKILL inflicts,
+because a turn commits its transcript at each step and the step in flight has not
+committed. On the HELD arm nothing is lost and nothing is cut: the runtime keeps
+serving on the build it loaded, the turn inside it is still running, and the row
+plus the dump say so. Everything already committed survives on both arms, i.e. the
+conversation, which a successor can be engaged on. The record is left behind with
+a dead pid on the fatal arm, which `registry.classify` already reads as `stale`
+and `reclaim` already sweeps: no new vocabulary, and `live`/`wedged`/`stale` is
+untouched.
 
 **The file's content is the evidence, not its existence.**
 `<log dir>/runtime-stall-<pid>.log`, beside `runtime.log`. Only a file carrying

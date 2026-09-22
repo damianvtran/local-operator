@@ -446,10 +446,20 @@ SIGNAL_DRAIN_S = 120.0
 #: patience for "my session is locked", because the alternative to firing is what
 #: the incident measured: unbounded, and it ended in a wedge nobody could clear.
 #: 15 min clears the longest silent step evidenced here, tolerates a silent model
-#: stream of the same order, and hands a stuck session over a quarter of an hour
-#: after its work stopped rather than never. Force-cutting something that was
-#: merely slow is the residual risk, accepted deliberately: it costs the turn in
-#: flight, while not firing costs the whole session.
+#: stream of the same order, and reports a stuck session a quarter of an hour after
+#: its work stopped rather than never.
+#:
+#: WHAT THE BOUND DOES NOW, since the obvious reading of the paragraph above is the
+#: one that was removed: it does NOT cut the turn. Force-cutting something that was
+#: merely slow was the accepted residual risk — it cost the turn in flight — and the
+#: operator's rule for every build move is that a runtime is replaced when its turn
+#: is COMPLETE, never on a heuristic of inactivity. So the bound now ABANDONS the
+#: handover: the runtime keeps the build it loaded, the messages the drain queued
+#: come back in, and the failure is published under ``UPDATE_FAILED_CAUSE``
+#: (``process._abandon_move``). What the bound still buys is unchanged and is what
+#: its calibration was for: a session whose work has gone silent stops being a
+#: handover nobody can complete, and becomes a reported condition on a runtime that
+#: is still serving.
 #:
 #: HERE, beside ``SIGNAL_DRAIN_S``, for that constant's own reason: the phrase that
 #: NAMES this bound is published on the record two front ends read
@@ -530,11 +540,16 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #: on it and publishes the OVERDUE phrase instead.
 LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 
-#: What a runtime publishes when its build drain has held with NO MOVEMENT
-#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S`` and has therefore stopped
-#: waiting (``process._leave_overdue``). The third phrase beside the two above,
-#: and the only one that reports a bound already SPENT rather than a wait still
-#: running.
+#: What a runtime USED TO publish when its build drain had held with NO MOVEMENT
+#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S``. NO ARM SENDS IT ANY MORE
+#: (``process._abandon_move`` abandons the handover instead of leaving, and keeps
+#: :data:`LEAVING_FOR_BUILD` on the record), and it stays in this module and in all
+#: four consumer tables for the reason a published vocabulary always outlives its
+#: publisher: the records that carry it are on disk, and this build still has to
+#: RENDER them. So it remains a member of :data:`PUBLISHED_LEAVING_PHRASES` — which
+#: is also what keeps ``cli.LEAVING_COLUMN_WIDTH`` sized for a row a reader may
+#: still meet — and what changed is only that nothing advertises it as a state this
+#: runtime can reach.
 #:
 #: WHY IT EXISTS SEPARATELY, AND WHY EVERY FRONT END KEYS ON IT.
 #: ``LEAVING_FOR_BUILD`` promises that the turn in flight finishes, and for the
@@ -572,6 +587,8 @@ LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 #: ``/info`` card-67 budget of 53, which is where the wide rung draws. The
 #: explicit "reported" half lives on the prose surfaces
 #: (``tui.app.OVERDUE_DRAIN_NOTICE`` and the refusal), which are not width-bound.
+#: This phrase is the widest of the three, which is why the historical entry above
+#: keeps the column where it is rather than letting a re-derivation shrink it.
 LEAVING_FOR_BUILD_OVERDUE = (
     f"leaving for the build on disk; no movement ({bound_text(BUILD_DRAIN_PROGRESS_S)})"
 )

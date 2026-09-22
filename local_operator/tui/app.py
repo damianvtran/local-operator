@@ -720,17 +720,19 @@ SIGNAL_DRAIN_NOTICE = (
 )
 
 #: The notice for a runtime that gave up WAITING for the work in flight
-#: (``LEAVING_FOR_BUILD_OVERDUE``): a build handover that was forced rather than
-#: waited out, which is a different departure from :data:`DRAIN_NOTICE` in its
-#: second clause and the same one in its first.
+#: (``LEAVING_FOR_BUILD_OVERDUE``): a departure no arm sends any more
+#: (``process._abandon_move`` abandons the handover and keeps serving), kept
+#: because the RECORDS that carry the phrase outlive the runtime that wrote them
+#: and this app still has to paint them. It stays a different sentence from
+#: :data:`DRAIN_NOTICE` in its second clause and the same one in its first.
 #:
 #: WHY IT MAY NOT REUSE THE ORDINARY BUILD SENTENCE. That sentence's promise —
-#: "it is finishing in-flight work first" — is exactly what this runtime has
-#: stopped doing: it denies the parked gates, hands the wakes over and cuts the
-#: turn. Painting it at that instant would reassure the operator about the one
-#: thing that is not true, in the sentence people act on when they decide the
-#: session is safe to leave alone (design round 1, D1; QA round 1, Q-1, which
-#: measured the frame rendering byte-identical to the unplaceable-phrase
+#: "it is finishing in-flight work first" — is exactly what a runtime that armed
+#: this phrase had stopped doing: it denied the parked gates, handed the wakes
+#: over and cut the turn. Painting it at that instant would reassure the operator
+#: about the one thing that was not true, in the sentence people act on when they
+#: decide the session is safe to leave alone (design round 1, D1; QA round 1,
+#: Q-1, which measured the frame rendering byte-identical to the unplaceable-phrase
 #: fallback).
 #:
 #: THE SENTENCE SAYS WHAT WAS OBSERVED, NOT WHY. "no movement has been reported"
