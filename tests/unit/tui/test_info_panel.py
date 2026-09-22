@@ -186,6 +186,51 @@ def test_a_draining_session_says_so_instead_of_busy() -> None:
     assert "signalled" not in ordinary, ordinary
 
 
+def test_a_held_runtime_says_so_beside_its_state() -> None:
+    """D1: the panel is where a stalled-but-alive runtime has to be visible.
+
+    Rendered through the real builder at full width and at the narrow width, because
+    the meta ladder sheds from the right: the held clause sits immediately before the
+    state word so it survives the shed, and it is what separates "not answering"
+    (which reads as "still settling") from a row whose bound has already fired and
+    will not resolve without a person.
+    """
+    from local_operator.tui.widgets.info_panel import HELD_STATE_WORD
+
+    held = SessionLine(
+        pid=4242,
+        state="wedged",
+        session_id="a1b2c3d4e5f6",
+        conversation_name="heldsession",
+        model_label="test/mock",
+        uptime_s=10.0,
+        rss_bytes=125_000_000,
+        stall_held=True,
+    )
+    snapshot = _snapshot(sessions=SessionsInfo(lines=(held,), total=1, live=0, wedged=1))
+
+    wide = _text(snapshot)
+    assert HELD_STATE_WORD in wide, wide
+    assert "not answering" in wide, wide
+
+    narrow = _text(snapshot, width=70)
+    assert HELD_STATE_WORD in narrow, (
+        "the held clause must survive the shed: it is the one fact that changes what "
+        f"the reader may do next, and it is gone at 70 columns: {narrow}"
+    )
+
+    # And a runtime that is merely not answering keeps the word it has always had.
+    ordinary = _text(
+        _snapshot(
+            sessions=SessionsInfo(
+                lines=(replace(held, stall_held=False),), total=1, live=0, wedged=1
+            )
+        )
+    )
+    assert HELD_STATE_WORD not in ordinary, ordinary
+    assert "not answering" in ordinary, ordinary
+
+
 # -- the loading frame --------------------------------------------------------
 
 

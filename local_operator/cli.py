@@ -3927,7 +3927,8 @@ def sessions_command(args: argparse.Namespace) -> int:
             # list column carries the fact, in the words the panel uses, so one state
             # does not acquire two vocabularies across the two surfaces a reader
             # compares (the rule ``STOP_RUNG_LABELS`` states for the stop rungs).
-            line += f" {_pad_cell(HELD_CELL if held.get(row['session_id']) else '', HELD_COLUMN_WIDTH)}"
+            said_held = HELD_CELL if held.get(row["session_id"]) else ""
+            line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
 
         if show_updating:
             # The cell is RENDERED from the row's pair through the ONE phase reader
