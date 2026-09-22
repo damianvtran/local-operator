@@ -798,9 +798,20 @@ def _package_manager_env(web_dir: Path) -> dict[str, str]:
         switch to pnpm@^11: "^11" is not a valid version`` and RETURNS, measured in
         the shipped 10.30.3 bundle — so a range is not a fetch, and disarming one
         would turn pnpm's warn-and-continue into an error on a tree that works
-        today. The strict pair is gated the same way for a second reason: a range
-        can never EQUAL the running version, so with the strict pair set pnpm would
-        throw on a tree that is fine.
+        today. The strict pair is gated the same way, and for the reason the
+        MEASUREMENT gives rather than a plausible-looking one: the pair does not fire
+        on its own. The version check it controls is only reached in the ELSE of
+        pnpm's switch decision — ``if (config.managePackageManagerVersions &&
+        config.wantedPackageManager?.name === "pnpm" …) switchCliVersion(config); else
+        … checkPackageManager(…)`` in the shipped bundle — and for a range pin the
+        switch branch owns the call and returns early with its warning, so the pair
+        is inert on a range until something makes that else-branch run. That
+        something is this function's own disarm: set together, they turn a range tree
+        that is fine into a failure, measured on a tree pinning ``pnpm@^11`` with
+        both (``pnpm install --lockfile-only`` → rc 1, ``ERROR This project is
+        configured to use v^11 of pnpm. Your current pnpm is v10.30.3``). Gating both
+        on an exact pin is what keeps that from happening; the range case is handled
+        by the refusal instead, which is why the disarm is gated with them.
       * ``PNPM_HOME``/``COREPACK_HOME`` at the locations resolved above — the
         shared, pre-populated homes — so a seeded machine finds the pinned manager
         already there instead of fetching it.
