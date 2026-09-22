@@ -92,11 +92,16 @@ dormant -> dormant               cold receipt -> complete | error | interrupted
 | an armed wake | the wake outranks `idle` because `●` is the least informative thing true of a live row (`session_picker.py:985-996`); `⇉` is not that — happening NOW beats happening later. This is the complaint's own case (idle + wake + children currently says "Scheduled") | a forward-looking wake could be argued above work you are not doing. Loses: `⇉` carries work in progress, which is strictly more than `●` |
 | `leaving` (a gate, not a rung) | a runtime committed to exiting is a stronger fact | without the gate a leaving row draws `⇉` beside "Leaving…", needing an exception in the glyph->words `ALLOWED` map |
 
-One ladder, three surfaces: the TUI mark, the desktop icon chain and the phone's slot put this below
-unread/pending and above presence-adjacent resting states (the phone has no `attached`/wake arms, so
-it is a no-op there). Non-goal: the terminal title's separator vocabulary
-(`tui/terminal_title.py:10-26`) and the CLI STATE column — `leaving` already refused to teach STATE a
-new word, for this reason.
+One rung, two and a half surfaces — and THE PHONE IS THE HALF, deliberately. The TUI mark and the
+desktop icon chain both read `status_code`, so they share this ladder exactly. The phone cannot: its
+summary carries no code (adding one would be a wire change of its own for one rung), so it ranks the
+facts it does carry — `streaming`, the unread receipt, and now `leaving` — and the daemon withholds the
+counts for any session it cannot vouch for (`_advertisable_counts`: a degraded dial, a stopped
+heartbeat, a runtime on its way out), which is what keeps the phone's number from advertising work the
+other two surfaces are calling "Leaving…" or "Not answering" (UX round 1, U1). The phone's ladder is
+therefore shallower than this one BY CONSTRUCTION, and the place to enforce the rung is the wire, not
+the client. Non-goal: the terminal title's separator vocabulary (`tui/terminal_title.py:10-26`) and the
+CLI STATE column — `leaving` already refused to teach STATE a new word, for this reason.
 
 ## 4. What carries the count
 
@@ -117,9 +122,13 @@ new word, for this reason.
   all, so without it a draining row whose `live_state` was idle would publish `delegating` beside a
   "Leaving…" tooltip and draw `⇉` next to the words. The row-level home also avoids a new import
   edge between `session_picker` and `session.catalog`, and makes the pairing structural rather than a
-  promise — the reason `shows_completion_mark` exists. `_counted` refuses a non-`int`
-  (`from_json` does no type validation and this is the first ARITHMETIC on those fields) rather than
-  letting a corrupt record raise inside the sidebar's poll loop.
+  promise — the reason `shows_completion_mark` exists. `reported_subagent_count`
+  (`session/runtime/types.py`, beside the fields it validates) refuses a non-`int`, a `bool`, a
+  negative and anything past `MAX_REPORTED_SUBAGENT_COUNT`, and it is the ONE implementation for three
+  readers: this predicate's `resume._counted`, `info.collect`'s fleet tally, and the desktop listing's
+  response model — rather than letting a corrupt record raise inside the sidebar's poll loop (`from_json`
+  does no type validation and this is the first ARITHMETIC on those fields) or 500 the conversation list
+  at the wire edge (review round 1, R4).
 - Wire LIST row: free — `desktop_sessions.py:3284-3290` projects `entry.row._asdict()`. Declare both
   on `server/models/desktop_sessions.py::SessionRow` and on the UI's hand-written mirror
   `SessionCatalogueRow` (`src/shared/desktop-session-contract.ts:9-33`); `None` serialises as JSON
@@ -148,9 +157,28 @@ to fix. Cost: `number \| null` in `types.ts`.
 **The phone's two arms, and why its mark is not a ring.** The slot is the only place this app can
 carry the state — it has no `attached` or wake arms to lose to — so two 4px accent dots keep the
 12px slot's geometry and give the state a SHAPE distinct from the single unread dot one rung above it
-in the same ink (the TUI's own argument for the arrow). A ring read as a quieter dot at this size. The
-chip then carries the count as text, in the shared noun, and is hidden on `null` and on 0 — with the
-pair's 2×4px inside the reserved box, the title's start x is untouched.
+in the same ink (the TUI's own argument for the arrow). A ring read as a quieter dot at this size. With
+the pair's 2×4px inside the reserved box the title's start x is untouched.
+
+**The chip sums the two counts, and that is NOT the catalogue's wording.** `delegatedChip` prints
+`N subagent(s)` from `running + queued`, where `delegating_label` prints `2 subagents running ·
+1 queued`. The reason is the tap: the session view the row opens onto prints its roster header as
+`{running}/{direct.length} running`, and both halves of that come from the folded projection, which
+draws a parked child as running (`mobile/projection.py` maps `queued` → the `running` mobile status). A
+chip that counted only the running ones therefore read `1 subagent` on a row whose session view said
+`2/2 running` one tap later (UX round 1, U2). One number for one population across the tap wins over
+spelling the split on a chip this narrow; the precise sentence stays on the catalogue, the desktop
+`title` and the TUI tooltip, where there is room for it. The chip is hidden on `null` and on 0, always
+carries the noun (a count-only chip left the reader guessing WHAT was queued, U3), and caps at `99+`
+so three digits cannot `shrink-0` the row's name away at 360px (U4) — the exact figure is one tap away
+in that same roster header.
+
+**And it is not the sidebar's `⌥N` chip.** Two delegated-work numbers can appear on one TUI frame:
+`⌥14` in the sidebar's footer is the store's GLOBAL hidden-run population (`catalog.subagent_population`,
+newest-first and capped, across every session), while this rung counts THIS session's children. Both
+can be true at once and neither is a bug; the new mark is simply the first thing that makes a reader
+expect the sidebar's children affordance to be this session's. Naming which population each one is
+remains open (UX round 1, U5, recorded rather than re-pointed).
 
 ## 6. PR split and order
 
@@ -183,7 +211,9 @@ now `checked == 675` — the count dimension `None, 0, 2` on BOTH counts, becaus
 hand-picked row covers is exactly how this mark goes wrong; round 1's finding was a pairing no frame
 covered), the tooltip-vs-glyph test, the rendered mark-column test;
 `tests/unit/server/test_desktop_feed.py` (parity gains the delegating arm);
-`tests/unit/mobile/test_daemon.py` (the summary shape).
+`tests/unit/mobile/test_daemon.py` (the summary shape, plus the daemon's own gate — UX round 1, U1: a
+degraded entry, a stopped heartbeat and a `leaving` runtime each report NO counts, a fresh live entry
+reports them).
 
 Added (the state must be falsifiable), all landed in this PR:
 
@@ -203,8 +233,10 @@ Added (the state must be falsifiable), all landed in this PR:
   the record of that mistake), and the absent-≠-0 case carried from the record to the row through the
   real scan.
 - `mobile/web/src/session-list.delegating.test.tsx` — the slot rung and the chip against the real
-  card: the pair of dots, the singular, queued-only, the two rungs that outrank it (unread, then
-  streaming — which still count their children), and `null`/0 rendering NOTHING rather than a zero.
+  card: the pair of dots, the singular, the sum (one running + one parked reads `2 subagents`, the
+  population the session view counts), the `99+` cap, `leaving` suppressing the mark, the two rungs that
+  outrank it (unread, then streaming — which still count their children), and `null`/0 rendering
+  NOTHING rather than a zero.
 
 ## Risks to watch
 
@@ -232,3 +264,13 @@ clear the published gate when the card being settled is the one that published i
 because it is a change to gate lifecycle rather than to this row's vocabulary, and it would be
 reviewed as a different change with a different blast radius. Recorded on the PR as a
 `deferred — <reason>` finding so it is not lost.
+
+A second pre-existing presentation defect is deferred for the same reason, and this change is what made
+it visible: the session view's roster folds a PARKED child into the running lane. `mobile/projection.py`
+maps the `queued` lifecycle status onto the `running` mobile status (only `paused`/`pausing` become
+`parked`), so the roster header prints `2/2 running` for a parent with one running and one waiting
+child, and draws the waiting child with the running `⟳` and its pulse. The phone's chip was moved onto
+THAT population rather than this one's (see §5) so the two surfaces agree across a tap — but the fold
+itself is a projection/presentation question with its own blast radius (every roster, every platform
+client, and the `parked` literal's meaning), not a row-vocabulary one, so it is recorded on the PR as
+`deferred — <reason>` with the anchors above rather than changed here.

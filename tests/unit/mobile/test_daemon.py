@@ -1640,6 +1640,79 @@ def test_the_phone_list_carries_the_delegated_work_from_the_record() -> None:
     assert rows[0]["subagents_queued"] is None, rows[0]
 
 
+def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for() -> None:
+    """U1: the phone must not advertise children the terminal calls "Leaving…".
+
+    The summary carries no status CODE, so a client drawing a mark from the
+    counts alone would keep saying "2 subagents running" about a session the
+    TUI and the desktop are describing as draining or silent. The counts are a
+    claim about a LIVE RUNTIME, and the daemon is the only party that can say
+    whether the runtime is still there to make it — so the gate is here, at the
+    source, and ``None`` is what the client hides a mark and a chip on.
+
+    Three arms, each with the session otherwise identical (2 running, 1 parked),
+    so a passing assertion is about the one condition it names: a DEGRADED dial
+    (the relay cannot confirm anything), a STOPPED heartbeat (the constant the
+    catalogue's own ``wedged`` verdict uses), and a runtime that is LEAVING.
+    """
+    import time
+
+    from local_operator.session.runtime.types import (
+        HEARTBEAT_TIMEOUT_S,
+        LEAVING_ON_SIGNAL,
+    )
+
+    def record(session_id: str = "s-fresh", pid: int = 4401) -> Any:
+        return SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id=session_id,
+            conversation_name="parent",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="fixture",
+            detached=True,
+            subagents_running=2,
+            subagents_queued=1,
+        )
+
+    daemon = MobileDaemon(port=0, password="pw")
+    fresh = record()
+    daemon.table.entries[fresh.pid] = SessionEntry(fresh)
+    rows = daemon.table._merge_summaries({})
+    assert (rows[0]["subagents_running"], rows[0]["subagents_queued"]) == (2, 1), rows[0]
+
+    # ...a dial that is down. The relay has confirmed nothing since it broke.
+    entry = daemon.table.entries[fresh.pid]
+    entry.degraded = True
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["subagents_running"] is None, rows[0]
+    assert rows[0]["subagents_queued"] is None, rows[0]
+
+    # ...an owner that stopped reporting, i.e. the row the catalogue calls wedged.
+    entry.degraded = False
+    entry.record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["subagents_running"] is None, rows[0]
+
+    # ...and a runtime on its way out. Its children ARE running; the phrase is
+    # what the row leads with, exactly as `SessionRow.delegating` gates on it.
+    entry.record.heartbeat_at = time.time()
+    entry.record.leaving = LEAVING_ON_SIGNAL
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["subagents_running"] is None, rows[0]
+    assert rows[0]["subagents_queued"] is None, rows[0]
+    assert rows[0]["leaving"] == LEAVING_ON_SIGNAL, rows[0]
+
+    # ...and an ENDED conversation is not a live row at all: the merge skips it
+    # (`if entry.ended: continue`), so it can only return through its durable row
+    # — which has no live entry and therefore no counts (the arm above).
+    entry.record.leaving = ""
+    entry.ended = True
+    assert daemon.table._merge_summaries({}) == []
+
+
 # --- the phone's listing: membership, so an unreadable store is not an empty one --
 
 

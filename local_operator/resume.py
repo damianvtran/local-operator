@@ -39,6 +39,7 @@ from local_operator.session.archived import archived_ids
 #: imports no stdlib and no engine. Hiding the refusal behind a function-local
 #: import would make the type unreachable to a caller that wants to catch it.
 from local_operator.session.errors import SessionStoreUnavailable
+from local_operator.session.runtime.types import reported_subagent_count
 from local_operator.session_lease import LEASE_NAME, _read_claim
 
 logger = logging.getLogger(__name__)
@@ -1979,19 +1980,22 @@ def _counted(value: int | None) -> int:
     inside the sidebar's poll loop behind ``/resume``, and a merely-numeric
     wrong value would pass silently and render as measured fact.
 
-    ``local_operator.info.collect._reported_count`` is the same rule for the
-    same reason, kept separate rather than shared because it carries that
-    screen's own display arms (an absurd-magnitude refusal that exists because a
-    31-digit figure overflows its frame) and because the sidebar's poll path
-    must not grow an import of that module to borrow two ``isinstance`` calls.
+    THE RULE IS NOT RESTATED HERE. ``reported_subagent_count``
+    (``session.runtime.types``, beside the fields it validates) is the one
+    implementation, shared with ``info.collect``'s fleet tally and with the
+    desktop listing's response model, because three readers disagreeing about
+    which values are believable is how one surface prints a figure another drops
+    (review round 1, R4). Its docstring carries the incident that made the rule.
 
-    ``bool`` is excluded explicitly: it is an ``int`` subclass, so ``True``
-    would otherwise count as one running subagent. A negative count is refused
-    the same way — it cannot mean anything a reader should be told.
+    ``0`` RATHER THAN ``None``, and that is this call site's own contract:
+    :attr:`SessionRow.delegating` needs a number to add, and both answers mean
+    the same thing to it — a value nobody reported can never make a row
+    delegating. Nothing here is ever RENDERED, so "not reported" and "zero"
+    cannot be confused on a frame; the surfaces that do render a count keep the
+    ``None`` (see ``CatalogEntry.status`` and ``session-list.tsx``), which is why
+    the shared function returns ``None`` and this wrapper collapses it.
     """
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return 0
-    return value
+    return reported_subagent_count(value) or 0
 
 
 class SessionRow(NamedTuple):
@@ -2174,9 +2178,11 @@ class SessionRow(NamedTuple):
         never make a row delegating. It is still not written as a zero anywhere
         — the label builder in the catalogue omits a count it was not given.
         "Queued with nothing running" is the case that must not read as idle:
-        ``subagent_gate`` parks a child with ``queued=True`` while it waits for
-        capacity, so a parent holding only parked children is working in
-        exactly the sense the operator is complaining about.
+        the capacity gate parks a child with ``queued=True`` while it waits for a
+        slot (``harness/subagent.py:663``, ``queued = jobs_manager.at_capacity()``
+        → ``harness/jobs.py:648``, whose ``at_capacity`` counts only
+        non-``queued`` running jobs), so a parent holding only parked children is
+        working in exactly the sense the operator is complaining about.
         """
         if self.leaving:
             return None

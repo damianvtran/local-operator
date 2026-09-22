@@ -105,7 +105,7 @@ describe("SessionCard delegated-work rung", () => {
 		expect(cardByName("Solo").textContent).not.toContain("1 subagents");
 	});
 
-	it("shows a queued-only parent, which must not read as idle", () => {
+	it("shows a queued-only parent, with the noun, which must not read as idle", () => {
 		sessionList = [
 			summary({
 				session_id: "p1",
@@ -117,7 +117,68 @@ describe("SessionCard delegated-work rung", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Parked");
 		expect(marks(card)).toHaveLength(2);
-		expect(card.textContent).toContain("2 queued");
+		/* The noun is present even with nothing running: a count-only chip left
+		   the reader guessing WHAT was queued (UX round 1, U3). */
+		expect(card.textContent).toContain("2 subagents");
+		expect(card.textContent).not.toContain("queued");
+	});
+
+	it("counts the population the session view counts, not the running ones alone", () => {
+		/* U2: `1 running + 1 parked` must not read `1 subagent` on the list and
+		   `2/2 running` in the session view one tap later. The chip sums both,
+		   because the roster header it agrees with sums both (the folded
+		   projection draws a parked child as running). */
+		sessionList = [
+			summary({
+				session_id: "p1",
+				conversation_name: "One of each",
+				subagents_running: 1,
+				subagents_queued: 1,
+			}),
+		];
+		render(<SessionListScreen />);
+		const card = cardByName("One of each");
+		expect(card.textContent).toContain("2 subagents");
+		expect(card.textContent).not.toContain("1 subagent");
+	});
+
+	it("caps a wide count so it cannot take the row's name", () => {
+		/* U4: the chip is `shrink-0`, so at 360px a three-digit count truncated
+		   `Parent at capacity, twelve parked …` to ~31 cells. Past the cap the
+		   chip shows `99+`; the exact figure is in the roster header the row
+		   opens onto. */
+		sessionList = [
+			summary({
+				session_id: "p1",
+				conversation_name: "At capacity",
+				subagents_running: 99,
+				subagents_queued: 12,
+			}),
+		];
+		render(<SessionListScreen />);
+		const card = cardByName("At capacity");
+		expect(card.textContent).toContain("99+ subagents");
+		expect(card.textContent).not.toContain("111");
+	});
+
+	it("advertises nothing for a session the list itself calls leaving", () => {
+		/* U1, the client half: the daemon withholds counts for a leaving entry,
+		   and this gate covers a client talking to a build that predates that
+		   refusal. A draining runtime has children running; the row's own phrase
+		   is what it leads with, so there is no mark and no chip. */
+		sessionList = [
+			summary({
+				session_id: "p1",
+				conversation_name: "Draining",
+				leaving: "Leaving",
+				subagents_running: 2,
+				subagents_queued: 1,
+			}),
+		];
+		render(<SessionListScreen />);
+		const card = cardByName("Draining");
+		expect(marks(card)).toHaveLength(0);
+		expect(card.textContent).not.toContain("subagent");
 	});
 
 	it("lets an unseen completion keep the slot, since a receipt outranks live work", () => {

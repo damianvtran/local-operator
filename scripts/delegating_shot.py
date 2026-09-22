@@ -245,6 +245,15 @@ async def main() -> None:
             await pilot.pause()
 
             if surface in ("cursor", "unseen"):
+                # FOCUS FIRST, or the frame does not contain the glyph it is
+                # cited for. The caret is painted only while the list HAS focus
+                # (`session_sidebar.py`: `cursor = self.has_focus and entry.id ==
+                # self.cursor_id`), so a scenario that sets `cursor_id` and
+                # hovers captures the tinted row and no `›` — which is exactly
+                # the adjacency this frame exists to show (`›` at column 2's
+                # neighbour, the residual risk the module docstring names).
+                # Design round 1, D2.
+                sidebar.focus()
                 sidebar.cursor_id = DELEG_ID
                 await pilot.pause()
                 row_y = next(

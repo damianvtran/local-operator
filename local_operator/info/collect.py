@@ -51,6 +51,7 @@ from local_operator.info.model import (
     SessionsInfo,
     SubagentLine,
 )
+from local_operator.session.runtime.types import reported_subagent_count
 
 logger = logging.getLogger(__name__)
 
@@ -258,54 +259,13 @@ def collect_process(
     )
 
 
-#: Above this, a published count is treated as corrupt rather than as a
-#: measurement. Deliberately far above anything this codebase can produce —
-#: ``DEFAULT_MAX_RUNNING_JOBS`` is 15 and the count is a ``len()`` over a
-#: bounded roster — so it can only reject a foreign or damaged record, never a
-#: real fleet. It is a RENDERING ceiling, not a belief about how many subagents
-#: can exist: six digits still fit the narrow rung.
-_ABSURD_COUNT = 999_999
-
-
-def _reported_count(value: Any) -> int | None:
-    """A published subagent count, or ``None`` when the record did not report one.
-
-    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
-    no type validation — so every field on a record is whatever the writer put
-    in the file. That is fine for the strings and bools already read here, which
-    only ever get formatted, but these two are the first record fields this
-    module does ARITHMETIC on, and arithmetic is where a foreign value stops
-    being cosmetic:
-
-    * a ``str`` or ``list`` raises ``TypeError`` inside the roll-up. ``_safe``
-      guards whole SECTIONS, so one bad record cost the entire sessions block —
-      no table, no runtimes row, and no lower-bound caveat — on a screen whose
-      whole purpose is describing a host that is already broken. Before these
-      fields existed there was no arithmetic here and the same record listed
-      normally, so that was a regression rather than a new limitation.
-    * a merely-numeric wrong value does not raise at all, which is worse: a
-      float printed ``4.5 total — 1 sessions + 3.5 subagents`` and a negative
-      printed ``-1 subagents``, both as measured fact.
-
-    Anything that is not a non-negative ``int`` is therefore treated as NOT
-    REPORTED rather than sanitised into a number. That is this screen's own
-    contract applied one layer out: an unusable value is not a measurement, and
-    calling it ``None`` folds it into the lower-bound caveat, which already
-    exists to say the total is missing terms. ``bool`` is excluded explicitly —
-    it is an ``int`` subclass, so ``True`` would otherwise count as one subagent.
-
-    A count above ``_ABSURD_COUNT`` is refused the same way. It is not that the
-    number is wrong — it is that a 31-digit figure renders 81 cells wide and
-    overflows every frame, including the abbreviated rung that exists to serve
-    narrow ones, because the shed compresses the LABELS and not the FIGURE.
-    Treating it as unreported keeps a corrupt record from breaking the layout
-    of the screen you open when something is already broken.
-    """
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        return None
-    if value > _ABSURD_COUNT:
-        return None
-    return value
+#: The count rule itself lives with the fields it validates —
+#: ``session.runtime.types.reported_subagent_count`` — because three readers apply
+#: it (this module's fleet tally, the sidebar's ``resume._counted``, and the
+#: desktop listing's response model) and they must agree about which values are
+#: believable (review round 1, R4). Its docstring carries this screen's own case
+#: for refusing a value rather than sanitising it: one corrupt record cost the
+#: entire sessions block here, because ``_safe`` guards whole sections.
 
 
 def collect_sessions(
@@ -416,8 +376,8 @@ def collect_sessions(
                 # has not told us it has no subagents, and ``or 0`` here would
                 # silently turn every older peer into a confident zero in the
                 # fleet total.
-                subagents_running=_reported_count(getattr(rec, "subagents_running", None)),
-                subagents_queued=_reported_count(getattr(rec, "subagents_queued", None)),
+                subagents_running=reported_subagent_count(getattr(rec, "subagents_running", None)),
+                subagents_queued=reported_subagent_count(getattr(rec, "subagents_queued", None)),
                 is_self=self_pid is not None and rec.pid == self_pid,
             )
         )

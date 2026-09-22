@@ -475,8 +475,8 @@ def delegating_label(running: int, queued: int) -> str:
       ``/info``'s fleet line already uses (``info/render.py:443``), so a parent
       at capacity is distinguishable from one that is merely busy;
     * ``{M} subagent(s) queued`` — children parked with nothing yet spending, a
-      state that must NOT read as idle (``subagent_gate`` parks a child with
-      ``queued=True``).
+      state that must NOT read as idle (the capacity gate parks a child with
+      ``queued=True``: ``harness/subagent.py:663``, ``harness/jobs.py:648``).
 
     SINGULAR AT ONE (``1 subagent running``), matching ``Scheduled (1 wake)``:
     a plural here is the kind of small wrongness a reader notices before they
