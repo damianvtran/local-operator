@@ -65,10 +65,9 @@ MAX_NAME_LENGTH = 256
 KEY_FINGERPRINT_BYTES = 16
 
 #: Truncation length of a VALUE fingerprint (:func:`value_fingerprint`), in
-#: bytes of HMAC tag, rendered as hex. 128 bits for the same reason the blind
-#: index takes 128: what this bound has to survive is two DIFFERENT secrets
-#: colliding in a store of a few hundred records, while a shorter display would
-#: make the identity harder to compare by eye.
+#: bytes of HMAC tag, rendered as hex. 128 bits, the same bound the blind index
+#: takes: what it has to survive is two DIFFERENT secrets colliding inside one
+#: store, and at 32 hex characters the display still fits on one line.
 VALUE_FINGERPRINT_BYTES = 16
 
 _SUBKEY_INFO_PREFIX = b"local-operator/secret-store/record/v1/gen="
@@ -206,12 +205,18 @@ def value_fingerprint(master_key: bytes, value: bytes) -> str:
     the digest of a value that appears anywhere else — a Git history, a pasted
     config — is computable by whoever has that copy. Keyed on
     :func:`derive_value_fingerprint_key`, neither is possible without the master
-    key, which is not stored beside the value but is the key the store itself is
-    sealed under. **Stated honestly, because the guide repeats it: a keyed
-    digest is a confirmation oracle for a holder of that key.** They can decrypt
-    the store anyway, so the fingerprint tells them nothing the ciphertext does
-    not — it is an identity, not a barrier, and it must not be described as
-    proof that a value is secret or unguessable.
+    key.
+
+    **Being exact about that key and where it lives, because the claim rests on
+    it:** the fingerprint key is DERIVED (HKDF, its own domain label) and written
+    nowhere — it exists only in the memory of the process computing a digest —
+    while what sits on disk is the master key (keyfile tier) or its scrypt
+    wrapping (passphrase tier). So no artifact beside the ciphertext can be
+    attacked against a digest, and anyone who does hold the master key opens the
+    store itself instead of grinding a 128-bit tag. **Stated honestly, because
+    the guide repeats it: a keyed digest is nevertheless a confirmation oracle
+    for a holder of that key.** It is an identity, not a barrier, and it must not
+    be described as proof that a value is secret or unguessable.
 
     **Stable within one store, and only within one store.** Deterministic (no
     per-call salt), so two calls agree and a value compared across sessions or
