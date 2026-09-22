@@ -196,9 +196,12 @@ equalled by a second footprint clock;
 2. **nothing in flight** — no tool batch executing (the live context does not end in
    an assistant message whose tool calls have no answers, the state
    `Session._wire_legal_snapshot` documents, plus the `_compacting` flag);
-3. **CPU advancing** — at least `PROGRESS_CPU_FLOOR` (5%) of one core across the
-   sample. A model call is a socket read; a bash child's CPU belongs to the child and
-   never reaches `time.process_time`.
+3. **CPU advancing** — at least `PROGRESS_CPU_FLOOR` (5%) of one core as a MEAN
+   OVER THE WHOLE RUN (not a per-sample reading: agent review round 1 measured that a
+   single scheduled-out sample discarded a run, leaving an effective margin of
+   0.4-1.2x against a documented 3.8x, and one rigged run in fifteen never fired). A
+   model call is a socket read; a bash child's CPU belongs to the child and never
+   reaches `time.process_time`.
 
 **The window is the bound**, and the argument that sized 300 s sizes this one: it sits
 above the largest legitimate silence measured on this fleet (205.8 s, 1.5x), and the
