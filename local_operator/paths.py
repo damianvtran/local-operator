@@ -202,12 +202,22 @@ def log_dirs() -> tuple[Path, ...]:
     file — so it looks in both.
 
     ORDER IS THE PREFERENCE, not a sort: this process's own :func:`log_dir` first
-    is where the writer put it whenever the two agree (and the only directory an
-    isolated run can see, since every candidate is HOME- or override-derived), then
-    the two directories a writer that does NOT share this process's environment can
-    have used — the DEFAULT config directory's logs (``$HOME`` +
-    :data:`DEFAULT_CONFIG_DIRNAME`) and the platform default. Deduplicated, so a
-    process without the override gets two entries rather than one path twice.
+    is where the writer put it whenever the two agree, then the two directories a
+    writer that does NOT share this process's environment can have used — the DEFAULT
+    config directory's logs (``$HOME`` + :data:`DEFAULT_CONFIG_DIRNAME`) and the
+    platform default. Deduplicated, so a process without the override gets two entries
+    rather than one path twice.
+
+    THE ISOLATION BOUNDARY, stated rather than implied, because the honest answer is
+    narrower than "an isolated run sees only its own root": every candidate is derived
+    from ``$HOME`` or from the override, so a run that redirects BOTH (the suite's
+    ``env -i HOME=… LOCAL_OPERATOR_CONFIG_DIR=…`` recipe) touches nothing outside its
+    own root — while an OVERRIDE-ONLY isolation still lists the two HOME-derived
+    stores, which on an operator's machine are the operator's own. That is deliberate
+    and not a leak to be tightened: a reader holding a dead pid cannot know which store
+    the writer used, narrowing to the override is exactly what hid the dumps this
+    function exists to find (the 31 cards in the PR's measurement), and reading a log
+    directory is not writing one — no caller opens these paths for append.
 
     THE DEFAULT CONFIG DIR IS NOT REDUNDANT WITH THE PLATFORM ONE, and this is the
     measured case rather than a theory: the runtimes on this host are started with
