@@ -878,17 +878,14 @@ def provider_env_key(provider_id: str, *, base: Path | None = None) -> str | Non
 
     Returns the same VALUE :func:`resolve_env_key` does, but its resolution order
     is the one the credential consolidation introduces: a provider-class store
-    row wins, the process environment is the second leg, and — transition only —
-    the plaintext ``credentials.env`` file is the last.
+    row wins and the process environment is the second leg.
 
     Why store-first: the store is the sanctioned home for a key the harness now
     writes (``lop credential update``, ``lop search setup``), and a stale export
     left in a shell profile must not outrank the value the operator deliberately
-    saved. The env leg stays AHEAD of the legacy file for the opposite reason it
-    always did — an explicit ``ANTHROPIC_API_KEY`` export is still a real
-    instruction — and the file leg remains only until every writer is repointed
-    (PR2 deletes it), so an install that has not yet run ``lop secret
-    migrate-env`` keeps working exactly as before.
+    saved. The env leg stays behind the store for the opposite reason it always
+    did — an explicit ``ANTHROPIC_API_KEY`` export is still a real instruction,
+    and is not what PR2a removes.
 
     Alias-aware like :func:`resolve_env_key`: a login flavour resolves through
     the name of the provider it stores under.
@@ -905,19 +902,22 @@ def provider_env_key(provider_id: str, *, base: Path | None = None) -> str | Non
 def first_provider_key(
     names: Iterable[str], env_value: str | None = None, *, base: Path | None = None
 ) -> str | None:
-    """First configured value across the store, ``env_value``, then the file.
+    """First configured value across the store, then ``env_value``.
 
-    The rung ORDER every store-first reader shares, split out from
+    The rung ORDER every provider-key reader shares, split out from
     :func:`provider_env_key` for the callers that carry their OWN key names and
-    have already resolved their env value: the classification vendors walk a
-    per-leg ``env_key_names`` tuple through ``CredentialManager.get_credential``
-    and, like the provider reader, must prefer a store row to the environment to
-    the plaintext file. Two spellings of that order is how one surface ends up
-    reading a different credential than the one a login wrote.
+    have already resolved their env value. Two spellings of that order is how
+    one surface ends up reading a different credential than the one a login
+    wrote.
 
     ``names`` are ENV VAR NAMES; each is looked up as a ``LOP_PROVIDER_<name>``
     store row. ``env_value`` is the caller's already-resolved environment value,
-    if it has one, and is consulted between the store and the file.
+    if it has one, and is consulted when no store row holds the key.
+
+    The plaintext ``credentials.env`` leg this function used to consult last is
+    GONE (PR2a): the file is no longer a credential source, so a name the store
+    does not hold and the environment does not export resolves to nothing rather
+    than to a file read.
     """
     for name in names:
         stored = provider_secret_value(name, base=base)
@@ -925,26 +925,6 @@ def first_provider_key(
             return stored
     if env_value:
         return env_value
-    if not names:
-        return None
-    # Transition leg: the plaintext file, read WITHOUT creating it. Goes away in
-    # PR2 once every writer writes store rows.
-    from local_operator.credentials import CredentialManager
-    from local_operator.paths import config_dir
-
-    root = _config_root(base)
-    try:
-        plaintext = CredentialManager.read_credentials(
-            root if root is not None else config_dir(), non_empty=True
-        )
-    except OSError:
-        return None
-    for name in names:
-        secret = plaintext.get(name)
-        if secret is not None:
-            value = secret.get_secret_value().strip()
-            if value:
-                return value
     return None
 
 

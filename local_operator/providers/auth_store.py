@@ -10,8 +10,9 @@ First match wins:
 2. config override (``models.yml``/gateway pointer)
 3. OAuth credential (auto-refresh + stickiness/round-robin)
 4. API key persisted by ``login`` (``source="login"``)
-5. env var — including the legacy ``credentials.env`` file read through
-   ``local_operator.credentials.CredentialManager`` when importable
+5. env var — the process environment. After PR2a the plaintext
+   ``credentials.env`` file is no longer read on this tier (the store's
+   provider-class rows are, above), so an export is the only ambient source
 6. stored API key without ``source="login"``
 7. fallback resolver (custom providers)
 
@@ -650,10 +651,13 @@ class _SerializedConnection:
 class AuthStore:
     """Credential persistence + the 7-step cascade.
 
-    ``credential_manager`` (legacy ``CredentialManager``) feeds the env tier
-    from ``credentials.env``. ``config_overrides`` seeds the config-override
-    tier. All DB access is local and synchronous; async methods only exist
-    where refresh/network happens.
+    ``credential_manager`` supplies the config ROOT the env tier resolves its
+    provider-class store rows under (``config_dir``). It no longer feeds a
+    plaintext leg: the env tier reads store rows then the process environment,
+    and the legacy ``credentials.env`` rung is GONE (PR2a).
+    ``config_stored_values`` seeds the config-derived tier. All DB access is
+    local and synchronous; async methods only exist where refresh/network
+    happens.
 
     .. note::
         Refresh is single-flight per process (``asyncio.Lock``) and across
@@ -3093,7 +3097,8 @@ class AuthStore:
         # step 5, regardless of which later tier ends up winning).
         pin(None)
 
-        # 5. Env var tier (process env, then legacy credentials.env).
+        # 5. Env var tier (the process environment; the plaintext credentials.env
+        # file is no longer read here, PR2a).
         env_key = self._env_api_key(provider)
         if env_key:
             return env_key, None
@@ -3163,14 +3168,14 @@ class AuthStore:
         # authenticates with its base provider's var) so the cascade,
         # ``is_usable`` and the catalogue enrichment cannot disagree about
         # whether a key runs a flavour. It reads the provider-class store row
-        # first, the process environment second and the legacy ``credentials.env``
-        # file last — the file leg exists only until every writer is repointed.
+        # first and the process environment second; the legacy ``credentials.env``
+        # file leg is GONE (PR2a).
         #
         # The cascade ORDER is untouched: this is still step 5, still one value,
         # still before the stored-api_key and fallback-resolver rungs.
         #
-        # ``base`` is the manager's own config root, so a store (or legacy file)
-        # the caller configured elsewhere is the one consulted; unset means the
+        # ``base`` is the manager's own config root, so a store the caller
+        # configured elsewhere is the one consulted; unset means the
         # HOME-derived default, which is what a CLI invocation wants.
         base = getattr(self._credential_manager, "config_dir", None)
         return provider_env_key(provider, base=base)

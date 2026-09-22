@@ -92,8 +92,9 @@ def _stack() -> tuple[ConfigManager, CredentialManager]:
     that now writes a provider-class STORE row via ``_store_api_key`` — was
     resurrecting the plaintext file this consolidation retires (R5). The readers
     below (``provider_statuses``, ``_credential``) go through
-    ``[redacted]``, which still sees whatever file exists; nothing here
-    needs it created.
+    ``[redacted]``, which reads the provider-class STORE row and the
+    process environment — the plaintext ``credentials.env`` leg is GONE (PR2a)
+    — so nothing here needs the file created, or keeps it alive.
     """
     base = config_dir()
     return ConfigManager(base), CredentialManager.readonly(base)

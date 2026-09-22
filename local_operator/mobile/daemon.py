@@ -4001,7 +4001,7 @@ def _list_models() -> list[dict[str, Any]]:
         )
         return _model_rows(cached_rows)
     with closing(store):
-        controller = ProviderController(store, CredentialManager(config_dir=directory))
+        controller = ProviderController(store, CredentialManager.readonly(config_dir=directory))
         admitted = controller.persisted_providers()
         statuses: dict[str, str] = {}
         if admitted is None:

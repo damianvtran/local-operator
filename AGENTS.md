@@ -2797,7 +2797,8 @@ READ path — the read check is the half that actually contains a value, since a
 hostile caller wants a key that already exists — so an agent secret can never
 shadow a provider key. Derive the name with `provider_secret_name(env_key)` and
 never spell the prefix by hand. Resolution order for a provider key is store row,
-then `os.environ`, then the legacy file: `provider_env_key(provider_id)` /
+then `os.environ` (the legacy plaintext `credentials.env` file is no longer a
+rung — PR2a removed its reader legs): `provider_env_key(provider_id)` /
 `provider_secret_value(env_key)` in `providers/registry.py` are the ONE readers,
 imported lazily so the CLI startup path never pulls the crypto stack.
 

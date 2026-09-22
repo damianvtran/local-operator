@@ -424,13 +424,15 @@ class ProviderController:
 
         BOTH persisted stores count, because the two sanctioned flows write
         different ones: ``/login`` writes the AuthStore (auth.db) and ``lop
-        credential update`` writes the legacy ``CredentialManager`` file. A
-        reader consulting only the first hides every API-key provider the owner
-        configured by hand; only the second hides every OAuth login, which on a
-        current install is most of them. The legacy file is read WITHOUT
-        ``get_credential``, whose convenience fallback imports a matching
-        environment variable into the store on miss — that would smuggle the
-        ambient key back in through the door this method exists to shut.
+        credential update`` writes a provider-class ROW in the encrypted secret
+        store. A reader consulting only the first hides every API-key provider
+        the owner configured by hand; only the second hides every OAuth login,
+        which on a current install is most of them.
+
+        The plaintext ``credentials.env`` file is NO LONGER READ here (PR2a);
+        the provider-class store rows below are the consolidated source it used
+        to supplement, so this method's answer is unchanged for any host whose
+        keys live in the store or in auth.db.
 
         Everything else is deliberately IDENTICAL to ``usable_providers``,
         including the oauth-flavour suppression (an active ``radient`` OAuth
@@ -451,29 +453,15 @@ class ProviderController:
             raise
         except (sqlite3.Error, OSError):
             return None
-        legacy: set[str] = set()
-        manager = self.credential_manager
-        if manager is not None:
-            try:
-                legacy = {
-                    name
-                    for name, value in manager.get_credentials().items()
-                    if value and value.get_secret_value()
-                }
-            except OSError:
-                # An unreadable legacy file is not grounds to claim the whole
-                # credential picture is unknowable: auth.db was read fine, and
-                # degrading to ``None`` here would show EVERY provider rather
-                # than the ones we positively established.
-                legacy = set()
         # The store's provider-class rows, keyed by env-key NAME to match the
         # rung list ``credential_file_names`` returns. This is the consolidated
-        # source; the plaintext file above is the transition-time second one.
+        # source; the plaintext file it used to union is gone.
         #
         # Through the manager's OWN root (R4): a controller built against a
         # non-default ``credential_manager`` must consult the store that manager
         # reads its other state from, not the HOME-derived default.
-        legacy |= stored_provider_env_keys(getattr(manager, "config_dir", None))
+        manager = self.credential_manager
+        legacy: set[str] = set(stored_provider_env_keys(getattr(manager, "config_dir", None)))
         persisted: set[str] = set()
         for definition in PROVIDER_REGISTRY:
             storage = credential_provider_id(definition.id)
@@ -490,7 +478,7 @@ class ProviderController:
             # listed 18 models for. It is alias-aware for the same reason
             # ``resolve_env_key`` is: a login flavour declares no key name of its
             # own, but the provider it stores under does, and that name is what
-            # the legacy file holds.
+            # the store holds.
             if any(name in legacy for name in credential_file_names(definition.id)):
                 persisted.add(definition.id)
         return persisted

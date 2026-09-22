@@ -1404,7 +1404,7 @@ def test_viewer_birth_config_and_model_resolution_run_off_the_event_loop(
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(factory_module, "resolve_hosting_model", resolve_model)
     monkeypatch.setattr("local_operator.cli.ConfigManager", config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager_cls)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
     monkeypatch.setattr(
         "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
@@ -1453,7 +1453,7 @@ def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", unconfigured)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager_cls)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
     monkeypatch.setattr(
         "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
@@ -1579,6 +1579,15 @@ def _bare_credential_manager(*args, **kwargs) -> MagicMock:
     manager.get_credential.return_value = None
     manager.get_credentials.return_value = {}
     return manager
+
+
+#: The class-level stand-in: a MagicMock is callable AND carries
+#: ``.readonly``, so ``CredentialManager(...)`` and
+#: ``CredentialManager.readonly(...)`` both resolve to a bare manager — the
+#: non-creating constructor is what production calls now (PR2a).
+_bare_credential_manager_cls = MagicMock()
+_bare_credential_manager_cls.side_effect = _bare_credential_manager
+_bare_credential_manager_cls.readonly.side_effect = _bare_credential_manager
 
 
 # --- CL-04: --yolo reachable from subcommands ----------------------------------
@@ -1878,7 +1887,7 @@ def test_main_interactive_missing_api_key_warns_and_starts(
     )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager_cls)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):

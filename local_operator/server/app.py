@@ -153,7 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Set up the subprocess environment for accessing shell commands
     setup_cross_platform_environment()
 
-    app.state.credential_manager = CredentialManager(config_dir=config_dir)
+    app.state.credential_manager = CredentialManager.readonly(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process

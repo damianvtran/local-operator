@@ -1,4 +1,4 @@
-"""AuthStore tests: cascade order, legacy credentials.env tier, refresh,
+"""AuthStore tests: cascade order, the store-first env tier, refresh,
 rotation, blocking. No network: fakes for the refresh capability."""
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AuthStore]:
-    # Hermeticity: the env-tier legacy loader reads ~/.local-operator/
-    # credentials.env; point it at an empty dir so real user keys never leak in.
+    # Hermeticity: the env tier reads the config root for provider-class store
+    # rows; point it at an empty dir so real user keys never leak in.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty-config"))
     # No real provider env vars may leak into cascade assertions.
     for var in (
@@ -107,19 +107,26 @@ async def test_cascade_stored_key_when_no_env(
     assert await store.get_api_key("openai") == "stored-key"
 
 
-async def test_cascade_legacy_credentials_env_tier(
+async def test_cascade_resolves_a_provider_store_row_before_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The env tier reads legacy credentials.env via CredentialManager."""
+    """The env tier is store-first: a provider row outranks an exported variable.
+
+    The legacy ``credentials.env`` leg this test used to pin is GONE (PR2a); the
+    provider-class store row is now the first thing ``_env_api_key`` sees, ahead
+    of the environment and ahead of a stored non-login key (step 6).
+    """
+    from local_operator.providers.registry import store_provider_key
+
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    manager = CredentialManager(tmp_path / "config")
-    manager.set_credential("OPENAI_API_KEY", "legacy-file-key", write=True)
+    manager = CredentialManager.readonly(tmp_path / "config")
+    store_provider_key("OPENAI_API_KEY", "row-key", base=manager.config_dir)
     auth = AuthStore(db_path=tmp_path / "auth.db", credential_manager=manager)
     try:
-        assert await auth.get_api_key("openai") == "legacy-file-key"
-        # Stored non-login keys rank AFTER the legacy file tier.
+        assert await auth.get_api_key("openai") == "row-key"
+        # Stored non-login keys rank AFTER the store row / env tier.
         auth.upsert_credential("openai", {"key": "stored-key", "type": "api_key"})
-        assert await auth.get_api_key("openai") == "legacy-file-key"
+        assert await auth.get_api_key("openai") == "row-key"
     finally:
         auth.close()
 

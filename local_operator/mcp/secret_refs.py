@@ -55,8 +55,8 @@ remote server's headers, which the allowlisted stdio child environment
   reference from a literal.
 * A fragment whose inner text contains a name the store holds — whatever
 decorates it (see :func:`_candidate_keys`) — is REFUSED, never handed over. The
-store accepts any key (``CredentialManager.set_credential`` checks only control
-characters), and a shell or compose file wraps one in anything at all —
+store accepts any key (the secret store checks only control characters), and a
+shell or compose file wraps one in anything at all —
 ``${hubspot-token}``, ``${TOKEN:-}``, ``${TOKEN#suffix}``, ``${!TOKEN}``,
 ``${env:TOKEN}`` — so a fragment naming a stored key cannot be a legitimate
 literal, and passing it through is the silent-unauthenticated-server failure

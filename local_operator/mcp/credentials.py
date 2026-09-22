@@ -44,16 +44,16 @@ class MCPCredentials(BaseModel):
 def credential_source(key: str, base: Path) -> str:
     """Which store holds ``key``: ``encrypted``, ``missing``, or ``unavailable``.
 
-    **Nothing here may create ``credentials.env``.** ``CredentialManager.__init__``
-    calls ``_ensure_config_exists``, so constructing it CREATES the plaintext file
-    — and a metadata probe that creates the store it is describing is a side
-    effect the caller never asked for, on the very file this change promises to
-    leave alone.
+    **Nothing here creates a credential-shaped file.** ``CredentialManager``'s
+    plain constructor calls ``_ensure_config_exists``, which CREATES the
+    plaintext ``credentials.env`` — and a metadata probe that creates the store
+    it is describing is a side effect the caller never asked for, on a file the
+    consolidation retires.
 
-    The plaintext fallback was REMOVED here: the legacy file has no writers left,
-    so a ``legacy`` answer describes a store nothing maintains. A key present
-    only in an old ``credentials.env`` — an install mid-migration — simply reads
-    as the store's own ``missing`` until ``lop secret migrate-env`` moves it.
+    The plaintext fallback was REMOVED here: the legacy file has no writers and
+    no readers left, so a ``legacy`` answer would describe a store nothing
+    maintains. A key present only in an old ``credentials.env`` simply reads as
+    the store's own ``missing`` until ``lop secret migrate-env`` moves it.
     """
     try:
         if store_path(base).exists():

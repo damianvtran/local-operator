@@ -6586,7 +6586,7 @@ def agents_delete_command(
             resolve_radient_credential_sync,
         )
 
-        credential_manager = CredentialManager(config_dir)
+        credential_manager = CredentialManager.readonly(config_dir)
         config_manager = ConfigManager(config_dir)
         base_url = _radient_hub_base_url(config_manager)
         api_key = resolve_radient_credential_sync(credential_manager, base_url)
@@ -6620,7 +6620,7 @@ def _build_auth_stack(config_dir: Path) -> tuple[Any, Any]:
     """
     from local_operator.providers.auth_store import AuthStore
 
-    credential_manager = CredentialManager(config_dir)
+    credential_manager = CredentialManager.readonly(config_dir)
     auth_store = AuthStore(credential_manager=credential_manager)
     return auth_store, credential_manager
 
@@ -7762,7 +7762,8 @@ def _preflight_api_key(
     failover; doing network refresh here can turn a transient OAuth failure
     into a false "API key is required" startup error that prevents access to
     the TUI's login command. With no stored row, the AuthStore cascade still
-    checks environment and legacy ``credentials.env`` keys.
+    checks the exported environment (the legacy ``credentials.env`` file is no
+    longer a rung, PR2a).
 
     Providers that need no key (ollama, test) and anything the provider
     registry cannot answer pass through — a preflight must never block a
@@ -7891,7 +7892,7 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
 
         base_dir = config_dir()
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager(base_dir)
+        credential_manager = CredentialManager.readonly(base_dir)
         from local_operator.agents import AgentRegistry  # lazy: heavy module
 
         agent_registry = AgentRegistry(base_dir)
@@ -8276,7 +8277,7 @@ def main() -> int:
                     resolve_radient_credential_sync,
                 )
 
-                credential_manager = CredentialManager(base_dir)
+                credential_manager = CredentialManager.readonly(base_dir)
                 config_manager = ConfigManager(base_dir)
                 base_url = _radient_hub_base_url(config_manager)
                 api_key = resolve_radient_credential_sync(credential_manager, base_url)
@@ -8679,7 +8680,7 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return 1
-                key_result = _preflight_api_key(hosting, CredentialManager(base_dir))
+                key_result = _preflight_api_key(hosting, CredentialManager.readonly(base_dir))
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
@@ -8721,7 +8722,7 @@ def main() -> int:
             return 1
 
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager(base_dir)
+        credential_manager = CredentialManager.readonly(base_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)

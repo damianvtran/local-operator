@@ -1631,6 +1631,28 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
     return hints
 
 
+def _knowledge_credential(key: str, config_dir: Path) -> str | None:
+    """Resolve an embedder key for the session's semantic backend.
+
+    A provider-class ``LOP_PROVIDER_<key>`` STORE row, then an exported variable.
+    ``provider_secret_value`` is namespace-scoped, so an ordinary agent secret
+    under this name is simply not found here. The legacy ``credentials.env`` leg
+    is GONE (PR2a): an embedder key the operator never stored or exported
+    resolves to nothing.
+
+    A NAMED function rather than an inline closure so the plaintext sweep
+    (``tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py``) can
+    drive THIS resolver directly. A removed leg that no callable reaches is a
+    removal nothing exercises, which is the gap that sweep exists to close.
+    """
+    from local_operator.providers.registry import provider_secret_value
+
+    stored = provider_secret_value(key, base=config_dir)
+    if stored:
+        return stored
+    return os.environ.get(key) or None
+
+
 def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
     """Expose configured names before deferred live connections can race turn one."""
     try:
@@ -1650,7 +1672,6 @@ def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
 
 
 async def _setup_knowledge(
-    credential_manager: CredentialManager,
     config_dir: Path,
     agent_registry: AgentRegistry,
     warnings_out: list[str],
@@ -1662,6 +1683,13 @@ async def _setup_knowledge(
     only their short descriptions join the ordinary skill descriptions sent to
     the configured semantic backend. Agent hints always use ``LocalEmbedder``.
     Any layer can fail independently without making session startup fail.
+
+    No ``CredentialManager`` is threaded in, deliberately: the embedder's
+    credential closure below reads a provider-class STORE row and the process
+    environment, and the store is reached by config ROOT through
+    ``provider_secret_value``. Carrying the manager was the shape the retired
+    plaintext leg needed (PR2a) and an unused parameter reads as a live
+    dependency the next reader would wire back up.
     """
     hooks = _KnowledgeHooks()
     try:
@@ -1699,23 +1727,10 @@ async def _setup_knowledge(
             ),
         )
 
-        def get_credential(key: str) -> str | None:
-            # Store-first, like every other provider-key reader: a
-            # LOP_PROVIDER_<key> row outranks the legacy CredentialManager tier.
-            # provider_secret_value is namespace-scoped, so an ordinary agent
-            # secret under this name is simply not found here and the legacy
-            # read below still resolves it.
-            from local_operator.providers.registry import provider_secret_value
-
-            stored = provider_secret_value(key, base=config_dir)
-            if stored:
-                return stored
-            secret = credential_manager.get_credential(key)
-            value = secret.get_secret_value() if secret else ""
-            return value or None
-
         if resources:
-            backend = default_backend_from_env(get_credential)
+            backend = default_backend_from_env(
+                functools.partial(_knowledge_credential, config_dir=config_dir)
+            )
             try:
                 hooks.index = SkillIndex(resources, backend, cache_dir=config_dir / "cache")
                 await hooks.index.build()
@@ -3448,9 +3463,7 @@ async def _prepare(
     config_dir = Path(agent_registry.config_dir)
     effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
-    hooks = await _setup_knowledge(
-        credential_manager, config_dir, agent_registry, knowledge_warnings, effective_cwd
-    )
+    hooks = await _setup_knowledge(config_dir, agent_registry, knowledge_warnings, effective_cwd)
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving
     # names only from the eventual manager let the knowledge block freeze empty

@@ -499,19 +499,18 @@ def test_provider_env_key_prefers_the_store_over_the_environment(
     assert provider_env_key("openrouter", base=sandbox) == "from-the-store"
 
 
-def test_provider_env_key_falls_back_to_the_legacy_file_during_the_transition(
-    sandbox: Path,
-) -> None:
-    """Mid-migration installs keep resolving: the file leg is still read LAST.
+def test_provider_env_key_ignores_a_decoy_plaintext_file(sandbox: Path) -> None:
+    """The plaintext file is NO LONGER a credential source (PR2a).
 
-    It is read, not created — the non-creating reader is what lets a host that has
-    never run ``lop secret migrate-env`` keep working without the read resurrecting
-    a file it had deleted.
+    It used to be read LAST during the migration; that rung is gone. A
+    ``credentials.env`` left on disk by a host that never ran ``lop secret
+    migrate-env`` must therefore NOT resolve a provider key — the reader treats
+    the name as unset, which is the whole point of retiring the file as a source.
     """
     from local_operator.providers.registry import provider_env_key
 
-    (sandbox / CREDENTIALS_FILE_NAME).write_text("OPENROUTER_API_KEY=from-the-file\n")
-    assert provider_env_key("openrouter", base=sandbox) == "from-the-file"
+    (sandbox / CREDENTIALS_FILE_NAME).write_text("OPENROUTER_API_KEY=from-the-file")
+    assert provider_env_key("openrouter", base=sandbox) in (None, "")
 
 
 def test_a_provider_key_read_on_a_store_less_host_creates_no_store(sandbox: Path) -> None:

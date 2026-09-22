@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
 import threading
 import time
@@ -54,12 +55,14 @@ class ProviderDefinition:
 
 
 def _credential(manager: CredentialManager, *keys: str) -> str:
-    """First configured value across the provider store, then the legacy tier.
+    """First configured value across the provider store, then the environment.
 
     Store-first: a ``LOP_PROVIDER_<key>`` row the operator saved (via ``lop
     search setup`` or ``lop credential update``) outranks an ambient export,
     which is the order every other provider-key reader in the repo uses. The
-    value is never logged.
+    legacy ``credentials.env`` leg is GONE (PR2a): a key the store does not hold
+    and the environment does not export resolves to nothing. The value is never
+    logged.
     """
     from local_operator.providers.registry import provider_secret_value
 
@@ -69,9 +72,9 @@ def _credential(manager: CredentialManager, *keys: str) -> str:
         if stored:
             return stored
     for key in keys:
-        value = manager.get_credential(key).get_secret_value().strip()
-        if value:
-            return value
+        exported = os.environ.get(key, "").strip()
+        if exported:
+            return exported
     return ""
 
 
@@ -795,8 +798,9 @@ def _deepseek_login_present() -> bool:
 
     The model key and the search key are deliberately the same credential, which
     is why this provider needs no search-specific setup step. Read through the
-    auth store because that is where ``login`` writes it; the env/credentials.env
-    tier is checked first by the caller, so this stays a pure store probe.
+    auth store because that is where ``login`` writes it; the store/env tier is
+    checked first by the caller — the plaintext ``credentials.env`` leg is GONE
+    (PR2a) — so this stays a pure store probe.
     """
     try:
         from local_operator.providers.auth_store import AuthStore
@@ -807,7 +811,7 @@ def _deepseek_login_present() -> bool:
 
 
 async def _resolve_deepseek_key(credentials: CredentialManager) -> str:
-    """The key the search will bill: env/credentials.env first, then the login.
+    """The key the search will bill: the store/env tier first, then the login.
 
     ``read_only=True`` because a search must never decide model routing: it must
     not consume an OAuth rotation slot, clear session stickiness, or flip the

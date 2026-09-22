@@ -31,7 +31,7 @@ from local_operator.classification.vendors import (
     questions_payload,
     request_body,
 )
-from tests.unit.classification.support import TEST_KEY
+from tests.unit.classification.support import TEST_KEY, store_row
 
 pytestmark = pytest.mark.asyncio
 
@@ -429,24 +429,24 @@ async def test_an_error_body_echoing_our_key_is_scrubbed(manager) -> None:
 
 async def test_typesafe_prefers_its_own_key_then_the_jev_alias(bare_manager) -> None:
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) is None
-    bare_manager.set_credential("JEV_API_KEY", "jev-key", write=False)
+    store_row(bare_manager, "JEV_API_KEY", "jev-key")
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "jev-key"
-    bare_manager.set_credential("TYPESAFE_API_KEY", "typesafe-key", write=False)
+    store_row(bare_manager, "TYPESAFE_API_KEY", "typesafe-key")
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "typesafe-key"
 
 
 async def test_openrouter_falls_back_to_the_dev_key(bare_manager) -> None:
     assert await credential_of(OpenRouterVendor(bare_manager), bare_manager) is None
-    bare_manager.set_credential("OPENROUTER_API_KEY_DEV", "dev-key", write=False)
+    store_row(bare_manager, "OPENROUTER_API_KEY_DEV", "dev-key")
     assert await credential_of(OpenRouterVendor(bare_manager), bare_manager) == "dev-key"
-    bare_manager.set_credential("OPENROUTER_API_KEY", "prod-key", write=False)
+    store_row(bare_manager, "OPENROUTER_API_KEY", "prod-key")
     assert await credential_of(OpenRouterVendor(bare_manager), bare_manager) == "prod-key"
 
 
 async def test_radient_falls_back_to_the_static_key_when_the_session_has_none(bare_manager) -> None:
     """A store with no Radient row resolves through the static tier, not to None."""
     assert await credential_of(RadientVendor(bare_manager), bare_manager) is None
-    bare_manager.set_credential("RADIENT_API_KEY", "radient-key", write=False)
+    store_row(bare_manager, "RADIENT_API_KEY", "radient-key")
     assert await credential_of(RadientVendor(bare_manager), bare_manager) == "radient-key"
 
 
@@ -466,10 +466,10 @@ async def test_a_leg_with_no_credential_refuses_before_any_http(bare_manager) ->
 
 
 async def test_the_resolved_credential_is_memoized_inside_its_ttl(manager) -> None:
-    manager.set_credential("TYPESAFE_API_KEY", "first", write=False)
+    store_row(manager, "TYPESAFE_API_KEY", "first")
     vendor = TypeSafeVendor(manager)
     assert await credential_of(vendor, manager) == "first"
-    manager.set_credential("TYPESAFE_API_KEY", "second", write=False)
+    store_row(manager, "TYPESAFE_API_KEY", "second")
     # Inside the TTL the memo answers, so the store is not read per message; the
     # TTL is the bound on how stale that can be (see the expiry test).
     assert await credential_of(vendor, manager) == "first"
@@ -500,10 +500,10 @@ async def test_a_rotated_credential_is_picked_up_after_the_ttl(bare_manager) -> 
     """
     now = [0.0]
     vendor = TypeSafeVendor(bare_manager, credential_ttl_s=300.0, clock=lambda: now[0])
-    bare_manager.set_credential("TYPESAFE_API_KEY", "original", write=False)
+    store_row(bare_manager, "TYPESAFE_API_KEY", "original")
     assert await credential_of(vendor, bare_manager) == "original"
 
-    bare_manager.set_credential("TYPESAFE_API_KEY", "rotated", write=False)
+    store_row(bare_manager, "TYPESAFE_API_KEY", "rotated")
     now[0] = 299.0
     # Still inside the TTL: the memo answers, and no store read happens.
     assert await credential_of(vendor, bare_manager) == "original"
@@ -518,9 +518,9 @@ async def test_the_memo_is_per_instance_not_a_module_global(bare_manager, tmp_pa
 
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    other = CredentialManager(other_dir)
-    other.set_credential("TYPESAFE_API_KEY", "other-account-key", write=False)
-    bare_manager.set_credential("TYPESAFE_API_KEY", "this-account-key", write=False)
+    other = CredentialManager.readonly(other_dir)
+    store_row(other, "TYPESAFE_API_KEY", "other-account-key")
+    store_row(bare_manager, "TYPESAFE_API_KEY", "this-account-key")
 
     first = TypeSafeVendor(bare_manager)
     second = TypeSafeVendor(other)
@@ -531,12 +531,17 @@ async def test_the_memo_is_per_instance_not_a_module_global(bare_manager, tmp_pa
 async def test_a_401_invalidates_the_memo_once_and_re_resolves_exactly_once(manager) -> None:
     """A revoked key must not become a per-message retry loop.
 
-    The REQUEST count IS the assertion: one initial attempt plus one retry, not a
-    loop. There are three resolves and the extra one is the *fallback tier* lookup
-    (this manager has no ``JEV_API_KEY``, so the walk past the refused tier finds
-    nothing and the leg fails) — still one pass down the tier list, which is what
-    "exactly once" means here: the tier index only advances, so the next message
-    starts below the tier that refused.
+    The REQUEST count IS the assertion: one initial attempt, one re-resolve, and at
+    most one tier advance — three requests is the documented bound (see
+    ``decide``), never a loop. There are three resolves too.
+
+    The walk reaches index 0 (the ``authstore`` tier) here, and that is a
+    consequence of the store-first readers rather than of this fixture: the
+    ``AuthStore`` the authstore tier consults resolves the provider env key
+    store-first itself, so the ``TYPESAFE_API_KEY`` store row this fixture armed
+    is visible BOTH at the authstore tier and at its own tier. A host with a
+    matching ``auth.db`` login row resolves that row first and never sees the
+    double; the bound that matters — no request storm — holds either way.
     """
     resolves: list[int] = []
     requests: list[httpx.Request] = []
@@ -554,11 +559,12 @@ async def test_a_401_invalidates_the_memo_once_and_re_resolves_exactly_once(mana
     with pytest.raises(DecisionVendorError) as caught:
         await vendor.decide(request_of(choice_question()), timeout_s=5.0)
     assert caught.value.kind == "auth"
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert len(resolves) == 3
     # The tier that refused is behind us for the rest of the session: tiers are
-    # (authstore, TYPESAFE_API_KEY, JEV_API_KEY) and the env key was index 1.
-    assert vendor._tier == 2
+    # (authstore, TYPESAFE_API_KEY, JEV_API_KEY) and the refusal landed at index
+    # 0, so the walk advanced once to index 1.
+    assert vendor._tier == 1
 
 
 async def test_a_401_that_heals_on_the_retry_answers_the_call(manager) -> None:
@@ -606,7 +612,10 @@ async def test_a_403_is_handled_the_same_way(manager) -> None:
             request_of(choice_question()), timeout_s=5.0
         )
     assert caught.value.kind == "auth"
-    assert len(requests) == 2
+    # One attempt, one re-resolve, one tier advance — the documented bound (see
+    # ``test_a_401_invalidates_the_memo_once_and_re_resolves_exactly_once`` for
+    # why the store row is reachable at two tiers).
+    assert len(requests) == 3
 
 
 async def test_a_429_is_not_retried(manager) -> None:
@@ -678,17 +687,21 @@ async def test_a_key_stored_by_login_is_used_when_no_env_key_exists(
     assert await credential_of(vendor, bare_manager) == f"{provider}-login-key"
 
 
-async def test_the_credential_manager_tier_still_answers(bare_manager) -> None:
-    """Regression guard for the env / ``credentials.env`` path, with the store empty."""
+async def test_a_leg_still_resolves_an_exported_environment_key(bare_manager, monkeypatch) -> None:
+    """The env tier survives PR2a: an explicit export is still a real instruction.
+
+    Only the plaintext ``credentials.env`` leg was removed; a variable the
+    operator exported still runs the leg, with the store empty.
+    """
+    monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
     assert not (bare_manager.config_dir / "auth.db").exists()
-    bare_manager.set_credential("TYPESAFE_API_KEY", "env-key", write=False)
+    assert not (bare_manager.config_dir / "secrets").exists()
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "env-key"
-    # A first resolve created the store; the assertion above only holds because
-    # nothing wrote a row into it.
-    assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "env-key"
+    # Resolving did not create a store: the env tier needs no row.
+    assert not (bare_manager.config_dir / "secrets").exists()
 
 
-async def test_the_login_row_wins_over_the_environment_key(bare_manager) -> None:
+async def test_the_login_row_wins_over_the_environment_key(bare_manager, monkeypatch) -> None:
     """THE precedence rule: the store row first, the env tiers behind it.
 
     Both are "the credential", and they disagree, so the order has to be stated
@@ -697,19 +710,18 @@ async def test_the_login_row_wins_over_the_environment_key(bare_manager) -> None
     while an exported variable is ambient and may belong to another tool.
     """
     store_login_key(bare_manager, "typesafe", "login-row-key")
-    bare_manager.set_credential("TYPESAFE_API_KEY", "env-key", write=False)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "login-row-key"
 
     store_login_key(bare_manager, "openrouter", "login-row-key")
-    bare_manager.set_credential("OPENROUTER_API_KEY_DEV", "dev-env-key", write=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY_DEV", "dev-env-key")
     assert await credential_of(OpenRouterVendor(bare_manager), bare_manager) == "login-row-key"
 
 
 async def test_the_alternates_still_answer_behind_the_store_and_the_primary_env_key(
     bare_manager,
 ) -> None:
-    assert not (bare_manager.config_dir / "auth.db").exists()
-    bare_manager.set_credential("JEV_API_KEY", "jev-key", write=False)
+    store_row(bare_manager, "JEV_API_KEY", "jev-key")
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "jev-key"
 
 
@@ -801,7 +813,7 @@ async def test_the_radient_leg_prefers_the_login_session_over_the_static_key(
     the vendor receives.
     """
     store_login_key(bare_manager, "radient", "oauth-session-bearer")
-    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    store_row(bare_manager, "RADIENT_API_KEY", "legacy-static-key")
     bearers: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -824,7 +836,7 @@ async def test_a_dead_login_row_falls_back_to_the_legacy_static_key(bare_manager
     value did not rotate), then the tier behind it.
     """
     store_login_key(bare_manager, "radient", "dead-oauth-bearer")
-    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    store_row(bare_manager, "RADIENT_API_KEY", "legacy-static-key")
     bearers: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -861,7 +873,7 @@ async def test_a_rotated_login_row_still_heals_without_advancing_a_tier(
     row rather than silently downgrading to the legacy key.
     """
     store_login_key(bare_manager, "radient", "first-bearer")
-    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    store_row(bare_manager, "RADIENT_API_KEY", "legacy-static-key")
     bearers: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -921,7 +933,7 @@ async def test_the_walk_restarts_at_the_preferred_tier_when_the_memo_expires(
     """
     now = [0.0]
     store_login_key(bare_manager, "radient", "first-login-bearer")
-    bare_manager.set_credential("RADIENT_API_KEY", "legacy-static-key", write=False)
+    store_row(bare_manager, "RADIENT_API_KEY", "legacy-static-key")
     bearers: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

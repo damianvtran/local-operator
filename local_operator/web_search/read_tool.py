@@ -260,7 +260,7 @@ async def execute_web_read(
     settings: WebSearchSettings = load_read_settings(manager)
     if not settings.enabled or not settings.read_enabled:
         return _result(tool_call_id, "Web reading is disabled in settings.", error=True)
-    credentials = CredentialManager(config_dir())
+    credentials = CredentialManager.readonly(config_dir())
 
     session_id = context.session_id if context is not None else ""
     page_context = PAGE_CONTEXTS.for_session(session_id)

@@ -588,9 +588,10 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
     for storage_id in sorted({credential_provider_id(t) for t in targets}):
         _invalidate_cached_listing(storage_id)
     print(f"Removed {removed} credential(s) for '{provider_id}'.")
-    # The cascade has two tiers below the stored rows: the process
-    # environment and the legacy credentials.env. Deleting the rows does not
-    # clear them, so the very next turn would authenticate again with no
+    # One tier below the stored rows remains: the process environment. (The
+    # legacy ``credentials.env`` file was a second one; PR2a removed it from
+    # the cascade.) Deleting the rows does not
+    # clear an export, so the very next turn would authenticate again with no
     # indication the logout was partial. Name the variable, never its value.
     definition_env = definition.env_keys
     env_var: str | None = None
@@ -601,10 +602,32 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
     if env_var:
         print(
             f"Warning: {provider_id} still authenticates from {env_var}. "
-            "Unset it or remove the credentials.env entry to complete the "
-            "logout."
+            "Unset it to complete the logout."
         )
     return 0
+
+
+def stored_login_key_names(credential_manager: "CredentialManager") -> list[str]:
+    """ENV KEY names the provider-class STORE rows hold, sorted.
+
+    The name-source reader ``list_logins`` prints under "secret store". Reading
+    the plaintext ``credentials.env`` here is GONE (PR2a): the file is no longer
+    a credential source, so a name only the file holds is one no reader could
+    resolve. An unreadable store answers with no names rather than raising —
+    this feeds a status printout, not a resolution.
+
+    A NAMED function rather than an inline loop so the reader log, and the
+    plaintext sweep that drives it
+    (``tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py``), share
+    one callable: a removed leg reached by no callable is removal nothing
+    exercises.
+    """
+    try:
+        from local_operator.providers.registry import stored_provider_env_keys
+
+        return sorted(stored_provider_env_keys(credential_manager.config_dir))
+    except Exception:  # noqa: BLE001 — a status listing must not raise
+        return []
 
 
 def list_logins(
@@ -639,23 +662,13 @@ def list_logins(
             print(f"  {definition.id:<14} {name}=<set>")
             found = True
     if credential_manager is not None:
-        # The provider-class store rows, keyed by env-key name, then the legacy
-        # file during the transition. Both are reported as names only.
-        try:
-            from local_operator.providers.registry import stored_provider_env_keys
-
-            for key in sorted(stored_provider_env_keys(credential_manager.config_dir)):
-                print(f"  secret store  {key}=<set>")
-                found = True
-        except Exception:
-            pass
-        try:
-            for key, secret in credential_manager.get_credentials().items():
-                if secret.get_secret_value():
-                    print(f"  credentials.env  {key}=<set>")
-                    found = True
-        except Exception:
-            pass
+        # The provider-class store rows, keyed by env-key name, reported as names
+        # only. The plaintext ``credentials.env`` loop this used to print is GONE
+        # (PR2a): the file is no longer a credential source, and
+        # ``stored_login_key_names`` is the one callable that reads those names.
+        for key in stored_login_key_names(credential_manager):
+            print(f"  secret store  {key}=<set>")
+            found = True
     if not found:
         print("  (none)")
     return 0

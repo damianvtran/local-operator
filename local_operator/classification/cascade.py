@@ -32,6 +32,7 @@ through the cost log rather than through a user-facing line.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -155,12 +156,12 @@ def vendor_status(
     answers, and it is the one the diagnostics actually ask.
 
     The probe is the credential tiers a synchronous, disk-free read can see: the
-    credential store and the environment (both of which ``CredentialManager``
-    already holds in memory). Radient's OAuth session is therefore NOT visible
-    here — see the module docstring — so ``radient`` reports ``False`` on a host
-    whose only Radient credential is a signed-in session. :func:`resolve_vendor`
-    is the authority; this function exists so a ``/info`` line or a login-status
-    read can be produced without an ``await`` and without a store read.
+    provider credential store and the process environment. Radient's OAuth
+    session is therefore NOT visible here — see the module docstring — so
+    ``radient`` reports ``False`` on a host whose only Radient credential is a
+    signed-in session. :func:`resolve_vendor` is the authority; this function
+    exists so a ``/info`` line or a login-status read can be produced without an
+    ``await`` and without a store read.
     """
     pin = pinned_vendor(settings)
     status: list[tuple[str, bool]] = []
@@ -180,9 +181,8 @@ def _static_credential_present(manager: "CredentialManager", name: str) -> bool:
     Each leg's key names mirror :mod:`local_operator.classification.vendors`
     exactly; the duplication is two tuples of constant names, and it is kept
     here rather than imported because the vendor classes resolve Radient
-    through the AuthStore and this function must not. ``get_credential`` reads
-    the environment tier too (without writing it back to disk), which is how a
-    shell-exported key is discovered.
+    through the AuthStore and this function must not. The environment tier is
+    read here too, which is how a shell-exported key is discovered.
     """
     keys = {
         "radient": ("RADIENT_API_KEY",),
@@ -190,18 +190,16 @@ def _static_credential_present(manager: "CredentialManager", name: str) -> bool:
         "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_DEV"),
     }[name]
     # Store-first, matching the vendor legs' own resolution: a provider-class
-    # store row counts as a populated static tier, then get_credential (which
-    # reads the environment tier too, without writing it back to disk), then the
-    # legacy file inside get_credential.
+    # store row counts as a populated static tier, then the process environment.
+    # The legacy ``credentials.env`` rung is GONE (PR2a), so a name neither the
+    # store nor the environment holds is simply not present.
     from local_operator.providers.registry import provider_secret_value
 
     # The manager's own root (R4), matching the sibling vendor legs in
     # ``vendors.py``: a provider-class row the caller configured elsewhere is the
     # one this probe must see, or the diagnostic reports a host it never read.
     base = getattr(manager, "config_dir", None)
-    return any(
-        provider_secret_value(key, base=base) or bool(manager.get_credential(key)) for key in keys
-    )
+    return any(provider_secret_value(key, base=base) or os.environ.get(key) for key in keys)
 
 
 __all__ = [

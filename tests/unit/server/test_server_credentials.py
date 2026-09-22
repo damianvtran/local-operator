@@ -9,15 +9,25 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.server.models.schemas import CredentialUpdate
+
+
+def _store_key(manager, env_key: str, value: str) -> None:
+    """Arm a provider-class STORE ROW under the manager's config root (PR2a)."""
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key(env_key, value, base=manager.config_dir)
 
 
 @pytest.mark.asyncio
 async def test_list_credentials_success(test_app_client, mock_credential_manager):
-    """Test retrieving credentials list successfully."""
-    mock_credential_manager.set_credential("OPENAI_API_KEY", "test-key")
-    mock_credential_manager.set_credential("SERPAPI_API_KEY", "test-key2")
+    """Test retrieving credentials list successfully.
+
+    The keys are armed as provider-class STORE ROWS (PR2a): the endpoint lists the
+    store, and the legacy ``CredentialManager`` file view it used to union is gone.
+    """
+    _store_key(mock_credential_manager, "OPENAI_API_KEY", "test-key")
+    _store_key(mock_credential_manager, "SERPAPI_API_KEY", "test-key2")
 
     response = await test_app_client.get("/v1/credentials")
 
@@ -33,12 +43,15 @@ async def test_list_credentials_success(test_app_client, mock_credential_manager
 
 @pytest.mark.asyncio
 async def test_list_credentials_non_empty_only(test_app_client, mock_credential_manager):
-    """Test retrieving only non-empty credentials."""
-    # Set some credentials with values and some with empty values
-    mock_credential_manager.set_credential("OPENAI_API_KEY", "test-key")
-    mock_credential_manager.set_credential("EMPTY_API_KEY", "")
-    mock_credential_manager.set_credential("SERPAPI_API_KEY", "test-key2")
-    mock_credential_manager.set_credential("ANOTHER_EMPTY_KEY", "")
+    """Test retrieving only non-empty credentials.
+
+    A key with a value is a store ROW (PR2a). The "empty value" case is expressed
+    as an absent row: the store refuses a blank payload at the writer, so a key
+    the operator cleared is one with no row at all — the same "not a credential"
+    answer the legacy file's blank line used to give.
+    """
+    _store_key(mock_credential_manager, "OPENAI_API_KEY", "test-key")
+    _store_key(mock_credential_manager, "SERPAPI_API_KEY", "test-key2")
 
     response = await test_app_client.get("/v1/credentials")
 
@@ -49,17 +62,25 @@ async def test_list_credentials_non_empty_only(test_app_client, mock_credential_
     result = data.get("result")
     assert "keys" in result
 
-    # Only non-empty credentials should be in the list
+    # Only rows with a value are listed. ``RADIENT_API_KEY`` is the row the
+    # shared ``test_app_client`` fixture arms (PR2a, for the Radient upload
+    # routes), so the two keys this test stored plus that one are exactly the
+    # non-empty set; a key with no row is absent.
     assert "OPENAI_API_KEY" in result["keys"]
     assert "SERPAPI_API_KEY" in result["keys"]
     assert "EMPTY_API_KEY" not in result["keys"]
     assert "ANOTHER_EMPTY_KEY" not in result["keys"]
-    assert len(result["keys"]) == 2
+    assert len(result["keys"]) == 3
 
 
 @pytest.mark.asyncio
 async def test_list_credentials_empty(test_app_client, mock_credential_manager):
-    """Test retrieving credentials list when empty."""
+    """A host whose only key is the fixture's own arming lists exactly that.
+
+    The shared ``test_app_client`` fixture arms a ``RADIENT_API_KEY`` store row
+    (PR2a, for the Radient upload routes), so "empty" here means every OTHER key
+    is absent — the placeholder names this test would otherwise store are gone.
+    """
     response = await test_app_client.get("/v1/credentials")
 
     assert response.status_code == 200
@@ -68,14 +89,19 @@ async def test_list_credentials_empty(test_app_client, mock_credential_manager):
     assert data.get("message") == "Credentials retrieved successfully"
     result = data.get("result")
     assert "keys" in result
-    assert len(result["keys"]) == 0
+    assert "EMPTY_API_KEY" not in result["keys"]
+    assert "ANOTHER_EMPTY_KEY" not in result["keys"]
+    assert result["keys"] == ["RADIENT_API_KEY"]
 
 
 @pytest.mark.asyncio
 async def test_list_credentials_error(test_app_client, mock_credential_manager):
     """Test error handling when retrieving credentials list."""
     # Mock the open function to raise an exception
-    with patch.object(CredentialManager, "get_credentials", side_effect=Exception("Test error")):
+    with patch(
+        "local_operator.secrets.access.open_store",
+        side_effect=Exception("Test error"),
+    ):
         response = await test_app_client.get("/v1/credentials")
 
     assert response.status_code == 500

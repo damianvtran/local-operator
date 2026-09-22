@@ -203,7 +203,7 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
     # which writes to whatever root it is handed.
     base_dir = config_dir()
     config_manager = ConfigManager(base_dir)
-    credential_manager = CredentialManager(base_dir)
+    credential_manager = CredentialManager.readonly(base_dir)
 
     from local_operator.agents import AgentRegistry  # lazy: heavy module
 

@@ -201,9 +201,9 @@ def ensure_log_dir() -> Path | None:
     refuses to start. The caller is expected to carry on with ``None``.
 
     Mode 0o700 because the log records prompts, model identifiers and error
-    text from an interactive session — the same sensitivity class as
-    ``credentials.env`` next door, and the default 0o755 would expose it to
-    every other account on a shared machine.
+    text from an interactive session — the same sensitivity class as the
+    encrypted credential store beside it, and the default 0o755 would expose it
+    to every other account on a shared machine.
     """
     directory = log_dir()
     try:

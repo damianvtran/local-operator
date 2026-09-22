@@ -1647,8 +1647,8 @@ _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 
 
 def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
-    """An explicit API key for ``provider`` from the provider store, env, or the
-    legacy credential file, else "".
+    """An explicit API key for ``provider`` from the provider store or the
+    environment, else "".
 
     Reading ONLY ``os.environ`` was a real defect rather than a shortcut: both
     sanctioned credential flows bypass the environment. ``local-operator
@@ -1663,7 +1663,8 @@ def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
     through the shared store-first reader; this one was the outlier.
 
     The env leg goes through ``registry.provider_env_key``, which reads the
-    provider-class STORE row first, then the environment, then the legacy file,
+    provider-class STORE row first, then the environment — the legacy plaintext
+    file it used to consult last is GONE (PR2a) —
     and does so for BOTH forms of ``env_keys`` — ``str | Callable[[], str |
     None]`` — where an ``isinstance(..., str)`` test silently drops the callable
     one. Anthropic is the only provider using it, so the reader that skipped it
@@ -2721,7 +2722,8 @@ def configure_model(
         model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
 
     # Best-effort static key for legacy consumers; the store-first reader tries
-    # the provider-class row, then env, then the legacy file. The cascade at
+    # the provider-class row, then the environment (the legacy plaintext file is
+    # no longer a rung, PR2a). The cascade at
     # stream time re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
     api_key: Optional[SecretStr] = None
     if credential_manager is not None:
