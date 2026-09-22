@@ -126,6 +126,40 @@ window is cut with its parent. Widening the probe to every child session is its
 own change — ``comms._records`` holds those sessions privately today — and is NOT
 in this one.
 
+THE TICK ITSELF CAN DIE, AND UNTIL THIS ITS DEATH WAS INVISIBLE
+--------------------------------------------------------------
+Everything above assumes the two ticks RUN. They are an ``asyncio`` task and a
+thread loop, so they can also DIE, and on 2026-09-21 one did: the workload
+tick's task raised, nothing observed it (no done-callback, no ``await``, no
+reader of ``exception()``), its stamp froze, and this bound fired 300 s later on
+a runtime that was otherwise perfectly healthy — killing the turn in flight.
+The dump then read as :data:`LEG_SILENCE` — "a loop parked in a call it never
+came back from" — which is the one explanation that was FALSE. ``faulthandler``
+dumps THREADS and never tasks, so a dead tick leaves no frame at all: the file
+shows what an idle, healthy process shows, and that is also what it shows when
+a tick is merely late. Nothing in the artifact separated the two, and that
+indistinguishability is the whole of this section.
+
+So a tick's death is now three things, and it has to be all three: the
+supervisor that drives the tick LOGS it at WARNING with the exception
+(``process._watch_stall_beats``), RE-CREATES the task while the deaths stay
+inside a rolling budget — ``process.STALL_BEAT_RESTARTS`` deaths inside
+``process.STALL_BEAT_WINDOW_S``, and the supervisor is itself guarded so that a
+fault in its own recovery path cannot end the supervision unobserved either —
+and records it HERE, :func:`note_tick_death`, a line written into this
+process's own dump beside the plane's own stamp, because the dump is the only
+artifact that survives the exit this bound makes. A dump carrying a tick-death
+line therefore says "the workload tick stopped" where the same dump used to
+say nothing at all, and :func:`tick_deaths` is the reader for it — as is the
+journal's incident narration, which prefers that fact to the bare silence leg
+when a dump carries both.
+
+A DEAD TICK STILL LETS THE BOUND FIRE, deliberately. Nothing here unbounds a
+plane whose ticker is gone: a plane nothing can stamp is a plane whose silence
+this module can no longer interpret, so the honest fail-safe is to leave on the
+deadline WITH the reason in the file rather than to run on with one leg
+silently switched off.
+
 WHY THE EXIT IS THE BLUNT ONE, AND WHAT IT COSTS
 ------------------------------------------------
 Past the bound the runtime must stop being a multi-hour freeze, and the graceful
@@ -367,6 +401,22 @@ PROGRESS_CPU_FLOOR = 0.05
 #: the C timer expired, never which leg set it. A reader therefore learns from
 #: the file itself whether a runtime went silent or spun without advancing.
 PROGRESS_MARKER = "[stall watchdog] no progress: "
+
+#: The line written into the dump when a plane's TICKER died, which is NOT the
+#: same fact as the plane's LOOP being silent — and the difference is the entire
+#: reason this line exists. Every other line in this file describes a process
+#: whose loops were alive and not reporting, or were reporting and not advancing;
+#: this one describes a process whose reporter is GONE, which no thread dump can
+#: show (see the module docstring). It shares :data:`ARM_MARKER`'s prefix so one
+#: search still finds every line this module writes, and it is written by
+#: :func:`note_tick_death` at the moment the death is observed — chronologically
+#: above any ``Timeout (`` dump the bound later produces, which is what lets a
+#: reader attribute a fired bound to a dead reporter instead of to a parked loop.
+#:
+#: NOT SPELLED IN THE HEADER, for the reason that constraint exists at all:
+#: readers test these as substrings, so a header quoting one would make every
+#: armed file read as a fired bound or as a dead tick.
+TICK_DEATH_MARKER = "[stall watchdog] tick died: "
 
 #: What the first sample of a progress clock holds before it has anything to
 #: compare against. A sentinel rather than ``None`` because a probe is free to
@@ -785,6 +835,55 @@ def beat(plane: str) -> None:
             logger.warning("stall watchdog could not re-arm its timer", exc_info=True)
 
 
+def note_tick_death(plane: str, reason: str) -> bool:
+    """Record durably that ``plane``'s TICKER died, in the armed dump file.
+
+    Beside the plane's own stamp rather than in a file of its own, and that is a
+    choice about WHAT A READER HAS IN HAND rather than about tidiness: the stamp
+    (:attr:`_Armed.last_beat`) is memory and dies with the process, and the only
+    artifact that outlives the ``_exit(1)`` this bound makes is the dump. So the
+    fact that a plane stopped being REPORTED goes where the report about that
+    process already is, and it is written ABOVE any dump the bound later writes,
+    which is what makes the two readable as one chronology.
+
+    Returns whether the line landed, so the caller's own WARNING can say which
+    of the two shapes it is in: recorded (a reader will see it) or not (the
+    caller's log line is then the only trace). A no-op when nothing is armed,
+    which is the whole in-process case — a TUI host, a test — where there is no
+    dump file to write into and the caller's log line is the record.
+
+    A FAILURE HERE MUST NOT TAKE THE CALLER DOWN. This runs on the path that has
+    just seen a task die, and an unwritable log directory is a reading of "no
+    record possible" rather than a second failure; :func:`_fire_progress` makes
+    the same call for the same reason.
+    """
+    line = f"{TICK_DEATH_MARKER}{plane}: {reason}\n"
+    with _LOCK:
+        armed = _ARMED
+        if armed is None:
+            return False
+        try:
+            armed.handle.write(line)
+            armed.handle.flush()
+            return True
+        except (OSError, ValueError):
+            # ONE RETRY THROUGH A FRESH DESCRIPTOR, exactly as the progress
+            # line does: a closed or stale descriptor is the case this recovers,
+            # and a permanently unwritable directory is not.
+            logger.debug("stall watchdog could not write its tick-death line", exc_info=True)
+            try:
+                with armed.path.open("a", encoding="utf-8") as spare:
+                    spare.write(line)
+                return True
+            except OSError:
+                logger.warning(
+                    "stall watchdog could not record the death of the %s tick for pid %s",
+                    plane,
+                    armed.pid,
+                )
+                return False
+
+
 def _start_sampler(armed: "_Armed") -> None:
     """Give the progress leg the thread it samples on. Called once, from ``arm``.
 
@@ -1070,6 +1169,30 @@ def fired_leg(pid: int | None = None, directory: Path | None = None) -> str | No
     if any(line.startswith(PROGRESS_MARKER) for line in text.splitlines()):
         return LEG_PROGRESS
     return LEG_SILENCE
+
+
+def tick_deaths(pid: int | None = None, directory: Path | None = None) -> tuple[str, ...]:
+    """Which planes' TICKERS died for this pid, oldest first, in this artifact.
+
+    The reader for :func:`note_tick_death`, and the counterpart of
+    :func:`fired_leg`: both answer questions a THREAD dump structurally cannot,
+    and a reader holding a fired bound needs both. ``fired_leg`` says the bound
+    fired and which predicate it believes ended the runtime; this says whether
+    the instrument that feeds that predicate was still alive when it fired — a
+    ``silence`` verdict beside a non-empty tuple here means the workload plane
+    did not go silent, its REPORTER did, and those two want different
+    investigations (one is a parked loop, the other a defect in this module's
+    own supervision).
+
+    Empty when the file is missing, unreadable, or carries no such line — the
+    quiet direction, as in :func:`_dump_text`.
+    """
+    text = _dump_text(dump_path(pid, directory))
+    return tuple(
+        line[len(TICK_DEATH_MARKER) :].split(":", 1)[0].strip()
+        for line in text.splitlines()
+        if line.startswith(TICK_DEATH_MARKER)
+    )
 
 
 def fired_pids(directory: Path | None = None) -> set[int]:

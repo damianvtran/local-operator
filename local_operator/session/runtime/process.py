@@ -64,6 +64,7 @@ import random
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
@@ -2841,6 +2842,7 @@ async def _drain_inbox_into(handle: object) -> int:
         SOURCE_USER,
         append_inbox,
         drain_inbox,
+        drop_owed_turn,
     )
 
     requires_engagement = not durable_conversation_path(directory / TRANSCRIPT_FILENAME)
@@ -2866,6 +2868,14 @@ async def _drain_inbox_into(handle: object) -> int:
                 directory,
                 len(keep),
             )
+            # AND THE RAISE OBLIGATION GOES WITH THE DEFERRAL (review round 1,
+            # R1-10). Every runtime raised for this record would boot, defer the
+            # same rows and exit — real work, hourly, that delivers nothing,
+            # because the one thing that would deliver them is the owner's first
+            # turn. The rows stay in the spool (touch nothing else here) and that
+            # turn still drains them, which is the deferral the sender's receipt
+            # describes.
+            drop_owed_turn(directory)
             return 0
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
@@ -2936,6 +2946,14 @@ async def _drain_inbox_into(handle: object) -> int:
                 logger.warning("spooled message could not be delivered", exc_info=True)
     if delivered:
         logger.info("delivered %d spooled message(s) at open", delivered)
+    # THE DRAIN THAT EMPTIES THE SPOOL RETIRES THE OBLIGATION (``wakes.spooled``):
+    # the rows are delivered, so nothing is owed any more, and the record would
+    # otherwise leave the supervisor raising a runtime for a session with nothing
+    # to run. Placed AFTER the loop rather than in a wrapper so the deferral
+    # branch above keeps its own, opposite, decision.
+    from local_operator.session.runtime.inbox import settle_owed_turn
+
+    settle_owed_turn(directory, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
     return delivered
 
 
@@ -3112,6 +3130,41 @@ def debug_stacks_enabled() -> bool:
     return os.environ.get(DEBUG_STACKS_ENV, "1").strip().lower() not in DEBUG_STACKS_OFF
 
 
+#: How many deaths inside :data:`STALL_BEAT_WINDOW_S` are TOLERATED.
+#:
+#: TOLERATED, not "a storm": the panel below gives up on the death that comes
+#: after this many, so the shipped constant of 3 tolerates three deaths and ends
+#: the supervision on the FOURTH (agent review round 2, MINOR 1: an earlier
+#: version of this comment said "the fifth", which is one more than the code
+#: does — the number a reader takes from prose has to be the number the runtime
+#: acts on).
+#:
+#: THE BUDGET IS A RATE, NOT A LIFETIME ALLOWANCE, and the shape of this constant
+#: is the whole of that (agent review round 1, MAJOR 1). A counter that is only
+#: ever incremented turns a storm guard into a slow disarmament: THREE unrelated
+#: transient deaths spread over a long session were enough to spend it, and the
+#: death AFTER them — hours later, no more related to those three than they were
+#: to each other — ended the supervision for the rest of the session, so the
+#: WORKLOAD stamp could then freeze for good and the bound could end a healthy
+#: runtime, which is the incident this supervision exists to prevent. Counting
+#: deaths inside a rolling window keeps what the cap is FOR (a hot failure cannot
+#: spend unbounded resources re-creating a tick that will not run) without what it
+#: accidentally had (one session's whole allowance, spent once and never
+#: returned).
+STALL_BEAT_RESTARTS = 3
+
+#: The window :data:`STALL_BEAT_RESTARTS` deaths are counted over, in seconds.
+#:
+#: ONE BOUND'S WORTH (``types.DEFAULT_STALL_S`` is 300 s), and the scale is the
+#: argument rather than a coincidence: "is this tick flapping?" is the same
+#: question the bound asks of the plane it feeds, over the same period. Below this
+#: rate a death is an incident the supervision absorbs; at this rate the plane's
+#: reporter is not working and the bound is about to judge the plane anyway. A
+#: window shorter than one heartbeat would make the budget unreachable, because
+#: attempts cannot be closer together than the tick's own leading sleep.
+STALL_BEAT_WINDOW_S = 300.0
+
+
 async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
     """Report the WORKLOAD loop's progress to the process's stall bound.
 
@@ -3138,6 +3191,287 @@ async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
         # them would be a drift in what the bound means.
         await asyncio.sleep(HEARTBEAT_INTERVAL_S)
         stall_watchdog.beat(stall_watchdog.WORKLOAD)
+
+
+def _record_tick_death(reason: str) -> str:
+    """Best-effort write of one tick-death line, and the clause naming where it landed.
+
+    MAY NEVER RAISE, AND THAT INCLUDES THE CLAUSE IT BUILDS. Two callers' CONTROL FLOW depends
+    on this returning rather than on what it returns: the give-up has to reach its ``return``
+    (agent review round 2, MINOR 2 — an un-totaled write there let a failing diagnostic defeat
+    the terminal state, measured as 130 ticks, 130 guard tracebacks and no give-up line in 2 s)
+    and a cancellation has to stay a cancellation (the same shape one branch over, where the
+    write's exception replaced the ``CancelledError``).
+
+    THE CLAUSE MOVED IN HERE FOR THE SAME REASON (agent review round 3, M2): the ``where`` string
+    was built at the call site and interpolated ``stall_watchdog.dump_path()``, which reaches
+    ``log_dir()`` — so even with the write itself total, a raise from the PATH LOOKUP hot-looped
+    the supervisor (121 creations, no give-up) one line below the fix. Everything the give-up
+    needs is therefore computed here, where nothing can raise, and the caller has no statement
+    left between deciding to give up and returning.
+
+    The two failure modes are reported apart, because they mean different things: a record that
+    could not be written is a missing diagnostic, while a record that landed but could not be
+    NAMED is present in the dump and only the log line is poorer for it.
+    """
+    try:
+        recorded = stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, reason)
+    except Exception:  # noqa: BLE001 — see the docstring: this must not move control flow
+        _safe_warning(
+            "session runtime: the stall bound's WORKLOAD tick-death record could not be "
+            "written, so the log line for this event is the only trace of it",
+            exc_info=True,
+        )
+        return "could NOT be recorded, so this log line is the only trace"
+    if not recorded:
+        return "could NOT be recorded, so this log line is the only trace"
+    try:
+        return f"is recorded in {stall_watchdog.dump_path()}"
+    except Exception:  # noqa: BLE001 — naming the file must not decide the give-up either
+        _safe_warning(
+            "session runtime: the stall bound's WORKLOAD tick-death record landed, but its "
+            "dump path could not be resolved for the log line",
+            exc_info=True,
+        )
+        return "is recorded, in the dump beside this runtime's log"
+
+
+def _safe_warning(message: str, *args: object, exc_info: bool = False) -> None:
+    """``logger.warning`` FOR A PATH THAT MUST NOT BE BROKEN BY ITS OWN REPORT.
+
+    EVERY log call in the supervision goes through here (agent review round 4, MINOR), because
+    each one sits between a decision and the statement that carries it out — and this shape has
+    now been found three times in two functions:
+
+    * the give-up's own line: unprotected, a raise from it reached the cycle guard, which slept
+      and went round again, so the give-up never happened (rigged: 321 creations in 6 s against
+      4 for the control);
+    * the two inside :func:`_record_tick_death`, i.e. in the function documented "MAY NEVER
+      RAISE" (rigged together with the record: 282 creations);
+    * the cancellation branch's, where a raise replaces the ``CancelledError`` a shutdown asked
+      for, exactly as the un-totaled write did in round 2;
+    * the cycle guard's own, which is the one that keeps the supervision alive at all — a raise
+      there ends the supervisor, and a supervisor that has ended is the frozen stamp and the
+      bound firing on a healthy runtime, which is the incident this whole change is about.
+
+    REACHABLE BY REAL STATE, not only by a rig: this venv's ``StreamHandler.emit`` re-raises
+    ``RecursionError`` instead of routing it to ``handleError``, and a runtime wedged enough to
+    blow the recursion limit is exactly the runtime driving this loop.
+
+    The cost is stated rather than hidden: if the log line cannot be written, the event is
+    reported by the dump record that precedes it and by nothing else.
+    """
+    try:
+        logger.warning(message, *args, exc_info=exc_info)
+    except Exception:  # noqa: BLE001 — a report that cannot be made is not a second failure
+        pass
+
+
+async def _watch_stall_beats(stop: asyncio.Event) -> None:
+    """Keep the WORKLOAD tick running for as long as the session is live.
+
+    THE DEFECT THIS EXISTS FOR, measured on 0.62.0 (2026-09-21). The tick used to
+    be started with a bare ``ensure_future`` and named exactly twice — there and
+    at shutdown — so when it RAISED, nothing observed it: ``asyncio`` reports an
+    unretrieved exception only at garbage collection, and a bound-firing
+    ``_exit(1)`` never reaches GC at all. Nothing re-created the task either, so
+    the WORKLOAD stamp froze FOREVER and the bound fired one deadline later on a
+    runtime that was perfectly healthy, killing the turn in flight. Three
+    readings were wrong at once: the runtime was reported as silent while it was
+    working, the reporter's own death was reported nowhere, and the artifact
+    could not tell the two apart — ``faulthandler`` dumps THREADS, and a dead
+    task has neither a thread nor a frame, so the dump showed exactly what an
+    idle healthy process shows.
+
+    SO THE DEATH IS OBSERVED INSTEAD OF LEFT TO THE GARBAGE COLLECTOR, and the
+    ``await`` below is what observes it: this coroutine drives the tick, so the
+    raise lands in a live frame at the moment it happens. A done-callback would
+    have to spawn the replacement from a synchronous callback (it cannot await
+    the delay) and would still leave the exception for whoever remembered to
+    call ``exception()``; awaiting it is the same visibility with the restart in
+    the same frame, and it also means ``amain``'s shutdown cancels the LIVE tick
+    through this await rather than skipping a dead one.
+
+    LIVENESS SEMANTICS ARE UNCHANGED. The tick stays a plain sleep loop
+    (:func:`_beat_stall_watchdog`, whose docstring says why a waiting turn must
+    keep it ticking), a genuinely silent plane still trips the bound, and a tick
+    that stays dead still trips it eventually: nothing here unbounds a plane
+    whose reporter is gone, because the honest fail-safe is to leave on the
+    deadline with the reason written into the dump rather than to run on with
+    one leg silently switched off. What is new is only that a death is LOGGED,
+    RECORDED, and — inside a rolling rate — UNDONE. The budget is
+    ``STALL_BEAT_RESTARTS`` TOLERATED deaths inside ``STALL_BEAT_WINDOW_S``
+    seconds, and the death after that budget (the FOURTH at the shipped constant)
+    ends the supervision — not a lifetime allowance (agent review round 1,
+    MAJOR 1: a counter that only ever increments is a storm guard that decays
+    into a permanent disarmament, so a death hours after the ones that spent it
+    re-ran the incident this function exists to prevent; agent review round 2,
+    MINOR 1: that sentence said "the fifth" while the code gives up on the
+    fourth). Past that rate the supervision GIVES UP, terminally and loudly, and
+    hands the plane back to the bound -- see the give-up branch for what that
+    costs and why continuing to re-create was rejected.
+
+    THE SPACING THAT MAKES A HOT FAILURE BOUNDED IS THE TICK'S OWN LEADING
+    SLEEP, so this loop adds no delay of its own on the normal path (the guard
+    below is the one place that sleeps, for the case where even that cannot run).
+    ``_beat_stall_watchdog`` is wait-then-beat, so the earliest a tick can die is
+    one heartbeat after it was created, whatever the supervisor does.
+
+    THE FIGURES ARE MEASURED, because a reasoned one was wrong twice (agent review
+    round 1, MINOR 2; and the correction that replaced it was wrong too, caught by
+    a real runtime before it reached the PR). A workload beat that NEVER works, at
+    heartbeat 0.2 s with a 2 s bound: the tick raised at 0.21, 0.63, 1.10 and
+    1.52 s — one heartbeat per attempt PLUS the guard's own heartbeat after each
+    failed stamp, because a beat that is broken breaks the supervisor's stamp with
+    it — and the bound ended the process 2.44 s after the arm. At the production
+    cadence (15 s, bound 300 s) that shape gives a give-up ~105 s after the arm and
+    a runtime that ends ~300 s after it.
+
+    THE INVARIANT, which is the only figure worth quoting: the bound fires one
+    deadline after the plane's LAST STAMP, and a stamp only ever comes from a beat
+    that WORKED — so a persistently broken beat costs the runtime no extra life
+    (its deadline is the arm's own), while a TRANSIENT death is exactly what the
+    re-creation's stamp buys back, which is why this loop stamps at all.
+
+    NOTHING IN THIS LOOP IS UNSUPERVISED, INCLUDING THE STAMP BELOW (agent
+    review round 1, MINOR 1): the whole cycle runs inside a guard, so a fault in
+    the recovery path is logged with its traceback rather than ending the
+    supervision silently -- which is this function's own defect, one level up.
+    """
+    deaths: deque[float] = deque()
+    while True:
+        # THE WHOLE CYCLE IS GUARDED. Every statement here but ``await tick`` is
+        # unsupervised state, and the failure it protects against is measured: a
+        # raise from the stamp below ended the supervisor, froze the stamp, and
+        # let the bound kill a healthy runtime. The guard is not a retry counter
+        # and deliberately has no budget of its own, because it needs none: one
+        # heartbeat per iteration bounds its cadence, and it does NOT stamp the
+        # plane, so if it is the thing that keeps failing then the plane goes
+        # genuinely unreported and the BOUND ends this runtime within one
+        # deadline -- the fail-safe, already in place.
+        try:
+            tick = asyncio.ensure_future(_beat_stall_watchdog(stop))
+            caught: Exception | None = None
+            try:
+                await tick
+            except Exception as exc:  # noqa: BLE001 — a dying tick ends nothing in itself
+                caught = exc
+            if stop.is_set():
+                # Ended because the session is ending, which is what it is for.
+                return
+            now = time.monotonic()
+            deaths.append(now)
+            while deaths and now - deaths[0] > STALL_BEAT_WINDOW_S:
+                deaths.popleft()
+            detail = (
+                f"{type(caught).__name__}: {caught}"
+                if caught is not None
+                else "the tick returned early, with no stop and no exception"
+            )
+            # THE DECISION IS TAKEN BEFORE ANYTHING THAT CAN RAISE (agent review
+            # round 2, MINOR 2). It used to be re-derived after the record write,
+            # so a raise from that write skipped the `return` below: the guard
+            # caught it, the loop went round again, and the FAILURE OF A REPORT
+            # defeated the give-up — reproduced as 130 ticks, 130 guard
+            # tracebacks and no give-up line in 2 s, with the plane never stamped.
+            # A terminal state that a diagnostic can switch off is not terminal.
+            giving_up = len(deaths) > STALL_BEAT_RESTARTS
+            if giving_up:
+                # THE GIVE-UP STATE, NAMED AND ARGUED (agent review round 1,
+                # MAJOR 1 asked for the choice to be explicit). It is TERMINAL
+                # for the session, and the reason is that the only thing that
+                # could re-arm supervision is this supervisor, which is the
+                # thing giving up. The rejected alternative -- keep re-creating
+                # while a plane's reporter cannot run -- is a choice between
+                # stamping on the plane's behalf (asserting a liveness nothing is
+                # delivering: the instrument lying about the one thing it
+                # measures) and not stamping (in which case the bound fires
+                # anyway). So the bound firing IS the fail-safe, and this line is
+                # what makes it attributable instead of mysterious.
+                detail += (
+                    f" -- and the supervision GIVES UP here: {len(deaths)} deaths inside "
+                    f"{STALL_BEAT_WINDOW_S:g}s. Terminal for this session by design; what that "
+                    f"costs is stated plainly: from here on nothing watches whether the "
+                    f"workload plane reports, its stamp is left to freeze, and the bound ends "
+                    f"this runtime one deadline after its last stamp"
+                )
+            # THE RECORD IS BEST-EFFORT AND THE GIVE-UP IS NOT, and since round 3 (M2)
+            # that covers the CLAUSE as well as the write: everything the give-up needs is
+            # computed inside ``_record_tick_death``, so there is no statement left here
+            # that could keep this loop from reaching the ``return`` below — the path
+            # lookup used to sit on this line, and rigging it to raise hot-looped the
+            # supervisor with no give-up at all.
+            #
+            # THE RECORD ALSO COMES FIRST, so that a restart which is itself killed by the
+            # bound (a tick that dies nearly a deadline late cannot be saved) still leaves
+            # the reason in the file a reader will open.
+            where = _record_tick_death(detail)
+            if giving_up:
+                # THE REPORT GOES THROUGH THE TOTAL CALL TOO (agent review round 4, MINOR):
+                # this line sat between the decision and the ``return`` below, so a raise from
+                # logging reached the guard, which slept and went round again — the give-up was
+                # defeated by the announcement of the give-up (rigged: 321 creations, no
+                # give-up line, control 4).
+                _safe_warning(
+                    "session runtime: the stall bound's WORKLOAD tick died (%s); the tick's "
+                    "death %s",
+                    detail,
+                    where,
+                )
+                return
+            _safe_warning(
+                "session runtime: the stall bound's WORKLOAD tick died (%s); re-creating it "
+                "(death %d inside %.0fs). Its plane's stamp is refreshed by the re-creation "
+                "and then by the new tick, and the tick's death %s",
+                detail,
+                len(deaths),
+                STALL_BEAT_WINDOW_S,
+                where,
+            )
+            # THE RESTART IS ITSELF A TURN OF THE WORKLOAD LOOP, so stamping here
+            # is a true reading rather than an optimistic one -- this coroutine
+            # only runs when that loop runs. Without it the plane stays stamped as
+            # silent for the new tick's leading sleep, and a death that happened
+            # near the deadline would be completed by the bound instead of by the
+            # recovery that just happened.
+            stall_watchdog.beat(stall_watchdog.WORKLOAD)
+        except asyncio.CancelledError:
+            # A CANCELLATION WITH ``stop`` UNSET IS NOT A SHUTDOWN (agent review
+            # round 1, NIT 1). ``amain`` sets ``stop`` and then cancels, so the two
+            # cases are separable -- and they must be, because "the session is
+            # ending" and "something else ended the ticker" are the pair this
+            # module keeps insisting an instrument must not confuse. Nothing else
+            # cancels this tick today; the guard is here so the day something
+            # does, it is in the log and in the dump rather than silent.
+            if not stop.is_set():
+                _safe_warning(
+                    "session runtime: the stall bound's WORKLOAD tick was cancelled while the "
+                    "session was live, so the supervision ends with it: the plane has no "
+                    "reporter and the bound will end this runtime one deadline after its last "
+                    "stamp",
+                    exc_info=True,
+                )
+                # THROUGH THE TOTAL WRITE, for the sibling reason: an un-totaled
+                # ``note_tick_death`` raising HERE would replace this CancelledError
+                # with its own exception, so the supervisor would end ``OSError``
+                # where the shutdown asked for ``cancelled``.
+                _record_tick_death(
+                    "the tick was cancelled while the session was live -- not a shutdown, so "
+                    "nothing re-created it"
+                )
+            raise
+        except Exception:  # noqa: BLE001 — nothing here may end the supervision unobserved
+            # THROUGH THE TOTAL CALL, and this one matters most: a raise from this log line
+            # escapes the handler, so the ``while`` ends and the supervision dies — the tick is
+            # never re-created, the stamp freezes and the bound ends a healthy runtime, which is
+            # the incident this function exists to prevent (agent review round 4, MINOR).
+            _safe_warning(
+                "session runtime: the stall bound's WORKLOAD supervision raised in its own "
+                "recovery path and is continuing; the plane is not stamped on this path, so "
+                "the bound still bounds it",
+                exc_info=True,
+            )
+            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
 
 
 async def amain(operator_cap: bytes | None = None) -> int:
@@ -3537,10 +3871,13 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # beside the signal wait; whichever fires first wins.
     reaper = asyncio.ensure_future(_reaper(handle, runtime, stop))
     # The workload half of the stall bound, beside the reaper because it shares
-    # its lifetime exactly: both run for the whole session and both stop with
-    # it. Nothing is armed for an in-process host that never went through this
-    # module's entry point, where ``beat`` is a no-op.
-    stall_beats = asyncio.ensure_future(_beat_stall_watchdog(stop))
+    # its lifetime exactly: both run for the whole session and both stop with it.
+    # SUPERVISED rather than a bare task, because an unobserved tick that dies
+    # outlives this process's health by one deadline (see
+    # :func:`_watch_stall_beats`, and the incident it documents). Nothing is
+    # armed for an in-process host that never went through this module's entry
+    # point, where ``beat`` is a no-op.
+    stall_beats = asyncio.ensure_future(_watch_stall_beats(stop))
     reaper_ran_clean_exit = False
     await stop.wait()
     if draining is not None and not draining.done():
@@ -3551,6 +3888,11 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # against a session that is already disposing.
         draining.cancel()
     if not stall_beats.done():
+        # The SUPERVISOR, so this reaches the live tick through its await rather
+        # than skipping a dead one: a tick that died and was re-created is not
+        # the task this handle names, which is exactly the state the old bare
+        # handle could not cancel. A supervisor that has returned (its restart
+        # budget exhausted) is ``done`` and owes nothing.
         stall_beats.cancel()
     if not reaper.done():
         reaper.cancel()

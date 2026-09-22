@@ -201,6 +201,18 @@ def _bash_shell(watcher: ConfigWatcher) -> str:
     return resolve_bash_shell(_configured_bash_shell())
 
 
+def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
+    """What ``execute_bash`` resolves per call for the search-interception keys.
+
+    Read through ``_search_interception_config``, the very reader the tool calls,
+    which resolves ``paths.config_dir()`` itself — the probe points that at the
+    watcher's directory, so a write from another process lands on the next call.
+    """
+    from local_operator.tools.builtin import _search_interception_config
+
+    return _search_interception_config()
+
+
 def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = None) -> str:
     """The subagent ModelSpec the session resolves for an effort tier.
 
@@ -523,6 +535,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.max_attempts": (1, lambda s, w: _fetch_settings(w).max_attempts),
     "web_fetch.blocked_retry": (False, lambda s, w: _fetch_settings(w).blocked_retry),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
+    # ``tools.search_interception.*`` is read per ``bash`` call through a fresh
+    # ConfigManager (``builtin._search_interception_config``), so an edit lands on
+    # the next command — observed through that same reader, not the raw mapping.
+    "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),
+    "tools.search_interception.block": (False, lambda s, w: _search_interception(w)[1]),
+    "tools.search_interception.rg_excludes": (False, lambda s, w: _search_interception(w)[2]),
     # ``shell_environment.*`` is deliberately NOT here (review round 1, M2): the
     # policy is resolved once per process, so it is a NEW-LAUNCH key and the
     # non-LIVE guard below is what covers it, from the other direction.

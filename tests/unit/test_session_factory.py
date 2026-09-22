@@ -29,7 +29,16 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_USER_TURN_KEY,
     RENDERED_INJECTION_KEY,
 )
-from local_operator.harness.types import AgentTool, TextContent
+from local_operator.harness.types import (
+    AgentTool,
+    ChatRequest,
+    CustomMessage,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolResult,
+)
 from local_operator.session.session import Session
 from local_operator.session_factory import (
     _latest_user_query,
@@ -41,6 +50,7 @@ from local_operator.session_factory import (
     resolve_hosting_model,
     wire_mcp_into_session,
 )
+from tests.unit.session.test_session import ScriptedStream
 
 if TYPE_CHECKING:
     from local_operator.agents import AgentData, AgentRegistry
@@ -1060,8 +1070,16 @@ class FakeSessionShell(Session):
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
-    def refresh_tools(self, tools) -> None:
+    def refresh_tools(self, tools) -> bool:
+        """Swap the inventory and report it as reaching the next model call.
+
+        The real ``Session`` publishes its tools array once per turn, so its
+        return value is what the resolver's reply promises. This shell has no
+        turn loop and no array, so every swap is immediately effective — the
+        signature is matched rather than the behaviour imitated.
+        """
         self.tools = list(tools)
+        return True
 
     def add_dispose_hook(self, hook, *, last: bool = False) -> None:
         # ``last`` mirrors ``Session.add_dispose_hook``, including the ordering it
@@ -4653,3 +4671,368 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
         "still in flight at teardown is persisted through it, and closing first "
         f"is what loses it (order was {order!r})"
     )
+
+
+# --- Leading-region stability ---------------------------------------------------
+#
+# THE COST MODEL. The auto route's upstream cache is a STRICT contiguous prefix
+# cache: a change at position X invalidates every token after X. The system
+# blocks and the tools array both ride AHEAD of the conversation, so a tool
+# published in the middle of a turn — which is what every `read
+# mcp://<server>/<tool>` enable does — reprices the whole conversation on the next
+# call. Measured on live radient/auto traffic: of the consecutive warm pairs whose
+# leading region changed, 32 of 35 were the tools array, at 38.77% of sent tokens
+# re-sent, against 1.05% when the leading region held; two MCP enables 58s apart
+# cost 323,227 and 340,572 excess tokens.
+#
+# These tests pin the two movers measured on that route — the tools array, and a
+# host capability probe re-read while a session is already running — through THE
+# composition root, so neither can be satisfied by wiring no shipped host
+# performs.
+
+
+class _ScriptedChatStream(ScriptedStream):
+    """``ScriptedStream`` for a session built by ``create_session``.
+
+    Two additions, both about living outside one test's control. ``close``:
+    ``create_session`` folds the stream's close into dispose, and the real stream
+    closes a shared httpx pool. A script that repeats once exhausted: background
+    work (a title write, a compaction check) may issue a call the test did not
+    script, and an index error there would be a failure in the harness rather
+    than in the leading region under test.
+    """
+
+    def __init__(self, turns: list[list[Any]]) -> None:
+        super().__init__(turns)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def __call__(self, request: ChatRequest, signal: Any):
+        if len(self.requests) >= len(self.turns):
+            self.turns.append([StreamEndEvent(stop_reason="stop")])
+        return super().__call__(request, signal)
+
+
+def _leading_region(request: ChatRequest) -> tuple[list[str], list[tuple[str, str]]]:
+    """One request's cached prefix, in the shape the cache sees it.
+
+    System blocks, then the tools array IN ORDER — an extra tool appended at the
+    END of the array still lands in the prefix, because the array sits before the
+    conversation. That is why "append, don't reorder" does not help here, and why
+    the fix has to be about WHEN the array moves rather than where in it a tool
+    lands.
+    """
+    return (
+        list(request.system_blocks or []),
+        [(tool.name, json.dumps(tool.parameters, sort_keys=True)) for tool in request.tools],
+    )
+
+
+async def _composition_root_session(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, stream: _ScriptedChatStream
+) -> Session:
+    """A real session from ``create_session`` on a scripted in-process stream.
+
+    ``create_session`` is what ``cli.py``, exec mode and the background worker all
+    call, and it is the only builder that runs the real ``_prepare``: the model
+    resolution, the system-blocks provider and its host probes, and the session's
+    own kwargs. Nothing here reaches the network — provider-client construction
+    and the MCP wiring are both replaced — while the config, credential and agent
+    stores stay the real objects rooted in the isolated ``tmp_config_dir``.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    monkeypatch.setattr("local_operator.model.configure.create_stream_fn", lambda *a, **kw: stream)
+
+    async def _no_mcp_wiring(session, tools, cwd, **kwargs):
+        # The MCP *connection* is not what these tests measure: an enable reaches
+        # a session as ``Session.refresh_tools`` (see
+        # ``session_factory.refresh_selected``, which the resolver calls), and
+        # that is what the tool below performs. Swapping the wiring keeps this a
+        # no-network, no-SDK test.
+        return None
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", _no_mcp_wiring)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    return cast(Session, session)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_enabled_mid_turn_waits_for_the_next_turn_in_the_array(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression guard for the measured cache loss.
+
+    The array is published at most ONCE per turn. An enable that lands after this
+    turn's first provider call must not move the prefix for the calls that
+    follow, and the enabled tool must not be silently unreachable either: the
+    session's inventory still takes it immediately (that is what makes the tool
+    executable, and what the prompt's inventory delta reports), so this is a
+    delay in the ARRAY and never a freeze of the session. That distinction is the
+    whole design — a session-lifetime freeze would break the lazy-MCP rung.
+    """
+    stream = _ScriptedChatStream(
+        [
+            # Turn 1, provider call 1. In production this tool call is `read
+            # mcp://linear/get_user`, whose resolver calls the same
+            # ``Session.refresh_tools`` the tool below calls.
+            [
+                StreamToolCallDelta(index=0, id="c1", name="enable", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            # Turn 1, provider call 2: the call whose cache this test is about.
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            # Turn 2, where the array is allowed to move.
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    async def never_execute(*args: Any, **kwargs: Any):
+        raise AssertionError("enabling an MCP tool must not execute it")
+
+    enabled = AgentTool(
+        name="mcp__linear_get_user",
+        description="Return the authenticated Linear user",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    published: list[bool] = []
+    side_channel: list[list[str]] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        published.append(session.refresh_tools([*session._tools, enabled]))
+        # What an aside or a compaction-advisor request would send. They must ride
+        # the SAME prefix the turn sends (the tools block is the front of it), so
+        # they read the published array — not the live inventory, which the swap
+        # above has already moved.
+        side_channel.append([tool.name for tool in session._side_channel_tools()])
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="enable",
+            content=[TextContent(text="enabled")],
+        )
+
+    def _enable_tool() -> AgentTool:
+        return AgentTool(
+            name="enable",
+            description="enable an MCP tool",
+            parameters={"type": "object", "properties": {}},
+            approval_tier="read",
+            execute=execute,
+        )
+
+    # Published BEFORE the turn opens: the array this test measures is the one the
+    # turn starts with, so the extra harness tool has to be in it already.
+    was_published = session.refresh_tools([*session._tools, _enable_tool()])
+    await session.prompt("enable the linear tool, then answer")
+    await session.prompt("and again")
+
+    assert len(stream.requests) == 3, "one turn with a tool batch, then one more turn"
+    first, second, third = stream.requests[0], stream.requests[1], stream.requests[2]
+    # The claim: two provider calls inside ONE turn share a byte-identical leading
+    # region. A tool appended at the end of the array is still a prefix miss.
+    assert _leading_region(second) == _leading_region(first)
+    assert enabled.name not in {tool.name for tool in second.tools}
+    # The enable WAS applied: the session can resolve and advertise it, so nothing
+    # was frozen — only the array's publish point moved.
+    assert enabled.name in {tool.name for tool in session._tools}
+    # And it is not lost to the session: the next turn's array carries it.
+    assert enabled.name in {tool.name for tool in third.tools}
+    assert _leading_region(third)[0] == _leading_region(first)[0]
+    # The publish contract the resolver's reply is built on: reachable from
+    # before the turn, deferred once the turn's array is on the wire.
+    assert was_published is True
+    assert published == [False]
+    # And the side channels that must reproduce this prefix send what the turn
+    # sent, not the inventory the mid-turn enable already grew.
+    assert side_channel == [[tool.name for tool in first.tools]]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_host_capability_probe_flip_cannot_start_a_prefix_epoch(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block 0 is the one block whose change costs EVERY live session a cold prefix.
+
+    ``prompts_api`` renders the console/browser notes from a HOST probe that
+    reads the desktop app's discovery record, and that record accepts a
+    stale-but-alive heartbeat — so the probe's answer flips with a heartbeat's
+    age, mid-session, on a timer nobody in this process controls. Because the
+    probe was re-read on every render, block 0 moved and the persisted-prefix
+    protocol answered correctly by starting a NEW epoch: two live sessions
+    flipped at 11:34:22/11:34:25 and reverted at 11:37:00/11:37:33, measured as
+    cache_read 47,616 -> 3,968 and 66,816 -> 50,304.
+
+    The epoch path is for AUTHORITY (edited instructions, repo guidance, a newer
+    packaged prompt). A liveness probe is not authority, so the host half of the
+    decision is taken once at construction. The tool-MEMBERSHIP half stays live:
+    the call path re-probes and refuses correctly, which is what makes a stale
+    sentence inside a session the acceptable cost.
+
+    The provider memoises its blocks on a key that does not include the host
+    probes, so the defect is only reachable from a RE-RENDER — and a live session
+    re-renders whenever its knowledge selection moves, which a new user turn does.
+    The knowledge stub below is that re-render, held deterministic: asserting the
+    epoch here while the provider was serving its memo would prove nothing, so the
+    state delta is asserted too, as the evidence the render actually happened.
+
+    THE `console` TOOL MUST BE ABSENT for this guard to mean anything, and the
+    precondition is asserted rather than assumed (QA round 1's scenario E found
+    it: built with the tool present, the membership half ORs the probe away and
+    block 0 does not move on either tree, so the experiment proves nothing). The
+    patch below removes the tool AND flips the host answer, which is the
+    incident's shape — a session built while the desktop app was down.
+    """
+    import local_operator.tools.builtin as builtin_tools
+
+    host = {"console": False}
+    # The console's ONE createIf gate is the same function the prompt's host probe
+    # calls, so patching it drives both the inventory and the note — which is
+    # exactly the coupling the three-state diagnosis rests on.
+    monkeypatch.setattr(builtin_tools, "ui_console_advertisable", lambda: host["console"])
+    monkeypatch.setattr(builtin_tools, "ui_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin_tools, "bridge_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin_tools, "cmux_browser_available", lambda: False)
+
+    knowledge = {"renders": 0}
+
+    async def _changing_knowledge(*args: Any, **kwargs: Any) -> str:
+        knowledge["renders"] += 1
+        return f'<skills>\n<skill name="rev-{knowledge["renders"]}"/></skills>'
+
+    monkeypatch.setattr(session_factory, "_select_knowledge_block", _changing_knowledge)
+
+    stream = _ScriptedChatStream([[StreamEndEvent(stop_reason="stop")]] * 2)
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    await session.prompt("first")
+    epoch = session._transcript.latest_custom_entry("system_prefix")
+    assert epoch is not None, "the persisted-prefix protocol must be on for this session"
+    first_region = _leading_region(stream.requests[0])
+    # The precondition QA round 1 named: with the console tool IN the array, its
+    # membership ORs the host probe away and block 0 cannot move on either tree.
+    assert "console" not in {tool.name for tool in stream.requests[0].tools}
+    # The flip is observable at all only because the construction-time answer
+    # renders the prohibition: without the note in block 0 there would be nothing
+    # for a heartbeat to move, and this guard could not go red.
+    assert "When the `console` tool is NOT in your tool list" in first_region[0][0]
+    await session.prompt("second")
+
+    # The re-render happened (the knowledge selection moved, as a new user turn
+    # makes it move), so the probes below were consulted again.
+    states = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage) and message.custom_type == "session_state"
+    ]
+    assert states, "the provider re-used its memo, so this guard proved nothing"
+
+    # The desktop app's discovery record ages back into the advertisable window —
+    # same process, same session, no edit by anyone — and the frozen prefix must
+    # not care.
+    host["console"] = True
+    await session.prompt("third")
+
+    frozen_before = list(stream.requests[0].system_blocks or [])
+    frozen_now = list(stream.requests[2].system_blocks or [])
+    moved = [
+        index for index, (before, now) in enumerate(zip(frozen_before, frozen_now)) if before != now
+    ]
+    assert not moved, (
+        f"a host capability probe flip moved system block(s) {moved}; block 0 is the one "
+        "whose change forces a new persisted prefix epoch for every live session"
+    )
+    assert session._transcript.latest_custom_entry("system_prefix") is epoch, (
+        "a host capability probe flip started a NEW persisted prefix epoch: the epoch "
+        "path is reserved for authority (edited instructions, repo guidance, a newer "
+        "packaged prompt), and a heartbeat's age is neither"
+    )
+    assert _leading_region(stream.requests[2])[0] == first_region[0]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_removed_mid_turn_stays_in_the_array_until_the_next_turn(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shrink direction, which used to republish the array mid-turn.
+
+    ``session_factory.refresh_selected`` — the MCP ``on_tools_changed`` and
+    disconnect path — rebinds the inventory through ``Session.refresh_tools``,
+    and before the array's one-publish latch that rebind moved the array for the
+    turn in flight: the same prefix cost as a grow, paid by a server dropping
+    away rather than by anything the user did. ``Session._reconcile_web_tools``
+    already refuses to move the inventory mid-turn for exactly this reason; the
+    latch is what extends that rule to the array.
+
+    What must still be immediate is the INVENTORY, and that is asserted too: a
+    removal that took effect only at the next turn would leave a session offering
+    a tool whose transport is gone.
+    """
+    stream = _ScriptedChatStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="drop", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    async def never_execute(*args: Any, **kwargs: Any):
+        raise AssertionError("the removed tool must not be executed by this test")
+
+    def _tool(name: str, execute) -> AgentTool:
+        return AgentTool(
+            name=name,
+            description=f"{name} the inventory",
+            parameters={"type": "object", "properties": {}},
+            approval_tier="read",
+            execute=execute,
+        )
+
+    dropped: list[bool] = []
+
+    async def drop_execute(tool_call_id, args, signal, on_update, context):
+        # Exactly what a disconnected MCP server's `on_tools_changed` does.
+        dropped.append(
+            session.refresh_tools([tool for tool in session._tools if tool.name != "victim"])
+        )
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="drop", content=[TextContent(text="dropped")]
+        )
+
+    seeded = session.refresh_tools(
+        [*session._tools, _tool("victim", never_execute), _tool("drop", drop_execute)]
+    )
+    await session.prompt("drop the victim tool, then answer")
+    await session.prompt("and again")
+
+    first, second, third = stream.requests[0], stream.requests[1], stream.requests[2]
+    assert {"victim", "drop"} <= {tool.name for tool in first.tools}
+    # The inventory dropped it at once — the tool is no longer resolvable.
+    assert "victim" not in {tool.name for tool in session._tools}
+    # ... while the array the turn is using is untouched, then catches up.
+    assert "victim" in {tool.name for tool in second.tools}
+    assert _leading_region(second) == _leading_region(first)
+    assert "victim" not in {tool.name for tool in third.tools}
+    assert seeded is True
+    assert dropped == [False], "a mid-turn removal must not republish the array"
+    await session.dispose()

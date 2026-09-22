@@ -6273,6 +6273,26 @@ def mobile_command(args: argparse.Namespace) -> int:
         print(f"installed:    {'yes' if result['installed'] else 'no'}")
         print(f"password set: {'yes' if result['password_set'] else 'no'}")
         print(f"healthy:      {'yes' if result['healthy'] else 'no'}")
+        # A healthy daemon with no bundle serves a 503 to every authenticated GET
+        # ("mobile web bundle not built"), so `healthy: yes` on its own reads as
+        # fine while the phone has no UI at all — the state generations
+        # 0.61.13-0.61.16, 0.61.18 and 0.62.0 were flipped into. One line, naming
+        # the remedy, rather than a redesign of this output.
+        #
+        # Gated on `installed`: on a machine that never set the portal up there is
+        # no phone and no 503, so the line would read as a fault report where the
+        # only correct advice is "you have not set this up yet" (design round 1,
+        # D4). The label leads with the STATE rather than the classifier token, so
+        # it is true on its own; the token stays in the parenthesis, where it is
+        # the classifier's own name (D5).
+        bundle = result.get("bundle")
+        if result["installed"] and bundle in ("buildable", "missing-sources"):
+            detail = (
+                "buildable — run `lop mobile install`"
+                if bundle == "buildable"
+                else "no web sources to build from"
+            )
+            print(f"bundle:       not built ({detail})")
         gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
         print(f"log:          {result['log']}")

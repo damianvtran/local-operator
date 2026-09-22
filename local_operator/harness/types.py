@@ -1995,6 +1995,25 @@ class LoopConfig(BaseModel):
         Field(default=None, exclude=True)
     )
 
+    # The tools array to send NOW, re-read immediately before every provider
+    # call. Supplying this does NOT re-read ``LoopContext.tools`` per call — it
+    # supersedes it, and the host is what decides how often the array may move.
+    # That is the whole point: the array rides AHEAD of the conversation in the
+    # same cache prefix, so on a strict contiguous prefix cache an appended tool
+    # reprices every message behind it, measured at 38.77% of sent tokens
+    # re-sent on live traffic where the leading region moved mid-turn (32 of 35
+    # such pairs were the tools array). A host with live tools wires this to a
+    # per-turn latch: one publish per turn, so an enable that lands while the
+    # turn is already running reaches the array at the NEXT turn.
+    #
+    # Tool RESOLUTION is deliberately not routed through here. It keeps reading
+    # the live ``LoopContext.tools``, which is what makes a tool enabled
+    # mid-turn still executable on the call that a mid-turn enable makes
+    # possible: the array is what the model was shown, not what it may run.
+    # ``None`` keeps the historical behaviour — the live context array, re-read
+    # on every call — for embedders that do not publish tools this way.
+    get_tools: Callable[[], Sequence["AgentTool"]] | None = Field(default=None, exclude=True)
+
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)

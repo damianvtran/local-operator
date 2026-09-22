@@ -351,8 +351,12 @@ def render_tool_inventory_block(
 
     ``host_has_browser`` carries the caller's already-computed host probe so
     the three-state diagnosis documented in :func:`build_system_blocks` is
-    decided identically here. Left as ``None`` (the session's re-render, which
-    has no cheaper source) it is probed once via
+    decided identically here, and the session's own re-render DOES pass it —
+    from the provider's construction-time pair, which
+    ``Session._reconcile_tool_inventory`` reads off the system-blocks provider —
+    so the block-1 note and the block-0 prose cannot disagree about an answer
+    that moves with a heartbeat. Left as ``None`` (a host's own provider, a
+    benchmark's fixed blocks, a bare ``lambda``) it is probed once via
     :func:`_host_browser_backend_available`; that probe is the only way to tell
     state 2 (the HOST has no backend, so the setup playbook applies) from
     state 3 (the host is fine and only this ROLE lacks the tool), and
@@ -546,6 +550,41 @@ def _host_console_available() -> bool:
         return False
 
 
+def host_capability_probes() -> tuple[bool, bool]:
+    """This HOST's capability answer, read ONCE per session: (browser, console).
+
+    The host half of the three-state browser/console diagnosis — the answer that
+    separates "this host has no backend" from "this role's allowlist omits the
+    tool" (see :func:`_host_browser_backend_available`). Both probes read the
+    desktop app's discovery record, which accepts a STALE-but-ALIVE heartbeat, so
+    the answer moves on a timer nobody in this process controls.
+
+    THAT is why callers take it at construction and pass it back in. Block 0 is
+    the one block whose change makes the session start a NEW persisted prefix
+    epoch (:meth:`local_operator.session.session.Session._prepare_system_blocks`),
+    and because the probes used to be re-read on every render, a heartbeat-age
+    flip bought every live session on the machine a cold cache: two sessions
+    flipped at 11:34:22/11:34:25 and reverted at 11:37:00/11:37:33, measured as
+    cache_read 47,616 -> 3,968 and 66,816 -> 50,304. The epoch path is reserved
+    for AUTHORITY — edited instructions, repo guidance, a newer packaged prompt —
+    and a liveness probe is not authority.
+
+    The accepted cost is one stale sentence inside a live session, and it has a
+    DIRECTION, which is the part a future reader needs: taking the answer once
+    at construction can go stale only in the ARRIVE-LATE case — a session built
+    while the desktop app was down keeps shipping the "no backend, do that setup
+    with the user" arm after the app appears. A capability that DEPARTS
+    mid-session is the other direction and is unaffected in substance: the tool
+    MEMBERSHIP half (``has_browser``/``has_console``) is derived per render, and
+    every call path re-probes and refuses (the console refuses per action when
+    the host's console bit is off). So the sentence can only ever be wrong about
+    the HOST, and never about what this session may do — which is what makes it
+    a sentence rather than a capability. QA round 1 measured that residue
+    directly (its scenario E, Q-1).
+    """
+    return (_host_browser_backend_available(), _host_console_available())
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -559,6 +598,8 @@ def build_system_blocks(
     agent_brief: str = "",
     model_label: str = "",
     interactive: bool = True,
+    host_has_browser: bool | None = None,
+    host_has_console: bool | None = None,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -570,6 +611,16 @@ def build_system_blocks(
     A changed standing-instruction head starts a new persisted prefix: cached
     bytes must never hide updated repository rules, custom instructions or a
     newer packaged prompt, including when an old conversation is resumed.
+
+    ``host_has_browser``/``host_has_console`` are the caller's ALREADY-COMPUTED
+    host probes, from :func:`host_capability_probes` at construction time. Pass
+    them: left ``None`` they are re-read here on every render, and because block
+    0 is the block whose change starts a new persisted prefix epoch for the live
+    session, a probe that flips with a heartbeat's age then costs every session
+    its cache (the measured incident is in :func:`host_capability_probes`). The
+    tool-MEMBERSHIP half of the decision is not frozen and must not be — it is
+    derived from ``tools`` on every render, so a tool this session gained is
+    described correctly whatever the host said at construction.
 
     ``user_instructions`` (the operator's standing customization, read once at
     session start from ``system_prompt.md``) rides the HEAD block instead,
@@ -599,7 +650,12 @@ def build_system_blocks(
     # connected... do that setup with the user". False, and actionably false.
     # The host probe is what separates 2 from 3.
     has_browser = any(tool.name == "browser" for tool in tools)
-    host_has_browser = has_browser or _host_browser_backend_available()
+    if host_has_browser is None:
+        host_has_browser = _host_browser_backend_available()
+    # MEMBERSHIP stays live; only the HOST's own answer is taken as given (see
+    # ``host_capability_probes``). ``has_browser`` ORed in first, so a session
+    # that has the tool is unaffected by what the host probe said.
+    host_has_browser = has_browser or host_has_browser
     # The console is the same three-state story with the same consequence for a
     # restricted child, and it is computed HERE rather than left to the template
     # so both capability pairs are decided by one function. Note the console's
@@ -608,7 +664,9 @@ def build_system_blocks(
     # and telling the model to arrange one would be the playwright mistake again
     # (design ui-console-tab §14.5).
     has_console = any(tool.name == "console" for tool in tools)
-    host_has_console = has_console or _host_console_available()
+    if host_has_console is None:
+        host_has_console = _host_console_available()
+    host_has_console = has_console or host_has_console
     # The browser prose is conditional rather than unconditional because it is
     # ~1,500 characters of instruction for a tool that is createIf-gated: a
     # host with no cmux and no extension paid for three paragraphs about a

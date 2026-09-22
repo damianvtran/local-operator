@@ -85,6 +85,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic plant of <venv>/bin/'Local Operator'; both paths are venv-derived",
     ),
     (
+        "local_operator/tools/builtin.py::_rg_config_path",
+        "os.replace",
+        # Atomic write of the generated ripgrep exclude config. Both paths come
+        # from `config_dir()/cache/` plus a fixed basename — no session id, no
+        # caller input — so neither can name a path under `sessions/`.
+        "Atomic replace of <config_dir>/cache/rg-search-excludes.conf; both paths config-derived",
+    ),
+    (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
         # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
@@ -1409,6 +1417,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         4,
     ),
     ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
+    # The spooled-turn store is the third of the supervisor's own state files
+    # (`local_operator/wakes/spooled.py`), beside the index and the ledger and
+    # with the same shape: every path is `<config>/wakes/spooled/<session-id>.json`
+    # built from the config dir plus a FIXED suffix, and the id reaches it only as
+    # a filename (from a session directory's own name, or from this directory's
+    # listing), so it can carry no separator. Nothing in the module walks,
+    # renames or removes a directory, under `sessions/` or anywhere else.
+    (
+        "local_operator/wakes/spooled.py::_write",
+        "os.replace",
+        "temp FILE -> wakes/spooled/<id>.json",
+    ),
+    (
+        "local_operator/wakes/spooled.py::clear_spooled_turn",
+        "<path>.unlink",
+        "wakes/spooled/<id>.json FILE",
+    ),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
     # -- container/in-memory .remove()/.replace(), not the filesystem --------
     (

@@ -89,7 +89,12 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_MODE,
     )
     from local_operator.tools import shell_env
-    from local_operator.tools.builtin import BASH_SHELL_DEFAULT
+    from local_operator.tools.builtin import (
+        BASH_SHELL_DEFAULT,
+        SEARCH_INTERCEPTION_BLOCK_DEFAULT,
+        SEARCH_INTERCEPTION_ENABLED_DEFAULT,
+        SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
+    )
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -134,6 +139,12 @@ def _consumer_defaults() -> dict[str, object]:
         "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
         "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
         "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The three search_interception keys. The consumer constants live next to
+        # the reader in tools/builtin.py, so this mapping is what stops the
+        # registry default and the code default drifting.
+        "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
+        "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
+        "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         # The registry restates this empty string rather than importing the
         # reader (an import edge from the CLI's settings layer into the TUI for
@@ -611,6 +622,48 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_search_interception_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
+    """The three ``search_interception`` rows write exactly where
+    ``tools.builtin`` reads, and a stored value round-trips through the real
+    reader.
+
+    Pinned by test rather than import for the same reason the rows around it
+    are: ``settings_io`` must stay cheap for the CLI while the reader lives in
+    ``tools/builtin``. A registry writing ``tools.search_interception.*`` while
+    the reader looked elsewhere would leave the guard reading its defaults
+    forever — silently un-configurable from ``/settings`` — so the paths and the
+    defaults are asserted against the consumer's own constants.
+    """
+    from local_operator.tools.builtin import (
+        SEARCH_INTERCEPTION_BLOCK_PATH,
+        SEARCH_INTERCEPTION_ENABLED_PATH,
+        SEARCH_INTERCEPTION_RG_CONFIG_PATH,
+        _search_interception_config,
+    )
+
+    assert (
+        settings_io.BY_KEY["tools.search_interception.enabled"].path
+        == SEARCH_INTERCEPTION_ENABLED_PATH
+    )
+    assert (
+        settings_io.BY_KEY["tools.search_interception.block"].path == SEARCH_INTERCEPTION_BLOCK_PATH
+    )
+    assert (
+        settings_io.BY_KEY["tools.search_interception.rg_excludes"].path
+        == SEARCH_INTERCEPTION_RG_CONFIG_PATH
+    )
+    assert settings_io.BY_KEY["tools.search_interception.enabled"].default is True
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["tools.search_interception.block"], False)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["tools"]["search_interception"]["block"] is False
+    assert "tools.search_interception.block" not in stored
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        _enabled, block, _rg = _search_interception_config()
+        assert block is False
 
 
 def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
