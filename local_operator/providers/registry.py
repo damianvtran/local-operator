@@ -16,6 +16,7 @@ import dataclasses
 import importlib
 import os
 from collections.abc import Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
@@ -907,7 +908,9 @@ def first_provider_key(names: Iterable[str], env_value: str | None = None) -> st
     return None
 
 
-def store_provider_key(env_key: str, value: str, *, description: str = "") -> None:
+def store_provider_key(
+    env_key: str, value: str, *, description: str = "", base: Path | None = None
+) -> None:
     """Write a provider-class store row for ``env_key`` (set or update).
 
     The ONE writer for the provider namespace, so every surface that saves a
@@ -917,21 +920,33 @@ def store_provider_key(env_key: str, value: str, *, description: str = "") -> No
     report; unlike the READERS this does not swallow failures, because a write
     the operator asked for and did not get must not look like success.
 
+    ``base`` selects the config root the store lives under; ``None`` is the
+    HOME-derived default, which is what the CLI wants. The credentials route
+    passes the manager's own ``config_dir`` so a server configured with a
+    non-default root writes its provider rows to the SAME root it reads its
+    other state from.
+
     ``update`` is tried first and ``set`` second: ``set`` refuses an existing
     name by design (a mistyped name must not clobber a live credential), so a
     re-run that changed a key would otherwise fail with ``SecretExists``.
     """
     from local_operator.secrets.access import open_store, session_id
-    from local_operator.secrets.errors import SecretExists, SecretNotFound
+    from local_operator.secrets.errors import SecretExists, SecretStoreError
     from local_operator.secrets.store import provider_secret_name
 
     name = provider_secret_name(env_key)
     payload = value.encode("utf-8")
-    store = open_store(create=True)
+    store = open_store(base, create=True)
+    # ``update`` first, then ``set``: ``set`` refuses an existing name by design
+    # (a mistyped name must not clobber a live credential), so a re-run that
+    # changed a key would otherwise fail with ``SecretExists``. The fall-through
+    # is on any store error — a missing row AND a store that does not exist yet
+    # both land here — and ``set`` surfaces its own, more specific failure rather
+    # than this branch hiding it.
     try:
         store.update(name, payload, role="provider", session_id=session_id())
         return
-    except SecretNotFound:
+    except SecretStoreError:
         pass
     try:
         store.set(
@@ -947,7 +962,7 @@ def store_provider_key(env_key: str, value: str, *, description: str = "") -> No
         store.update(name, payload, role="provider", session_id=session_id())
 
 
-def remove_provider_key(env_key: str) -> bool:
+def remove_provider_key(env_key: str, *, base: Path | None = None) -> bool:
     """Delete the provider-class row for ``env_key``; ``True`` if one was removed.
 
     Best-effort on an absent store (returns ``False``): a delete of something
@@ -958,13 +973,13 @@ def remove_provider_key(env_key: str) -> bool:
     from local_operator.secrets.store import provider_secret_name
 
     try:
-        open_store().delete(provider_secret_name(env_key), session_id=session_id())
+        open_store(base).delete(provider_secret_name(env_key), session_id=session_id())
         return True
     except (SecretNotFound, SecretStoreError, OSError):
         return False
 
 
-def stored_provider_env_keys() -> set[str]:
+def stored_provider_env_keys(base: Path | None = None) -> set[str]:
     """ENV KEY names that have a provider-class row in the store.
 
     The name-source reader the controller's ``persisted_providers`` rung uses in
@@ -985,11 +1000,11 @@ def stored_provider_env_keys() -> set[str]:
     from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
 
     try:
-        if not store_path().exists():
+        if not store_path(base).exists():
             return set()
         return {
             record.name[len(PROVIDER_SECRET_PREFIX) :]
-            for record in open_store().list()
+            for record in open_store(base).list()
             if record.name.startswith(PROVIDER_SECRET_PREFIX)
         }
     except (SecretStoreError, OSError, ValueError):
