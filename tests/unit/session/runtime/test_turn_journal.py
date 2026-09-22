@@ -1005,3 +1005,85 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     # narrated as this row's death.
     os.utime(dump, (row.started_at - 600, row.started_at - 600))
     assert journal.death_verdict(row)[1] != STALL_BOUND_CAUSE
+
+    # (f) A FIRE THE RUNTIME SURVIVED IS NOT THIS TURN'S DEATH — the THIRD STATE,
+    # and the one this change introduces. With a turn in flight the bound dumps and
+    # leaves the runtime ALIVE (``stall_watchdog._holds_work``), so a dump carrying
+    # ``HELD_MARKER`` is evidence the runtime was STALLED, never evidence about what
+    # killed it: the death that left this row is some other death, and calling it
+    # ``runtime-stall-bound`` would put the instrument's name on the wrong corpse —
+    # the precise falsehood this rung was added to end, in the other direction. The
+    # fact still reaches the reader, as a lead on whatever DID answer.
+    dump.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f"{stall_watchdog.HELD_MARKER}it did not end it\n",
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert (
+        cause != STALL_BOUND_CAUSE
+    ), f"a fire the runtime SURVIVED was narrated as the death that ended it: {reason}"
+    assert journal.HELD_BOUND_LEAD in reason, (
+        f"the death says nothing about the bound that fired and held, so a reader "
+        f"comparing this with the dump sees two unrelated events: {reason}"
+    )
+
+    # AND THE LIST COLUMN KEEPS IT (design review round 1, D3). ``outcome_summary`` is
+    # what a LIST renders a reason through, and it splits the sentence at its
+    # parenthetical — so while the lead rode inside the brackets a held death and a
+    # no-dump death rendered byte-identical there, collapsing three attribution states
+    # into two outcomes on the surface a person scans. The lead is a CLAUSE of the
+    # sentence now, which is what makes it survive the split.
+    from local_operator import incidents
+
+    listed = incidents.outcome_summary(reason)
+    assert journal.HELD_BOUND_LEAD in listed, (
+        f"the listing column dropped the one fact that says this runtime survived its "
+        f"bound: {listed!r}"
+    )
+    assert listed != incidents.outcome_summary(
+        incidents.render_cut_off_reason(incidents.KILL_UNATTRIBUTED)
+    ), "a held death must not render as a plain unattributed one"
+
+    # ...AND ON THE ARM THAT RECORDS NO OTHER ACT (agent review round 2, MAJOR-2;
+    # design review round 2, D3). With no signal and no install move the row falls
+    # through to ``KILL_CAUSE`` — the arm round 1 measured FIRST — and that arm kept
+    # the lead inside ``row_detail``, so the listing cell for a held-then-killed death
+    # was byte-identical to a no-dump death. ``install_moved`` is patched because this
+    # rig's stamp resolves against the REAL install on disk, so without it the row
+    # always takes the arm above and the assertion below could never fail (the reviewer
+    # measured exactly that hole in the round-1 cell).
+    monkeypatch.setattr(journal, "install_moved", lambda _row: False)
+    kind, cause, reason = journal.death_verdict(row)
+    from local_operator.incidents import KILL_CAUSE
+
+    assert cause == KILL_CAUSE, cause
+    listed = incidents.outcome_summary(reason)
+    assert journal.HELD_BOUND_LEAD in listed, (
+        f"the unattributed arm dropped the lead, so a held death still renders exactly "
+        f"as a no-dump death in the listing: {listed!r}"
+    )
+    assert listed != incidents.outcome_summary(
+        incidents.render_cut_off_reason(KILL_CAUSE, detail=incidents.KILL_UNATTRIBUTED)
+    ), "a held death must not render as a plain no-dump death"
+
+    # (g) ...AND IT STILL READS AS HELD WHEN THE MARKER LANDED MID-LINE (QA round 2,
+    # Q-4). ``faulthandler`` flushes its dump from its own thread while the sampler
+    # appends our marker to the same ``O_APPEND`` descriptor, so on about one fire in
+    # four the marker lands at the end of an unflushed dump line rather than at the head
+    # of its own. Read with a line-start test this dump says "the bound ended it" about
+    # a runtime that is still ALIVE — the exact lie this rung exists to end, restored
+    # through the reader.
+    dump.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f'  File "{stall_watchdog.HELD_MARKER}the bound fired at 1.0 and did NOT end this '
+        "runtime\n",
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert (
+        cause != STALL_BOUND_CAUSE
+    ), f"an interleaved held marker read as the bound ENDING this runtime: {reason}"
+    assert journal.HELD_BOUND_LEAD in reason, reason

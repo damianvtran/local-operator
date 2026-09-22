@@ -853,10 +853,27 @@ def install_moved(row: TurnJournalRow) -> bool:
     return (_now() - age) <= alive_until
 
 
-def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, ...]]:
-    """``(which leg of the runtime's stall bound ended it, which tickers had died)``.
+#: The clause carried by every verdict for a turn whose runtime SURVIVED its own
+#: stall bound before dying of something else — the third state, in the one place a
+#: person reads it.
+#:
+#: WHY IT IS A LEAD RATHER THAN A CAUSE TOKEN. The death this rides with is whatever
+#: killed the runtime AFTERWARDS (a signal, a recorded token, or nothing at all), and
+#: naming the bound as its cause is the inversion this exists to prevent: a bound that
+#: dumped and held is EVIDENCE the runtime was stalled, never evidence about what
+#: ended it. It is the same shape as the other attribution leads on this function
+#: (``SIGTERM received``, ``unattributed``) because it is the same kind of fact —
+#: something established about the death that is not its name.
+HELD_BOUND_LEAD = (
+    "its own stall bound fired earlier, dumped every thread beside its log and did NOT "
+    "end this runtime"
+)
 
-    ``(None, ())`` when this turn left no dump of its own.
+
+def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, ...], bool]:
+    """``(which leg fired, which tickers died, whether the runtime SURVIVED it)``.
+
+    ``(None, (), False)`` when this turn left no dump of its own.
 
     THE TWO FACTS COME OUT OF ONE READ OF ONE FILE, deliberately: the narration
     consumes them together (agent review round 1, MINOR 3), because a bare
@@ -897,11 +914,15 @@ def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, .
 
         path = stall_watchdog.dump_path(row.pid)
         if not path.exists() or path.stat().st_mtime < row.started_at:
-            return None, ()
-        return stall_watchdog.fired_leg(row.pid), stall_watchdog.tick_deaths(row.pid)
+            return None, (), False
+        return (
+            stall_watchdog.fired_leg(row.pid),
+            stall_watchdog.tick_deaths(row.pid),
+            stall_watchdog.held_fire(row.pid),
+        )
     except Exception:  # noqa: BLE001 — an unreadable dump is not a dead session
         logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)
-        return None, ()
+        return None, (), False
 
 
 def _stall_bound_detail(leg: str, tick_deaths: tuple[str, ...] = ()) -> str:
@@ -1025,20 +1046,32 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         render_cut_off_reason,
     )
 
-    leg, tick_deaths = _stall_bound_evidence(row)
-    if leg is not None:
+    leg, tick_deaths, held = _stall_bound_evidence(row)
+    # THE THIRD STATE, and the reason it is tested FIRST among the two. A fired dump
+    # now has two readings, and they want opposite answers: without ``HELD_MARKER``
+    # the bound ENDED this runtime (this rung), with it the bound dumped, found work
+    # in flight, and LEFT THE RUNTIME ALIVE — so a death that happened afterwards is
+    # some OTHER death, and narrating it as this one would be the exact class of lie
+    # this whole rung exists to end (the instrument knowing and saying the wrong
+    # thing is worse than it not saying anything). So the held case falls THROUGH to
+    # the rungs below, carrying :data:`HELD_BOUND_LEAD` so the reader still learns a
+    # bound fired and was survived.
+    if leg is not None and not held:
         return (
             "error",
             STALL_BOUND_CAUSE,
             render_cut_off_reason(STALL_BOUND_CAUSE, detail=_stall_bound_detail(leg, tick_deaths)),
         )
+    held_lead = HELD_BOUND_LEAD if held else ""
     signal = signal_exit_token(row.exit_cause)
     if signal:
         return (
             "error",
             "runtime-shutdown",
             render_cut_off_reason(
-                "runtime-shutdown", detail=row_detail(row, lead=f"{signal} received")
+                "runtime-shutdown",
+                detail=row_detail(row, lead=f"{signal} received"),
+                clause=held_lead,
             ),
         )
     recorded = str(row.exit_cause or "")
@@ -1054,19 +1087,36 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         return (
             "error",
             recorded,
-            render_cut_off_reason(recorded, detail=row_detail(row)),
+            render_cut_off_reason(recorded, detail=row_detail(row), clause=held_lead),
         )
     if install_moved(row):
-        detail = f" ({row.build_label()} → {_current_build_label()})"
+        # The lead rides here too: the install-window arm has the narrowest detail of
+        # the four (a build pair), and a runtime that survived a bound before the
+        # install moved under it is a fact the reader needs on THIS arm most of all —
+        # a stall is why it was still alive to be caught by the tear.
+        detail = f"{row.build_label()} → {_current_build_label()}"
         return (
             "error",
             "install-mid-update",
-            render_cut_off_reason("install-mid-update", detail=detail),
+            render_cut_off_reason("install-mid-update", detail=detail, clause=held_lead),
         )
     return (
         "error",
         KILL_CAUSE,
-        render_cut_off_reason(KILL_CAUSE, detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
+        render_cut_off_reason(
+            KILL_CAUSE,
+            detail=row_detail(row, lead=KILL_UNATTRIBUTED),
+            # ...AND THE HELD LEAD IS A CLAUSE HERE TOO (agent review round 2, MAJOR-2;
+            # design review round 2, D3). This is the arm round 1 measured first — the
+            # "died of nothing recorded" row of that table — and it kept the lead inside
+            # the parenthetical, so a held-then-killed death and a no-dump death still
+            # rendered byte-identically in the listing cell: exactly the collapse of
+            # three states into two that the lead's placement exists to prevent. The
+            # UNATTRIBUTED half stays in the DETAIL, where it belongs: it qualifies the
+            # death, while "the bound fired and did NOT end it" changes what the row
+            # MEANS.
+            clause=held_lead,
+        ),
     )
 
 

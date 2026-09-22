@@ -199,8 +199,11 @@ EXPECTED = [
         # after the pair above for the same append-only reason: ``None`` here
         # because no runtime in this fixture tripped it (the path is
         # ``stall_watchdog``'s to compose, and it is the one artifact a reader
-        # needs after a freeze — see that module).
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
         "stall_dump": None,
+        "stall_held": False,
     },
     {
         "state": "live",
@@ -245,8 +248,11 @@ EXPECTED = [
         # after the pair above for the same append-only reason: ``None`` here
         # because no runtime in this fixture tripped it (the path is
         # ``stall_watchdog``'s to compose, and it is the one artifact a reader
-        # needs after a freeze — see that module).
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
         "stall_dump": None,
+        "stall_held": False,
     },
     {
         "state": "stale",
@@ -296,8 +302,11 @@ EXPECTED = [
         # after the pair above for the same append-only reason: ``None`` here
         # because no runtime in this fixture tripped it (the path is
         # ``stall_watchdog``'s to compose, and it is the one artifact a reader
-        # needs after a freeze — see that module).
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
         "stall_dump": None,
+        "stall_held": False,
     },
 ]
 
@@ -547,7 +556,11 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert list(rows[0]).index("update_failed") < list(rows[0]).index("beat_lag_s")
     assert list(rows[0]).index("beat_lag_s") < list(rows[0]).index("cpu_since_beat_s")
     assert list(rows[0]).index("cpu_since_beat_s") < list(rows[0]).index("stall_dump")
-    assert list(rows[0])[-1] == "stall_dump"
+    # ``stall_held`` is the third state and the newest key, appended after the dump
+    # path it qualifies: a reader that has ``stall_dump`` and not this one cannot
+    # tell a runtime that survived its bound from one the bound ended.
+    assert list(rows[0]).index("stall_dump") < list(rows[0]).index("stall_held")
+    assert list(rows[0])[-1] == "stall_held"
 
     assert (
         cli.sessions_command(
@@ -616,6 +629,137 @@ FAILED_WINDOW = [
     (replace(record, update_failed=UPDATE_PAIR) if index == 0 else record, state)
     for index, (record, state) in enumerate(FIXTURE)
 ]
+
+
+#: ``FIXTURE`` whose first session SURVIVED its own stall bound — the third
+#: attribution state, and the one that reached no rendered surface before design review
+#: round 1 (D1): with the exit held, such a runtime stays stalled for the life of the
+#: process, so the listing is where a person learns it needs them.
+HELD_SESSION = [
+    (replace(record, leaving="") if index == 0 else record, state)
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+def test_a_held_runtime_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
+    """D1: the bound fired, dumped, and did NOT end it — the row must say so.
+
+    Before this, ``stall_held`` reached the JSON row and no screen: a held session listed
+    exactly as an idle one, under a state word ("not answering") that reads as "still
+    settling" — while the safety net that used to resolve it has already fired and the
+    only way out is a person running ``lop stop``. Both halves are asserted: the column
+    and its cell when a row is held, and no column at all when none is.
+    """
+    import argparse
+
+    from local_operator import cli
+    from local_operator.session.runtime import stall_watchdog
+
+    _install_fixture(monkeypatch, HELD_SESSION)
+    held_pid = HELD_SESSION[0][0].pid
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {held_pid})
+
+    rows = session_rows()
+    assert rows[0]["stall_held"] is True
+    assert [row["stall_held"] for row in rows[1:]] == [False, False]
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "STALLED" in out, f"the held state rendered nowhere: {out}"
+    assert cli.HELD_CELL in out, out
+    assert "lop stop" in out, "the cell must name the way out, not only the state"
+
+
+def test_a_stale_pid_with_a_leftover_dump_is_not_held(monkeypatch: Any) -> None:
+    """D8 (round 2): a held dump outlives the runtime, and the phrase must not.
+
+    ``held_pids`` is a scan of the dump files and knows nothing about the process, so a
+    held runtime that a person later stopped kept ``bound held`` — the phrase this round
+    exists to make mean "still running, needs you" — beside a state word saying its pid
+    is gone. The fence is here rather than in the panel, because this is the layer that
+    has the state, and both surfaces read what this publishes.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    stale = [
+        (record, "stale" if index == 0 else state) for index, (record, state) in enumerate(FIXTURE)
+    ]
+    _install_fixture(monkeypatch, stale)
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {stale[0][0].pid})
+    monkeypatch.setattr(stall_watchdog, "fired_pids", lambda *a, **k: {stale[0][0].pid})
+
+    rows = session_rows()
+    assert rows[0]["stall_dump"], "the artifact is still published: the dump is the evidence"
+    assert (
+        rows[0]["stall_held"] is False
+    ), "a leftover dump on a dead pid was rendered as a runtime that survived its bound"
+
+
+def test_the_stalled_and_updating_cells_sit_under_their_own_headers(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """Both gates on at once — the case the round-1 fix got backwards.
+
+    A runtime can be held AND carry a failed update, and the first version of the column
+    appended the header one way round and the cell the other: the held value rendered
+    under ``UPDATING`` and the update value under ``STALLED`` (agent review round 2,
+    MAJOR-3, from the rendered frame). One row is enough to show it, and this is that
+    row with both facts set.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    both = [
+        (replace(record, leaving="", update_failed=UPDATE_PAIR) if index == 0 else record, state)
+        for index, (record, state) in enumerate(FIXTURE)
+    ]
+    _install_fixture(monkeypatch, both)
+    from local_operator.session.runtime import stall_watchdog
+
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {both[0][0].pid})
+    rows = session_rows()
+    assert rows[0]["stall_held"] is True and rows[0]["update_failed"] == UPDATE_PAIR
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    header = lines[0]
+    assert header.index("UPDATING") < header.index("STALLED"), header
+    row = next(ln for ln in lines[1:] if "4243" in ln)
+    # The VALUES must be in the same order as the HEADERS, or each is under the other's.
+    assert row.index("update failed") < row.index(cli.HELD_CELL), row
+
+
+def test_the_stalled_column_is_absent_when_no_row_is_held(monkeypatch: Any, capsys: Any) -> None:
+    """The gate, in the other direction: no held row anywhere means no column.
+
+    Same rule as ``LEAVING``/``UPDATING`` — a column that prints for a state nothing is
+    in teaches a reader to ignore it — and the assertion is here because the cell is
+    wide enough that a stray one would push every other column along with it.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "STALLED" not in out, out
 
 
 def test_a_failed_window_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
