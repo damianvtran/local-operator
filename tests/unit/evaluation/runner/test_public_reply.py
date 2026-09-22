@@ -43,6 +43,7 @@ from local_operator.evaluation.runner.provider_client import (
 from local_operator.evaluation.runner.public_reply import (
     _MAX_EXTRA_KEY_CHARS,
     _MAX_EXTRA_KEYS_SHOWN,
+    _MAX_TRAILING_DECODE_ATTEMPTS,
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
     REJECTED_REPLY_WITHHELD,
@@ -404,6 +405,38 @@ def test_a_string_that_is_not_an_action_array_keeps_its_refusal(spelling: str) -
         parse_decision(body, observation(), route=ROUTE)
 
     assert "decision must carry a non-empty actions array" in str(info.value)
+
+
+def test_a_top_level_encoded_actions_batch_still_refuses_a_competing_batch() -> None:
+    """The outer ambiguity scan must see IDs through the accepted string spelling."""
+
+    current = observation()
+    actions = json.loads(type_payload(current))["actions"]
+    body = json.dumps({"actions": json.dumps(actions)}) + " " + finish_payload(current)
+
+    with pytest.raises(DecisionParseError, match="second action batch"):
+        parse_decision(body, current, route=ROUTE)
+
+
+def test_an_exhausted_competing_batch_scan_refuses_encoded_actions() -> None:
+    """A bounded scan cannot treat unchecked trailing candidates as safe."""
+
+    current = observation()
+    actions = json.loads(type_payload(current))["actions"]
+    harmless = " ".join(
+        json.dumps({"unrelated": index})
+        for index in range(_MAX_TRAILING_DECODE_ATTEMPTS)
+    )
+    body = (
+        json.dumps({"actions": json.dumps(actions)})
+        + " "
+        + harmless
+        + " "
+        + finish_payload(current)
+    )
+
+    with pytest.raises(DecisionParseError, match="second action batch"):
+        parse_decision(body, current, route=ROUTE)
 
 
 def test_a_competing_batch_hidden_in_the_string_still_refuses_the_turn() -> None:
