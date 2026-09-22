@@ -43,10 +43,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from secrets import token_bytes
+from secrets import token_bytes, token_hex
 from typing import Any, Literal
 
 from local_operator.network.wire import b64u, crockford, unb64u
@@ -423,10 +424,22 @@ def _staged_write(target: Path, payload: Any) -> None:
     and the registry module belongs to the session plane). The two are pinned to
     the same mode by ``tests/unit/network/test_identity.py``, which asserts the
     file and its directory modes directly.
+
+    THE STAGING NAME IS NOT JUST THE PID: a process has many threads, and two of
+    them writing one identity file shared a staging file — one ``os.replace``
+    takes it away under the other's ``os.chmod``, exactly the window QA round 15
+    measured in ``store._write_private_json``. The consequence here is worse than
+    a lost update: ``load`` treats an unreadable identity as an ABSENT one and
+    mints a fresh key, i.e. a new device id the mesh has never seen. Thread id
+    and four random bytes make the name unique per call; the store's lock is not
+    copied here because the writer is a single payload — two savers of one
+    identity write the same bytes, so ordering does not matter.
     """
     directory = target.parent
     _ensure_dir(directory)
-    temporary = directory / f".{target.name}.{os.getpid()}.tmp"
+    temporary = directory / (
+        f".{target.name}.{os.getpid()}.{threading.get_ident()}.{token_hex(4)}.tmp"
+    )
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle)
