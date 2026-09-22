@@ -413,6 +413,16 @@ class ArgumentChoice:
     #: Paints ``detail`` in the danger tint when the state is a problem the user
     #: should notice (a server that failed, a credential that cannot be read).
     alert: bool = False
+    #: What the NAME column PAINTS when it must differ from :attr:`name`.
+    #:
+    #: ``name`` is the VALUE — the text choosing this row puts in the buffer, so
+    #: for ``/new``'s device picker it is the whole argument (``remote pixel-8``).
+    #: That is exactly what must NOT be painted there: the leading keyword is
+    #: identical on every row, so it spends the column that has to answer "which
+    #: device am I choosing" restating the command the user just typed, and an
+    #: id-shaped value ellipsizes inside it. Empty (the default, and every list
+    #: but this one) means "paint ``name``", so no existing row changes.
+    display: str = ""
 
     @property
     def names(self) -> tuple[str, ...]:

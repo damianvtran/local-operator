@@ -143,13 +143,24 @@ NETWORK_SUBCOMMAND_HELP: dict[str, str] = {
     "peers": "Reachable peers right now",
     "rename": "Rename a network locally",
     "rm": "Forget a network locally",
-    # THE FLAG IS NAMED, because the bare form is REFUSED (UX round 1, U5): the
-    # session plane acts on a session that lives on ONE device, so the CLI
-    # requires `--peer <device>` or `--all-peers` and answers
+    # THE FLAG IS NAMED FIRST, because the bare form is REFUSED (UX round 1,
+    # U5): the session plane acts on a session that lives on ONE device, so the
+    # CLI requires `--peer <device>` or `--all-peers` and answers
     # "name a device with --peer, or ask every device with --all-peers"
     # otherwise. A row that offered the bare verb would be the U4 shape one
     # verb over — an offer the handler refuses.
-    "sessions": "Sessions on other devices: list, engage, stop (--peer <dev> or --all-peers)",
+    #
+    # AND IT IS SHORT ENOUGH THAT BOTH SPELLINGS SURVIVE THE ROW (UX round 2,
+    # U15). Naming the flags was the U5 fix, and the row then truncated exactly
+    # before the half that did it: measured through the real picker, the
+    # description column is 56 cells at a 110-column terminal and 46 at 100, so
+    # the 75-cell sentence it used to carry painted as "…stop (--peer <" — the
+    # every-device spelling a person with several peers needs was the part cut.
+    # At 42 cells both flags are whole at every width the picker is used at. The
+    # three verbs left the row rather than being half-shown; the README and the
+    # CLI's own help carry them, and a flag that is never shown cannot be
+    # guessed, which is why the flags won the cells.
+    "sessions": "Peers' sessions: --peer <dev>, --all-peers",
     "show": "Members, roles and endpoints",
     "status": "Relay health and this device's links",
     "trust": "Trust an untrusted network again",

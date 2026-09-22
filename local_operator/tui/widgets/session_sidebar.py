@@ -23,7 +23,7 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
-from local_operator.resume import UNNAMED_DEVICE, format_age
+from local_operator.resume import UNNAMED_DEVICE, UNTITLED_CONVERSATION, format_age
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
@@ -557,7 +557,7 @@ class SessionSidebar(Widget, can_focus=True):
 
     @staticmethod
     def _peer_heading(row: Any) -> str:
-        """The heading a peer's section carries: ``⇄ <label>``, plus its state.
+        """The heading a peer's section carries: `` ⇄ <label>``, plus its state.
 
         The label is the peer's NAME — a 32-hex device id is not something a user
         recognises their own laptop by — and the suffix is the design's two-word
@@ -565,9 +565,18 @@ class SessionSidebar(Widget, can_focus=True):
         not answer the read that stamped these rows. Nothing claims staleness of
         the ROWS here; that is ``placement_stale``'s business and the tooltip's,
         because a heading that stacked both would be a sentence, not a label.
+
+        THE LEADING SPACE IS THE MARK COLUMN (design round 2, D18). Rows paint
+        the locality glyph in cell 1 (cell 0 is the caret or the pin, §1.3
+        decision 2), and this heading used to paint it in cell 0 — so the one
+        glyph that says "everything under this line is another device" started at
+        a different x from every mark it governed and the column did not stack.
+        A heading has no caret and no pin, so its cell 0 is empty by definition,
+        and indenting it costs no row its width: the tier headings above
+        (``★ Pinned``, ``Active Sessions``) keep cell 0 and stay put.
         """
         label = row.owner_label or UNNAMED_DEVICE
-        return f"⇄ {label}" + ("" if row.reachable else " (unreachable)")
+        return f" ⇄ {label}" + ("" if row.reachable else " (unreachable)")
 
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
         """``(rank, section heading)`` — the ONE key the sort and the paint share.
@@ -1461,7 +1470,7 @@ class SessionSidebar(Widget, can_focus=True):
             # for it. `sub_title` already degrades to either half alone, and
             # to `row.name` when it has neither.
             name = entry.sub_title if entry.subagent else entry.row.name
-            title = truncate_cells(name or "Untitled conversation", title_width)
+            title = truncate_cells(name or UNTITLED_CONVERSATION, title_width)
             if entry.subagent:
                 # `sub_title` is "label · role", and the role is the half that
                 # truncation eats first. When the cut lands on the separator

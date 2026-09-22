@@ -173,6 +173,11 @@ class NetworkLocal:
     device_id: str = ""
     device_name: str = ""
     identity_present: bool = False
+    #: The relay RECORD's own claim, kept for the tooltip and for a reader
+    #: comparing the record with the live answer. The panel deliberately never
+    #: paints these as a verdict: in the window where they are the only thing
+    #: known the live half is still asking, and a record promoted to an answer is
+    #: what produced the self-contradicting loading frame (design round 2, D20).
     relay_state: str = ""
     relay_pid: int = 0
     networks: list[NetworkEntry] = field(default_factory=list)
@@ -679,23 +684,15 @@ class NetworkScreen(ModalScreen[None]):
         # the only thing known and it says so.
         if self.status_run is not None:
             return
-        if not self.local.relay_state:
-            # NO BACKTICKS, AND NO DEFERRED ANSWER (design round 1, D3). This line
-            # used to carry a shell command between literal backticks — the
-            # backticks painted onto a terminal, confirmed at 250% zoom — and it
-            # spent its words pushing the one thing the reader wants, why the mesh
-            # is down, into a command they have to leave the panel to run.
-            # "No record" is a fact this device holds, and it IS the answer: there
-            # is no relay process here. The CLI keeps its place as a next step in
-            # the footer, beside the other next steps, rather than as the answer.
-            body.append("  relay: not running on this device\n", style="dim")
-        else:
-            verdict = (
-                "running"
-                if self.local.relay_state == "live"
-                else f"running but not answering ({self.local.relay_state})"
-            )
-            body.append(f"  relay: {verdict}  pid {self.local.relay_pid}\n")
+        # PENDING IS NOT A VERDICT (design round 2, D20). While the Relay section
+        # is still asking, the only thing this half knows is that the LIVE answer
+        # has not landed; the disk record beside it is not an answer, it is the
+        # input the answer is about. Painting it as one put "relay: not running on
+        # this device" directly above the Relay section's "asking the relay…" —
+        # the frame contradicting itself about the one fact both lines are about.
+        # So the pending sentence here is the SAME pending sentence there, and the
+        # verdict is said once, by the section that measured it.
+        body.append("  relay: checking…\n", style="dim")
 
     @staticmethod
     def _short(network_id: str) -> str:
@@ -728,10 +725,31 @@ class NetworkScreen(ModalScreen[None]):
         body.append(" ".join(kept) or fields[0])
         body.append("\n")
 
+    def _relay_known_down(self) -> bool:
+        """Whether the Relay section's own answer already says nothing can be asked.
+
+        The Networks and Peers sections below ask the relay over its control
+        socket; the Relay section asks whether there IS one. Once that answer is
+        in and says no, ``checking with the relay…`` is a promise the frame has
+        already broken — there is nothing to check WITH — so the section inherits
+        the local answer and the subtitle the local fallback already uses (design
+        round 2, D20). False while the answer is pending, which is the one case
+        where "checking" is the truth.
+        """
+        payload = self.status_run.payload() if self.status_run is not None else None
+        # ``is False``, not ``not ...``: a refusal document carries no
+        # ``relay_running`` key at all, and "the answer did not say" is the
+        # pending case, not the down one.
+        return isinstance(payload, dict) and payload.get("relay_running") is False
+
     def _networks_section(self, body: Text, width: int) -> None:
         entries = self._entries()
         if self.relay is None:
-            note = "checking with the relay…"
+            note = (
+                "from this device's records"
+                if self._relay_known_down()
+                else "checking with the relay…"
+            )
         elif entries and not entries[0].verified:
             note = "from this device's records"
         else:
@@ -812,7 +830,11 @@ class NetworkScreen(ModalScreen[None]):
         # same rule, and ``found by the relay`` is a state rather than the
         # dependent clause it was (design round 1, D11).
         if self.peers_run is None:
-            note = "checking with the relay…"
+            note = (
+                "from this device's records"
+                if self._relay_known_down()
+                else "checking with the relay…"
+            )
         elif relay_rows:
             note = "found by the relay"
         else:
@@ -845,12 +867,17 @@ class NetworkScreen(ModalScreen[None]):
                     width,
                 )
             return
-        if self.peers_run is None:
+        if self.peers_run is None and not self._relay_known_down():
             # NOTHING IN THE BODY: the section-subtitle slot already says it
             # (``checking with the relay…``), and painting the same sentence
             # twice — once on the heading, once as a row — was this section's
             # own copy of the redundancy the two-phase design avoids elsewhere.
             # The other two sections use the subtitle for exactly this state.
+            #
+            # …UNLESS THE RELAY IS ALREADY KNOWN DOWN (design round 2, D20):
+            # then there is no answer coming for this section either, the
+            # subtitle has switched to the local one above, and the rows below
+            # (this device's own member lists) are what the frame actually holds.
             return
         if not self.local.peers:
             body.append(

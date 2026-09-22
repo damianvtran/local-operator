@@ -2609,6 +2609,19 @@ CREDENTIAL_TYPING_NOTICE_RUNGS: tuple[str, ...] = (
 #: index into the ladder.
 CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
 
+#: What ``/new``'s picker says when this device knows no peers, widest first.
+#:
+#: THE TAIL IS THE PART THAT MUST SURVIVE. ``/network invite`` is the one sentence
+#: this surface is the only place to say — it is where a user with no peers is
+#: standing when they need it — and the row it paints in is ~56 cells at a
+#: 110-column terminal, so a single long sentence was cropped mid-clause
+#: ("then /network join on…"). The narrow rung keeps the invite verb whole rather
+#: than promising a second verb it then loses (design round 2, D16).
+NO_PEERS_NOTICE_RUNGS: tuple[str, ...] = (
+    "No peers yet — /network invite mints a token; /network join redeems it on the other device.",
+    "No peers yet — /network invite mints a token.",
+)
+
 #: Said after Esc unredacts a typed secret back into the composer as plaintext.
 #:
 #: The unredact is the only exit that leaves the secret IN the buffer, and the
@@ -14014,7 +14027,15 @@ class OperatorApp(App[None]):
             if remote is not None and remote.owner_device:
                 self._system_notice(
                     f"{concrete} is running on {remote.owner_label or UNNAMED_DEVICE} — "
-                    f"/network sessions --peer {remote.owner_device} lists it, "
+                    # THE REMEDY NAMES THE DEVICE THE SENTENCE JUST NAMED (QA round
+                    # 11 Q-R11-2 / UX round 2 U12). It printed the 34-character
+                    # id beside the device's own label, so the command it invites
+                    # the user to run was spelled with the one word that sentence
+                    # had just replaced. The NAME when there is one, and the full
+                    # id otherwise — never ``owner_label``'s 8-cell abbreviation,
+                    # which is a column here and not something the relay resolves.
+                    f"/network sessions --peer "
+                    f"{remote.owner_device_name or remote.owner_device} lists it, "
                     "--engage warms it, --stop ends it",
                     "warning",
                 )
@@ -15228,7 +15249,25 @@ class OperatorApp(App[None]):
             notice(f"{name} is in more than one network — name the peer by id: {ids}", "warning")
             return
         peer = matches[0]
-        argv = ["sessions", "--peer", peer.device_id, "--create", "--name", peer.label]
+        # THE RECEIPT ECHOES WHAT IT IS GIVEN, SO IT IS GIVEN THE USER'S WORD
+        # (QA round 11 Q-R11-2 / UX round 2 U12). ``lop network sessions --peer
+        # <x> --create`` prints ``created on <x>`` and repeats ``--peer <x>`` in
+        # its remedy, and this passed ``peer.device_id`` — so the ONE surface
+        # where the user typed a name answered in the 34-character wire token it
+        # exists to hide, and the remedy's copy-pasteable command carried it too.
+        # ``peer.token`` is ``name or device_id``: the name when there is one,
+        # which is also exactly the word the picker inserted and the handler
+        # resolved a line above.
+        #
+        # …BUT ONLY WHILE IT STILL RESOLVES TO THIS ONE DEVICE. An id-addressed
+        # create for a peer whose NAME is ambiguous across two networks would
+        # otherwise be refused by the relay's own ambiguous-peer refusal — the
+        # receipt would stop a create that works today. Falling back to the id
+        # there costs the friendly word and nothing else.
+        addressing = peer.token
+        if len({match.device_id for match in resolve_peer(addressing)}) != 1:
+            addressing = peer.device_id
+        argv = ["sessions", "--peer", addressing, "--create", "--name", peer.label]
         if prompt:
             argv += ["--prompt", prompt]
         self._run_network_cli(
@@ -36620,6 +36659,21 @@ class OperatorApp(App[None]):
             # here — the create call answers it with the peer's own reason, and a
             # fabricated "reachable" column would be the one lie this surface
             # could tell.
+            #
+            # THE PAINTED NAME IS THE DEVICE, AND THE ROW STILL INSERTS THE
+            # ARGUMENT (design round 2, D15). The value (`name`) has to stay the
+            # whole `remote <peer>` argument — the picker completes with it, and a
+            # row that filled a bare peer word would run a LOCAL session, which is
+            # the U4 defect one round back — so the display is carried separately
+            # and the row reads as a device selection instead of a repeated
+            # keyword. The description column used to repeat the label for a named
+            # peer (`remote damian-mbp` / `damian-mbp`) while the two facts a
+            # person is actually choosing between — which network the device is
+            # in, what role it holds — were absent: the network is named here, the
+            # role is the detail column, and the unnamed case says the shared
+            # `unnamed device` string (D8) rather than ellipsizing a hex id in both
+            # columns. The peer's id is not shown: it is what the row INSERTS, not
+            # a fact anyone picks by, and for a NAMED peer the token IS the label.
             peer_choices: list[ArgumentChoice] = []
             try:
                 from local_operator.network.peers import known_peers
@@ -36627,6 +36681,8 @@ class OperatorApp(App[None]):
                 peers = known_peers()
             except Exception:  # noqa: BLE001 — a picker never fails on the mesh being absent
                 peers = []
+            from local_operator.resume import UNNAMED_DEVICE
+
             seen: set[str] = set()
             for peer in peers:
                 token = peer.token
@@ -36636,17 +36692,30 @@ class OperatorApp(App[None]):
                 peer_choices.append(
                     ArgumentChoice(
                         name=f"remote {token}",
-                        description=peer.label,
+                        display=peer.name or UNNAMED_DEVICE,
+                        description=peer.network_name,
                         detail=peer.role,
                     )
                 )
-            choices = peer_choices or [
-                ArgumentChoice(name="remote", description="Create it on another device")
-            ]
-            picker.set_choices(choices)
-            picker.set_notice(
-                "" if peer_choices else "No peers yet. /network invite mints a token."
-            )
+            # NO ROWS IS THE HONEST OFFER WHEN THERE IS NO PEER, AND THE NOTICE
+            # IS THEN NOT SUPPRESSED (design round 2, D16). The bare `remote` row
+            # this used to paint was there "to be SEEN rather than to be RUN" — and
+            # it was the row the picker PRE-SELECTED, so the first Enter a new user
+            # presses ran it and landed on a red "Use /new remote <peer>…". That is
+            # U4's defect in the state EVERY user starts in. The row also bought
+            # nothing: an empty list still paints its notice (`set_notice` sends
+            # the dock up with no rows), so the one string that says how a first
+            # peer comes to exist — the sentence this surface is the only place to
+            # say — reaches the screen either way, and now nothing is under the
+            # cursor to run.
+            picker.set_choices(peer_choices)
+            if peer_choices:
+                picker.set_notice("")
+            else:
+                # ``set_notice_rungs`` installs the notice itself (widest rung
+                # first, resolved against the row's real budget at paint time),
+                # which is what keeps the remedy whole as the pane narrows.
+                picker.set_notice_rungs(NO_PEERS_NOTICE_RUNGS)
             return
         if message.command == "goal":
             # ONE row, and only while there is a goal to unset. `/goal`'s
@@ -45215,7 +45284,7 @@ def _notifications_listing(
     """
     from rich.cells import cell_len
 
-    from local_operator.resume import format_age
+    from local_operator.resume import UNTITLED_CONVERSATION, format_age
     from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS
     from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -45230,7 +45299,7 @@ def _notifications_listing(
         # the taxonomy: "✓ name —  · 2h" would read as a missing column.
         kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
         tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
-        label = entry.row.name or "Untitled conversation"
+        label = entry.row.name or UNTITLED_CONVERSATION
         if budget <= 0:
             # Zero is "no opinion" (the caller could not measure), which keeps
             # the untruncated name exactly as ``/stop all``'s listing does.

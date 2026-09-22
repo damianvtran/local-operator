@@ -2089,6 +2089,21 @@ class SessionRow(NamedTuple):
 UNNAMED_DEVICE = "unnamed device"
 
 
+#: What a SESSION with no stored name is called, on every surface that has to
+#: name one — the same export and for the same measured reason as
+#: :data:`UNNAMED_DEVICE` one paragraph up.
+#:
+#: The two halves of one list disagreed about this: a nameless row this device
+#: holds printed ``Untitled conversation`` (``session/catalog.py``), while a
+#: nameless row READ FROM A PEER printed its bare 12-hex id
+#: (``session/peer_rows.py``). A remote row is the one row a reader cannot
+#: resolve by looking around them, so it was the row least able to afford a
+#: string nobody typed — and design round 2 (D14) read the committed sidebar
+#: frame showing exactly that. One spelling, so a name-less session reads the
+#: same whichever machine minted it.
+UNTITLED_CONVERSATION = "Untitled conversation"
+
+
 #: The fork tag's text as a FILTER sees it. The mark itself is drawn per
 #: surface (``session_picker.FORK_MARKER`` in the TUI, the phone's list
 #: renderer on mobile); this is the one spelling every one of them searches by.

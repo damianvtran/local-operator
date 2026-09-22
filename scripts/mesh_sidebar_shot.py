@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -91,33 +92,94 @@ def _admit_everyone(
         )
 
 
-def _seed_session(root: Path, session_id: str, title: str) -> None:
-    """A session B really holds: the directory, its transcript, and its title.
+def _seed_session(
+    root: Path, session_id: str, title: str, *, network_id: str, home_device: str
+) -> None:
+    """A session B really holds, IN THE SHAPE ``/new remote <peer> <name>`` leaves.
 
-    The activity file is what makes it a row of B's own catalogue (retention's
-    clock); a directory with neither would be a session neither device lists,
-    which is the separate defect ``local_session_rows`` now covers for
-    peer-created sessions that have not had a turn yet.
+    THE SHAPE IS THE EVIDENCE (QA round 11 Q-R11-1 = design round 2 D14). This
+    used to hand-write the title sidecar under the key ``title`` while the
+    product's own reader (``resume._read_title_sidecar``) reads ``text`` — so
+    both seeded sessions had NO readable title, every row fell back to a bare
+    id, and the committed ``static/tui-mesh-sidebar.png`` shipped a frame of the
+    product painting ids where a user sees names. A capture script may not
+    invent its own spelling of a format the product owns, so the title is
+    written through ``resume.write_session_title`` — the same writer the create
+    path uses — and the placement stamp through ``write_stamp``, mirroring
+    ``RelayServer._op_session_create``. Both are the product's own formats by
+    construction, so neither can drift from the reader again.
+
+    The activity file (``transcript.jsonl``) is what makes it a row of B's own
+    CATALOGUE (retention's clock), which is the half that names it from the
+    sidecar. A directory with none would be a session neither device lists,
+    which is the separate defect ``local_session_rows`` covers for peer-created
+    sessions that have not had a turn yet — so the promptless-directory shape is
+    not what this frame is about.
     """
+    from local_operator.resume import write_session_title
+    from local_operator.session.creation import ensure_session_created_at
+    from local_operator.session.placement import (
+        MeshStamp,
+        SessionPlacement,
+        write_stamp,
+    )
+
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "transcript.jsonl").write_text("", encoding="utf-8")
-    (directory / "title.json").write_text(
-        f'{{"title": {title!r}, "names": [{title!r}]}}'.replace("'", '"'), encoding="utf-8"
+    ensure_session_created_at(directory, time.time())
+    write_session_title(directory, title, user_set=True, past_names=[])
+    write_stamp(
+        root,
+        MeshStamp(
+            session_id=session_id,
+            network_id=network_id,
+            home_device=home_device,
+            placement=SessionPlacement(
+                # ``peer`` rather than ``local``, exactly as the create writes it:
+                # B runs this session, but it is here because another device
+                # asked for it (§5.1). A ``local`` stamp here would put the
+                # frame's sessions outside the mesh membership test and the
+                # picture would describe a shape the product does not produce.
+                mode="peer",
+                network_id=network_id,
+                home_device=home_device,
+                policy="pinned",
+                stamp_revision=1,
+            ),
+            origin={"kind": "user", "source_device": "", "source_session_id": ""},
+        ),
     )
 
 
-def _require_rows(root: Path, expected: int) -> None:
+def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
+    """Refuse to write a frame unless the producer returns these NAMES.
+
+    A GUARD THAT COUNTS ROWS CANNOT SEE THIS CLASS OF LIE, which is exactly why
+    the id-only frame survived a script written to catch it (design round 2
+    D14): the producer returned the right NUMBER of rows and the wrong STRING in
+    them. So the assertion is on the names, and it fails on an id (the
+    nameless-row fallback that shipped) as loudly as on a missing row.
+    """
     from local_operator.session.peer_rows import clear_cache, peer_session_rows
 
     clear_cache()
     rows = peer_session_rows(root)
-    if len(rows) != expected:
+    if len(rows) != len(titles):
         raise SystemExit(
-            f"the producer returned {len(rows)} remote rows for a mesh holding {expected}: "
-            "the frame would show a surface the product does not render, so none was written"
+            f"the producer returned {len(rows)} remote rows for a mesh holding "
+            f"{len(titles)}: the frame would show a surface the product does not "
+            "render, so none was written"
         )
-    print(f"producer rows: {[(row.id, row.owner_device_name) for row in rows]}")
+    names = sorted(row.name for row in rows)
+    if names != sorted(titles):
+        raise SystemExit(
+            "the producer returned rows whose names are not the ones seeded: "
+            f"{names} != {sorted(titles)}. A row naming a session by its id is the "
+            "shape this guard exists to catch: the frame would show bare ids where "
+            "a user sees titles."
+        )
+    print(f"producer rows: {[(row.id, row.name, row.owner_device_name) for row in rows]}")
 
 
 def main() -> int:
@@ -176,8 +238,14 @@ def main() -> int:
         if link is None:
             raise SystemExit(f"the two devices could not link: {reason}")
         for session_id, title in SESSIONS:
-            _seed_session(root_b, session_id, title)
-        _require_rows(root_a, len(SESSIONS))
+            _seed_session(
+                root_b,
+                session_id,
+                title,
+                network_id=record_a.network_id,
+                home_device=server_b.identity.device_id,
+            )
+        _require_rows(root_a, tuple(title for _session_id, title in SESSIONS))
 
         env = {**__import__("os").environ, "LO_SIDEBAR_SHOT_MESH": str(root_a)}
         shot = subprocess.run(

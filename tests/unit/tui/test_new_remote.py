@@ -257,17 +257,32 @@ async def test_the_picker_offers_remote_then_every_known_peer(
         await pilot.pause()
         assert editor._picker.is_open()
         painted = "\n".join(row.plain for row in editor._picker.render_rows(70))
-        assert "remote" in painted
-        assert "remote damian-mbp" in painted
-        # The unnamed device is offered by ID, which is the only word that
-        # addresses it — and the row still carries the whole argument.
-        assert "remote d_bbbb" in painted
-        # The row names are the tokens the shape accepts: the two halves of ONE
-        # contract, asserted together so a row that filled something the
-        # validator then refused could not pass.
+        # THE ROW PAINTS THE DEVICE, AND INSERTS THE ARGUMENT (design round 2,
+        # D15). The keyword stays in the VALUE — taking it out is how a row the
+        # picker offers starts a LOCAL session (UX round 1, U4) — so it is
+        # asserted ABSENT from the painted name and PRESENT in what choosing the
+        # row would fill. Painting it spent the one column that answers "which
+        # device" restating the command the user had just typed.
+        assert "remote " not in painted, painted
+        assert "damian-mbp" in painted
+        # The peer with no name is NAMED, not ellipsized: an id-shaped token used
+        # to fill both columns with a truncated hex string and never reached the
+        # shared ``unnamed device`` string the panel and the sidebar already use
+        # (design round 2, D15; the D8 vocabulary).
+        assert "unnamed device" in painted
+        # …and the device sits in the NAME column, which is the column a reader
+        # scans down, rather than in the description.
+        rows = editor._picker.render_rows(70)
+        assert rows[0].plain.split()[1] == "damian-mbp", rows[0].plain
+        assert "unnamed device" in rows[1].plain, rows[1].plain
+        # The row NAMES — what choosing a row puts in the buffer — are the tokens
+        # the shape accepts: the two halves of ONE contract, asserted together so
+        # a row that filled something the validator then refused could not pass.
+        inserted = [name for name, _item in editor._picker._matches]
+        assert inserted == ["remote damian-mbp", "remote d_bbbb"], inserted
         spec = slash_command_for("/new")
         assert spec is not None
-        for token in ("remote damian-mbp", "remote d_bbbb"):
+        for token in inserted:
             assert command_argument_is_used(spec, token)
         # ...AND THE ROW UNDER THE CURSOR IS ONE THE HANDLER RUNS (UX round 1,
         # U4). The list opens with its first row highlighted, so a leading
@@ -282,6 +297,15 @@ async def test_the_picker_offers_remote_then_every_known_peer(
 
 @pytest.mark.asyncio
 async def test_the_picker_says_what_to_do_with_no_peers() -> None:
+    """THE STATE EVERY NEW USER STARTS IN (design round 2, D16).
+
+    The list used to open with ONE row — a bare ``remote`` keyword row that
+    existed "to be SEEN rather than to be RUN" — and that row was PRE-SELECTED, so
+    the first Enter a user presses ran it and landed on a red "Use /new remote
+    <peer>…". It also suppressed the notice: ``set_notice`` returns early while
+    rows are showing, so the one sentence that says how a first peer comes to
+    exist was the sentence the row hid. No row, and the notice paints.
+    """
     from local_operator.tui.widgets.editor import Editor
 
     app = _app_fixture()
@@ -290,8 +314,12 @@ async def test_the_picker_says_what_to_do_with_no_peers() -> None:
         await _type(pilot, "/new ")
         editor = app.query_one(Editor)
         await pilot.pause()
-        assert editor._picker.is_open()
-        assert editor._picker._notice == "No peers yet. /network invite mints a token."
+        assert not editor._picker.is_open(), "a row is under the cursor with no peers to offer"
+        painted = editor._picker.render_text(70).plain
+        assert "/network invite" in painted, painted
+        # The key the notice leaves the user holding: nothing here runs, so the
+        # first Enter cannot be answered with a refusal.
+        assert not editor._picker._matches
 
 
 @pytest.mark.asyncio
@@ -306,17 +334,52 @@ async def test_remote_creates_the_session_on_the_peer(
         await _boot(pilot, app)
         app._run_slash_command("/new remote damian-mbp")
         await app.workers.wait_for_complete()
-        # The DEVICE ID goes on the wire, not the label: a peer can be renamed on
-        # either side, and `--peer` is resolved by the relay against what it can
-        # dial.
+        # THE USER'S OWN WORD GOES ON THE WIRE, AND COMES BACK IN THE RECEIPT
+        # (QA round 11 Q-R11-2 / UX round 2 U12). ``--create`` echoes whatever
+        # ``--peer`` it was given into ``created on <x>`` and into the remedy
+        # command, so passing the device id made the one surface the user
+        # addressed by name answer in a 34-character wire token — a word the
+        # sidebar, `/network peers` and `/network sessions` all replace. The
+        # relay resolves a name against the same member store this device just
+        # resolved it against.
         assert run.argv == [
             "sessions",
             "--peer",
-            "d_aaaa",
+            "damian-mbp",
             "--create",
             "--name",
             "damian-mbp",
         ]
+
+
+@pytest.mark.asyncio
+async def test_an_id_addressed_create_keeps_the_id_when_the_name_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The friendly word may only be used where it still names ONE device.
+
+    The receipt fix (QA round 11, Q-R11-2) must not turn a working create into a
+    refusal: an id-addressed create for a peer whose NAME is shared with another
+    device would be answered by the relay with its own ambiguous-peer refusal, so
+    the id stays on the wire whenever the name does not resolve back to exactly
+    this device. Asserted because a one-word change that reads better is one
+    committer away from breaking a create that already worked.
+    """
+    _peers(
+        monkeypatch,
+        [
+            KnownPeer(device_id="d_aaaa", name="laptop", network_id="n_1"),
+            KnownPeer(device_id="d_bbbb", name="laptop", network_id="n_2"),
+        ],
+    )
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/new remote d_aaaa")
+        await app.workers.wait_for_complete()
+        assert run.argv[:3] == ["sessions", "--peer", "d_aaaa"]
 
 
 @pytest.mark.asyncio
@@ -429,7 +492,7 @@ async def test_the_peers_own_refusal_is_shown_verbatim(
         await _boot(pilot, app)
         app._run_slash_command("/new remote damian-mbp")
         await app.workers.wait_for_complete()
-        assert run.argv[:3] == ["sessions", "--peer", "d_aaaa"]
+        assert run.argv[:3] == ["sessions", "--peer", "damian-mbp"]
         assert any("start it with `lop network start`" in text for text in _notices(app)), _notices(
             app
         )

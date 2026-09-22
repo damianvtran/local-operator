@@ -233,6 +233,28 @@ async def test_each_peer_forms_one_section_after_previous_and_before_subagent() 
 
 
 @pytest.mark.asyncio
+async def test_the_peer_heading_stacks_in_the_rows_own_mark_column() -> None:
+    """Design round 2, D18: one mark column for a heading and the rows under it.
+
+    Rows paint the locality glyph in cell 1 — cell 0 is the caret-or-pin slot —
+    and the heading painted it in cell 0, so the one glyph that says "everything
+    under this line is another device" started at a different x from every mark
+    it governed and the column did not stack. The heading has no caret and no
+    pin, so its cell 0 is empty by definition: indent it, and the tier headings
+    above (which do own cell 0) stay exactly where they were.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_remote("a1", label="damian-mbp", name="Peer A one")]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        lines = sidebar.render().plain.splitlines()
+        heading = _line_with(lines, "⇄ damian-mbp")
+        row = _line_with(lines, "Peer A one")
+        assert heading.index("⇄") == row.index("⇄") == 1, (heading, row)
+
+
+@pytest.mark.asyncio
 async def test_an_unreachable_peer_says_so_in_the_heading() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:

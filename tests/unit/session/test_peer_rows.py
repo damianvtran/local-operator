@@ -125,6 +125,25 @@ def test_a_device_with_no_relay_issues_no_call_at_all(monkeypatch: pytest.Monkey
     assert built == [], "no catalogue may be built when there is no relay record"
 
 
+def test_a_nameless_peer_row_reads_like_every_other_nameless_row() -> None:
+    """ONE SPELLING FOR ONE CONDITION (design round 2, D14).
+
+    The peer-side fallback was the session's own 12-hex id while a nameless row
+    THIS device holds paints ``Untitled conversation`` — so one missing name read
+    two ways on one screen, and the id was on the row a reader can least resolve
+    by looking around them (a remote row is the one row no local list can
+    explain). Both halves now read the shared constant.
+    """
+    from local_operator.resume import UNTITLED_CONVERSATION
+
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_1", "d_aa", name="")],
+    )
+    rows = peer_session_rows(catalog=catalog)
+    assert [row.name for row in rows] == [UNTITLED_CONVERSATION]
+
+
 def test_rows_carry_every_field_the_surfaces_read() -> None:
     catalog = _Catalog(
         [

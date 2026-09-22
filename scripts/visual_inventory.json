@@ -84,6 +84,10 @@
     "network_shot.py": [
       "both"
     ],
+    "new_remote_shot.py": [
+      "with-peers",
+      "no-peers"
+    ],
     "org_chart_shot.py": [
       "one-agent",
       "empty",
