@@ -96,6 +96,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.incidents import REASONING_ECHO_MARKERS
+from local_operator.model.effort import real_rungs
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -488,13 +489,29 @@ def _lower_effort(model: "ModelSpec") -> str | None:
     ``None`` when the model has no ladder or already runs at its bottom rung:
     there is no cheaper setting to retry at, and a retry at the SAME effort
     would reproduce the same silent truncation, so the caller ends the turn
-    instead."""
+    instead.
+
+    The ``auto`` SENTINEL sits at index 0 of the Radient router ladder
+    (``configure.ROUTER_EFFORT_LADDERS``), so from ``auto`` this returns ``None``
+    -- a DELIBERATE choice, not an accident of placement. ``auto`` is not a
+    depth: it delegates the level to the server, so there is no rung below it to
+    retreat to, and inventing one (dropping to ``low``) would put a level on the
+    wire the user never chose while the band still read ``auto``. Declining the
+    retreat ends the truncated turn with the loop's own notice, which is the
+    honest frame. A caller that wants a cheaper retry from ``auto`` must first
+    pick a real rung with ``/effort``."""
     ladder = list(model.reasoning_efforts)
     current = model.reasoning_effort
     if not ladder or current is None or current not in ladder:
         return None
-    index = ladder.index(current)
-    return ladder[index - 1] if index > 0 else None
+    # The cheapest REAL rung strictly below the current one. `real_rungs` owns
+    # the "what does this ladder rank" rule so this and the eval runner's
+    # `_one_rung_lower` cannot drift (round-2 review R2-1/R2-4).
+    rungs = real_rungs(ladder)
+    if current not in rungs:
+        return None
+    index = rungs.index(current)
+    return rungs[index - 1] if index > 0 else None
 
 
 # How long the batch waits for tools to unwind after an ABORT before it stops

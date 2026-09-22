@@ -168,6 +168,72 @@ it measured and this process's CPU time over that same gap
 work (CPU advanced), starved by the host (CPU did not), not running (pid gone).
 Both readings are in-process — no `ps`/`lsof` fork per tick.
 
+## The second leg: spinning without advancing
+
+**What the first release could not see, and the measurement that exposed it.** The
+bound above measures the LOOPS RUNNING. On 2026-09-21 a session on build 0.61.16 —
+with the bound armed — was measured by another session's probe with no progress in
+its transcript, its roster or its four subagent counters across 75 s, **+14.3 s of
+process CPU** burned in that window, and 231 s of heartbeat age, while both planes'
+ticks kept re-arming the timer. The probe's own words: no build, no command, no work
+in flight. A four-way subagent batch had been launched 16 s after a sibling settled,
+the parent acknowledged the launch, and then produced nothing.
+
+**The timing, because it settles what was at fault.** Its serving plane's last beat
+was 18:34:58, so the 300 s liveness deadline was 18:39:58. The operator's reap landed
+at **18:39:46 — twelve seconds short**. Both instruments were right, and neither was
+broken: the bound saw a live loop, the probe saw a stalled session, and nothing in the
+design could see "spinning without advancing".
+
+**Why the fix is composite.** A bound keyed on movement alone would cut every
+legitimate long step — a model call, a tool, a subprocess all produce no transcript
+movement — which is the false positive the liveness design was chosen to avoid. Three
+facts together separate WAITING from SPINNING, and all three must hold for a whole
+window:
+
+1. **no motion** — `process._work_motion`, the drain's clock, REUSED rather than
+equalled by a second footprint clock;
+2. **nothing in flight** — no tool batch executing (the live context does not end in
+   an assistant message whose tool calls have no answers, the state
+   `Session._wire_legal_snapshot` documents, plus the `_compacting` flag);
+3. **CPU advancing** — at least `PROGRESS_CPU_FLOOR` (5%) of one core as a MEAN
+   OVER THE TRAILING WINDOW. Not a per-sample reading: agent review round 1 measured
+   that a single scheduled-out sample discarded a run, leaving an effective margin of
+   0.4-1.2x against a documented 3.8x, and one rigged run in fifteen never fired. And
+   not a cumulative mean either: round 2 measured that one baseline held from the run's
+   start decays as ~1/t through silence, so a burst is carried and the detection
+   latency depends on how long the session has been alive. The mean is taken over the
+   samples pruned to the window, so the latency follows the BURN. A model call is a
+   socket read; a bash child's CPU belongs to the child and never reaches
+   `time.process_time`.
+
+**The window is the bound**, and the argument that sized 300 s sizes this one: it sits
+above the largest legitimate silence measured on this fleet (205.8 s, 1.5x), and the
+measured false positive for calling a runtime `wedged` at 45 s — 105.8 s and 205.8 s of
+beat gap on sessions whose CPU was advancing — is a starved scheduler, i.e. a session
+DOING work: such a sample fails leg 2 or leg 1.
+
+**The leg is live in production, and that is proven on a spawned child.** The PR's
+first version proved the predicate behaviourally and the wiring only textually —
+three text-preserving mutants (the publication inside `if False:`, an early
+`return (), True` before the probe reads the handle, a probe-less arm site in another
+module) left that pin green with the leg inert. The acceptance evidence is now a real
+`python -m …process` child spawned through `launch._spawn_runtime`, spinning because a
+`PYTHONPATH`-supplied `sitecustomize.py` starts a CPU-burning thread at interpreter
+start (no model, no turn), with `LOP_RUNTIME_STALL_SECONDS=45`: it exits `rc=1` with
+the progress line in its dump and `fired_leg → "progress"`. The same rig with `probe=`
+dropped inside the child does not fire. A predicate that ships silently disabled
+with green tests would make the fleet *look* protected, which is the failure this
+whole design exists to avoid.
+
+**The firing path names its class.** `faulthandler` reaches its timer from a C thread
+and calls `_exit(1)` there, so no exit hook, no journal row and no reaper runs after a
+fire — the dump is the only place a class can be written, which is why the header and
+the progress line carry `incidents.STALL_BOUND_CAUSE` and `fired_leg()` reads the leg
+back out of the file. Without that token the loudest ending in the fleet — a runtime
+that dumped every thread and killed itself — was narrated as `unattributed`, i.e. "no
+act was recorded", which is the one reading that is worse than not knowing.
+
 ## Not in this change
 
 **Reclaim cannot help here.** `reclaim`'s rung 5 refuses any candidate with a
@@ -184,6 +250,15 @@ to decide what happens to that terminal — a different design question, and
 arming it from a library path is exactly the interlock hazard above. The
 detached `-m` child is the shape covered: 16 of 16 records in the operator's own
 store were `kind=daemon` when this was written.
+
+**A subagent lane's own in-process tool is not covered by the progress leg.**
+The in-flight fact reads the PROCESS's own step and its compaction. A lane running
+a long in-process tool of its own is not in flight by that measure, so a lane
+parked in private CPU work with no step boundary for longer than the window is
+cut with its parent. A lane that is STEPPING is covered from the other end (its
+step boundaries move the roster generation, so leg 1 fails); closing the gap
+needs a per-child probe, and `comms._records` holds those sessions privately
+today. Widening the probe to every child session gets its own round.
 
 ## PR-B: bounding the scan itself
 

@@ -77,6 +77,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
@@ -127,6 +128,7 @@ from local_operator.procstate import (
     terminate_process_tree,
 )
 from local_operator.redaction_shapes import (
+    CREDENTIAL_SHAPES,
     PEM_BODY_LINE_RE,
     PEM_END_LINE_RE,
     PEM_HEADER_LINE_RE,
@@ -134,15 +136,20 @@ from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
     credential_dump_notice,
+    has_shape_anchor,
     scrub_secrets_with_hits,
     shape_report,
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
+    SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadPathError,
+    ensure_scratchpad_dir,
     parse_scratchpad_url,
+    scratchpad_dir_of,
+    scratchpad_env_injection,
 )
 from local_operator.tools import group_reaper, shell_env
 from local_operator.tools.spill import (
@@ -1575,12 +1582,24 @@ def _ambiguous_report(
     )
 
 
-def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
-    """Build a non-throwing error result (loop never raises into the model)."""
+def _error(
+    tool_call_id: str,
+    tool_name: str,
+    message: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> ToolResult:
+    """Build a non-throwing error result (loop never raises into the model).
+
+    ``details`` carries structured payload for renderers and compaction pruning
+    the same way :func:`_text`'s does — the memory guard uses it to record the
+    measured group peak and the ceiling behind a MEMORY LIMIT EXCEEDED result.
+    """
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         content=[TextContent(text=message)],
+        details=details,
         is_error=True,
     )
 
@@ -2009,6 +2028,51 @@ def _configured_bash_shell() -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _configured_memory_budget(override_mb: float | None) -> memory_guard.Budget:
+    """Resolve this command's memory budget from config + host, at CALL time.
+
+    Fresh ``ConfigManager`` per call for the same reason ``_configured_bash_shell``
+    uses one: the ``memory_guard`` keys are LIVE, so an edit lands on the next
+    command. A config read that fails means "the constants' defaults" (enabled,
+    auto) so a command still runs when ``config.yml`` is broken.
+
+    The ``memory_mb`` argument is passed through to ``compute_budget`` even when
+    the config read failed — the caller said the number, so it does not depend on
+    the config being readable. That is about a config-read FAILURE, not the
+    precedence over the off switch: ``enabled=False`` still wins over a positive
+    ``memory_mb``, because ``enabled`` is the machine-wide master switch (F9;
+    contract §6/§7, QA round 1 Q1).
+    """
+    mode = memory_guard.BASH_MEMORY_MODE_DEFAULT
+    limit_mb = memory_guard.BASH_MEMORY_LIMIT_MB_DEFAULT
+    soft_fraction = memory_guard.BASH_MEMORY_SOFT_FRACTION_DEFAULT
+    enabled = memory_guard.BASH_MEMORY_ENABLED_DEFAULT
+    try:
+        config = ConfigManager(config_dir())
+        mode = config.get_nested_value(memory_guard.BASH_MEMORY_MODE_PATH, mode)
+        limit_mb = config.get_nested_value(memory_guard.BASH_MEMORY_LIMIT_MB_PATH, limit_mb)
+        soft_fraction = config.get_nested_value(
+            memory_guard.BASH_MEMORY_SOFT_FRACTION_PATH, soft_fraction
+        )
+        enabled = config.get_nested_value(memory_guard.BASH_MEMORY_ENABLED_PATH, enabled)
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        pass
+    # Guard the TYPES as well as the values: a hand-edited config.yml can hold a
+    # string where a number belongs, and a bad value must degrade to the default
+    # rather than raise inside the guard that is supposed to protect the command.
+    return memory_guard.compute_budget(
+        mode=mode if isinstance(mode, str) else memory_guard.BASH_MEMORY_MODE_DEFAULT,
+        limit_mb=limit_mb if isinstance(limit_mb, int) and not isinstance(limit_mb, bool) else 0,
+        soft_fraction=(
+            float(soft_fraction)
+            if isinstance(soft_fraction, (int, float)) and not isinstance(soft_fraction, bool)
+            else memory_guard.BASH_MEMORY_SOFT_FRACTION_DEFAULT
+        ),
+        override_mb=override_mb,
+        enabled=enabled if isinstance(enabled, bool) else memory_guard.BASH_MEMORY_ENABLED_DEFAULT,
+    )
+
+
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -2038,6 +2102,18 @@ class BashParams(BaseModel):
             "still bounds the run."
         ),
     )
+    # Terse on purpose, like every field here: the schema rides every request.
+    # The semantics are the three the reader needs — unset = config, 0 = no
+    # budget for this call, > 0 = explicit ceiling in MB.
+    memory_mb: float | None = Field(
+        default=None,
+        description=(
+            "Optional RAM ceiling in MB for this command's process group. Omit to "
+            "use the configured budget; 0 disables the limit for this call; a "
+            "positive number overrides it. Exceeding the limit kills the command's "
+            "group."
+        ),
+    )
 
 
 #: What the live card shows while the pipe is holding an unterminated line.
@@ -2055,6 +2131,17 @@ _LIVE_PENDING_TEXT = "no output yet"
 #: not paint them.
 _WITHHELD_LIVE_OUTPUT = (
     "[live output withheld: this session's credential filter could not read its sink]"
+)
+
+#: The MEMORY LIMIT EXCEEDED line when the guard's own numbers are not available —
+#: a kill that arrived without a retained sample (a cancellation landing in the
+#: same tick). Plain text, no markdown: the tool card paints Text, so backticks
+#: would land literally. It still tells the model to reduce peak memory, which is
+#: the whole point of the line.
+MEMORY_EXCEEDED_FALLBACK = (
+    "MEMORY LIMIT EXCEEDED: this command exceeded the device memory budget and was "
+    "killed; the session is fine. Reduce peak memory and retry: stream instead of "
+    "loading all rows, lower the batch size, or process the input in chunks."
 )
 
 #: A PEM armour header, and a base64 body line. Only a header opens the streaming
@@ -2149,6 +2236,50 @@ class _BashOutput:
 #: line still publishes most of it promptly.
 _PIPE_DEFERRAL_LIMIT = 8192
 
+#: How much raw text the SHAPE rule may hold back, as a hard bound.
+#:
+#: Twice :data:`_PIPE_DEFERRAL_LIMIT`, and the factor is derived rather than
+#: chosen. A shape match the table can see is complete inside the buffer, which
+#: caps its length at the deferral window — so a match straddling a cap-forced
+#: cut ALWAYS starts less than one window before that cut, and moving the cut
+#: back to the match's start therefore holds at most one further window of
+#: bytes. Anything longer than the window itself cannot be protected this way
+#: (see :meth:`_PipeRedactor._shape_safe_spans`), so the bound is not a tuning
+#: knob and does not move when the table gains a rule.
+#:
+#: **This is not the filter's total hold**, and reading it as one is a mistake
+#: this comment used to invite. The `never cut through a KNOWN value` rule below
+#: predates it and holds as much as the value needs — ``pending`` is bounded by
+#: ``max(_PIPE_HOLD_LIMIT, longest registered value + _PIPE_DEFERRAL_LIMIT)``,
+#: because a registered value is a credential the session was told about and the
+#: hold is what keeps it off the wire in two halves. See the class docstring for
+#: the measurement and for what a long registration costs.
+_PIPE_HOLD_LIMIT = 2 * _PIPE_DEFERRAL_LIMIT
+
+
+def _shape_match_spans(text: str, offset: int) -> list[tuple[int, int]]:
+    """Every span of ``text`` a credential shape could match, in absolute offsets.
+
+    The pattern objects and the table are the scrubber's own — this is a second
+    USE of one table, never a second copy of it, so a rule added there is
+    visible here and a rule changed there cannot drift from what this finds.
+
+    Deliberately coarser than the scrub in two ways, both in the safe direction:
+    a rule's ``guard`` is not consulted (a span the guard would reject is
+    reported anyway, which can only make the caller hold bytes longer) and the
+    search runs against pristine text, so it cannot see a span an earlier rule's
+    mask created — reported spans are therefore a SUPERSET of what the scrubber
+    can mask, which is the direction a "do not cut inside a match" rule needs.
+
+    ``offset`` locates ``text`` inside the buffer it was sliced from, so the
+    caller can move a cut that is an offset into that buffer.
+    """
+    spans: list[tuple[int, int]] = []
+    for shape in CREDENTIAL_SHAPES:
+        for match in shape.pattern.finditer(text):
+            spans.append((match.start() + offset, match.end() + offset))
+    return spans
+
 
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
@@ -2181,10 +2312,41 @@ class _PipeRedactor:
     released in cap-sized pieces rather than accumulating, so memory does not
     grow with the command's output. The cap is a CONSTANT, not a function of the
     longest possible match — a bound derived from the pattern table would be
-    wrong the moment a rule was added. The residual is the obvious one: a shape
-    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
-    the cap, is split across two releases and not matched here. Both are
-    contained by the result path, which scrubs the finished text in one piece.
+    wrong the moment a rule was added.
+
+    **The cap used to publish credentials, and the release point is what fixed
+    it.** The line rule is safe by construction only while a line is whole — the
+    cap is what breaks that, cutting through the middle of one. A
+    ``scheme://user:pass@host`` or a ``KEY=value`` line the table masks whole was
+    then published as an unmasked HEAD by the release that cut it and an
+    unmasked TAIL by the next one, because neither slice holds the shape the
+    pattern needs, and NO later pass can repair it: the live stream — the card
+    and ``jobs(op='peek')`` — is the one surface nothing re-reads. So a
+    cap-forced cut is moved back out of any shape it would split
+    (:meth:`_shape_safe_spans`), exactly as the loop below already does for a
+    KNOWN value.
+
+    The bound that buys is :data:`_PIPE_HOLD_LIMIT`: the search is confined to
+    the last two windows of the buffer, so the SHAPE rule never holds more than
+    two windows. The residual is what the bound costs — a SINGLE match longer
+    than a deferral window can still be split, because it cannot be COMPLETE in
+    the buffer at the moment its start reaches the cut, so nothing there is
+    there to find. That is phase-dependent rather than a clean boundary: with
+    the release point landing where it does, a 8,039-byte match is protected on
+    every placement tried, a 9,039-byte one on seven of eight, and by 12,039
+    bytes on two of eight (4 KiB reads; key material past the cap is handled on
+    its own by :meth:`_mask_open_key_block`). Every shape the table can match
+    inside the window is not split.
+
+    **The hold is the max of two rules, and this is the honest one.** ``pending``
+    is bounded by ``max(_PIPE_HOLD_LIMIT, longest registered value + one window)``:
+    the KNOWN-value rule below is older, is not a window rule at all, and holds
+    whatever a registered value needs — measured, a 24,576-byte registered value
+    peaks at 31,072 bytes held at 64 KiB reads, where the same input under this
+    limit alone peaks at 8,192. That is bounded by what the SESSION knows rather
+    than by what the child prints, which is the property the cap exists for, and
+    it is the same in kind as the shape rule: a value too long to be complete in
+    the buffer is split here too, registered or not.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
@@ -2384,14 +2546,29 @@ class _PipeRedactor:
         # is the property that must not depend on what the child prints, so a
         # command that opens a PEM block and never closes it cannot pin the
         # buffer forever.
-        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
+        cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
+        if cap_forced:
             cut = len(text) - _PIPE_DEFERRAL_LIMIT
         # Never cut through a KNOWN value. The newline rule above already
         # prevents that for any value without a newline in it, which is every
         # credential in practice; this keeps the guarantee for the ones with
         # one, and for the cap-forced cut above.
+        #
+        # A SHAPE gets the same rule, for the same reason and by a stricter
+        # mechanism — see _shape_safe_spans / _cut_outside: the cap is the one
+        # release the line rule does not cover, and it is the one that used to
+        # publish a credential in two unmasked halves.
+        spans = self._shape_safe_spans(text) if cap_forced else []
+        # ONE fixed point over BOTH rules, not a sequence of them: moving the cut
+        # for a shape can put it inside a value and vice versa, so the two have to
+        # be re-checked against each other until neither moves it. The reviewer of
+        # this change measured 0 violations from applying them in sequence across
+        # 2,232 buffer/phase combinations, so this is a latent hole being closed
+        # rather than a live one.
         while True:
             previous_cut = cut
+            if spans:
+                cut = self._cut_outside(cut, spans)
             for secret in self.secrets:
                 start = text.find(secret, max(cut - len(secret) + 1, 0))
                 if 0 <= start < cut < start + len(secret):
@@ -2399,6 +2576,57 @@ class _PipeRedactor:
             if cut == previous_cut:
                 break
         return cut
+
+    def _shape_safe_spans(self, text: str) -> list[tuple[int, int]]:
+        """Every shape span a cap-forced release must not land inside.
+
+        Called only when the CAP forced the cut — the one release point chosen
+        without regard to the text around it, and so the only one the newline
+        rule above does not already make safe. The cheap anchor gate then stands
+        in front of the table, so a cap-forced cut inside ordinary output (a
+        10 MB blob of JSON, a progress line) pays a lowercase substring search
+        and nothing else.
+
+        Offsets are absolute in ``text``, and the search is confined to the last
+        :data:`_PIPE_HOLD_LIMIT` bytes. That confinement is what keeps the SHAPE
+        rule bounded: the caller may move a cut back to any span reported here,
+        so ``pending`` cannot be pushed past the hold limit by a shape, and a
+        match beginning earlier than the window is longer than a whole deferral
+        window and could not be held without defeating the cap. The pre-existing
+        known-value rule is a separate, larger hold — see the class docstring.
+        """
+        floor = max(len(text) - _PIPE_HOLD_LIMIT, 0)
+        window = text[floor:]
+        if not has_shape_anchor(window):
+            return []
+        # A match CLOSED BY THE BUFFER END is dropped. Holding cannot protect it —
+        # the next read may extend it — so backing off to its start would hold a
+        # span that keeps growing while CHANGING THE PARTITION, and the partition
+        # is what the truncation-sensitive rules read: measured, including it
+        # masked a value the one-piece pass leaves alone on an input this change
+        # does not fix. It is also the >window case by construction (it crosses
+        # the cut and reaches the buffer end, so it is longer than one window),
+        # which is the residual this bound already states.
+        return [(start, end) for start, end in _shape_match_spans(window, floor) if end < len(text)]
+
+    @staticmethod
+    def _cut_outside(cut: int, spans: list[tuple[int, int]]) -> int:
+        """Move ``cut`` back to the start of the last span it would split.
+
+        Iterated to a fixed point rather than filtered once, because moving the
+        cut can put it inside a DIFFERENT, overlapping span: two rules can
+        propose spans that overlap, and the first move is not necessarily the
+        last (a span ending inside the new cut is a split the single pass would
+        have missed). The existing
+        known-value loop below is written the same way for the same reason.
+        """
+        while True:
+            previous_cut = cut
+            for start, end in spans:
+                if start < cut < end:
+                    cut = start
+            if cut == previous_cut:
+                return cut
 
 
 def _bash_progress_line(
@@ -2758,6 +2986,17 @@ async def execute_bash(
     elif MAY_DELEGATE_ENV in os.environ:
         # Clear what this child would otherwise inherit — and only that.
         injections[MAY_DELEGATE_ENV] = ""
+    # The session's scratchpad root rides the SAME three arms, from one helper, so
+    # the two writers of an inherited-shaped variable cannot drift apart: set to
+    # this session's root, cleared when the name is inherited and this session has
+    # none (so a nested session never writes into its parent's scratchpad), and
+    # not written at all otherwise. The scheme cannot cross this boundary — a
+    # shell cannot resolve one — which is the whole reason the path is exported.
+    #
+    # ``ensure_scratchpad_dir`` runs HERE because this is where the path is handed
+    # over: a shell cannot create a missing parent the way ``write``/``edit`` do,
+    # so the advertised path has to exist by the time the child starts.
+    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 
@@ -2882,6 +3121,31 @@ async def execute_bash(
         spawned_pgid = os.getpgid(process.pid)
         group_reaper.register_group(spawned_pgid, params.command)
 
+    # The memory guard, bound to EXACTLY the group we just spawned. It is built
+    # only when we actually captured a pgid AND the budget resolved to something
+    # armed: a command whose group id could not be read is Windows-shaped (the
+    # guard is a POSIX feature — os.killpg/getpgid do not exist there) and runs
+    # unguarded, and a `source="disabled"` budget (config off, non-measurable
+    # host) is the pre-guard behaviour. The guard can only ever read and kill
+    # THIS pgid: it never discovers a group of its own, so it cannot touch the
+    # runtime or a sibling session (F5).
+    memory_budget = _configured_memory_budget(params.memory_mb)
+    guard: memory_guard.Guard | None = None
+    if spawned_pgid is not None and memory_budget.source != "disabled":
+        guard = memory_guard.Guard(spawned_pgid, memory_budget)
+    elif memory_budget.source == "disabled":
+        # One line, once, on the reason the guard is not protecting this
+        # command. Logged rather than streamed: a per-command advisory would be
+        # wallpaper, and `source="disabled"` is a machine-wide condition.
+        logger.debug("memory guard disabled for this command: %s", memory_budget.reason)
+
+    # The soft advisory line, held for the life of the command once the guard
+    # fires it. PERSISTENT, not one-shot: it rides the card's state line on every
+    # update so it stays painted until the command settles (design review D1).
+    # The guard's own latch stops it RE-FIRING; this cell is what makes the ONE
+    # firing stay visible rather than surviving a single 500 ms snapshot.
+    memory_advisory: str | None = None
+
     def _unregister_group() -> None:
         # Drop this group's ledger line once it is confirmed dead, so a clean
         # run leaves nothing for the startup sweep to consider and a long host
@@ -2891,6 +3155,24 @@ async def execute_bash(
             return
         with contextlib.suppress(Exception):
             group_reaper.unregister_group(spawned_pgid)
+
+    def _reap_synchronously() -> None:
+        """The drain/reap tail's NON-awaiting cleanup, shareable by early returns.
+
+        The steering-path memory branch returns before the tail (it cannot await
+        there — a caught cancellation would re-deliver), but the group is already
+        killed, so its ledger line, its transport and the abort waiter still need
+        releasing. Every step here is synchronous or a cancel, so it is safe on a
+        cancelled task (review round 1, m2). Idempotent: the normal tail runs the
+        same steps, so calling this on the way to that tail would be harmless too.
+        """
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        _unregister_group()
+        if abort_waiter is not None and not abort_waiter.done():
+            abort_waiter.cancel()
 
     stdout_chunks = _BashOutput()
     stderr_chunks = _BashOutput()
@@ -3028,10 +3310,28 @@ async def execute_bash(
             # Bytes are arriving and being held; ``(empty)`` would tell the
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
+        summary = _bash_output_summary(stdout, stderr)
+        # The soft (memory.high) advisory is carried as its OWN field, not
+        # prepended to the output text (design review D1). Prepended, it rode the
+        # HEAD of a block that keeps the TAIL, so on a chatty command — the exact
+        # memory-pressure case it exists for — it scrolled off, and the one-shot
+        # latch meant the next snapshot overwrote it anyway. As a field it reaches
+        # the card's persistent state line and stays put.
+        #
+        # ADVISORY ONLY — see the module docstring: userspace cannot throttle an
+        # allocation, so this is a warning, never a slowdown. The line is the
+        # latch's text; once the guard has fired it we resend the SAME line on
+        # every subsequent update (the latch returns it once, so it is held here),
+        # so it stays painted until the command settles.
+        advisory = memory_advisory
         on_update(
             AgentToolUpdate(
-                content=[TextContent(text=_bash_output_summary(stdout, stderr))],
-                details={"tool_name": "bash", "running": True},
+                content=[TextContent(text=summary)],
+                details={
+                    "tool_name": "bash",
+                    "running": True,
+                    "memory_advisory": advisory,
+                },
             )
         )
 
@@ -3042,7 +3342,44 @@ async def execute_bash(
 
     timed_out = False
     aborted = False
+    # Set when the memory guard kills this command's group. A THIRD branch beside
+    # timed_out/aborted, reading the same _kill(): the drain/reap tail below runs
+    # unchanged, and the result builder turns the flag into the MEMORY LIMIT
+    # EXCEEDED line. Checked on the detach path too, so a memory-killed command is
+    # never reported as "continues in the background" (§10).
+    memory_exceeded = False
+    memory_sample: memory_guard.Sample | None = None
     next_update = loop.time() + 0.5
+    # The memory tick rides the SAME 250 ms cadence as the timeout/abort wait, so
+    # it adds no loop and no new blocking call. The guard's sample() runs the ps
+    # read in a thread (never on the loop thread) — a blocking read here would
+    # stall the TUI frame, which is the failure this guard must not introduce.
+    mem_tick = guard.tick_s if guard is not None else 0.25
+    next_mem_sample = loop.time() + mem_tick
+
+    async def _memory_tick() -> bool:
+        """Sample the guarded group; kill and return True on a hard breach.
+
+        Unknown usage (None) is never a kill — ``should_kill`` requires a measured
+        reading, so a hiccupping ``ps`` leaves the command alone (F6). The soft
+        advisory is folded into the next live update, not emitted as a second
+        stream.
+        """
+        nonlocal memory_exceeded, memory_sample, memory_advisory
+        if guard is None:
+            return False
+        sample = await guard.sample()
+        memory_sample = sample
+        if guard.should_kill(sample):
+            memory_exceeded = True
+            _kill()
+            return True
+        # One-shot: ``soft_notice`` latches internally, so a group sitting over
+        # the soft line does not re-arm this.
+        notice = guard.soft_notice(sample)
+        if notice:
+            memory_advisory = notice
+        return False
 
     def _detach_to_job(jobs: Any, headline: str) -> ToolResult:
         """Hand the running process to a background job and return its id.
@@ -3080,8 +3417,11 @@ async def execute_bash(
             # budget, keeps the readers alive to drain the pipes, and reports
             # the exit status + bounded output as the job result.
             del job_id
+            nonlocal next_mem_sample
             timed_out_bg = False
             cancelled_bg = False
+            memory_exceeded_bg = False
+            bg_sample: memory_guard.Sample | None = None
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
 
@@ -3131,6 +3471,16 @@ async def execute_bash(
                     if asyncio.get_running_loop().time() > bg_deadline:
                         timed_out_bg = True
                         break
+                    # The memory guard's tick rides the SAME 250 ms wait: a
+                    # command that detached via steering or background=True is
+                    # still bounded. sample() runs the ps read in a thread.
+                    if guard is not None and asyncio.get_running_loop().time() >= next_mem_sample:
+                        next_mem_sample = asyncio.get_running_loop().time() + mem_tick
+                        bg_sample = await guard.sample()
+                        if guard.should_kill(bg_sample):
+                            memory_exceeded_bg = True
+                            _kill()
+                            break
                     await asyncio.wait({bg_wait}, timeout=0.25)
                     # The status line a human reads in the TUI while the job
                     # runs. Deliberately a heartbeat and not the output itself:
@@ -3138,7 +3488,7 @@ async def execute_bash(
                     # tail), and mirroring it into a field every renderer
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
-                await cleanup(kill=cancelled_bg or timed_out_bg)
+                await cleanup(kill=cancelled_bg or timed_out_bg or memory_exceeded_bg)
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
                 # into process cleanup first, then preserve cancellation so the
@@ -3151,6 +3501,25 @@ async def execute_bash(
             err = _redact_tool_text(err, context)
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            if memory_exceeded_bg:
+                head = (
+                    guard.over_budget_message(bg_sample)
+                    if guard is not None and bg_sample is not None
+                    else MEMORY_EXCEEDED_FALLBACK
+                )
+                # Structured details on the job row, mirroring the foreground
+                # result's `details` (contract §8.2, review round 1 m3): a
+                # renderer or compaction can read the measured peak and ceiling
+                # by key instead of parsing the head text. `report_progress`
+                # merges a mapping into `latest_details`, so this rides the same
+                # channel the heartbeat uses without displacing it.
+                report_progress(
+                    {
+                        "memory_exceeded": True,
+                        "memory_peak_bytes": guard.peak_bytes if guard else None,
+                        "memory_ceiling_bytes": guard.hard_bytes if guard else None,
+                    }
+                )
             if cancelled_bg:
                 head = "CANCELLED (process killed)"
             out, err, footer, _spill_details = await asyncio.to_thread(
@@ -3280,6 +3649,13 @@ async def execute_bash(
                 aborted = True
                 _kill()
                 break
+            if loop.time() >= next_mem_sample and guard is not None:
+                # Sampled BEFORE the update gate so a breach kills in the same
+                # tick the number is fresh. ``_memory_tick`` never raises into the
+                # loop: a probe failure is "unknown", which is never a kill.
+                next_mem_sample = loop.time() + mem_tick
+                if await _memory_tick():
+                    break
             if loop.time() >= next_update:
                 _emit_update()
                 next_update = loop.time() + 0.5
@@ -3302,6 +3678,35 @@ async def execute_bash(
             # No job manager to own a detached child: kill rather than leak.
             _kill()
             raise
+        if memory_exceeded:
+            # §10: a memory-killed command must NEVER be reported as "continues
+            # in the background". The guard set the flag before its _kill(), so if
+            # a steering CancelledError arrives in the same tick the memory branch
+            # wins.
+            #
+            # We return here rather than falling into the drain/reap tail below:
+            # awaiting there after a caught cancellation would re-deliver the
+            # cancellation and lose the attribution this branch exists to
+            # preserve. But skipping the tail must not skip its SYNCHRONOUS
+            # cleanup — the group is already killed, so reap its ledger line and
+            # release its transport here (review round 1, m2). The `await`s of
+            # the tail are what we cannot do; `_unregister_group()`,
+            # `transport.close()` and cancelling the abort waiter are not.
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            message = (
+                guard.over_budget_message(memory_sample)
+                if guard is not None and memory_sample is not None
+                else MEMORY_EXCEEDED_FALLBACK
+            )
+            return _error(
+                tool_call_id,
+                "bash",
+                # The COMMAND line is scrubbed like every other result line: a
+                # command can carry a credential (see the abort branch above).
+                f"{message}\n{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+            )
         return _detach_to_job(
             jobs,
             "steering interrupted; the command continues in the background. "
@@ -3384,6 +3789,26 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    if memory_exceeded:
+        # The MEMORY LIMIT EXCEEDED line goes FIRST, exactly where TIMEOUT goes,
+        # because the tool card keeps the HEAD of at most 40 lines — a line at the
+        # end of a long result is the first thing its truncation drops.
+        message = (
+            guard.over_budget_message(memory_sample)
+            if guard is not None and memory_sample is not None
+            else MEMORY_EXCEEDED_FALLBACK
+        )
+        parts.insert(0, message)
+        # An ordinary _error, NOT _invalid_arguments: the argument was
+        # satisfiable, the machine said no. The kill already yields a non-zero
+        # return code; the line makes it ATTRIBUTABLE, so the model learns the
+        # command itself was too big rather than retrying it identically.
+        details = dict(spill_details or {})
+        details["memory_exceeded"] = True
+        if guard is not None:
+            details["memory_peak_bytes"] = guard.peak_bytes
+            details["memory_ceiling_bytes"] = guard.hard_bytes
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     # ONE advisory line when the command is shaped like a credential dump, so the
     # model learns the safer form at the moment it needs it rather than after the
     # secret is already in the transcript. It rides the RESULT, not the stream:
@@ -3402,6 +3827,14 @@ async def execute_bash(
     notice = credential_dump_notice(params.command)
     if notice:
         parts.insert(1, notice)
+    # The scratch nudge rides the SAME head window and for the same measured
+    # reason (a line at the end of a long result is the first thing the card
+    # drops). It goes AFTER the credential notice, which keeps first position:
+    # a secret already in the transcript outranks where a scratch file landed.
+    # It costs nothing when it does not fire, which is the ordinary command.
+    scratch = _bash_scratch_hint(params.command, context)
+    if scratch:
+        parts.insert(2 if notice else 1, scratch)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -3486,7 +3919,23 @@ def build_bash_tool() -> AgentTool:
         name="bash",
         label="Shell",
         describe_approval=_describe_shell_approval,
-        description=("Run a bash command and return its exit code, stdout and stderr."),
+        description=(
+            # The ONE standing token cost of the scratchpad work, measured against
+            # the start-of-session budget this repo guards (30,025 billed tokens):
+            # this clause is ~24 of them, and it is deliberately at that size. The
+            # budget is nearly exhausted — before this change the guard passed
+            # with 48 tokens of headroom — so the examples are two rather than
+            # four and the rest of the rule lives in ``guide://scratchpad``, which
+            # costs nothing until it is read. What the clause must do is name the
+            # PATH variable: a shell cannot resolve ``scratchpad://``, the nudge
+            # above only fires after the fact, and the packaged prompt's paragraph
+            # is not in front of the model at the moment it writes a redirect.
+            "Run a bash command and return its exit code, stdout and stderr. "
+            # Interpolated rather than spelled out, so the name the model is told
+            # to use and the name both spawn sites export are one constant — a
+            # second literal here is how the advice would outlive a rename.
+            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp."
+        ),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
         # bash runs shared when non-pty; models batch independent
@@ -4789,14 +5238,12 @@ def _scheme_refusal(
 def _scratchpad_root(context: ToolContext | None) -> Path | None:
     """The scratchpad root off the context, or ``None``. ``""`` reads as ``None``.
 
-    ``""`` is treated as absent rather than as a path: ``Path("")`` is the cwd,
-    which would silently make the whole working directory listable through the
-    scheme.
+    The field reading itself lives in ``scratchpad.scratchpad_dir_of`` so the
+    ``eval`` worker's spawn reads the same field the same way; the ``Path``
+    conversion stays here because this is the module that resolves paths.
     """
-    raw = getattr(context, "scratchpad_dir", None) if context else None
-    if not isinstance(raw, str) or not raw:
-        return None
-    return Path(raw)
+    raw = scratchpad_dir_of(context)
+    return None if raw is None else Path(raw)
 
 
 #: This module's view of the platform, a module-local copy for the same reason
@@ -4881,9 +5328,12 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
 
     Contract, deliberately narrow in four ways:
 
-    * Only ``write``/``edit`` call it, from their own RESOLVED target path —
-      never from ``bash`` and never from ``read``, so a script or a test that
-      deliberately writes under ``/tmp`` through the shell is unaffected.
+    * Its callers are the two writers, from their own RESOLVED target path — not
+      from ``read``, so a script or a test that deliberately writes under ``/tmp``
+      through the shell is unaffected by the ``write``/``edit`` line. ``bash`` has
+      its own entry point (``_bash_scratch_hint``) for the same advisory, because
+      a shell command has no resolved target path to hand in — it has a command
+      string whose CREATING positions have to be read instead.
     * Depth-1 only: the parent must BE a temp root. Several of this fleet's real
       agent worktrees live at ``/private/tmp/<name>``, so anything nested deeper
       is a plausible deliverable and a nudge there would be a false positive on
@@ -4915,11 +5365,528 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
             # TARGET — named once, as the subject the reason clauses hang off.
             # The ``write(path=…)`` example is gone too: taught by
             # ``system.md``, the guide and the tool description.
-            return (
-                f"[scratch] Your own scratch belongs in {SCRATCHPAD_SCHEME} — {resolved} "
-                f"sits directly under a temp root: {why}."
-            )
+            return _temp_scratch_line(resolved, why, SCRATCHPAD_SCHEME)
     return ""
+
+
+def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool = False) -> str:
+    """The one advisory line BOTH temp-root nudges emit, verbatim in one place.
+
+    ``remedy`` is what the two channels can actually act on and it is the only
+    thing that differs between them: ``write``/``edit`` take the
+    ``scratchpad://`` scheme, while a shell cannot resolve a scheme at all and is
+    given the exported path variable instead. The reason clauses and the word
+    order are shared, because the word order is the load-bearing part (see
+    :func:`_temp_scratch_hint`) and a second hand-written copy is how it would
+    quietly stop being true of one of the two lines.
+
+    ``is_root`` swaps the SUBJECT from a created target to the temp root itself,
+    for the bash side's unexpanded targets (``> /tmp/f$i``): the sentence shape,
+    the remedy and the reason are unchanged, because the advice is the same and
+    only the thing being NAMED changes. The root arm names the trap in full
+    ("puts scratch in a temp root") rather than referring back to it — there is no
+    antecedent to refer to, since the reader has not been shown the concrete
+    target the other arm talks about, and the clause is visible only when the
+    whole line fits anyway.
+
+    KNOWN LIMIT, recorded here because this is the one builder both advisories
+    share (design review round 1, D1). The line is rendered in a TUI card whose
+    lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
+    behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
+    so the REMEDY is what gets clipped below ~52 columns, and the whole remedy
+    needs ~73. That bound is not this line's: the ``write``/``edit`` line has the
+    same prologue, so the identical edge already applied to it before this
+    change, which is why the wording (approved in #1374, with a cell-pinning
+    test) is not re-opened for it. Two things keep it a display matter only: the
+    MODEL is unaffected — the tool result carries the full line, and the card
+    clips a rendering of it, never the text the model reads — and the fix, if
+    the edge ever matters, is a shorter prologue rather than a shorter remedy.
+    """
+    subject = (
+        f"writing directly under {resolved} puts scratch in a temp root"
+        if is_root
+        else f"{resolved} sits directly under a temp root"
+    )
+    return f"[scratch] Your own scratch belongs in {remedy} — {subject}: {why}."
+
+
+# ---------------------------------------------------------------------------
+# The bash-side scratch nudge
+# ---------------------------------------------------------------------------
+#
+# The SAME advisory as ``_temp_scratch_hint``, reaching the channel the measured
+# volume actually uses. The audit that produced this (2026-09-21, 400
+# transcripts) counted 8,766 shell calls creating scratch under a temp root
+# against 44 that reached the scratchpad, and the shipped nudge's own docstring
+# recorded that it fired only from ``write``/``edit``. The shell is where the
+# rule has to be present at the moment of creating.
+
+#: The commands whose OPERANDS are CREATED by the call, and which operands count.
+#: ``all`` for the file creators; ``last`` for ``cp``/``mv``, where only the
+#: DESTINATION is created — a source under a temp root is a read, and pointing
+#: the agent at it would be advice about the wrong file; ``template`` for
+#: ``mktemp``, whose operand is a template rather than a path.
+#:
+#: The template-less form (plain ``mktemp -d``) is the guide's sanctioned escape
+#: hatch for a directory that genuinely needs a real temp path, and it is exempt
+#: WITHOUT a deny-list entry: it has no operand, so no candidate is ever produced.
+#: The exemption is structural, which is what keeps "nudge the template" and
+#: "never nudge the escape hatch" from having to be kept in sync by hand.
+_CREATING_COMMANDS: dict[str, str] = {
+    "tee": "all",
+    "mkdir": "all",
+    "touch": "all",
+    "cp": "last",
+    "mv": "last",
+    "mktemp": "template",
+}
+
+#: Prefix commands that stand in FRONT of the real command rather than being one —
+#: ``sudo mkdir /tmp/x``, ``env FOO=1 cp a /tmp/b``, ``timeout 60 mkdir /tmp/x`` do
+#: not nudge unless the walk steps over the prefix to the word that IS the command.
+#:
+#: Each maps to the two facts stepping over it needs: the flags that take a
+#: SEPARATE value, and whether a leading bare operand belongs to the PREFIX rather
+#: than to the command. Without the first, the flag's VALUE sits in command
+#: position and reads as the command name (``sudo -u root mkdir``); without the
+#: second, the prefix's own operand does the same (``timeout 60 mkdir``). Either
+#: way the creation behind it is never seen.
+#:
+#: Both are MISSES, which is the safe direction — but the docstring below names
+#: ``sudo mkdir`` as a shape this list exists for, so leaving it inexact would be a
+#: coverage claim rather than an intended limit. Kept to the prefixes worth naming
+#: plus the shell words that share their position (``do``/``then``/``else``, where
+#: the next word is still a command); anything else is a miss on purpose.
+_COMMAND_PREFIXES: dict[str, tuple[frozenset[str], bool]] = {
+    "sudo": (
+        frozenset(
+            {
+                "-u",
+                "-g",
+                "-p",
+                "-C",
+                "-h",
+                "-r",
+                "-t",
+                "--user",
+                "--group",
+                "--prompt",
+                "--chdir",
+                "--host",
+                "--role",
+                "--type",
+            }
+        ),
+        False,
+    ),
+    "timeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), True),
+    "nice": (frozenset({"-n", "--adjustment"}), True),
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), False),
+    "command": (frozenset(), False),
+    # ``time`` is a shell KEYWORD rather than a program, so it can stand in front of
+    # anything and its only option is ``-p``; no operand of its own. It was in the
+    # original frozenset and was dropped when that became this table, which made
+    # ``time mkdir /tmp/x`` silent at a head where it had nudged before — a
+    # regression nothing caught, because no row used ``time``.
+    "time": (frozenset(), False),
+    "nohup": (frozenset(), False),
+    "exec": (frozenset(), False),
+    "do": (frozenset(), False),
+    "then": (frozenset(), False),
+    "else": (frozenset(), False),
+}
+
+#: ``NAME=value`` ahead of a command word.
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+#: A bare operand that is a PREFIX's own rather than the command's: ``timeout 60``,
+#: ``nice 10``, and their suffixed spellings (``timeout 1m``).
+_PREFIX_OPERAND = re.compile(r"\d+(?:\.\d+)?[smhd]?$")
+
+#: A shell construct the scanner cannot expand: a variable or a command
+#: substitution. Its presence is what separates a target that NAMES a path from a
+#: target that will name one at run time (see :func:`_temp_scratch_line`).
+_UNEXPANDED_SHELL = re.compile(r"[$`]")
+
+
+def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
+    """One advisory line when ``command`` CREATES a path directly under a temp
+    root, else ``""``.
+
+    Same voice, same reason clauses and the same word order as the
+    ``write``/``edit`` nudge (:func:`_temp_scratch_hint`); the remedy differs
+    because this channel needs a PATH. Contract, all of it load-bearing:
+
+    * CREATING positions only — redirect ``>``/``>>``, the operands of ``tee``,
+      ``mkdir``, ``touch``, ``cp``/``mv`` (destination) and an explicit ``mktemp``
+      template. A ``read``, ``rm``, ``cat`` or ``grep`` target is not a creation
+      and is never nudged, and a heredoc BODY is data rather than commands.
+    * Depth-1 only: the target's parent must BE the temp root. This fleet keeps
+      real worktrees at ``/private/tmp/<name>``, so a deeper path is a plausible
+      deliverable and nudging it would be a false positive on real work — the
+      same narrowness ``write``/``edit`` already document and accept.
+    * Exempt: a template-less ``mktemp -d`` (the guide's escape hatch) and every
+      ``mktemp`` template that does not carry the ``X`` run — neither produces a
+      candidate.
+    * No scratchpad on this host means no nudge: there is nowhere better to point
+      the session, and the export is absent in exactly that case.
+    * At most ONE line per result (this returns one string), and no module-level
+      state of any kind — the dedupe that would need it does not exist because a
+      single result is built from a single command.
+    * NOT a ``background: true`` call, and this one is a deliberate GAP rather
+      than a decision the code makes: a detached command settles through
+      ``_detach_to_job``, whose job result is assembled on its own path and never
+      reaches the advisory insert below. Measured 2026-09-21 — ``mkdir -p
+      /tmp/…`` with ``background=True`` nudges in neither the immediate result nor
+      the settled ``result_text``. Left as a miss on purpose: the advisory would
+      arrive at job-settle time, which can be long after the file was created and
+      acted on, so buying it costs more surface than it returns. The foreground
+      path is where the volume is (``nohup … > log`` is a foreground shell).
+    """
+    if not command:
+        return ""
+    if _scratchpad_root(context) is None:
+        return ""
+    roots = dict(_temp_scratch_roots())
+    if not roots:
+        return ""
+    for candidate in _bash_created_paths(command):
+        resolved = _temp_root_target(candidate, roots)
+        if resolved is None:
+            continue
+        # A target the shell has yet to expand does not NAME a path, and printing
+        # its resolved form would invent one (``> /tmp/f$i`` is not
+        # ``/private/tmp/f$i``). The temp root is the honest subject there, and it
+        # is a directory that really exists.
+        unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
+        return _temp_scratch_line(
+            resolved.parent if unexpanded else resolved,
+            roots[resolved.parent],
+            f"${SCRATCHPAD_PATH_ENV}",
+            is_root=unexpanded,
+        )
+    return ""
+
+
+def _bash_created_paths(command: str) -> Iterator[str]:
+    """The candidate paths ``command`` creates, in the order the shell meets them.
+
+    A structural walk over the token stream rather than a pattern match, because
+    "is this token CREATED" is a fact about its position — an operand of a
+    creating command, or a redirect target — and not about how the path is
+    spelled. Quoted and backslash-escaped text has already been dequoted by the
+    scanner, so ``> "/tmp/x.log"`` yields the same token as ``> /tmp/x.log``.
+    """
+    tokens = _bash_tokens(_strip_heredoc_bodies(command))
+    index = 0
+    at_command = True
+    while index < len(tokens):
+        kind, text = tokens[index]
+        index += 1
+        if kind == "redir":
+            if index < len(tokens) and tokens[index][0] == "word":
+                yield tokens[index][1]
+                index += 1
+            continue
+        if kind == "op":
+            at_command = True
+            continue
+        if not at_command:
+            continue
+        if _ASSIGNMENT.match(text):
+            continue
+        prefix = _COMMAND_PREFIXES.get(text)
+        if prefix is not None:
+            index = _skip_prefix_operands(tokens, index, *prefix)
+            continue
+        if text.startswith("-"):
+            # A stray flag in command position names no command, so nothing behind
+            # it is a creation this walk can attribute.
+            continue
+        mode = _CREATING_COMMANDS.get(text.rsplit("/", 1)[-1])
+        if mode is None:
+            at_command = False
+            continue
+        operands: list[str] = []
+        while index < len(tokens) and tokens[index][0] == "word":
+            if not tokens[index][1].startswith("-"):
+                operands.append(tokens[index][1])
+            index += 1
+        if mode == "last":
+            operands = operands[-1:]
+        elif mode == "template":
+            operands = [operand for operand in operands if "X" in operand]
+        yield from operands
+        at_command = False
+
+
+def _skip_prefix_operands(
+    tokens: list[tuple[str, str]], index: int, taking_value: frozenset[str], takes_operand: bool
+) -> int:
+    """Step past a prefix command's own flags and operands, to its real command.
+
+    Returns the index of the first token that is neither, so the caller resumes at
+    a genuine command position. The two skip rules are the table's: a flag listed
+    as taking a value consumes the token after it (``-u root``), and a prefix that
+    consumes a leading bare operand stops doing so after one (``timeout 60``) —
+    after that, a bare word IS the command.
+    """
+    while index < len(tokens) and tokens[index][0] == "word":
+        word = tokens[index][1]
+        if word in taking_value:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        if takes_operand and _PREFIX_OPERAND.match(word):
+            takes_operand = False
+            index += 1
+            continue
+        break
+    return index
+
+
+def _expand_tmpdir_spellings(candidate: str) -> str:
+    """``candidate`` with the shell's ``$TMPDIR`` spellings expanded.
+
+    ``${TMPDIR}`` FIRST: the longer spelling contains no ``$TMPDIR`` substring, but
+    replacing in the other order would leave ``${}`` behind and rewrite a literal
+    that was never a variable. Shared with the unexpanded-target check next door so
+    the two cannot disagree about what counts as spelled out: ``$TMPDIR/x`` IS a
+    path once expanded, while ``/tmp/f$i`` still is not.
+    """
+    for spelling in ("${TMPDIR}", "$TMPDIR"):
+        candidate = candidate.replace(spelling, tempfile.gettempdir())
+    return candidate
+
+
+def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
+    """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
+
+    The root spellings a shell writes are the point of the expansion below:
+    ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
+    literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
+    shells on this fleet spell it. Every other form is left alone: a relative
+    path, a ``~`` path and anything carrying a scheme are not temp-root targets
+    and must not be guessed at.
+    """
+    text = _expand_tmpdir_spellings(candidate.strip())
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        resolved = Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
+    return resolved if resolved.parent in roots else None
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """``command`` with every heredoc BODY removed.
+
+    A body is DATA being written, not commands being run: in ``cat > /tmp/x.sh
+    <<'EOF'`` the lines that follow are the file's contents, so a ``> /tmp/y``
+    inside them is not a second creation at this level. The operator and its
+    delimiter are left in place — only the body is dropped — so the token scan
+    still sees the command's real shape.
+
+    Quote- and comment-aware, because ``echo "a << b"`` is one word rather than a
+    heredoc. One delimiter per line is what this models; a second ``<<`` on the
+    same line is a shape the shell accepts and this scanner does not follow, and
+    the cost of that is a body tokenised as commands — an advisory MISS, which is
+    the direction this nudge is allowed to be wrong in.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char in "'\"":
+            end = _consume_quoted(command, index, [])
+            out.append(command[index:end])
+            index = end
+            continue
+        if char == "\\" and index + 1 < length:
+            out.append(command[index : index + 2])
+            index += 2
+            continue
+        if char == "#" and (index == 0 or command[index - 1] in " \t\n;&|"):
+            newline = command.find("\n", index)
+            end = length if newline == -1 else newline
+            out.append(command[index:end])
+            index = end
+            continue
+        if (
+            char == "<"
+            and command[index : index + 2] == "<<"
+            and command[index : index + 3] != "<<<"
+        ):
+            tabs_only = command[index : index + 3] == "<<-"
+            cursor = _skip_whitespace(command, index + (3 if tabs_only else 2))
+            delimiter, after = _read_shell_word(command, cursor)
+            out.append(command[index:after])
+            newline = command.find("\n", after)
+            if newline == -1:
+                break
+            out.append("\n")
+            index = _end_of_heredoc(command, newline + 1, delimiter, tabs_only)
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _end_of_heredoc(command: str, start: int, delimiter: str, tabs_only: bool) -> int:
+    """Index just past the line that terminates a heredoc body, or the end.
+
+    ``<<-`` strips leading TABS from the body AND from the terminator, which is
+    the one thing that would make a delimiter match fail on a body the shell
+    itself accepts — so the tab strip is part of matching, not decoration.
+    """
+    cursor = start
+    length = len(command)
+    while cursor <= length:
+        newline = command.find("\n", cursor)
+        line_end = length if newline == -1 else newline
+        line = command[cursor:line_end]
+        if (line.lstrip("\t") if tabs_only else line).strip() == delimiter:
+            return length if newline == -1 else newline + 1
+        if newline == -1:
+            break
+        cursor = newline + 1
+    return length
+
+
+def _skip_whitespace(command: str, index: int) -> int:
+    """Index of the first character at or after ``index`` that is not blank."""
+    length = len(command)
+    while index < length and command[index] in " \t":
+        index += 1
+    return index
+
+
+def _read_shell_word(command: str, index: int) -> tuple[str, int]:
+    """The dequoted word at ``index``, and the index after it."""
+    buffer: list[str] = []
+    length = len(command)
+    while index < length and command[index] not in " \t\n;&|<>":
+        if command[index] in "'\"":
+            index = _consume_quoted(command, index, buffer)
+            continue
+        if command[index] == "\\" and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+            continue
+        buffer.append(command[index])
+        index += 1
+    return "".join(buffer), index
+
+
+def _consume_quoted(command: str, start: int, buffer: list[str]) -> int:
+    """Append the CONTENTS of the quote at ``start`` to ``buffer``; return the
+    index after it.
+
+    Backslash escapes are honoured inside double quotes only, which is what the
+    shell does: ``'\\'`` is a literal backslash in single quotes, and treating it
+    as an escape there would dequote a path the shell would have kept verbatim.
+    An unterminated quote runs to the end of the command, which is also what the
+    shell does with it.
+    """
+    quote = command[start]
+    index = start + 1
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char == "\\" and quote == '"' and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        buffer.append(char)
+        index += 1
+    return index
+
+
+def _bash_tokens(command: str) -> list[tuple[str, str]]:
+    """Split a command into ``(kind, text)`` with kind ``word``/``op``/``redir``.
+
+    Deliberately a SMALL scanner rather than a shell parser: its only consumer is
+    an advisory filter, so anything it does not model degrades to "no nudge"
+    rather than to a wrong one. What it DOES model is the set of positions the
+    nudge fires on and the things that would make a word look like one of them:
+    quoting and escapes (a quoted ``>`` is a word), the ``;``/``&&``/``||``/``|``/
+    newline separators that end an operand list, fd redirections (``2>``, ``&>``,
+    ``2>&1``, ``>&2``) which must be neither a word nor a path, and ``<``/``<<``
+    — a heredoc's delimiter is not a created path.
+    """
+    tokens: list[tuple[str, str]] = []
+    buffer: list[str] = []
+    index = 0
+    length = len(command)
+
+    def flush() -> None:
+        if buffer:
+            tokens.append(("word", "".join(buffer)))
+            buffer.clear()
+
+    while index < length:
+        char = command[index]
+        if char in " \t":
+            flush()
+            index += 1
+        elif char == "\\" and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+        elif char in "'\"":
+            index = _consume_quoted(command, index, buffer)
+        elif char == "#" and not buffer:
+            newline = command.find("\n", index)
+            index = length if newline == -1 else newline
+        elif char == "\n":
+            flush()
+            tokens.append(("op", "\n"))
+            index += 1
+        elif char == ">" or (char == "&" and command[index : index + 2] == "&>"):
+            # A digit-only buffer before ``>`` is a file descriptor (``2>``), not
+            # a word — flushing it would put a bare ``2`` in the operand list and
+            # break the "last operand is the cp destination" rule.
+            if buffer and all(digit in "0123456789" for digit in buffer):
+                buffer.clear()
+            flush()
+            index += 1 if char == ">" else 2  # ``&>`` carries its own ``>``
+            if index < length and command[index] == ">":
+                index += 1
+            if index < length and command[index] == "&":
+                # ``>&2`` / ``2>&1`` / ``>&-``: a duplicated descriptor, no path.
+                index += 1
+                while index < length and (command[index].isdigit() or command[index] == "-"):
+                    index += 1
+                continue
+            tokens.append(("redir", ">"))
+        elif char == "<":
+            flush()
+            index += 1
+            heredoc = index < length and command[index] == "<"
+            if heredoc:
+                index += 1
+                if index < length and command[index] == "<":
+                    index += 1
+            tokens.append(("op", "<<" if heredoc else "<"))
+            if heredoc:
+                # The delimiter (or herestring operand) is never a created path.
+                _, index = _read_shell_word(command, _skip_whitespace(command, index))
+        elif char in ";&|()":
+            flush()
+            index += 2 if command[index : index + 2] in ("&&", "||") else 1
+            tokens.append(("op", char))
+        else:
+            buffer.append(char)
+            index += 1
+    flush()
+    return tokens
 
 
 def _scratchpad_address(result: ToolResult, url: str, path: Path) -> ToolResult:

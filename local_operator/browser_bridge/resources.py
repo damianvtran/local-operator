@@ -438,8 +438,12 @@ class BrowserResource:
     def _lease_generation(self) -> str:
         from local_operator.session_lease import _read_claim
 
-        generation, _pid = _read_claim(self.directory / ".execution-lease")
-        return generation or ""
+        # One parser for the claim, shared with the lease and the resume path:
+        # the claim now carries the writer's birth fields as well as its
+        # generation, and a second reader beside that parser is how two callers
+        # come to disagree about who owns a transcript. This one wants only the
+        # generation — a browser resource is fenced on it, never on the pid.
+        return _read_claim(self.directory / ".execution-lease").generation or ""
 
     def initialize(self) -> None:
         if self.generation:

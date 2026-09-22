@@ -21,6 +21,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ from typing import Any
 import pytest
 
 import local_operator.session.runtime.launch as launch_module
+from local_operator import procstate
 from local_operator.session.runtime.launch import (
     _CONSTRUCTING_POLL_S,
     _CONSTRUCTING_WINDOW_S,
@@ -439,7 +441,7 @@ async def test_a_claim_held_by_a_zombie_is_recovered_not_waited_on(
 
 
 def _count_every_corpse_probe(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Count calls to the zombie probe from EVERY module that has bound it.
+    """Count calls to the expensive proof from EVERY module that has bound it.
 
     Patching one caller is not enough, and that is a finding rather than a
     nicety: the loop asks the same question twice per pass — once through
@@ -452,7 +454,15 @@ def _count_every_corpse_probe(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     binds the probe for the FIRST time after this call would not be counted,
     which is why the expected carriers are asserted below.
 
-    Counts INVOCATIONS, not forks: on Linux ``is_zombie`` answers from ``/proc``
+    **TWO ENTRY POINTS NOW, and both are counted.** The proof used to be
+    ``is_zombie`` alone; a claim that records its writer's birth token is proved
+    through ``process_sample`` instead, because the same platform probe answers
+    the corpse question and the identity question from one sample (2026-09-21).
+    Counting only ``is_zombie`` would report a fork-free grid while the identity
+    proof forked on every pass — the exact failure this helper's origin note
+    describes, one probe over. A pass that spends either is spending the proof.
+
+    Counts INVOCATIONS, not forks: on Linux the sample answers from ``/proc``
     without forking, but the expensive question is asked either way, and that is
     the thing a dense grid must not do.
     """
@@ -461,17 +471,25 @@ def _count_every_corpse_probe(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     from local_operator import session_lease as lease_module  # and so does this
 
     real = procstate.is_zombie
+    real_sample = procstate.process_sample
     calls: list[int] = []
 
     def counting(pid: int) -> bool:
         calls.append(pid)
         return real(pid)
 
+    def counting_sample(pid: int):
+        calls.append(pid)
+        return real_sample(pid)
+
     holders = []
+    samplers = []
     for module in list(sys.modules.values()):
         try:
             if getattr(module, "is_zombie", None) is real:
                 holders.append(module)
+            if getattr(module, "process_sample", None) is real_sample:
+                samplers.append(module)
         except Exception:  # noqa: BLE001 — a module with a raising __getattr__
             continue
     names = {module.__name__ for module in holders}
@@ -479,8 +497,15 @@ def _count_every_corpse_probe(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         lease_module.__name__,
         resume_module.__name__,
     } <= names, f"not every carrier is imported, so this counter is partial: {sorted(names)}"
+    sample_names = {module.__name__ for module in samplers}
+    assert {
+        lease_module.__name__,
+        resume_module.__name__,
+    } <= sample_names, f"the identity probe has an uncounted carrier: {sorted(sample_names)}"
     for module in holders:
         monkeypatch.setattr(module, "is_zombie", counting)
+    for module in samplers:
+        monkeypatch.setattr(module, "process_sample", counting_sample)
     return calls
 
 
@@ -504,8 +529,6 @@ async def test_the_dense_starting_window_pays_no_corpse_probe(tmp_path: Path, mo
     proof — so the tests around this one show both other ends: a corpse's claim
     IS taken over, and the proof IS spent once the grid goes coarse.
     """
-    probes = _count_every_corpse_probe(monkeypatch)
-
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     session_dir = tmp_path / "sessions" / SESSION_ID
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -513,6 +536,12 @@ async def test_the_dense_starting_window_pays_no_corpse_probe(tmp_path: Path, mo
     # deadline is shorter than the window on purpose, so every pass under test is
     # a dense one.
     holder = acquire_session_lease(session_dir)
+    # The counter goes in AFTER the holder is acquired, because the WRITE path
+    # spends one identity probe of its own: a claim records the birth token of the
+    # pid it names (2026-09-21), sampled once per process and memoised. That is a
+    # per-process cost, not a per-pass one, and counting it here would measure the
+    # setup rather than the grid.
+    probes = _count_every_corpse_probe(monkeypatch)
     try:
         with pytest.raises(TimeoutError):
             await engage_runtime(
@@ -569,6 +598,93 @@ async def test_the_corpse_proof_is_spent_once_the_grid_goes_coarse(
     # Two probes per pass on the coarse grid (discovery + lease), ~5 passes in
     # 0.6 s; a dense grid would be ~60 passes.
     assert len(probes) <= 25, f"{len(probes)} probes in a 0.6 s coarse tail is still a dense fork"
+
+
+@pytest.mark.asyncio
+async def test_a_claim_naming_an_unrelated_live_pid_spawns_instead_of_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE OPERATOR'S SYMPTOM, END TO END (session bfbc971ef537, 2026-09-21).
+
+    The session could not be reopened by ANY interface, and the loop spent its
+    whole ``DEFAULT_DEADLINE_S`` (30 s) spawning nothing: the transcript's claim
+    named a pid that a dead runtime had left behind, and the kernel had handed
+    that number to an unrelated live process. ``_lease_holder`` answered with
+    that stranger, so engage took its "a contender holds the transcript but has
+    not published yet" branch and waited for a record that could never appear.
+
+    The property asserted here is the one the user cares about: with the claim
+    naming a live stranger, the engage SPAWNS — it does not sit out the deadline
+    and it does not raise. Staged as in ``test_lease_process_identity``: the
+    token in the claim is measured off a real process which is then reaped, and
+    the pid is a real live process that is not that owner. Every pid and token
+    here is real; only the coincidence is arranged.
+
+    On the unfixed tree this test fails with the loop's ``TimeoutError`` after
+    burning the deadline — which is what the operator saw as "the runtime is
+    reconnecting".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+    instance = FakeRuntimeFleet(tmp_path)
+    instance.loop = asyncio.get_running_loop()
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise, **seed: instance.spawn(
+            session_id, cwd, defer_materialise=defer_materialise
+        ),
+    )
+
+    # The dead owner, held alive for one token tick before its token is read: the
+    # macOS token is whole SECONDS, so a process killed inside the second it was
+    # born would stage a collision rather than a reuse.
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    stranger = None
+    try:
+        time.sleep(1.2)
+        scheme = procstate.birth_scheme()
+        token = procstate.birth_token(owner.pid)
+        assert scheme is not None and token is not None
+        owner.kill()
+        owner.wait(timeout=10)
+
+        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        assert procstate.birth_token(stranger.pid) != token
+
+        session_dir = tmp_path / "sessions" / SESSION_ID
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".execution-lease").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "session_id": SESSION_ID,
+                    "generation": "forged",
+                    "pid": stranger.pid,
+                    "birth_scheme": scheme,
+                    "birth_token": token,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        (session_dir / ".session.pid").write_text(str(stranger.pid), encoding="utf-8")
+
+        outcome = await engage_runtime(
+            SESSION_ID,
+            str(tmp_path),
+            WarmErrand(),
+            config_dir=tmp_path,
+            deadline_s=5.0,
+        )
+
+        assert instance.spawns == 1, "engage did not spawn at all"
+        assert instance.winners == 1, "the spawned candidate never took the claim"
+        assert outcome.spawned is True, "engage reported an attach to a recycled pid"
+    finally:
+        if stranger is not None:
+            stranger.kill()
+            stranger.wait(timeout=10)
+        instance.close()
 
 
 @pytest.mark.asyncio

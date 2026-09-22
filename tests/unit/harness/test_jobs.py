@@ -169,6 +169,39 @@ async def test_progress_burst_publishes_every_edge_without_persisting() -> None:
     await manager.dispose()
 
 
+@pytest.mark.asyncio
+async def test_a_mapping_report_merges_structured_fields_onto_the_job_row() -> None:
+    """A mapping progress report lands its keys on ``latest_details`` (m3).
+
+    This is the channel bash uses to record a background memory kill's peak and
+    ceiling by key, so a renderer/compaction can read them without parsing the
+    head text. A plain string still writes ``progress`` — the two shapes must
+    coexist without one clobbering the other.
+    """
+    release = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        await release.wait()
+        return "done"
+
+    manager = AsyncJobManager()
+    job_id = manager.register("bash", "hog", blocked)
+    report = manager._progress_fn(job_id)
+    report("heartbeat")
+    assert require_job(manager, job_id).latest_details == {"progress": "heartbeat"}
+    # A mapping merges in without displacing the progress line.
+    report({"memory_exceeded": True, "memory_peak_bytes": 123, "memory_ceiling_bytes": 64})
+    assert require_job(manager, job_id).latest_details == {
+        "progress": "heartbeat",
+        "memory_exceeded": True,
+        "memory_peak_bytes": 123,
+        "memory_ceiling_bytes": 64,
+    }
+    release.set()
+    await manager.settled_event(job_id).wait()
+    await manager.dispose()
+
+
 def test_accumulate_usage_preserves_provider_reported_calls() -> None:
     """A tool-using child's receipts stay attached to their original calls."""
     from local_operator.harness.subagent import _accumulate_usage

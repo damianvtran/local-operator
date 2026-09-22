@@ -167,6 +167,7 @@ from local_operator.incidents import (
     format_cut_off_raw,
     render_cut_off_reason,
 )
+from local_operator.model.effort import cheapest_real_rung
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
@@ -8867,10 +8868,21 @@ class Session:
         and forgotten on the way to the executor" — the drop the parity test
         exists to catch, avoided by never letting a host configure it at all.
 
-        Defensive about a transcript with no usable ``.directory``, matching
-        how the id derivation tolerates one: a host with no session has no
-        scratch area, and that is a ``None`` rather than an exception on the
-        path every turn walks. Cost is one join and one ``parent.name`` compare.
+        THE ROOT IS NOT CREATED HERE, deliberately, and the reason is a pinned
+        invariant next door: ``Transcript(defer_materialise=True)`` exists so a
+        speculative runtime — a viewer's first keystroke warms a session before
+        the user has committed to a message — leaves NOTHING on disk, and this
+        method runs during construction (``_build_tool_context``), so a mkdir
+        here would defeat it. ``test_birth_selection_is_durable_only_when_work_
+        is_admitted`` fails on exactly that assertion. The root is instead created
+        where the path is HANDED OVER — ``scratchpad.ensure_scratchpad_dir``, called
+        by the two spawn sites — which is the moment that matters: a session's own
+        ``write``/``edit`` create their parents anyway, and a shell cannot, so the
+        only channel that needed the directory to pre-exist is the one that now
+        gets it made before it is told the path.
+
+        Cost is one join and one ``parent.name`` compare; the write is the spawn
+        site's.
         """
         from local_operator.scratchpad import scratchpad_root
 
@@ -9573,12 +9585,13 @@ class Session:
         # emit: the row reached the model, persisted, and painted on no operator
         # surface at all, live or on replay.
         #
-        # `warning` ink for BOTH classifications, deliberately: the event is one
-        # the operator asked to be shown either way (a credential touched a tool,
-        # and a plaintext copy may be sitting on disk to clean up), and the
-        # severity difference is carried by the text rather than by the ink. A
-        # quieter ink for the contained case is a DESIGN decision on the notice
-        # row, not something this change should make by the back door.
+        # `warning` ink for whichever classification reaches this method, and
+        # in-tree today that is only the escalated one: the contained hit is
+        # dropped at `_queue_shape_incident`, the single gate, so this comment is
+        # about the INK of a severity this path still carries by text. The
+        # severity difference lives in the wording rather than in the ink, because
+        # a quieter ink for the contained case is a DESIGN decision on the notice
+        # row rather than something this change should make by the back door.
         try:
             await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
         except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
@@ -12062,11 +12075,16 @@ class Session:
 
     @staticmethod
     def _lowest_effort(spec: ModelSpec) -> ModelSpec:
-        """``spec`` on the bottom rung of its own effort ladder, if it has one."""
+        """``spec`` on the cheapest REAL rung of its own effort ladder, if it has one.
+
+        The ``auto`` sentinel is skipped: it is a delegation, not a depth, so
+        the "lowest" rung is the cheapest member that names a real level.
+        """
         efforts = spec.reasoning_efforts
-        if not efforts or spec.reasoning_effort == efforts[0]:
+        lowest = cheapest_real_rung(efforts)
+        if lowest is None or spec.reasoning_effort == lowest:
             return spec
-        return spec.model_copy(update={"reasoning_effort": efforts[0]})
+        return spec.model_copy(update={"reasoning_effort": lowest})
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary.

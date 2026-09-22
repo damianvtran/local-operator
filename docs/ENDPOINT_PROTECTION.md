@@ -48,12 +48,13 @@ Operator`, a binary named `Local Operator` (§2, §3).
 The `<prefix>`/`<install env>` distinction belongs to the **pre-generation
 render**, not to the live plists. `launchd_job` names the branded link
 `<prefix>/bin/Local Operator` where no shim can be planted — `<prefix>` is the
-install prefix of whichever CLI installed the job, `<install env>` the
-environment the installing component runs from (the desktop app's Application
-Support tree, below) — and, with no branded link either, drops `Program`
-entirely and puts the image in `ProgramArguments[0]`. The uv-tool prefix of that
-older shape survives in the dated `…wakes.plist.bak-…` record below, in
-`ProgramArguments[0]`, with no `Program` key.
+install prefix of whichever CLI installed the job, and `<install env>` the
+environment the installing component ran from, whose image is that render's
+fallback — the desktop app's Application Support tree, below — rather than
+the stable one the live layout names. With no branded link either, it drops
+`Program` entirely and puts the image in `ProgramArguments[0]`. The uv-tool
+prefix of that older shape survives in the dated `…wakes.plist.bak-…` record
+below, in `ProgramArguments[0]`, with no `Program` key.
 
 The image/argv split is deliberate, not incidental. The four installers all
 spread `procname.launchd_job(...)` — callers `mobile/install.py`,
@@ -617,10 +618,12 @@ exclusion could be observed firing — see §4.)
 signed does not sign the interpreters it provisions — but it does not leave them
 unsigned either.** The app-provisioned images under Application Support carry
 the app's Developer ID and team (Class 2 above), so a certificate rule *can*
-cover the daemons' program image on a desktop-app install. What a rule written
-for the app bundle does not cover is the **CLI install path**: the uv-tool, pipx
-and plain-pip images are ad-hoc signed with no team at all (Class 1). One
-product, two signing states, and the state depends on how the user installed it.
+cover them, and the daemons' program image on a **pre-generation** desktop-app
+install — the shape §2's Class 2 lead-in bounds, the live layout naming the
+generation tree's image instead (§1). What a rule written for the app bundle
+does not cover is the **CLI install path**: the uv-tool, pipx and plain-pip
+images are ad-hoc signed with no team at all (Class 1). One product, two
+signing states, and the state depends on how the user installed it.
 
 ## 3. The behaviour pattern that trips behavioural engines
 
@@ -691,10 +694,11 @@ install:
    control is still a disagreement an engine has to resolve on its own.
 
 An install that persists itself, fetches new code, runs a temp-directory
-installer, writes an executable environment into Application Support and
-supervises daemons out of that directory is, to a heuristic, indistinguishable
-from the pattern those heuristics are designed to catch. That is the finding,
-and it is why the fix in §4 is an allow-list rather than an argument.
+installer, writes an executable environment into Application Support — a data
+root, not the origin the supervised daemons run from — and supervises daemons
+out of its own install tree is, to a heuristic, indistinguishable from the
+pattern those heuristics are designed to catch. That is the finding, and it is
+why the fix in §4 is an allow-list rather than an argument.
 
 ## 4. The admin recipe
 
@@ -730,7 +734,7 @@ Scope the exclusion to:
   a label the browser bridge derives from a non-default config root, §1);
 - for desktop-app installs, `/Applications/Local Operator.app/**` and
   `~/Library/Application Support/Local Operator/**` (the managed Python
-  environment and the data directory the app executes helpers from);
+  environment and the app's data directory);
 - the notifier bundle the TUI builds at runtime —
   `~/.local-operator/notifier/LocalOperator.app/**` (§1). It sits **inside the
   config directory** rather than in an install prefix, and its bundle
@@ -847,8 +851,9 @@ Report it as a behavioural false positive with the evidence attached:
   out explicitly as a **hardlink to the environment's CPython**, so the
   analyst can see in one step why the name and the signature disagree;
 - the paths in `~/Library/Application Support/Local Operator` for a
-  desktop-app install, including the fact that helper processes execute from
-  there;
+  desktop-app install, including the fact that the directory is the app's data
+  root — what it provisions — and not the origin the supervised daemons run
+  from: the helper processes run from the app bundle and the generation tree;
 - **per-release file hashes**, so the vendor can distinguish our releases from
   anything else using the same names.
 

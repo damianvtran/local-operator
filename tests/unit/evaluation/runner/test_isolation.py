@@ -358,6 +358,19 @@ PINNED_DEFERRED_DENIED_IMPORTS: tuple[tuple[str, str, str], ...] = (
         "create_provider_model_client",
         "local_operator.model.configure",
     ),
+    # `_one_rung_lower` is the eval-side spelling of `harness.loop._lower_effort`
+    # and MUST reach `model.effort.real_rungs` for the same reason the four above
+    # reach their modules: the rule it encodes (which ladder members are ranks
+    # rather than sentinels) has one owner, and a local copy would drift. The
+    # import is deferred (inside the function) because `provider_client` may not
+    # pull `model.effort` into its import-time closure -- `effort.py` is pure and
+    # cheap, but the seam is the module boundary, not the cost. Pinned here so an
+    # added deferred denied import still fails (round-2 review R2-1).
+    (
+        "local_operator.evaluation.runner.provider_client",
+        "_one_rung_lower",
+        "local_operator.model.effort",
+    ),
 )
 
 
