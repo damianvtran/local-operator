@@ -321,7 +321,14 @@ def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
     body = resolver("guide://scratchpad")
 
     assert body is not None
-    assert body.count("deleted with the session") == 1
+    # The lifetime, stated once and stated so it cannot be read as ephemeral. The
+    # earlier wording ("deleted with the session") was read by a measured session
+    # as meaning "like a temp directory", and it kept a duplicate copy of its state
+    # outside the pad for an hour rather than test that reading: the pad is
+    # session-DIR backed and rides out runtime restarts and rollovers.
+    assert body.count("survives runtime restarts") == 1
+    assert "deleted with the session" not in body
+    assert "dies with the session" not in body
     assert "one-off script" in body
     assert "Data you are still shaping" in body
     assert "real extension" in body

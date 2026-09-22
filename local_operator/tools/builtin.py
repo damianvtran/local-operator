@@ -5416,6 +5416,43 @@ _PLATFORM = sys.platform
 #: to state it cannot drift apart.
 _SYSTEM_TMP_IS_PRUNED = _PLATFORM == "darwin"
 
+#: The trap the temp-root arm names, as a noun phrase. A name rather than an inline
+#: literal because the line's ROOT arm (``is_root``) spells the trap out in full —
+#: there is no concrete target beside it for "the same trap" to refer back to — so
+#: the phrase appears twice in one line and a second copy is how it drifts.
+_TEMP_ROOT_TRAP = "a temp root"
+
+#: The DIRECTORY NAMES that are the same trap as a temp root wherever they appear.
+#: That is the whole of the second arm's trigger: no extension gate, and no
+#: location gate either, because the NAME is the convention the session was already
+#: following when it wrote there.
+#:
+#: What is wrong with one of these is NOT what is wrong with a temp root (see
+#: ``_SCRATCH_DIR_WHY``), and it is not that nothing prunes it — it is that it sits
+#: inside the user's own tree, nothing removes it with the session, and the user
+#: cannot tell it apart from their own files. Measured 2026-09-22 on this host: one
+#: such directory held 634 files / 193 MB, with two of the same shape beside it at
+#: 356 MB and 239 MB.
+_SCRATCH_DIR_NAMES = frozenset(
+    {"tmp", ".tmp", "temp", "scratch", ".scratch", "scratchpad", ".scratchpad"}
+)
+
+#: The trap the scratch-named-directory arm names, the sibling of
+#: ``_TEMP_ROOT_TRAP``.
+_SCRATCH_DIR_TRAP = "a scratch-named directory"
+
+#: Why a scratch-named directory is the wrong place for scratch. Deliberately NOT
+#: the temp arm's macOS prune: a workspace ``tmp/`` is on no cleaner's list, so
+#: saying that would be a false statement about the machine reading it. What is
+#: true of every host is that the file is in the user's tree, that the session
+#: ending does not take it away, and that the user has no way to tell a session's
+#: working file from their own output — which is the litter this protocol exists to
+#: prevent.
+_SCRATCH_DIR_WHY = (
+    "it is in the user's own tree, nothing removes it with the session, "
+    "and it cannot be told apart from their own output"
+)
+
 
 def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
     """``(resolved root, why it is a trap)`` for the temp dirs ``write``/``edit`` watch.
@@ -5472,9 +5509,57 @@ def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
     return tuple(roots)
 
 
+def _in_scratch_named_dir(resolved: Path, scratchpad_root: Path) -> bool:
+    """True when ``resolved`` sits DIRECTLY in a scratch-named directory.
+
+    The second arm of the same advisory (see :func:`_temp_scratch_hint`), and the
+    predicate BOTH channels call so the two cannot disagree about what counts.
+    ``resolved`` must already be resolved — every caller resolves first, because
+    the comparison is against a NAME and an unresolved spelling of a symlinked
+    parent is a silent miss.
+
+    Three parts, each load-bearing:
+
+    * The parent must BE such a directory: ``<x>/tmp/sub/y.md`` does not fire. The
+      same depth-1 rule the temp arm documents, for the same reason — a nested
+      path under a scratch-named directory is a plausible deliverable (this
+      fleet's own ``tmp/`` and ``scratch/`` worktrees live there) and a false
+      positive on real work costs more than the miss.
+    * The name is compared CASE-INSENSITIVELY: ``TMP/`` is the same convention
+      spelled by a different hand, and a name is not a case-sensitive identifier.
+    * Nothing inside the session's own pad counts. This is not a refinement: a pad
+      root is commonly named ``scratchpad`` and an agent may well make a ``tmp/``
+      inside it, so without containment EVERY write into the pad would be told to
+      move itself into the pad. Containment, not the name, is what decides it — a
+      subdirectory of the pad is session-scoped exactly as the root is.
+    """
+    if resolved.parent.name.lower() not in _SCRATCH_DIR_NAMES:
+        return False
+    try:
+        root = scratchpad_root.resolve()
+    except OSError:  # pragma: no cover - a pad root that cannot be resolved
+        return True
+    return not resolved.is_relative_to(root)
+
+
 def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad: bool) -> str:
-    """One advisory line when ``write``/``edit`` lands a file DIRECTLY under a temp
-    root, else ``""``.
+    """One advisory line when ``write``/``edit`` lands a file DIRECTLY in a temp
+    root or in a scratch-named directory, else ``""``.
+
+    Two arms, one advisory. The temp-root arm is the shipped contract (below).
+    The second arm fires on the parent's NAME (``tmp``, ``.tmp``, ``temp``,
+    ``scratch``, ``.scratch``, ``scratchpad``, ``.scratchpad``, any case, any
+    location) and exists because the same funnel runs through the user's own tree:
+    the incident it was built for (2026-09-22) wrote an interface spec to a
+    ``minervaai/tmp/`` file with no deliberation at all — it followed the
+    workspace's ambient convention — and handed the path to two subagents that
+    then read and wrote it. Nothing prunes that directory and no session teardown
+    touches it, so it is indistinguishable from the user's own work forever.
+    ``_in_scratch_named_dir`` owns the trigger and its three constraints.
+
+    The two arms share the builder, the word order (remedy first) and the
+    one-line-per-result rule, and they differ in the reason clause: the temp arm
+    states the macOS prune, and a workspace ``tmp/`` is not on any cleaner's list.
 
     Why a hint and not a refusal: a session doing image or tooling work outside a
     repo can legitimately need a real temp path, and the rule this nudges is
@@ -5500,7 +5585,10 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
     * No scratchpad on this host (the ``SCRATCHPAD_UNAVAILABLE`` contract) means
       no nudge — there is nowhere better to point the session.
     * Never for a ``scratchpad://`` target: the session's own store is the
-      destination, not the trap.
+      destination, not the trap. The second arm needs this too and gets it from
+      containment rather than the target's spelling, because a path INSIDE the pad
+      can reach the tools as a plain absolute path (a shell prints one, and the
+      receipt teaches it).
     """
     if is_scratchpad:
         return ""
@@ -5524,30 +5612,62 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
             # The ``write(path=…)`` example is gone too: taught by
             # ``system.md``, the guide and the tool description.
             return _temp_scratch_line(resolved, why, SCRATCHPAD_SCHEME)
+    # The temp roots are tried FIRST on purpose: ``/tmp`` is itself a
+    # scratch-named directory, and the prune reason is the more specific true
+    # statement about that one. Only a target the loop above did not claim can
+    # reach the name arm.
+    if _in_scratch_named_dir(resolved, root):
+        return _temp_scratch_line(
+            resolved,
+            _SCRATCH_DIR_WHY,
+            SCRATCHPAD_SCHEME,
+            trap=_SCRATCH_DIR_TRAP,
+            relation="in",
+        )
     return ""
 
 
-def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool = False) -> str:
-    """The one advisory line BOTH temp-root nudges emit, verbatim in one place.
+def _temp_scratch_line(
+    resolved: Path,
+    why: str,
+    remedy: str,
+    *,
+    is_root: bool = False,
+    trap: str = _TEMP_ROOT_TRAP,
+    relation: str = "under",
+) -> str:
+    """The one advisory line EVERY nudge arm emits, verbatim in one place.
 
-    ``remedy`` is what the two channels can actually act on and it is the only
-    thing that differs between them: ``write``/``edit`` take the
-    ``scratchpad://`` scheme, while a shell cannot resolve a scheme at all and is
-    given the exported path variable instead. The reason clauses and the word
-    order are shared, because the word order is the load-bearing part (see
-    :func:`_temp_scratch_hint`) and a second hand-written copy is how it would
-    quietly stop being true of one of the two lines.
+    Four arms now reach it — the two temp-root ones (``write``/``edit`` and the
+    shell) and the two scratch-named-directory ones — so "one place" is doing more
+    work than it did when there were two.
 
-    ``is_root`` swaps the SUBJECT from a created target to the temp root itself,
+    ``remedy`` is what the two CHANNELS can actually act on and it is the only
+    thing that differs between them: ``write``/``edit`` take the ``scratchpad://``
+    scheme, while a shell cannot resolve a scheme at all and is given the exported
+    path variable instead. The reason clauses and the word order are shared,
+    because the word order is the load-bearing part (see :func:`_temp_scratch_hint`)
+    and a second hand-written copy is how it would quietly stop being true of one
+    of the lines.
+
+    ``trap`` and ``relation`` are how a second TRAP joins without a second
+    builder: ``trap`` is the noun phrase the line names (``a temp root`` /
+    ``a scratch-named directory``) and ``relation`` is the preposition the subject
+    sits in it by (``under`` a root, ``in`` a directory). Both default to the
+    shipped temp-root values, so the contract those two arms pinned is byte-for-byte
+    unchanged — and the reason stays a separate argument, because the two traps
+    need DIFFERENT reasons (the prune is a fact about one of them only).
+
+    ``is_root`` swaps the SUBJECT from a created target to the directory itself,
     for the bash side's unexpanded targets (``> /tmp/f$i``): the sentence shape,
     the remedy and the reason are unchanged, because the advice is the same and
     only the thing being NAMED changes. The root arm names the trap in full
-    ("puts scratch in a temp root") rather than referring back to it — there is no
-    antecedent to refer to, since the reader has not been shown the concrete
-    target the other arm talks about, and the clause is visible only when the
-    whole line fits anyway.
+    ("puts scratch in a temp root", or "…in a scratch-named directory") rather
+    than referring back to it — there is no antecedent to refer to, since the
+    reader has not been shown the concrete target the other arm talks about, and
+    the clause is visible only when the whole line fits anyway.
 
-    KNOWN LIMIT, recorded here because this is the one builder both advisories
+    KNOWN LIMIT, recorded here because this is the one builder all the advisories
     share (design review round 1, D1). The line is rendered in a TUI card whose
     lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
     behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
@@ -5561,9 +5681,9 @@ def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool =
     the edge ever matters, is a shorter prologue rather than a shorter remedy.
     """
     subject = (
-        f"writing directly under {resolved} puts scratch in a temp root"
+        f"writing directly under {resolved} puts scratch in {trap}"
         if is_root
-        else f"{resolved} sits directly under a temp root"
+        else f"{resolved} sits directly {relation} {trap}"
     )
     return f"[scratch] Your own scratch belongs in {remedy} — {subject}: {why}."
 
@@ -5910,7 +6030,7 @@ def _missing_tool_notice(stderr: str, context: ToolContext | None) -> str:
 
 def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
     """One advisory line when ``command`` CREATES a path directly under a temp
-    root, else ``""``.
+    root OR directly in a scratch-named directory, else ``""``.
 
     Same voice, same reason clauses and the same word order as the
     ``write``/``edit`` nudge (:func:`_temp_scratch_hint`); the remedy differs
@@ -5924,6 +6044,15 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
       real worktrees at ``/private/tmp/<name>``, so a deeper path is a plausible
       deliverable and nudging it would be a false positive on real work — the
       same narrowness ``write``/``edit`` already document and accept.
+    * The SECOND arm is the same scan over the same candidates with a different
+      predicate — ``_scratch_dir_target`` — and it is why this channel matters:
+      an audit of 400 transcripts measured the shell creating scratch in a temp
+      root 8,766 times against 44 calls into the pad, so a name-only arm that
+      reached ``write``/``edit`` alone would cover roughly a tenth of the
+      behaviour it was written for. The two arms cannot both fire on one
+      candidate, and the temp roots are tried first because ``/tmp`` IS a
+      scratch-named directory and the prune is the more specific true statement
+      about that one.
     * Exempt: a template-less ``mktemp -d`` (the guide's escape hatch) and every
       ``mktemp`` template that does not carry the ``X`` run — neither produces a
       candidate.
@@ -5941,28 +6070,37 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
       arrive at job-settle time, which can be long after the file was created and
       acted on, so buying it costs more surface than it returns. The foreground
       path is where the volume is (``nohup … > log`` is a foreground shell).
+      The second arm inherits that gap unchanged.
     """
     if not command:
         return ""
-    if _scratchpad_root(context) is None:
+    pad = _scratchpad_root(context)
+    if pad is None:
         return ""
     roots = dict(_temp_scratch_roots())
     if not roots:
         return ""
     for candidate in _bash_created_paths(command):
         resolved = _temp_root_target(candidate, roots)
-        if resolved is None:
-            continue
+        if resolved is not None:
+            why, trap, relation = roots[resolved.parent], _TEMP_ROOT_TRAP, "under"
+        else:
+            resolved = _scratch_dir_target(candidate, pad)
+            if resolved is None:
+                continue
+            why, trap, relation = _SCRATCH_DIR_WHY, _SCRATCH_DIR_TRAP, "in"
         # A target the shell has yet to expand does not NAME a path, and printing
         # its resolved form would invent one (``> /tmp/f$i`` is not
-        # ``/private/tmp/f$i``). The temp root is the honest subject there, and it
+        # ``/private/tmp/f$i``). The directory is the honest subject there, and it
         # is a directory that really exists.
         unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
         return _temp_scratch_line(
             resolved.parent if unexpanded else resolved,
-            roots[resolved.parent],
+            why,
             f"${SCRATCHPAD_PATH_ENV}",
             is_root=unexpanded,
+            trap=trap,
+            relation=relation,
         )
     return ""
 
@@ -6080,6 +6218,33 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     except OSError:  # pragma: no cover - a path that cannot be resolved
         return None
     return resolved if resolved.parent in roots else None
+
+
+def _scratch_dir_target(candidate: str, scratchpad_root: Path) -> Path | None:
+    """``candidate`` resolved, when it sits DIRECTLY in a scratch-named directory.
+
+    The shell side of the second arm, and the sibling of :func:`_temp_root_target`
+    above — same expansion, same refusals, a different predicate. The refusals are
+    shared for the same reason they exist there: a relative path, a ``~`` path and
+    anything carrying a scheme are not guessed at, because the scan has no cwd to
+    resolve them against and a path the command never names is worse than the miss.
+
+    That refusal is also the honest limit of this arm on the shell channel: a bare
+    ``> tmp/x.md`` is RELATIVE and goes unnoticed, while the same write through
+    ``write``/``edit`` is resolved against the workspace cwd and does fire. The
+    two channels are not equally covered, and the shape the incident took
+    (an absolute path handed to a subagent) is the one they both catch.
+    """
+    text = _expand_tmpdir_spellings(candidate.strip())
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        resolved = Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
+    return resolved if _in_scratch_named_dir(resolved, scratchpad_root) else None
 
 
 def _strip_heredoc_bodies(command: str) -> str:
