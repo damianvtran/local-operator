@@ -3197,30 +3197,32 @@ _STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
 
 
 def _record_funnel(monkeypatch) -> list[tuple[int, int]]:
-    """Record ``(bytes_in, hit_count)`` for every call into the one funnel.
+    """Record ``(bytes_in, hit_count)`` for every call into the ONE table entry.
 
-    Every redaction path in the tree — the loop's result hook, the journaled
-    tool-call argument scrub, the live pipe filter, the live-text path — reaches
-    the table through this one function, so recording here counts a call
-    wherever it came from and whatever it decided.
+    ``scrub_shapes_with_hits`` is the single place the rule table runs: every
+    other view onto it (``scrub_secrets``, ``scrub_secrets_with_hits``,
+    ``scrub_shapes``, ``match_shape_names``) is a caller of it in the same
+    module, so every module-level ``from … import`` binding in the tree routes
+    here and ONE patch counts them all. An earlier revision instead patched the
+    ``scrub_secrets_with_hits`` binding in three modules, which is not the same
+    set: ``harness/redaction.summarize_arguments`` reaches the table through
+    ``scrub_shapes``, so the journaled tool-call argument summary was invisible
+    to the count while the docstring claimed every path was covered (R1-3).
+
+    What this therefore guarantees: a table call SOMEWHERE in the tree is
+    counted, whichever path made it. It does NOT say which path made it — a path
+    that stopped scrubbing altogether counts zero calls and reads as "nothing to
+    do" — so the arms below pair it with a growth assertion on the step count.
     """
     records: list[tuple[int, int]] = []
-    real = redaction_shapes.scrub_secrets_with_hits
+    real = redaction_shapes.scrub_shapes_with_hits
 
-    def wrapper(text, values=()):
-        scrubbed, hits = real(text, values)
+    def wrapper(text):
+        scrubbed, hits = real(text)
         records.append((len(text), len(hits)))
         return scrubbed, hits
 
-    # Each module holds its OWN binding of the name (a module-level ``from …
-    # import``), so patching one leaves the others reading the real function and
-    # the measurement silently under-counts. ``redaction_shapes`` is patched for
-    # its own ``scrub_secrets`` / ``match_shape_names`` views.
-    import local_operator.variables as variables
-
-    monkeypatch.setattr(redaction_shapes, "scrub_secrets_with_hits", wrapper)
-    monkeypatch.setattr(variables, "scrub_secrets_with_hits", wrapper)
-    monkeypatch.setattr(builtin, "scrub_secrets_with_hits", wrapper)
+    monkeypatch.setattr(redaction_shapes, "scrub_shapes_with_hits", wrapper)
     return records
 
 
@@ -3376,15 +3378,84 @@ async def test_a_resume_replay_makes_no_pass_calls_at_all(monkeypatch, tmp_path)
     assert "hunter2swordfish" in json.dumps([m.model_dump() for m in replayed])
 
 
-def test_the_bash_settled_path_bounds_the_pass_before_it_runs(monkeypatch):
-    """The settled-stream cap BITES, and it bites before the pass runs.
+def _decoded_stream_whose_block_contains_the_cut(
+    cap: int, body_lines: int = 4
+) -> tuple[str, str, str]:
+    """The round-1 review's construction at ``cap``: ``(decoded, body_line, block)``.
 
-    Pins the ORDER, not the number: the elision has to happen before the redact,
-    so the pass is never paid for text the result then throws away. Moving the
-    truncation back to after the pass reds this — the pass would be handed the
-    whole stream, which is what it was found doing at up to the retention limit
-    per pipe while the model's display budget is 8 KiB.
+    A `bash` stream carrying a PEM-shaped block whose END line is the LAST line
+    of the retained head, so the cap's elision snaps to a body-line newline
+    INSIDE the block: the BEGIN line and body lines are kept, the END line falls
+    in the dropped middle. ``body_line`` is a line of the key body, and its
+    presence anywhere downstream is the leak these arms exist to catch.
+
+    The placement is arithmetic, not a lucky string: ``_clip_head_tail`` snaps
+    the head cut back to the last newline at or before ``(cap - marker) // 2``
+    and ``_BashOutput`` keeps exactly the first ``cap // 2`` bytes as its head,
+    so ending the block at ``cap // 2`` puts its 30-byte END line in the last 30
+    bytes of that head and the body newline before it exactly at the snap point.
+    The retention notice is what makes the elision fire at all: ``decode()`` is
+    ``cap + len(notice)`` characters whenever anything was omitted.
     """
+    # The PEM header and footer are BUILT rather than written out, and asserted
+    # below, because a PEM written whole is itself a credential shape: the
+    # harness's own content filter rewrote an earlier spelling of them on the
+    # way into this file, which left the arm testing a block no rule matched.
+    dashes = "-" * 5
+    begin = dashes + "BEGIN RSA PRIVATE KEY" + dashes + "\n"
+    end = dashes + "END RSA PRIVATE KEY" + dashes + "\n"
+    body = "MIIEowIBAAKCAQEA" * 3
+    pad = "plain output line of the alignment run, no anchors in it\n"
+    block = begin + (body + "\n") * body_lines + end
+    start = cap // 2 - len(block)
+    total = cap + 4096
+    filler = (pad * ((start // len(pad)) + 2))[:start]
+    rest_len = total - start - len(block)
+    raw = filler + block + (pad * ((rest_len // len(pad)) + 2))[:rest_len]
+    assert scrub_shapes(block).count(REDACTION_MARKER) >= 1, "not a shape the table masks"
+    assert scrub_shapes(body) == body, "the body line is masked on its own"
+    chunks = builtin._BashOutput(limit=cap)
+    data = raw.encode()
+    for at in range(0, len(data), 65536):
+        chunks.append(data[at : at + 65536])
+    return chunks.decode(), body, block
+
+
+def _assert_the_cut_lands_inside(decoded: str, block: str, cap: int) -> None:
+    """The construction is non-vacuous: the snapped cut is strictly INSIDE it.
+
+    Without this the arms below could pass while testing nothing — a block the
+    elision keeps whole is masked under either order, and the leak only exists
+    when the cut falls between the block's first and last line.
+    """
+    snap = decoded[: (cap - len(builtin.BASH_TRUNCATION_MARKER)) // 2].rfind("\n") + 1
+    start = decoded.index(block)
+    assert start < snap < start + len(block), (
+        f"the cut at {snap} is not inside the block [{start}, {start + len(block)}): "
+        "this arm would test nothing"
+    )
+
+
+def test_a_cut_inside_a_multi_line_match_masks_the_kept_side(monkeypatch):
+    """R1-1: the pass sees the WHOLE stream, and the cut cannot hide a fragment.
+
+    Two assertions, one per half of the defect. First the ORDER: the text handed
+    to the pass is byte-for-byte the decoded stream, so an elision can never
+    remove bytes the mask has not seen. The round-1 revision elided first and
+    failed here — it handed the pass ``cap`` characters of a larger stream —
+    while every other arm in this file stayed green. Second the OUTCOME: the
+    block's kept side comes back masked, not raw, because the mask runs while
+    the block is still whole.
+
+    Capped at 4 KiB so the arm costs kilobytes; ``cap`` is the only input the
+    construction varies with, and the shipped number is exercised below.
+    """
+    cap = 4096
+    monkeypatch.setattr(builtin, "_REDACT_STREAM_LIMIT_CHARS", cap)
+    decoded, body, block = _decoded_stream_whose_block_contains_the_cut(cap)
+    assert len(decoded) > cap, "the elision must bite for this arm to mean anything"
+    _assert_the_cut_lands_inside(decoded, block, cap)
+
     seen: list[int] = []
     real = builtin._redact_tool_text
 
@@ -3393,24 +3464,70 @@ def test_the_bash_settled_path_bounds_the_pass_before_it_runs(monkeypatch):
         return real(text, context)
 
     monkeypatch.setattr(builtin, "_redact_tool_text", spy)
-    # Capped small so the assertion costs kilobytes instead of megabytes; the
-    # shipped cap is the retention limit below and the shape is the same.
-    monkeypatch.setattr(builtin, "_REDACT_STREAM_LIMIT_CHARS", 4096)
+    # A store, not ``ToolContext(cwd=".")``: with no ``variables`` the pass is a
+    # no-op (``_redact_tool_text`` returns its input untouched), so the OUTCOME
+    # assertion below would read a raw body line on a pass that never ran.
+    context = ToolContext(cwd=".", variables=VariableStore(cwd="."))
+    out = builtin._redact_settled_stream(decoded, context)
 
-    out = builtin._redact_settled_stream("x" * 100_000, ToolContext(cwd="."))
+    assert seen == [len(decoded)], (
+        f"the pass was handed {seen} of {len(decoded)} characters: an elision ran "
+        "before the mask, so a cut inside a multi-line match can publish the kept "
+        "side raw"
+    )
+    assert body not in out, "a raw key body line survived the settled pass"
+    assert "PRIVATE KEY" not in out, "the block's header survived the settled pass"
+    assert out.count(REDACTION_MARKER) >= 1, "the block was dropped, not masked"
 
-    assert seen == [4096], f"the pass was handed {seen}; expected the cap exactly"
-    assert len(out) <= 4096 + len(builtin.BASH_TRUNCATION_MARKER)
+
+def test_the_shipped_cap_never_publishes_a_split_match(tmp_path):
+    """R1-1 at the SHIPPED cap, through the spill the model can `read` later.
+
+    The reviewer's exact case at ``_REDACT_STREAM_LIMIT_CHARS`` (4 MiB): a
+    multi-line block wholly retained, ending in the last bytes of the retained
+    head, with the snapped cut inside it. Checked on both surfaces a settled
+    `bash` call publishes — the text the call site spills, and the bytes
+    ``read spill://`` serves back out of that file. The elide-before-mask order
+    failed both: 2,000 raw body lines in the spill, ``BEGIN`` line present, and
+    the same fragment served to the model on `read`.
+    """
+    from local_operator.tools.spill import get_store
+
+    cap = builtin._REDACT_STREAM_LIMIT_CHARS
+    decoded, body, block = _decoded_stream_whose_block_contains_the_cut(cap)
+    _assert_the_cut_lands_inside(decoded, block, cap)
+    context = ToolContext(cwd=str(tmp_path), variables=VariableStore(cwd=str(tmp_path)))
+    masked = builtin._redact_settled_stream(decoded, context)
+    assert body not in masked, "the pass published a raw key body line"
+
+    budget = builtin.TOOL_OUTPUT_LIMIT_CHARS - 2 * len(builtin.BASH_TRUNCATION_MARKER)
+    out, _err, _footer, details = builtin._bash_oversized_streams(
+        masked, "", budget, False, context
+    )
+    assert body not in out
+    # ``details`` is optional on that return type and the spill payload is
+    # ``Any``; both are narrowed here rather than unwrapped with a default that
+    # pyright reads as an attribute access on ``None``.
+    assert details is not None, "a spilled tail must report its details"
+    spilled = details.get("spill")
+    handle = spilled["handle"] if isinstance(spilled, dict) else None
+    assert handle, "an over-budget settled stream must spill; without it this arm checks nothing"
+    stored = get_store().read_lines(handle, 1, 10**7)
+    assert stored is not None, "the handle must resolve in the store that wrote it"
+    served, total = stored
+    assert total > 1, "the spill is empty; the handle proves nothing"
+    assert body not in "\n".join(served), "the spill the model can `read` carries a raw key line"
 
 
-def test_the_settled_cap_is_the_retention_limit_not_the_display_budget():
-    """The cap may only drop what is dropped from the OUTPUT too.
+def test_the_settled_cap_bounds_what_is_published_not_the_pass():
+    """The cap is an OUTPUT bound; the mask is what it is applied to.
 
-    The same text the display elides is what gets spilled to the store, and the
-    store's copy is readable later, so a cap set to the 8 KiB display budget
-    would skip bytes that are still published — the bound would leak rather than
-    mask. The cap is therefore the largest text the retention layer produces, so
-    nothing reachable is skipped and detection is unchanged.
+    Pins the halves that need no fixture: the cap is the retention limit, so the
+    only text it can drop is the retention notice, and it is larger than the
+    display budget, so it cannot skip bytes the spill still publishes. What it is
+    NOT — a bound on the pass input — is measured by the arms above; the round-1
+    claim that an elision-first order "bounds the pass" is not in this file
+    anywhere.
     """
     from local_operator.tools.spill import SPILL_ENTRY_LIMIT_BYTES
 
