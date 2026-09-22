@@ -3996,10 +3996,21 @@ async def wire_mcp_into_session(
         rides ahead of the conversation, so removing one tool from it reprices
         every message behind it. What IS immediate is the inventory — this still
         swaps the live set, so the removed tool stops resolving at once and the
-        prompt's inventory block reports the change through its usual delta. Only
-        the ADVERTISEMENT lags, and a model that calls a tool whose schema it can
-        still see gets the tool's own refusal (or its transport's) rather than a
-        shape change in the middle of a turn.
+        prompt's inventory block reports the change through its usual delta.
+
+        THE MODEL THAT CALLS THE SCHEMA IT CAN STILL SEE GETS A TYPED REFUSAL,
+        ``Tool not found: <name>`` (``harness/loop.py``'s synthetic unknown-tool
+        fault), not the tool's own answer. The approval gate runs only after a
+        tool RESOLVES, and nothing here resolves — the top-level fallback
+        resolver serves names in ``_mcp_deferred_origins`` only. That refusal is
+        the accepted cost of holding the array still, and the transport is why
+        it is the right one: a server that dropped away cannot answer for
+        itself, so leaving it resolvable would buy a transport error where the
+        model could have had a planning refusal. ``_reconcile_web_tools``
+        reaches the opposite conclusion about the INVENTORY on the same class of
+        edit — it defers that change to the turn boundary — because a web tool
+        that is still resolvable has a per-call gate that answers "disabled";
+        see its docstring. The two policies differ on purpose.
         """
         live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
         base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory

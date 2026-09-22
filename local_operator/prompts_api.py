@@ -351,8 +351,12 @@ def render_tool_inventory_block(
 
     ``host_has_browser`` carries the caller's already-computed host probe so
     the three-state diagnosis documented in :func:`build_system_blocks` is
-    decided identically here. Left as ``None`` (the session's re-render, which
-    has no cheaper source) it is probed once via
+    decided identically here, and the session's own re-render DOES pass it —
+    from the provider's construction-time pair, which
+    ``Session._reconcile_tool_inventory`` reads off the system-blocks provider —
+    so the block-1 note and the block-0 prose cannot disagree about an answer
+    that moves with a heartbeat. Left as ``None`` (a host's own provider, a
+    benchmark's fixed blocks, a bare ``lambda``) it is probed once via
     :func:`_host_browser_backend_available`; that probe is the only way to tell
     state 2 (the HOST has no backend, so the setup playbook applies) from
     state 3 (the host is fine and only this ROLE lacks the tool), and
@@ -565,10 +569,18 @@ def host_capability_probes() -> tuple[bool, bool]:
     for AUTHORITY — edited instructions, repo guidance, a newer packaged prompt —
     and a liveness probe is not authority.
 
-    The accepted cost is one stale sentence inside a live session. The tool
-    MEMBERSHIP half (``has_browser``/``has_console``) stays live per render, and
-    the call path re-probes and refuses correctly, so the sentence can only ever
-    be wrong about the host and never about what this session may do.
+    The accepted cost is one stale sentence inside a live session, and it has a
+    DIRECTION, which is the part a future reader needs: taking the answer once
+    at construction can go stale only in the ARRIVE-LATE case — a session built
+    while the desktop app was down keeps shipping the "no backend, do that setup
+    with the user" arm after the app appears. A capability that DEPARTS
+    mid-session is the other direction and is unaffected in substance: the tool
+    MEMBERSHIP half (``has_browser``/``has_console``) is derived per render, and
+    every call path re-probes and refuses (the console refuses per action when
+    the host's console bit is off). So the sentence can only ever be wrong about
+    the HOST, and never about what this session may do — which is what makes it
+    a sentence rather than a capability. QA round 1 measured that residue
+    directly (its scenario E, Q-1).
     """
     return (_host_browser_backend_available(), _host_console_available())
 

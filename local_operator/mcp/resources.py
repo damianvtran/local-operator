@@ -476,9 +476,10 @@ def _search_tools(
         # request's definitions at the next TURN. This header is composed before
         # the enables below run, so it states the rule rather than the outcome.
         lines.append(
-            "Matched tools are enabled — their schemas reach the request's tool "
-            "definitions at the next model call, or the next turn if this turn's "
-            "list is already published."
+            "Matched tools are enabled; their schemas reach the request's tool "
+            "definitions at the next model call, or at the next turn if this turn's "
+            "list is already published. Each per-tool detail read below says which "
+            "of the two it is."
         )
     used = sum(map(len, lines))
     included = 0
@@ -611,9 +612,10 @@ def make_mcp_resolver(
             "The full input schema is now available in the tool definition "
             "for the next model call."
             if published is not False
-            else "The full input schema joins the request's tool definitions at the "
-            "NEXT TURN, not the next model call: this turn is already running with "
-            "the tool list it started with."
+            else "The full input schema will be available in the tool definition at "
+            "the NEXT TURN, not the next model call: this turn is already running "
+            "with the tool list it started with. Continue with the work you can do "
+            "now; if this tool is the only way to continue, say so and stop."
         )
         return "\n".join(
             [

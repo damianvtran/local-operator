@@ -3532,10 +3532,23 @@ class Session:
         the next turn. Within the turn the DELTA IS AUTHORITATIVE — it names what
         the session can actually resolve, and resolution reads the live
         inventory — while the array lags by one turn because moving it costs the
-        whole conversation's cached prefix. The reverse direction (a removal) is
-        the same trade: the delta stops naming the tool, the array keeps its
-        schema until the turn ends, and the per-call gate gives the better answer
-        if the model calls it anyway.
+        whole conversation's cached prefix.
+
+        WHAT THE LAG COSTS, in both directions, because this paragraph is the
+        only place the trade is recorded. A GROW: during that window the delta
+        names a tool whose input schema is in neither the array nor this block
+        (the schema rides the array; the detail read carries the description
+        only), so a model that acts on the delta is guessing its arguments and
+        the validator answers with the problem. A REMOVAL: the inventory drops
+        the tool at once, so a call the model emitted against the schema it can
+        still see answers ``Tool not found: <name>`` — a typed refusal from
+        ``_plan_call``, not the tool's own, because the approval gate runs only
+        after a tool RESOLVES and nothing here resolves. That is the narrower of
+        the two available policies rather than an oversight:
+        ``_reconcile_web_tools`` defers the whole INVENTORY change for the same
+        class of edit, because a web tool that is still resolvable answers for
+        itself through its own per-call gate ("disabled"), and an MCP server
+        that dropped away has no transport left to answer with.
 
         This lives here, and not in the block providers, because the session is
         the only object that knows what the array will contain. Providers close

@@ -4889,6 +4889,13 @@ async def test_a_host_capability_probe_flip_cannot_start_a_prefix_epoch(
     The knowledge stub below is that re-render, held deterministic: asserting the
     epoch here while the provider was serving its memo would prove nothing, so the
     state delta is asserted too, as the evidence the render actually happened.
+
+    THE `console` TOOL MUST BE ABSENT for this guard to mean anything, and the
+    precondition is asserted rather than assumed (QA round 1's scenario E found
+    it: built with the tool present, the membership half ORs the probe away and
+    block 0 does not move on either tree, so the experiment proves nothing). The
+    patch below removes the tool AND flips the host answer, which is the
+    incident's shape — a session built while the desktop app was down.
     """
     import local_operator.tools.builtin as builtin_tools
 
@@ -4916,6 +4923,9 @@ async def test_a_host_capability_probe_flip_cannot_start_a_prefix_epoch(
     epoch = session._transcript.latest_custom_entry("system_prefix")
     assert epoch is not None, "the persisted-prefix protocol must be on for this session"
     first_region = _leading_region(stream.requests[0])
+    # The precondition QA round 1 named: with the console tool IN the array, its
+    # membership ORs the host probe away and block 0 cannot move on either tree.
+    assert "console" not in {tool.name for tool in stream.requests[0].tools}
     # The flip is observable at all only because the construction-time answer
     # renders the prohibition: without the note in block 0 there would be nothing
     # for a heartbeat to move, and this guard could not go red.

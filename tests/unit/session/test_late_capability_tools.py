@@ -343,13 +343,22 @@ async def test_a_late_installed_ask_is_described_in_the_prompt_not_just_advertis
 
 @pytest.mark.asyncio
 async def test_no_advertised_tool_is_ever_missing_from_the_prompt_inventory(tmp_path) -> None:
-    """The invariant, derived rather than enumerated.
+    """The invariant, derived rather than enumerated — at the TURN BOUNDARY.
 
     This is the guard that matters: it does not name ``ask``, so it fails for
     ANY tool that reaches the provider without reaching the prompt — the next
     session-gated capability, an MCP tool spliced in mid-session, a role's
     rebuilt inventory. One instance of this bug was fixed before; asserting on
     the array alone let the same class ship again.
+
+    SCOPED, since the tools array's one-publish latch (``Session._wire_tools``):
+    this test installs its capability BETWEEN turns, so what it checks is the
+    turn-boundary invariant — asking whether the tool list a turn STARTS with
+    describes the tool list it sends. A mid-turn enable deliberately breaks the
+    stricter reading until the next turn: the inventory and its delta name the
+    tool while the array a running turn sends cannot carry it. That window is
+    pinned in ``test_session_factory.py`` (the mid-turn grow and removal guards),
+    not here, and a reader should not cite this test for the in-turn case.
     """
     stream = RecordingStream()
     session = make_prompt_session(tmp_path, stream)
