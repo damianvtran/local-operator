@@ -17,7 +17,11 @@ both are quoted below rather than paraphrased.
 **Every `file:line` is against `origin/main` at `0caf7a32`** — the same ref the
 probes in Appendix A were run against, so a reading and its citation belong to one
 tree; where a citation is to an unmerged branch it names the PR and that branch's
-head instead (`#1428` `f111faac`, `#1429` `90d02d6c`, `#1430` `43ce30ae`). The
+head instead (`#1428` `f111faac`, `#1429` `90d02d6c`, `#1430` `43ce30ae`). A branch
+citation is line-checked at that branch's head: they are `secret_sinks.py:1108` and
+`:1768-1773` plus `tools/builtin.py:3055` and `tools/eval.py:1110` at `90d02d6c`,
+and `handlers.py:253`, `:316` and `:342` at `43ce30ae`. Every other number is the
+`0caf7a32` re-derivation. The
 first pass of this document was read out of a checkout that had diverged from
 `origin/main` (an older revision, with unrelated staged work in its tree), so its
 line numbers were wrong for the ref it claimed; they were re-derived against
@@ -322,7 +326,7 @@ to be told what that layer decided. Every option below is a different answer to
 ### 2.2 The options
 
 **A1 — harness supplies the bytes (recommended).** The pre-execution scan (PR B)
-runs over the command text in `execute_bash` (`builtin.py:2976`) before the
+runs over the command text in `execute_bash` (`builtin.py:2977`) before the
 spawn. Where it proves that every `$(lop secret get NAME)` occurrence flows into
 a consumer sink, the harness **retrieves the value itself, in the session
 process**, injects it into the child's environment under a per-secret variable
@@ -420,7 +424,7 @@ its TTL; A2 is not selected. What the CLI *does* need is the refusal surface tha
 already ships, so the follow-up reuses it rather than inventing a second one:
 `--reveal` exists on `feat/secret-identity-surface` (`43ce30ae`, PR #1430) with
 `REVEAL_REFUSED = 3` (`handlers.py:253`), its both-streams-are-a-terminal test
-(`handlers.py:288`), and its rendered refusal (`_refuse_reveal`, `handlers.py:342`).
+(`handlers.py:316`), and its rendered refusal (`_refuse_reveal`, `handlers.py:342`).
 `get` itself keeps `rc 2` with empty stdout (`secrets/cli.py:15-27`), so exit `3`
 belongs to reveals and to the deferred refusal, not to the value path.
 
@@ -508,7 +512,7 @@ What the deferred work adds, in the shipped names rather than new ones:
 |---|---|---|
 | `get` | `ok` | **unchanged**: the unqualified retrieval path, exactly as today |
 | `get` | `refused` | an unapproved `get` was asked to print a value (new) |
-| `describe` | `ok` | shipped by #1430, for `describe --fingerprint` |
+| `describe` | `fingerprint` | shipped by #1430, for `describe --fingerprint` (`store.py:935` on `43ce30ae` writes `event="describe"`, `outcome="fingerprint"`) |
 | `reveal` | `tty` / `refused` / `cancelled` | shipped by #1430; a refusal carries `rc 3` and empty stdout |
 | `get-for-consumer` | `ok` | the harness retrieved on the child's behalf and injected it (A1; new) |
 
@@ -545,7 +549,7 @@ rule, because the non-revealing forms are strictly better and already exist:
 ### 3.1 Where the scan runs, and why there
 
 **In the tool, beside argument validation, before the spawn — not at the loop,
-and not as an approval.** `execute_bash` (`builtin.py:2976`) already refuses
+and not as an approval.** `execute_bash` (`builtin.py:2977`) already refuses
 malformed calls inline (`builtin.py:2991-3014`) and already has a pre-abort
 branch (`builtin.py:3016-3025`); the scan is the same kind of thing: a validation
 refusal that returns an error `ToolResult` before any process exists. The
@@ -848,7 +852,7 @@ lexer.
 ### 5.1 The chunk-boundary hole: exact location
 
 `local_operator/tools/builtin.py::_PipeRedactor._release_point` (`builtin.py:2620-2673`),
-called from `_feed_scrubbed` (`builtin.py:2527-2553`) which masks *after* the cut;
+called from `_feed_scrubbed` (`builtin.py:2526-2553`) which masks *after* the cut;
 the retention and mirror callers are `_pump` at `builtin.py:3325-3389`
 (`safe = redactor.feed(chunk)`, `sink.append(safe)`, `_mirror(safe)`).
 
@@ -1013,7 +1017,11 @@ the sanctioned path IS masked**, by the exact-value pass — the retrieval that 
 the file registered the value with the session (the broker notifies the owning
 session and waits for its ack before the value exists, `access.py:299-337`, and
 that registration is what `VariableStore.redaction_values` reads,
-`variables.py:461`), so a `cat` of that path in the same session is masked. The
+`variables.py:461`), so a `cat` of that path in the same session is masked — **on
+the announced path only**: where the store degrades to the local decrypt instead
+(`access.py:380-395` — no broker reachable, or the default tier's fall-through
+after a denial), the retrieval is *unannounced*, nothing registers the value, and
+the same session's read-back is **not** masked (QA Q-9). The
 earlier drafting of this item said the opposite and that was wrong. What *is* open:
 **(a)** any session that did not perform the retrieval — a resume, a sibling agent,
 a subagent with its own store view — where nothing registers the value and only the
@@ -1050,7 +1058,10 @@ reported*, not that transforms are impossible.
 **6.4 Live surfaces and the spill bytes (from §5.1).** Bytes the pipe filter
 released raw (multi-line values) are in the live card, the peek buffer, the abort
 receipt and the spill file. Masked at a *read* result only when the session has
-the value registered; the spill's bytes on disk stay plaintext regardless.
+the value registered; the spill's bytes on disk stay plaintext regardless. This is
+not the only shelf of on-disk plaintext in the programme — the `lop exec` job
+ledger and its per-job logs are the same class reached by another route, and they
+are enumerated in 6.12, not here.
 **Status: narrowed (PR #1428) — and the multi-line case is still open.** #1428
 replaced the eval worker's per-`write` masking with a bounded windowed masker and
 closed the transform spellings on the pipe path, but it does not change the
@@ -1087,13 +1098,22 @@ it either way: the evidence that would settle it is a value-typed probe through
 `ask` and `send` with a registered value, and that belongs in QA's matrix, not in
 a design claim. **Status: open, except the surfaces it can actually see — and the first draft
 overstated this, which is review finding R1-2 / QA Q-3.** PR #1429's scanner has
-**exactly two call sites** (`tools/builtin.py:3055`, `tools/eval.py:1115` on
+**exactly two call sites** (`tools/builtin.py:3055`, `tools/eval.py:1110` on
 `90d02d6c`); nothing scans a `send`/`ask` argument, and the module has no
 peer-message sink at all, so the sentence "a `lop secret get` in a `send` argument
 is refused" was false and has been removed. Measured on that head, `lop` is not a
 member of the scanner's `_EMITTERS` (`secret_sinks.py:1108`), so a stage whose
 command word it does not recognise falls to its consumer default and is *allowed*
-— the same default that keeps `curl -H "…$v"` legal (`secret_sinks.py:1769-1773`).
+— the same default that keeps `curl -H "…$v"` legal
+(`secret_sinks.py:1768-1773`, whose own comment reads "a consumer: the value was
+used, not printed"). What makes that true is the stage's *source verdict*: allowed
+when its command word is neither an emitter, an interpreter, a length sink, a
+path-mover **nor a source verb** (round-1 review's phrasing). Measured, so the
+distinction is not read off the set: `lop secret get X` in command position is
+refused (`verdict='printing'`, rule `shell.bare-source-in-command-position`) while
+`foo $(lop secret get X)` is allowed (`verdict='consumer'`) — a `lop` stage is
+classified, not unclassified.
+
 What did narrow is the pair #1428 covers: the bash live path and the eval frames,
 both now windowed maskers. The per-line text path and the cross-channel question
 are unchanged, and this document still declines to claim either way.
@@ -1168,20 +1188,28 @@ is the operator's residual risk. **Guide-only in the meantime.**
 
 **6.12 The `lop exec` job ledger: a stored prompt, re-emitted and kept in
 plaintext.** `lop exec --background` stores the caller's raw command as the job's
-`prompt`: `exec_mode.py` writes `"prompt": prompt` into `logs/jobs.jsonl`
-(`exec_mode.py:242-264`) and `# prompt: {command}` into the job's own log file
-(`exec_mode.py:530`). `lop exec --status JOB_ID` folds those rows back into a state
-document (`job_status`, `exec_mode.py:370`), which `local_operator/cli.py:8587`
-prints as JSON — so the caller's tool result carries **the entire stored prompt
-verbatim**. No `lop secret` appears in the text `lop exec --status <id>`, so
-neither of #1429's two call sites sees it; nothing on that path scrubs at all
+`prompt`: `exec_mode.py` writes `"prompt": prompt` into `_ensure_logs_dir() /
+JOBS_FILE` — that is `logs/exec-jobs.jsonl` under `config_dir()` (`JOBS_FILE` is
+defined as `"exec-jobs.jsonl"` at `exec_mode.py:76`, the write is at `:258`) — and
+`# prompt: {command}` into the job's own log at `:530`. `lop exec --status JOB_ID`
+folds those rows back into a state document (`job_status`, `exec_mode.py:370`), and
+`local_operator/cli.py:8602` prints that document as JSON — so the status read hands
+the whole stored prompt back to the caller's tool result **before** the caller-side
+registered-value/shape net runs (`loop.py:3119-3125`); if nothing registered it (no
+`lop secret` retrieval, no shape hit), the prompt arrives as written. No
+`lop secret` appears in the text `lop exec --status <id>`, so neither of #1429's two
+call sites sees it; nothing on that path scrubs at all
 (`grep -c "redact\|scrub" local_operator/exec_mode.py` → 0, verified at
-`0caf7a32`); and the two copies on disk are plaintext and durable, which is 6.4's
-class reached by another route. A redaction notice has been reported on this route
-— what was verified here is the mechanism (store, fold, print), not the notice.
-**Status: open, and nothing in A/B/C can see it** (review finding R1-1 / QA Q-2).
-The fix is a scrub on the status read plus a decision about what the ledger may
-keep, and both are outside this programme's scope, so they are named here rather
+`0caf7a32`). The prompt itself then survives on disk in two places, both plaintext
+(`logs/exec-jobs.jsonl` and the per-job `exec-<stamp>-<slug>-<job_id>.log` (`exec_mode.py:496`) — whose *filename*
+embeds the first 40 characters of the command via `slugify` (`exec_mode.py:139-149`),
+so a directory listing alone exposes that much of the prompt), and any spill the
+command itself produced adds a third (6.4). Those are 6.4's class of on-disk
+exposure on a different shelf, not spill entries. A redaction notice has been reported on this
+route — what was verified here is the mechanism (store, fold, print), not the
+notice. **Status: open, and nothing in A/B/C can see it** (review finding R1-1 /
+QA Q-2). The fix is a scrub on the status read plus a decision about what the ledger
+may keep, and both are outside this programme's scope, so they are named here rather
 than implied away.
 
 **Direct answer to the operator's question.** *Yes.* After everything that
