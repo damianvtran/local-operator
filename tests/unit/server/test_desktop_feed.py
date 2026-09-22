@@ -3327,7 +3327,11 @@ async def test_cancelling_one_open_waiter_does_not_cancel_shared_baseline(tmp_pa
     monkeypatch.setattr(feed, "_take_baseline", held_baseline)
     first = feed.subscribe()
     first_events = feed.events(first)
-    first_open = asyncio.create_task(anext(first_events))
+
+    async def next_open(events):
+        return await anext(events)
+
+    first_open = asyncio.create_task(next_open(first_events))
     second_events = None
     second_open = None
     try:
@@ -3342,7 +3346,7 @@ async def test_cancelling_one_open_waiter_does_not_cancel_shared_baseline(tmp_pa
 
         second = feed.subscribe()
         second_events = feed.events(second)
-        second_open = asyncio.create_task(anext(second_events))
+        second_open = asyncio.create_task(next_open(second_events))
         release_baseline.set()
         opened = await asyncio.wait_for(second_open, timeout=5)
         assert opened["type"] == "open", opened
@@ -3352,9 +3356,6 @@ async def test_cancelling_one_open_waiter_does_not_cancel_shared_baseline(tmp_pa
             second_open.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await second_open
-        if second_events is not None:
-            await second_events.aclose()
-        await first_events.aclose()
         await feed.close()
 
 
