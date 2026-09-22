@@ -159,10 +159,15 @@ in about a second.
 
 WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer`,
 `lop send --peer`, `lop sessions move <id> --to <peer>|local`, and the TUI's
-`/new remote` and `/move`. Do not promise a user that a session can be MOVED
-between devices, and do not retry those verbs hoping for a different answer —
+`/move`. Do not promise a user that a session can be MOVED between devices, and
+do not retry those verbs hoping for a different answer —
 `--peer` is not a flag on `exec` or `send`, and `move` is not a `sessions`
-subcommand. Credentials are the other gap (next section): a session created on a
+subcommand. **`/new remote <peer> [prompt]` IS in this build** (see "Which device
+should run this session"): it creates, lists, warms and stops a session on a peer,
+and it is the one WRITE this slice ships — it is named here because it used to be
+listed as unbuilt while it worked, and a guide that tells an agent a working verb
+does not exist is the same defect in the other direction. Credentials are the
+other gap (next section): a session created on a
 peer needs a model THAT PEER can reach, and this build does not broker one.
 
 DIAL-ONLY DEVICES. A machine with no inbound path (behind NAT, or
@@ -369,8 +374,9 @@ is for a suspected key compromise, and the previous id is gone for good.
 existing:
 
 - Session MOBILITY — `lop sessions move <id> --to <peer>|local`, move-with-`--keep`
-  (fork), and the TUI's `/move` and `/new remote`. Creating, listing, warming and
-  stopping a session ON a peer IS implemented (see "Which device should run this
+  (fork), and the TUI's `/move`. Creating, listing, warming and
+  stopping a session ON a peer IS implemented — including the TUI's
+  `/new remote <peer> [prompt]` (see "Which device should run this
   session"); moving one is not (`mesh-session-mobility.md`).
 - Credential brokering (`mesh-credentials.md`).
 - The console/relay UI surfaces (`mesh-ui.md` §1–2).

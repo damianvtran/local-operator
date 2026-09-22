@@ -23,9 +23,11 @@ THREE THINGS LIVE HERE, AND WHY THEY ARE ONE MODULE.
 THE ZERO-PEER PROPERTY (R16, spine §10 topology 0). Nothing in this module runs
 for a device with no network: a facade built with no ``owner`` uses ``LocalOwner``
 (``session/owner.py``), and ``resolve_owner`` answers from the local store without
-touching the relay when no catalogue is supplied. That is what
-``tests/unit/network/test_projection.py`` asserts with a spy on the relay entry
-point rather than by inspection.
+touching the relay when no catalogue is supplied. That is asserted with a spy on
+the relay entry point rather than by inspection, in
+``tests/unit/session/test_owner_seam.py::test_a_facade_with_no_owner_gets_the_local_one_and_records_nothing``
+(this module's own test file, ``tests/unit/network/test_projection.py``, covers
+the CATALOGUE — the read side — against a real relay's reply).
 
 NAMES IT DOES NOT INVENT. The peer-side ops are the transport's
 (``net_catalog``, ``net_forward``, ``net_session_move`` …) plus the three the
@@ -308,12 +310,36 @@ class RelayPeerCatalog:
     # -- the relay call -----------------------------------------------------
 
     def _call(self, op: str, **fields: Any) -> dict[str, Any] | None:
-        from local_operator.network import relay, store
+        """One control call to this device's relay, with the ANSWER unwrapped.
 
-        record = store.find_own_relay(self._root)
-        if record is None:
-            return None
-        return relay.control_request(record, op, **fields)
+        THE REPLY IS AN ENVELOPE, NOT THE ANSWER (QA round 10, Q-R10-1). The
+        relay frames every control reply as ``{"op": "ack", "req", "detail"}``
+        (``relay._control_connection``), and this method used to hand that
+        envelope straight back while both readers below asked IT for
+        ``peers``/``sessions``. Both were ``None`` on every call, so
+        ``peers()`` returned ``[]``, ``_load()`` returned ``[]``, and
+        ``peer_session_rows()`` returned ``()`` on every device that has a
+        relay — the remote rows the sidebar's ``⇄`` tier, the per-device
+        heading and the ``/resume`` guard all read. It survived a green suite
+        because every producer test stood a fake in for this class, so
+        ``_call`` was never exercised against a real reply.
+
+        Unwrapping HERE rather than in the two readers keeps one unwrap for the
+        one envelope: ``_relay_call`` is this module's own spelling of "run one
+        local op and give me its detail", and the session-owner half of this
+        file already goes through it. A second unwrap in ``peers()`` would be
+        the copy that drifts when the envelope changes.
+
+        THE BUDGET IS THE LISTING'S, NOT THE SOCKET DEFAULT (5 s). The relay
+        fans out to the peers behind this op and bounds its own probe at
+        ``relay.LISTING_PROBE_BUDGET_S``; a client that gave up first would
+        return "no peers" for a mesh whose peer simply took longer than the
+        default — the same silent-empty answer, one layer down, and the reason
+        ``network/cli.py``'s listing calls wait out the relay's own budget.
+        """
+        from local_operator.network import relay
+
+        return _relay_call(self._root, op, timeout=relay.LISTING_CLIENT_TIMEOUT_S, **fields)
 
     # -- the protocol -------------------------------------------------------
 

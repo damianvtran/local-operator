@@ -36,8 +36,9 @@ from local_operator.interpreter import python_argv
 
 #: How long a listing may take before this surface gives up on it. The CLI's own
 #: client budget for a listing is the relay's probe budget plus its slack
-#: (``_listing_timeout`` = 12 s + 8 s); a TUI that cut that short would report a
-#: timeout about a command that was still working, so the bound sits above it.
+#: (``relay.LISTING_CLIENT_TIMEOUT_S`` = 12 s + 8 s, the one home for that
+#: number); a TUI that cut that short would report a timeout about a command that
+#: was still working, so the bound sits above it.
 LISTING_TIMEOUT_S = 30.0
 
 #: A dial-free verb — the local store, the identity file, an audit tail. Short

@@ -118,21 +118,24 @@ def test_argparse_does_not_own_a_verb_the_cli_lacks() -> None:
     The vocabulary is a front end, so a word with no parser behind it would be a
     row that runs ``lop network <unknown>`` and answers with argparse's usage
     text — the "offered but broken" shape, caught here rather than by a user.
+
+    `subcommands_of` rather than walking `parser._subparsers` directly: argparse
+    types that attribute `Optional` and an action's `choices` as
+    `Iterable[Any] | None`, so the direct walk is four non-narrowable sites (the
+    checkout's own `pyright` gate flagged them). The helper proves the mapping is
+    the dict `add_subparsers` built once, in one place, for every test module
+    that asks — including this one.
     """
     import argparse
 
     from local_operator.network.cli import add_parser
+    from tests.unit.network import conftest as net_fixtures
 
     parser = argparse.ArgumentParser(prog="lop", add_help=False)
     subparsers = parser.add_subparsers(dest="command")
     add_parser(subparsers)
-    network = next(
-        action
-        for action in parser._subparsers._group_actions  # noqa: SLF001
-        if action.dest == "command"
-    )
-    subcommands = network.choices["network"]._subparsers._group_actions[0]  # noqa: SLF001
-    available = set(subcommands.choices)
+    network = net_fixtures.subcommands_of(parser)["network"]
+    available = set(net_fixtures.subcommands_of(network))
     # `new` is the user-facing word and `init` is the CLI's verb (the receipt says
     # which); `rename`/`rm` map straight through.
     mapping = {"new": "init"}
@@ -327,6 +330,48 @@ async def test_join_names_the_cli_instead_of_half_pairing(
         await app.workers.wait_for_complete()
         assert run.calls == [], "join must not spawn a pairing subprocess"
         assert any("lop network join @some/token" in text for text in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_a_network_name_with_a_space_is_addressable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-R10-4: the addressing verbs resolve their target as a LONGEST PREFIX.
+
+    ``/network new`` takes the WHOLE tail as a name, so a network called
+    ``Gamma Mesh`` is creatable from this surface — and the first-token rule
+    answered "this device is not in a network called 'Gamma'" for the network
+    the sibling verb had just made, while ``lop network rename "Gamma Mesh" …``
+    renamed it. Two networks are staged on purpose: ``Gamma`` beside
+    ``Gamma Mesh`` is the case where a shorter-prefix-first rule would silently
+    rename the wrong one.
+    """
+    _isolated_network_store(monkeypatch, ("Gamma Mesh", "Gamma"))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network rename Gamma Mesh Gamma Renamed")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["rename", "Gamma Mesh", "Gamma Renamed"]
+
+        await _submit(pilot, app, "/network rename Gamma Gamma Prime")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["rename", "Gamma", "Gamma Prime"]
+
+        await _submit(pilot, app, "/network rm Gamma Mesh yes")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["rm", "Gamma Mesh"]
+
+        await _submit(pilot, app, "/network disconnect Gamma Mesh yes")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["disconnect", "Gamma Mesh"]
+
+        await _submit(pilot, app, "/network member rm Gamma Mesh d_peer yes")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["member", "rm", "Gamma Mesh", "d_peer"]
 
 
 @pytest.mark.asyncio
@@ -582,6 +627,39 @@ async def test_the_panels_panic_key_fills_the_composer_and_runs_nothing(
         await pilot.pause()
         assert app.query_one(Editor).text == "/network panic n_00"
         assert run.calls == [], "the panel never runs a destructive verb itself"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("size", "cut"), [((100, 30), False), ((64, 30), True)])
+async def test_the_panel_footer_says_when_it_has_been_cut(
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int], cut: bool
+) -> None:
+    """U8: the footer fits, or it says it does not.
+
+    Measured before the fix, at 64x30: the line ended after ``shift+p`` with no
+    ellipsis and no fallback, so the only hints for refresh, copy and panic were
+    gone exactly where a cramped terminal wanted them — and nothing on the frame
+    said more existed. A cut line that does not say it was cut is the defect; a
+    cut line that does is the fix.
+    """
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    _isolate_panel(monkeypatch)
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        hint = app.screen.query_one("#network-hint")
+        text = str(hint.render())
+        if cut:
+            assert text.endswith("…"), text
+            assert "ctrl+r copy" not in text, text
+        else:
+            assert text.endswith("ctrl+r copy"), text
+            assert "…" not in text, text
 
 
 @pytest.mark.asyncio

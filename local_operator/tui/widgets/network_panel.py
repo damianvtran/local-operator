@@ -311,6 +311,16 @@ class NetworkScreen(ModalScreen[None]):
     def on_unmount(self) -> None:
         self.presentation_cancelled = True
 
+    def on_resize(self, _event: Any) -> None:
+        """Re-derive the width-sensitive halves, so a resize is not painted stale.
+
+        The title rule and the footer both measure the card, and both are built
+        once in ``compose`` before anything can be measured (UX round 1, U8 — the
+        footer used to be FIXED at that moment, so it could never notice a narrow
+        terminal at all).
+        """
+        self._repaint()
+
     def on_screen_resume(self) -> None:
         self._dismiss_if_cancelled()
 
@@ -513,7 +523,22 @@ class NetworkScreen(ModalScreen[None]):
             overflow="crop",
         )
 
-    def _hint_text(self) -> str:
+    #: The footer's keys, in order, as SEGMENTS rather than one string: every
+    #: prefix of this tuple is a valid shorter footer, which is what lets a narrow
+    #: terminal keep the leftmost keys and say that it dropped the rest (UX round
+    #: 1, U8). One string could only be cut, and a cut line does not say it was
+    #: cut.
+    HINT_SEGMENTS = (
+        "esc",
+        "↑↓",
+        "enter members",
+        "d disconnect",
+        "shift+p panic",
+        "r refresh",
+        "ctrl+r copy",
+    )
+
+    def _hint_text(self, width: int = 0) -> str:
         """The footer: the keys, in ONE casing, and the row-sensitive half named.
 
         ``shift+P`` used to be the only capitalised key on a line whose other four
@@ -533,9 +558,28 @@ class NetworkScreen(ModalScreen[None]):
         padding) and the previous hint measured 78 of them; adding the copy chord
         is 14 more, so ``esc close``/``↑↓ move`` gave up ten cells of verb to keep
         the whole line on screen rather than ending in an ellipsis. Nothing is
-        dropped: every binding the screen carries is named.
+        dropped at a width that fits: every binding the screen carries is named.
+
+        AT A WIDTH THAT DOES NOT FIT, THE LINE SAYS SO (UX round 1, U8). Measured
+        at 64x30 the frame ended after ``shift+p`` with no ellipsis and no
+        fallback, so the only hints for refresh, copy and panic were gone exactly
+        where a cramped terminal wants them — and nothing on the frame said more
+        existed. ``width`` is the cells available (``_card_width``, the same
+        measurement the title uses); zero means "not measured yet" and returns the
+        whole line, which is what ``compose`` renders before the first layout.
         """
-        return "esc · ↑↓ · enter members · d disconnect · shift+p panic · r refresh · ctrl+r copy"
+        full = " · ".join(self.HINT_SEGMENTS)
+        if not width or len(full) <= width:
+            return full
+        kept: list[str] = []
+        for segment in self.HINT_SEGMENTS:
+            candidate = " · ".join([*kept, segment])
+            # +2 for the marker itself: a line that names six keys and says
+            # nothing about the seventh is the defect, not the truncation.
+            if len(candidate) + 2 > width:
+                break
+            kept.append(segment)
+        return " · ".join(kept) + " …"
 
     def _entries(self) -> list[NetworkEntry]:
         """The network rows on screen: the relay's when it has answered, else ours.
@@ -774,7 +818,13 @@ class NetworkScreen(ModalScreen[None]):
         else:
             note = "from this device's records"
         self._header(body, "Peers", note)
-        if relay_rows:
+        # The `isinstance` here REPEATS the one folded into `relay_rows` on
+        # purpose: `relay_rows` is a bool, so a checker cannot carry the
+        # narrowing through it, and iterating a `None` is what this loop would
+        # otherwise look like. The conjunction is the same condition — a false
+        # `relay_rows` only ever short-circuits it — so the printed rows and the
+        # note still come from one verdict.
+        if relay_rows and isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -858,6 +908,13 @@ class NetworkScreen(ModalScreen[None]):
         title = getattr(self, "_title", None)
         if title is not None and title.is_mounted:
             title.update(self._title_text())
+        # THE FOOTER IS WIDTH-SENSITIVE, so it is re-derived here rather than only
+        # built once in `compose`: `compose` runs before the first layout, when
+        # there is nothing to measure, and a hint fixed at that moment cannot
+        # notice a resize or a narrow screen (UX round 1, U8).
+        hint = getattr(self, "_hint", None)
+        if hint is not None and hint.is_mounted:
+            hint.update(self._hint_text(self._card_width()))
 
 
 def build_network_report(local: NetworkLocal, width: int = _MIN_CARD_WIDTH) -> Text:

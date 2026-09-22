@@ -300,6 +300,92 @@ def test_a_peer_can_create_a_session_on_this_device_and_prompt_it(
         _stop_all(served)
 
 
+def test_a_promptless_create_is_still_a_row_on_both_devices(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-R10-3: the bare ``/new remote <peer>`` must leave a listable session.
+
+    The prompted create above works because its turn writes the activity file
+    the ordinary catalogue ranks on. The PROMPTLESS create — the first thing a
+    user types — has no turn, so the peer's runtime finds no work and no
+    viewer, and (on a real device) idle-exits: the session then carried neither
+    activity file, which makes it "never worked in" and outside the ranked set
+    entirely. The id the user was handed by ``net_session_create`` was therefore
+    a row on NEITHER machine, while the receipt they read was a bare boolean.
+
+    So this test drives the whole shape: create with no prompt, stop the
+    runtime (the idle-exit), and then require the row from the owner's own
+    listing and from the creator's sidebar producer.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 9,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "name": "bare create",
+                "prompt": "",
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        detail = reply["detail"]
+        session_id = detail["session_id"]
+        assert session_id
+        # ``admitted`` is the relay's word for "the first prompt landed", and
+        # with no prompt there is none to land. The CLI's RECEIPT is what may
+        # not print this alone (UX round 1, U2); the wire keeps the field.
+        assert detail["admitted"] is False
+        assert detail["detail"] == ""
+
+        session_dir = server_b.root / "sessions" / session_id
+        assert session_dir.is_dir(), "the peer minted no directory at all"
+        assert not any(
+            (session_dir / name).exists() for name in ("transcript.jsonl", "inbox.jsonl")
+        ), (
+            "this test is about a session with no activity: if a create now writes one, "
+            "the membership rule below is no longer what carries the row"
+        )
+
+        # THE IDLE EXIT, as the real device performs it: the runtime goes, its
+        # discovery record goes with it, and the only thing left is the
+        # directory and its stamp.
+        served[session_id].stop()
+        assert not [
+            row
+            for row in server_b.local_session_rows()
+            if row["session_id"] == session_id and row["state"] != "stored"
+        ]
+
+        own = [row for row in server_b.local_session_rows() if row["session_id"] == session_id]
+        assert own, "the owner itself cannot list the session it just minted"
+        assert own[0]["state"] == "stored"
+        assert own[0]["placement"]["home_device"] == server_b.identity.device_id
+        assert own[0]["conversation_name"] == "bare create"
+
+        rows = _call(server_a.root, "peer_session_rows")["detail"]
+        remote = [row for row in rows["sessions"] if row["session_id"] == session_id]
+        assert remote, rows
+        assert remote[0]["locality"] == "remote"
+
+        # ...and through the SIDEBAR's producer, which is the surface the user
+        # actually reads (Q-R10-1's whole subject).
+        from local_operator.session.peer_rows import clear_cache, peer_session_rows
+
+        clear_cache()
+        produced = peer_session_rows(server_a.root)
+        assert [row.id for row in produced] == [session_id]
+        assert produced[0].owner_device == server_b.identity.device_id
+        link.close("test")
+    finally:
+        _stop_all(served)
+
+
 def test_a_create_frame_that_names_a_session_id_is_refused(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

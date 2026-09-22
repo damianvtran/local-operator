@@ -3914,9 +3914,9 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
             return _local_relay_refusal()
         # The relay PROBES each peer here, so the client waits out the relay's own
         # listing budget instead of timing out on it and reporting a running relay
-        # as absent.
+        # as absent. One home for that deadline: `relay.LISTING_CLIENT_TIMEOUT_S`.
         reply = relay.control_request(
-            record, "peer_session_rows", timeout=relay.LISTING_PROBE_BUDGET_S + 8.0
+            record, "peer_session_rows", timeout=relay.LISTING_CLIENT_TIMEOUT_S
         )
         if reply is None:
             # The record was there and the socket answered nothing: a stopped or

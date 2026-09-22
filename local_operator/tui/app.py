@@ -36596,26 +36596,31 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "new":
-            # ONE LIST, TWO FORMS. The bare `remote` row exists for a peer the user
-            # wants to name by id (a device joined without `--name` has no label to
-            # offer), and each peer row carries the WHOLE argument — `remote
-            # <peer>` — because the picker's completion replaces the argument, and
-            # a row named just `devon-laptop` would leave a buffer the handler
-            # cannot tell from the desktop's `sessions.new` selection.
+            # THERE IS NO KEYWORD-ONLY ROW WHILE A PEER ROW EXISTS. There used to
+            # be a leading `remote` row ("Create it on another device") which was
+            # the row the picker PRE-SELECTED — and pressing Enter on it left the
+            # buffer holding a bare `remote`, which the handler refuses with "Use
+            # /new remote <peer>…". A user who took the row the UI put under the
+            # cursor was told the syntax they had just been offered. The design's
+            # own rule is the fix: the ROW CARRIES THE WHOLE ARGUMENT
+            # (`remote <peer>`), so with peers listed every row runs, and the
+            # first Enter fills a working command.
             #
-            # The rows come from THIS DEVICE's member lists (a disk read, no dial):
-            # the list opens on the keystroke after a space, and a device whose
-            # relay is down is exactly the device whose `/new remote` matters.
+            # A DEVICE WITH NO PEERS KEEPS THE BARE ROW, and it is there to be
+            # SEEN rather than to be run: the list needs a row to open at all
+            # (`CommandPicker.is_open` is `bool(self._matches)`, so an empty set
+            # shows nothing — including the notice that says what creates the
+            # first peer). Nothing else on this device is a working `/new remote`
+            # argument, so the row that says the form exists is the honest offer,
+            # and the notice beside it names the remedy. A peer the user wants to
+            # name by id that is not in the list is typed directly: the argument
+            # is free text and these rows only offer it.
+            #
             # Reachability is not shown as a state here because it is not known
             # here — the create call answers it with the peer's own reason, and a
             # fabricated "reachable" column would be the one lie this surface
             # could tell.
-            choices = [
-                ArgumentChoice(
-                    name="remote",
-                    description="Create it on another device",
-                )
-            ]
+            peer_choices: list[ArgumentChoice] = []
             try:
                 from local_operator.network.peers import known_peers
 
@@ -36628,16 +36633,19 @@ class OperatorApp(App[None]):
                 if not token or token in seen:
                     continue
                 seen.add(token)
-                choices.append(
+                peer_choices.append(
                     ArgumentChoice(
                         name=f"remote {token}",
                         description=peer.label,
                         detail=peer.role,
                     )
                 )
+            choices = peer_choices or [
+                ArgumentChoice(name="remote", description="Create it on another device")
+            ]
             picker.set_choices(choices)
             picker.set_notice(
-                "" if len(choices) > 1 else "No peers yet. /network invite mints a token."
+                "" if peer_choices else "No peers yet. /network invite mints a token."
             )
             return
         if message.command == "goal":
@@ -37469,16 +37477,21 @@ class OperatorApp(App[None]):
             self._dispatch_network_cli(rest[:1], ["show", *rest[:1]], notice, verb="show")
             return
         if verb == "rename":
-            # The same fix as `new`, one token over: the FIRST token names the
-            # network to relabel and everything after it is the new name, so
-            # `/network rename devmesh My Fancy Name` renames to `My Fancy Name`
-            # rather than to `My` (review round 4, MINOR 2).
+            # THE TARGET IS RESOLVED AS A PREFIX (Q-R10-4), so the name `new`
+            # accepts is the name `rename` can address: `/network rename Gamma
+            # Mesh Gamma Renamed` relabels `Gamma Mesh`, where the first-token
+            # rule answered "not in a network called 'Gamma'" for a network the
+            # user had just created.
+            target, tail = self._network_split(rest)
+            if not target or not tail:
+                self._system_notice("Use /network rename <network> <new name>", "warning")
+                return
             self._dispatch_network_cli(
                 rest,
-                ["rename", rest[0] if rest else "", " ".join(rest[1:])],
+                ["rename", target, " ".join(tail)],
                 notice,
                 verb="rename",
-                needs=2,
+                needs=1,
                 tail=True,
             )
             return
@@ -37486,15 +37499,20 @@ class OperatorApp(App[None]):
             self._dispatch_network_cli(rest[:1], ["trust", *rest[:1]], notice, verb="trust")
             return
         if verb == "rm":
+            # ...and the same prefix resolution, so `/network rm Gamma Mesh yes`
+            # forgets the network the user named rather than looking for `Gamma`
+            # (Q-R10-4). The rehearsal and the argv are built from the SPLIT, so
+            # the sentence and the command cannot name different networks.
+            target, tail = self._network_split(rest)
             self._network_confirm_then(
-                rest,
+                [target, *tail],
                 notice,
                 verb="rm",
                 needs=1,
                 token="yes",
-                argv=["rm", rest[0]] if rest else [],
+                argv=["rm", target] if target else [],
                 rehearsal=(
-                    f"/network rm forgets {rest[0] if rest else 'a network'} ON THIS DEVICE only: "
+                    f"/network rm forgets {target or 'a network'} ON THIS DEVICE only: "
                     "the other devices keep the network and this one stops answering it. "
                     "Run /network disconnect first if the point is to leave."
                 ),
@@ -37594,17 +37612,31 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
-        target = rest[1:]
+        # THE NETWORK IS A PREFIX AND THE DEVICE IS THE WHOLE REMAINDER (Q-R10-4),
+        # which is the only split that addresses a network whose name contains a
+        # space without breaking a device LABEL that contains one. A trailing
+        # `yes` is the confirmation, so it is stripped before the split and put
+        # back as the position `_network_confirm_then` reads.
+        tail = rest[1:]
+        confirmed = bool(tail) and tail[-1].casefold() == "yes"
+        spec = tail[:-1] if confirmed else tail
+        network, device = self._network_split(spec)
+        device_name = " ".join(device)
+        if not network or not device_name:
+            self._system_notice(
+                "Use /network member rm <network> <device> — /network show lists the members",
+                "warning",
+            )
+            return
         self._network_confirm_then(
-            target,
+            [network, device_name, *(["yes"] if confirmed else [])],
             notice,
             verb="member rm",
             needs=2,
             token="yes",
-            argv=["member", "rm", target[0], target[1]] if len(target) >= 2 else [],
+            argv=["member", "rm", network, device_name],
             rehearsal=(
-                f"Revoking {target[1] if len(target) > 1 else 'a member'} from "
-                f"{target[0] if target else 'a network'} rotates the network secret: every "
+                f"Revoking {device_name} from {network} rotates the network secret: every "
                 "remaining device is re-keyed, and the revoked device is refused at its "
                 "next connect until it is invited again."
             ),
@@ -37617,12 +37649,20 @@ class OperatorApp(App[None]):
         (§1.5), which is what makes the incident control reachable in one command;
         with several it lists them instead of guessing which one the user meant.
         """
-        network_arg = rest[0] if rest else ""
-        if rest and rest[0].casefold() == "yes":
+        # THE CONFIRMATION TOKEN IS `yes`, AND IT IS THE LAST TOKEN (Q-R10-4).
+        # With a name that may contain spaces, "everything before a trailing
+        # `yes` is the network" is the only split that keeps
+        # `/network disconnect Gamma Mesh yes` addressable at all; the bare
+        # `/network disconnect yes` is the same rule with an empty name, which is
+        # what resolves to the single network below.
+        confirmed = bool(rest) and rest[-1].casefold() == "yes"
+        spec = rest[:-1] if confirmed else rest
+        if spec:
+            network_arg, _tail = self._network_split(spec)
+            confirm_at = len(spec)
+        else:
             network_arg = ""
             confirm_at = 0
-        else:
-            confirm_at = 1 if rest else 0
         argv = ["disconnect"] + ([network_arg] if network_arg else [])
         target = network_arg or self._network_only_name()
         if target is None:
@@ -37745,6 +37785,50 @@ class OperatorApp(App[None]):
             if record.name == target:
                 return record.name or record.network_id
         return None
+
+    def _network_target(self, tokens: list[str]) -> tuple[str, list[str]] | None:
+        """``(the network these tokens address, the tokens left over)``, or ``None``.
+
+        THE TARGET IS A PREFIX, NOT A TOKEN (QA round 10, Q-R10-4). ``/network new``
+        takes the WHOLE tail as a name (review round 4), so a network can be called
+        ``Gamma Mesh`` — and every verb that ADDRESSES one still sliced ``rest[0]``,
+        so the name the sibling verb happily created was unreachable:
+        ``/network rename Gamma Mesh Gamma Renamed`` answered *this device is not in
+        a network called 'Gamma'* while ``lop network rename "Gamma Mesh" …`` renamed
+        the same pair. The same first-token rule limited ``rm``, ``disconnect`` and
+        ``member rm``.
+
+        LONGEST PREFIX FIRST, matched the way :meth:`_network_name_for` matches (id
+        first, then name), so the two verbs agree about what a token means: a network
+        genuinely called ``Gamma`` beside one called ``Gamma Mesh`` is still
+        addressable by either, because the LONGEST leading run that names something
+        wins and the rest is the verb's own argument. ``None`` when nothing in the
+        prefix names a network, which is how a caller knows to pass the first token
+        through and let the CLI refuse it in its own words.
+        """
+        records = self._network_records()
+        for length in range(len(tokens), 0, -1):
+            candidate = " ".join(tokens[:length])
+            for record in records:
+                if record.network_id == candidate:
+                    return candidate, tokens[length:]
+            for record in records:
+                if record.name == candidate:
+                    return candidate, tokens[length:]
+        return None
+
+    def _network_split(self, tokens: list[str]) -> tuple[str, list[str]]:
+        """The split above, degrading to the first token so the CLI can refuse it.
+
+        A verb whose network name the user mistyped must hear from the CLI, whose
+        refusal names the network it could not find — the same sentence the CLI
+        prints for the same typo. Inventing a second refusal here is how the two
+        surfaces came to disagree in the first place (Q-R10-4).
+        """
+        split = self._network_target(tokens)
+        if split is not None:
+            return split
+        return (tokens[0] if tokens else ""), tokens[1:]
 
     def _open_network_screen(self, verb: str) -> None:
         """Push the mesh panel. Push-before-read, like ``/info`` and ``/session``.
