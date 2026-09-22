@@ -220,32 +220,6 @@ def _candidate_keys(inner: str) -> list[str]:
     return keys
 
 
-def _store_values_legacy(base: Path) -> dict[str, SecretStr]:
-    """The credential store's values, as ``SecretStr``, keyed by name.
-
-    Values stay WRAPPED: the mapping is built on every connect that has a
-    reference, and unwrapping here would copy every credential in the file —
-    unrelated providers' keys included — into plaintext ``str`` for no benefit.
-    :func:`_resolve_value` unwraps the one key it actually substitutes.
-
-    Read fresh on each call rather than cached: the store is written by the API
-    server process (``PATCH /v1/credentials``) while a session that already
-    holds MCP connections reads it, so a cached snapshot would keep reporting a
-    credential the user has just added as missing until something restarted.
-    The file is a handful of lines.
-    """
-    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
-
-    if not (base / CREDENTIALS_FILE_NAME).exists():
-        # No store exists, so every reference is unresolvable. Read directly
-        # rather than constructing CredentialManager, whose constructor CREATES
-        # an empty credentials file: a connect must not write to the config dir
-        # as a side effect of reading a reference.
-        return {}
-    # ``dict(...)`` is a shallow copy: the manager hands back its own live dict.
-    return dict(CredentialManager(base).get_credentials())
-
-
 def _reference_fragments(value: str):
     """The resolver's left-to-right opener/escape scan, without reading a store."""
     index = 0
@@ -292,12 +266,10 @@ def _store_values(
         for value in (getattr(cfg, field, None) or {}).values():
             for text in _reference_fragments(value):
                 candidates.update(_candidate_keys(text))
-    # Legacy values remain wrapped and read-only. Never obtain unrelated
-    # encrypted values just to decide whether a malformed fragment names a key.
-    legacy: dict[str, SecretStr] | None = None
+    # The store's own values; a candidate NOT in the store is simply absent.
+    # Never obtain unrelated encrypted values just to decide whether a malformed
+    # fragment names a key.
     values: dict[str, SecretStr] = {}
-    if cfg is None:
-        return _store_values_legacy(base)
     for key in candidates:
         try:
             absent = not store_path(base).exists()
@@ -313,11 +285,6 @@ def _store_values(
                         values[key] = SecretStr("present")
                 except SecretNotFound:
                     absent = True
-            if absent:
-                if legacy is None:
-                    legacy = _store_values_legacy(base)
-                if key in legacy:
-                    values[key] = legacy[key]
             if register is not None and key in values and key in required:
                 register(values[key].get_secret_value())
         except Exception:
