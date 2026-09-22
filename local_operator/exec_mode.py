@@ -621,7 +621,7 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
         # a benchmark).
         base_dir = config_dir()
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager(base_dir)
+        credential_manager = CredentialManager.readonly(base_dir)
         agent_registry = AgentRegistry(base_dir)
 
         session_args = argparse.Namespace(

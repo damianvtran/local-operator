@@ -713,16 +713,20 @@ def test_a_broken_submodule_degrades_instead_of_escaping() -> None:
     """
     import sys
 
+    # ``local_operator.secrets.access`` is the module the credential probe now
+    # imports lazily (PR2a; the plaintext ``local_operator.credentials`` reader is
+    # gone), so breaking it here is the same "partially broken install" the test
+    # names: the probe must degrade, not crash.
     sentinel = object()
-    saved = sys.modules.get("local_operator.credentials", sentinel)
-    sys.modules["local_operator.credentials"] = None  # type: ignore[assignment]
+    saved = sys.modules.get("local_operator.secrets.access", sentinel)
+    sys.modules["local_operator.secrets.access"] = None  # type: ignore[assignment]
     try:
         snapshot = collect_snapshot(LiveState())
     finally:
         if saved is sentinel:
-            sys.modules.pop("local_operator.credentials", None)
+            sys.modules.pop("local_operator.secrets.access", None)
         else:
-            sys.modules["local_operator.credentials"] = saved  # type: ignore[assignment]
+            sys.modules["local_operator.secrets.access"] = saved  # type: ignore[assignment]
 
     assert isinstance(snapshot, InfoSnapshot)
     assert snapshot.degraded
@@ -734,9 +738,10 @@ def test_a_degraded_collect_writes_nothing_into_the_current_directory(tmp_path: 
     Found for real: the B1 fallback was `Path(".")`, and `CredentialManager`
     CREATES its store on construction, so probing a machine whose `config_dir()`
     could not be resolved wrote a `credentials.env` into whatever directory the
-    user was standing in. A diagnostic that mutates the thing it describes is
-    the same fault as `check_latest()` rewriting the cache, which this module
-    bans outright.
+    user was standing in. The probe now reads the encrypted store and creates
+    nothing (PR2a), but the property is unchanged and still asserted: a
+    diagnostic that mutates the thing it describes is the same fault as
+    `check_latest()` rewriting the cache, which this module bans outright.
     """
     import os
 
@@ -840,10 +845,12 @@ def test_the_credential_probe_names_a_root_it_could_not_look_at(
     root = tmp_path / "config"
     root.mkdir()
     if kind == "untraversable-directory":
-        (root / "credentials.env").write_text("DEEPSEEK_API_KEY=test_key\n")
+        (root / "secrets").mkdir()
+        (root / "secrets" / "store.db").touch()
         root.chmod(0o000)
     elif kind == "symlink-loop":
-        (root / "credentials.env").symlink_to("credentials.env")
+        (root / "secrets").mkdir()
+        (root / "secrets" / "store.db").symlink_to("store.db")
 
     def at_root() -> Path:
         return root

@@ -39,12 +39,15 @@ The order is the provider stack's, and it is the same for all three legs
    operator is signed into and the route we bill; a pasted key is the legacy
    path, kept working rather than leading. So a machine that has BOTH uses the
    login row, and the static key is a fallback rather than the default.
-2. **``CredentialManager.get_credential(<env key>)``** — the process environment
-   and the legacy ``credentials.env``. Still needed explicitly: the store's own
-   env tier reads only a provider's *single-string* ``env_keys``, so a tuple
-   like TypeSafe's ``("TYPESAFE_API_KEY", "JEV_API_KEY")`` is not covered there,
-   and neither is ``OPENROUTER_API_KEY_DEV``. This is also the LEGACY tier the
-   ladder below falls back to when the login row cannot serve.
+2. **The provider-class store row, then the process environment** — the
+   ``LOP_PROVIDER_<env key>`` row a login or ``lop credential update`` wrote,
+   else an exported variable. Still needed explicitly: the store's own env tier
+   reads only a provider's *single-string* ``env_keys``, so a tuple like
+   TypeSafe's ``("TYPESAFE_API_KEY", "JEV_API_KEY")`` is not covered there,
+   and neither is ``OPENROUTER_API_KEY_DEV``. This is the LEGACY tier the
+   ladder below falls back to when the login row cannot serve. The plaintext
+   ``credentials.env`` leg is GONE (PR2a) — a name neither the store nor the
+   environment holds resolves to nothing.
 3. **The vendor-specific alternates** — ``JEV_API_KEY`` for TypeSafe,
    ``OPENROUTER_API_KEY_DEV`` behind the production key for OpenRouter.
 4. ``None`` — "this leg has no credential", which the cascade treats as "skip".
@@ -93,6 +96,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -518,7 +522,7 @@ class _HttpDecisionVendor:
         OAuth session an interactive login wrote, which is the preferred way to
         bill this call; every name after it is a static key the operator pasted
         or exported, which is the LEGACY tier. The order is the contract (see the
-        module docstring), and the members are ``CredentialManager`` key names,
+        module docstring), and the members are the provider env-key names,
         so a tier can be named in a log line without a value ever being printed.
         """
         return ("authstore", *self.env_key_names)
@@ -547,25 +551,30 @@ class _HttpDecisionVendor:
 
         The static-key tiers are resolved STORE-FIRST: for each name in
         ``env_key_names`` the provider-class store row (``LOP_PROVIDER_<name>``)
-        is read before falling through to ``manager.get_credential(name)``, which
-        is the legacy file plus the process environment. That keeps the tier
-        vocabulary unchanged — an index still names one credential — while making
-        a store row the value a login wrote outrank an ambient export.
+        is read before falling through to the process environment, so a store
+        row the operator saved outranks an ambient export. That keeps the tier
+        vocabulary unchanged — an index still names one credential. The legacy
+        ``credentials.env`` rung is GONE (PR2a): a name neither the store nor
+        the environment holds resolves to nothing.
         """
+        from local_operator.providers.registry import provider_secret_value
+
         for index, tier in enumerate(self.credential_tiers[self._tier :], start=self._tier):
             if tier == "authstore":
                 stored = await auth_store_api_key(manager, self.provider_id)
                 if stored:
                     return SecretStr(stored), index
                 continue
-            from local_operator.providers.registry import provider_secret_value
 
             stored_key = provider_secret_value(tier, base=getattr(manager, "config_dir", None))
             if stored_key:
                 return SecretStr(stored_key), index
-            value = manager.get_credential(tier)
-            if value:
-                return value, index
+            # An exported variable is a real instruction and is not what PR2a
+            # removes. The tier NAME is itself the env-key name a leg declares,
+            # so the environment rung is that name exported.
+            exported = os.environ.get(tier)
+            if exported:
+                return SecretStr(exported), index
         return None, None
 
     async def credential(self, manager: "CredentialManager") -> SecretStr | None:

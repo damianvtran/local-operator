@@ -1700,19 +1700,17 @@ async def _setup_knowledge(
         )
 
         def get_credential(key: str) -> str | None:
-            # Store-first, like every other provider-key reader: a
-            # LOP_PROVIDER_<key> row outranks the legacy CredentialManager tier.
-            # provider_secret_value is namespace-scoped, so an ordinary agent
-            # secret under this name is simply not found here and the legacy
-            # read below still resolves it.
+            # A provider-class LOP_PROVIDER_<key> store row, then an exported
+            # variable. provider_secret_value is namespace-scoped, so an
+            # ordinary agent secret under this name is simply not found here.
+            # The legacy credentials.env leg is GONE (PR2a): an embedder key
+            # the operator never stored or exported resolves to nothing.
             from local_operator.providers.registry import provider_secret_value
 
             stored = provider_secret_value(key, base=config_dir)
             if stored:
                 return stored
-            secret = credential_manager.get_credential(key)
-            value = secret.get_secret_value() if secret else ""
-            return value or None
+            return os.environ.get(key) or None
 
         if resources:
             backend = default_backend_from_env(get_credential)

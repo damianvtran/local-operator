@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
 import uuid
 from typing import Any, Callable
 
@@ -364,7 +365,7 @@ async def execute_web_search(
     # use, so no new parse cost and no new malformed-file exposure.
     if not settings.enabled:
         return _result(tool_call_id, WEB_SEARCH_DISABLED_MESSAGE, error=True)
-    credentials = CredentialManager(config_dir())
+    credentials = CredentialManager.readonly(config_dir())
     service = WebSearchService(
         settings,
         credentials,
@@ -384,23 +385,24 @@ async def execute_web_search(
         # independent calls rather than borrowing another caller's lifecycle.
         io = context.web_io if context is not None else None
         if io is not None and service.tavily_oauth_search is None:
+            # Digest the EXPORTED credential values behind the resolved chain, so
+            # two calls with different credentials do not coalesce. Store rows are
+            # deliberately NOT digested: they resolve identically for every
+            # consumer of the same config root, so they cannot vary between two
+            # calls in one process; the environment is the only per-call input.
+            # The plaintext ``credentials.env`` leg this used to also read is GONE
+            # (PR2a). The RESOLVED, non-rotating chain, not ``settings.providers``:
+            # an auto-joined provider's credential (EXA_API_KEY,
+            # PARALLEL_API_KEY, DEEPSEEK_API_KEY) sits outside the priority prefix,
+            # and two calls with different credentials behind it must not coalesce.
+            # ``resolve()`` rather than ``candidates()`` because the rotation
+            # offset moves per call and the key must be stable.
             auth = hashlib.sha256(
                 json.dumps(
                     {
-                        key: value.get_secret_value()
-                        for key, value in {
-                            key: credentials.get_credential(key)
-                            # The RESOLVED, non-rotating chain, not
-                            # ``settings.providers``: an auto-joined provider's
-                            # credential (EXA_API_KEY, PARALLEL_API_KEY,
-                            # DEEPSEEK_API_KEY) sits outside the priority prefix,
-                            # and two calls with different credentials behind it
-                            # must not coalesce. ``resolve()`` rather than
-                            # ``candidates()`` because the rotation offset moves
-                            # per call and the key must be stable.
-                            for provider in service.resolve()
-                            for key in PROVIDERS[provider].credential_keys
-                        }.items()
+                        key: os.environ.get(key, "")
+                        for provider in service.resolve()
+                        for key in PROVIDERS[provider].credential_keys
                     },
                     sort_keys=True,
                 ).encode()

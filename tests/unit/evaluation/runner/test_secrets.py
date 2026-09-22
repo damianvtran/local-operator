@@ -118,60 +118,72 @@ def test_empty_value_is_a_missing_secret(value: str | None) -> None:
         resolver.resolve(["K"])
 
 
-def test_credential_store_resolver_wraps_the_manager_and_names_only_the_ref() -> None:
+def _isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point HOME and the config dir inside ``tmp_path``, and open the store."""
+    from local_operator.secrets.access import open_store
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "config").mkdir()
+    return open_store(create=True)
+
+
+def _store_resolver_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str):
+    """A ``CredentialStoreResolver`` over an isolated store holding ``name``."""
+    from local_operator.credentials import CredentialManager
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
 
-    class _Secret:
-        def __init__(self, value: str) -> None:
-            self._value = value
+    store = _isolated_store(tmp_path, monkeypatch)
+    store.set(name, value.encode())
+    return CredentialStoreResolver(CredentialManager.readonly(tmp_path / "config"))
 
-        def get_secret_value(self) -> str:
-            return self._value
 
-    class _Manager:
-        def __init__(self, explode: bool = False) -> None:
-            self.explode = explode
+def test_credential_store_resolver_reads_the_store_and_names_only_the_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolver serves names from the AGENT store and names only the ref.
 
-        def get_credentials(self) -> dict[str, _Secret]:
-            if self.explode:
-                raise RuntimeError("store exploded reading /path/credentials.env")
-            return {"PRESENT": _Secret(CANARY), "EMPTY": _Secret("")}
+    The legacy ``CredentialManager`` mapping it used to fall back to is GONE
+    (PR2a): a name the store does not hold is honestly missing, and the message
+    carries the REF name, never a value or a path a store error might quote.
+    """
+    from local_operator.credentials import CredentialManager
+    from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
 
-        def get_credential(self, key: str) -> _Secret:  # pragma: no cover
-            raise AssertionError("the resolver must not use the env-falling-back getter")
+    store = _isolated_store(tmp_path, monkeypatch)
+    store.set("PRESENT", CANARY.encode())
 
-    resolver = CredentialStoreResolver(_Manager())
+    resolver = CredentialStoreResolver(CredentialManager.readonly(tmp_path / "config"))
     assert resolver.resolve(["PRESENT"]) == (ResolvedSecret(name="PRESENT", value=CANARY),)
     for absent in ("ABSENT", "EMPTY"):
         with pytest.raises(MissingSecret) as missing:
             resolver.resolve([absent])
         assert missing.value.name == absent
-    with pytest.raises(MissingSecret) as errored:
-        CredentialStoreResolver(_Manager(explode=True)).resolve(["BOOM"])
-    assert errored.value.name == "BOOM"
-    assert "credentials.env" not in str(errored.value)
 
 
 def test_credential_store_resolver_never_falls_back_to_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The REAL CredentialManager falls back to os.environ; the resolver must not.
+    """A name not on ``--secret-env`` is documented as store-only.
 
-    A name not on ``--secret-env`` is documented as store-only. Serving an
-    ambient variable for it would make that claim false in the operator's
-    own proof.
+    Serving an ambient variable — or an old ``credentials.env`` value — for it
+    would make that claim false in the operator's own proof.
     """
-
     from local_operator.credentials import CredentialManager
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
 
-    (tmp_path / "credentials.env").write_text("IN_STORE=from-the-file\n")
+    store = _isolated_store(tmp_path, monkeypatch)
+    store.set("IN_STORE", b"in-store-value")
+    # A decoy plaintext file must not resurface a value either (PR2a).
+    (tmp_path / "config" / "credentials.env").write_text("ONLY_IN_FILE=file-value")
     monkeypatch.setenv("ONLY_IN_ENV", "ambient-value")
-    resolver = CredentialStoreResolver(CredentialManager(tmp_path))
-    assert resolver.resolve(["IN_STORE"])[0].value == "from-the-file"
-    with pytest.raises(MissingSecret) as raised:
-        resolver.resolve(["ONLY_IN_ENV"])
-    assert raised.value.name == "ONLY_IN_ENV"
+    resolver = CredentialStoreResolver(CredentialManager.readonly(tmp_path / "config"))
+    assert resolver.resolve(["IN_STORE"])[0].value == "in-store-value"
+    for absent in ("ONLY_IN_ENV", "ONLY_IN_FILE"):
+        with pytest.raises(MissingSecret) as raised:
+            resolver.resolve([absent])
+        assert raised.value.name == absent
     assert "ambient-value" not in str(raised.value)
 
 
@@ -183,28 +195,23 @@ LONG_CANARY = "SECRETVALUE-" + "z" * 9000
 
 
 @pytest.mark.parametrize("kind", ["static", "env", "store"])
-def test_over_long_value_is_unusable_by_name_only(kind: str) -> None:
+def test_over_long_value_is_unusable_by_name_only(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``ResolvedSecret.max_length`` is 8192; a cert chain exceeds it.
 
     pydantic's ValidationError embeds ``input_value=`` -- the value -- in its
-    message, so every resolver has to translate it before it can escape.
+    message, so every resolver has to translate it before it can escape. The
+    store resolver is driven through the REAL store (PR2a): it reads agent-class
+    rows, so a real over-long row is what its path is exercised with.
     """
 
-    from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
     from local_operator.evaluation.runner.secrets import UnusableSecret
-
-    class _Secret:
-        def get_secret_value(self) -> str:
-            return LONG_CANARY
-
-    class _Manager:
-        def get_credentials(self) -> dict[str, _Secret]:
-            return {"K": _Secret()}
 
     resolver: SecretResolver = {
         "static": StaticSecretResolver({"K": LONG_CANARY}),
         "env": EnvSecretResolver({"K": LONG_CANARY}),
-        "store": CredentialStoreResolver(_Manager()),
+        "store": _store_resolver_with(tmp_path, monkeypatch, "K", LONG_CANARY),
     }[kind]
     with pytest.raises(UnusableSecret) as raised:
         resolver.resolve(["K"])

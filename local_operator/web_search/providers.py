@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
 import threading
 import time
@@ -54,12 +55,14 @@ class ProviderDefinition:
 
 
 def _credential(manager: CredentialManager, *keys: str) -> str:
-    """First configured value across the provider store, then the legacy tier.
+    """First configured value across the provider store, then the environment.
 
     Store-first: a ``LOP_PROVIDER_<key>`` row the operator saved (via ``lop
     search setup`` or ``lop credential update``) outranks an ambient export,
     which is the order every other provider-key reader in the repo uses. The
-    value is never logged.
+    legacy ``credentials.env`` leg is GONE (PR2a): a key the store does not hold
+    and the environment does not export resolves to nothing. The value is never
+    logged.
     """
     from local_operator.providers.registry import provider_secret_value
 
@@ -69,9 +72,9 @@ def _credential(manager: CredentialManager, *keys: str) -> str:
         if stored:
             return stored
     for key in keys:
-        value = manager.get_credential(key).get_secret_value().strip()
-        if value:
-            return value
+        exported = os.environ.get(key, "").strip()
+        if exported:
+            return exported
     return ""
 
 

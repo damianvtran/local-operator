@@ -35,6 +35,22 @@ from local_operator.classification.types import (
 TEST_KEY = "unit-test-key"
 
 
+def store_row(manager: Any, env_key: str, value: str) -> None:
+    """Arm a manager with a PROVIDER-CLASS STORE ROW for ``env_key``.
+
+    The consolidation retired the plaintext ``credentials.env`` file and the
+    in-memory mapping ``CredentialManager.set_credential(write=False)`` used to
+    seed, so a fixture that wants a leg to find a static key must now write the
+    row a real ``lop credential update`` would. This is that writer, routed
+    through the production ``store_provider_key`` so a test cannot disagree with
+    the reader about the row's name or namespace, and pointed at the manager's
+    OWN config root so two managers in one test stay independent.
+    """
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key(env_key, value, base=manager.config_dir)
+
+
 def candidate(
     name: str,
     *,

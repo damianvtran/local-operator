@@ -601,8 +601,7 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
     if env_var:
         print(
             f"Warning: {provider_id} still authenticates from {env_var}. "
-            "Unset it or remove the credentials.env entry to complete the "
-            "logout."
+            "Unset it to complete the logout."
         )
     return 0
 
@@ -639,21 +638,15 @@ def list_logins(
             print(f"  {definition.id:<14} {name}=<set>")
             found = True
     if credential_manager is not None:
-        # The provider-class store rows, keyed by env-key name, then the legacy
-        # file during the transition. Both are reported as names only.
+        # The provider-class store rows, keyed by env-key name, reported as names
+        # only. The plaintext ``credentials.env`` loop this used to print is GONE
+        # (PR2a): the file is no longer a credential source.
         try:
             from local_operator.providers.registry import stored_provider_env_keys
 
             for key in sorted(stored_provider_env_keys(credential_manager.config_dir)):
                 print(f"  secret store  {key}=<set>")
                 found = True
-        except Exception:
-            pass
-        try:
-            for key, secret in credential_manager.get_credentials().items():
-                if secret.get_secret_value():
-                    print(f"  credentials.env  {key}=<set>")
-                    found = True
         except Exception:
             pass
     if not found:

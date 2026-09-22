@@ -650,10 +650,13 @@ class _SerializedConnection:
 class AuthStore:
     """Credential persistence + the 7-step cascade.
 
-    ``credential_manager`` (legacy ``CredentialManager``) feeds the env tier
-    from ``credentials.env``. ``config_overrides`` seeds the config-override
-    tier. All DB access is local and synchronous; async methods only exist
-    where refresh/network happens.
+    ``credential_manager`` supplies the config ROOT the env tier resolves its
+    provider-class store rows under (``config_dir``). It no longer feeds a
+    plaintext leg: the env tier reads store rows then the process environment,
+    and the legacy ``credentials.env`` rung is GONE (PR2a).
+    ``config_stored_values`` seeds the config-derived tier. All DB access is
+    local and synchronous; async methods only exist where refresh/network
+    happens.
 
     .. note::
         Refresh is single-flight per process (``asyncio.Lock``) and across
@@ -3163,14 +3166,14 @@ class AuthStore:
         # authenticates with its base provider's var) so the cascade,
         # ``is_usable`` and the catalogue enrichment cannot disagree about
         # whether a key runs a flavour. It reads the provider-class store row
-        # first, the process environment second and the legacy ``credentials.env``
-        # file last — the file leg exists only until every writer is repointed.
+        # first and the process environment second; the legacy ``credentials.env``
+        # file leg is GONE (PR2a).
         #
         # The cascade ORDER is untouched: this is still step 5, still one value,
         # still before the stored-api_key and fallback-resolver rungs.
         #
-        # ``base`` is the manager's own config root, so a store (or legacy file)
-        # the caller configured elsewhere is the one consulted; unset means the
+        # ``base`` is the manager's own config root, so a store the caller
+        # configured elsewhere is the one consulted; unset means the
         # HOME-derived default, which is what a CLI invocation wants.
         base = getattr(self._credential_manager, "config_dir", None)
         return provider_env_key(provider, base=base)
