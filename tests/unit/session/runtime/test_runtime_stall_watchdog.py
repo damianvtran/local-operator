@@ -2027,10 +2027,14 @@ def test_deaths_spread_across_the_window_never_disarm_the_supervision(
 ) -> None:
     """THE BUDGET IS A RATE, NOT AN ALLOWANCE (agent review round 1, MAJOR 1).
 
-    The defect this closes: with a counter that is only ever incremented, four
-    unrelated transients spread over a session spend the budget, and the fifth --
-    hours later, no more related to the first four than they were to each other --
-    freezes the WORKLOAD stamp for good and lets the bound end a healthy runtime.
+    The defect this closes: with a counter that is only ever incremented, THREE
+    unrelated transients spread over a session were enough to spend the budget, and the
+    death after them -- hours later, no more related to those three than they were to
+    each other -- ended the supervision for the rest of the session, so the WORKLOAD
+    stamp could then freeze for good and the bound could end a healthy runtime. (An
+    earlier version of this docstring said "the fifth", which is one more than the code
+    ends on: the same off-by-one agent review round 3 caught one file over from the
+    correction in ``process.py``.)
     That is the very incident this supervision exists to prevent, so the cell that
     forbids it is the one that runs MORE deaths than the budget allows and demands
     that supervision is still there at the end.
@@ -2395,11 +2399,43 @@ def _started_name(starter: ast.Call) -> str | None:
     return None
 
 
-def _started_coroutines(function: ast.AST) -> list[str]:
-    """The coroutine NAMES handed to a task starter inside ``function``."""
-    return [
-        name for starter in _task_starters(function) if (name := _started_name(starter)) is not None
-    ]
+def _module_aliases(module: ast.Module) -> dict[str, str]:
+    """Module-level ``name = other_name`` bindings, for resolving an ALIASED starter.
+
+    AGENT REVIEW ROUND 3, N1: the round-2 check matched the name written at the call site, so
+    ``_orphan = _beat_stall_watchdog`` followed by ``ensure_future(_orphan(stop))`` was a second
+    real arm site the check counted as one — the other half of the round-2 NIT. Only single-name
+    targets whose value is a single name are followed, and only at module level, which is enough
+    for an alias and cannot invent a resolution the language would not make.
+    """
+    aliases: dict[str, str] = {}
+    for node in module.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = node.value.id
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.value, ast.Name)
+            and isinstance(node.target, ast.Name)
+        ):
+            aliases[node.target.id] = node.value.id
+    return aliases
+
+
+def _resolves_to(name: str, aliases: dict[str, str]) -> set[str]:
+    """``name`` and every module-level alias it stands for, transitively."""
+    seen = {name}
+    while (nxt := aliases.get(name)) is not None and nxt not in seen:
+        name = nxt
+        seen.add(name)
+    return seen
+
+
+def _starts_coroutine(starter: ast.Call, name: str, aliases: dict[str, str]) -> bool:
+    """Whether ``starter`` hands ``name`` — or an alias of it — to a task starter."""
+    started = _started_name(starter)
+    return started is not None and name in _resolves_to(started, aliases)
 
 
 def test_a_failing_record_cannot_defeat_the_give_up(
@@ -2498,6 +2534,51 @@ def test_a_failing_record_does_not_replace_a_cancellation(
     ]
 
 
+def test_a_failing_dump_path_cannot_defeat_the_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE CLAUSE IS PART OF THE GIVE-UP, NOT JUST THE WRITE (agent review round 3, M2).
+
+    Round 2 made the RECORD total and left the sentence around it building
+    ``stall_watchdog.dump_path()`` at the call site — and ``dump_path`` reaches ``log_dir()``,
+    so rigging THAT to raise, with the record left total and succeeding, still skipped the
+    ``return``: the reviewer measured 121 creations, no ``GIVES UP`` line, and a supervisor
+    that never came back — spawning a task on every pass. The fix moved the whole clause inside
+    the total call, so there is nothing left between the decision and the return.
+
+    Same shape as the round-2 cell, one line down, and ``wait_for`` is again what makes it red
+    rather than wedged on the un-protected code.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    def unnameable_dump(pid: int | None = None, directory: Path | None = None) -> Path:
+        raise OSError("rig: the dump path cannot be resolved")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+    monkeypatch.setattr(stall_watchdog, "dump_path", unnameable_dump)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=20.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor never reached its decision ({deaths} creations), so a path lookup that "
+        f"cannot resolve defeats the give-up — round 2's finding one line down: {messages}"
+    )
+    assert any("GIVES UP" in message for message in messages), messages
+    assert any("dump path could not be resolved" in message for message in messages), messages
+
+
 def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
     """The fix is WIRED, and wired in ONE place.
 
@@ -2508,27 +2589,31 @@ def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
     side of this module.
 
     The second assertion is the other half: the tick's coroutine is handed to a task
-    starter exactly ONCE in this module — **at any depth, not just inside a
-    module-level function** (agent review round 2, NIT: the earlier check looked only
-    at function bodies, so its sentence claimed more than it tested) — so a second
-    arm site beside the supervisor cannot appear unnoticed.
+    starter exactly ONCE in this module — **at any depth, not just inside a module-level
+    function, and through an alias if one is used** (agent review round 2, NIT, and round
+    3, N1: the check first saw only function bodies, and then only the name written at the
+    call site, while its sentence claimed both) — so a second arm site beside the
+    supervisor cannot appear unnoticed.
     """
     from local_operator.session.runtime import process
 
     source = Path(process.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
     functions = _beater_module_functions(source)
-    assert "_watch_stall_beats" in _started_coroutines(
-        functions["amain"]
+    aliases = _module_aliases(module)
+    assert any(
+        _starts_coroutine(starter, "_watch_stall_beats", aliases)
+        for starter in _task_starters(functions["amain"])
     ), "amain does not start the supervisor, so a real runtime can run with an unobserved tick"
     ticks = [
         starter
-        for starter in _task_starters(ast.parse(source))
-        if _started_name(starter) == "_beat_stall_watchdog"
+        for starter in _task_starters(module)
+        if _starts_coroutine(starter, "_beat_stall_watchdog", aliases)
     ]
     assert len(ticks) == 1, (
         f"the tick's coroutine is handed to a task starter {len(ticks)} times in this module "
-        f"(at any depth): with zero the runtime has no bound ticker at all, and with two the "
-        f"second one is unobserved — the defect this PR removes"
+        f"(at any depth, aliases resolved): with zero the runtime has no bound ticker at all, "
+        f"and with two the second one is unobserved — the defect this PR removes"
     )
 
 

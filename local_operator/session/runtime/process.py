@@ -3176,27 +3176,47 @@ async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
         stall_watchdog.beat(stall_watchdog.WORKLOAD)
 
 
-def _record_tick_death(reason: str) -> bool:
-    """Best-effort write of one tick-death line into the armed dump. MAY NEVER RAISE.
+def _record_tick_death(reason: str) -> str:
+    """Best-effort write of one tick-death line, and the clause naming where it landed.
 
-    TOTAL ON PURPOSE (agent review round 2, MINOR 2), because two callers' CONTROL FLOW
-    depends on it rather than on what it returns: the give-up has to reach its ``return``
-    — an un-totaled write there let a failing diagnostic defeat the terminal state, measured
-    as 130 ticks, 130 guard tracebacks and no give-up line in 2 s — and a cancellation has
-    to stay a cancellation, where an un-totaled write replaced the ``CancelledError`` with
-    the write's own exception and left the supervisor ending ``OSError`` instead of
-    ``cancelled``. A record that cannot be written is a missing diagnostic, never a second
-    failure and never a death that did not happen.
+    MAY NEVER RAISE, AND THAT INCLUDES THE CLAUSE IT BUILDS. Two callers' CONTROL FLOW depends
+    on this returning rather than on what it returns: the give-up has to reach its ``return``
+    (agent review round 2, MINOR 2 — an un-totaled write there let a failing diagnostic defeat
+    the terminal state, measured as 130 ticks, 130 guard tracebacks and no give-up line in 2 s)
+    and a cancellation has to stay a cancellation (the same shape one branch over, where the
+    write's exception replaced the ``CancelledError``).
+
+    THE CLAUSE MOVED IN HERE FOR THE SAME REASON (agent review round 3, M2): the ``where`` string
+    was built at the call site and interpolated ``stall_watchdog.dump_path()``, which reaches
+    ``log_dir()`` — so even with the write itself total, a raise from the PATH LOOKUP hot-looped
+    the supervisor (121 creations, no give-up) one line below the fix. Everything the give-up
+    needs is therefore computed here, where nothing can raise, and the caller has no statement
+    left between deciding to give up and returning.
+
+    The two failure modes are reported apart, because they mean different things: a record that
+    could not be written is a missing diagnostic, while a record that landed but could not be
+    NAMED is present in the dump and only the log line is poorer for it.
     """
     try:
-        return stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, reason)
+        recorded = stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, reason)
     except Exception:  # noqa: BLE001 — see the docstring: this must not move control flow
         logger.warning(
             "session runtime: the stall bound's WORKLOAD tick-death record could not be "
             "written, so the log line for this event is the only trace of it",
             exc_info=True,
         )
-        return False
+        return "could NOT be recorded, so this log line is the only trace"
+    if not recorded:
+        return "could NOT be recorded, so this log line is the only trace"
+    try:
+        return f"is recorded in {stall_watchdog.dump_path()}"
+    except Exception:  # noqa: BLE001 — naming the file must not decide the give-up either
+        logger.warning(
+            "session runtime: the stall bound's WORKLOAD tick-death record landed, but its "
+            "dump path could not be resolved for the log line",
+            exc_info=True,
+        )
+        return "is recorded, in the dump beside this runtime's log"
 
 
 async def _watch_stall_beats(stop: asyncio.Event) -> None:
@@ -3327,20 +3347,17 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
                     f"workload plane reports, its stamp is left to freeze, and the bound ends "
                     f"this runtime one deadline after its last stamp"
                 )
-            # THE RECORD IS BEST-EFFORT AND THE GIVE-UP IS NOT, which is the same finding's
-            # other half: ``_record_tick_death`` cannot raise, so no state the write can
-            # reach — a closed handle, a read-only log directory, a collaborator that
-            # breaks — can keep this loop from reaching the ``return`` below.
+            # THE RECORD IS BEST-EFFORT AND THE GIVE-UP IS NOT, and since round 3 (M2)
+            # that covers the CLAUSE as well as the write: everything the give-up needs is
+            # computed inside ``_record_tick_death``, so there is no statement left here
+            # that could keep this loop from reaching the ``return`` below — the path
+            # lookup used to sit on this line, and rigging it to raise hot-looped the
+            # supervisor with no give-up at all.
             #
             # THE RECORD ALSO COMES FIRST, so that a restart which is itself killed by the
             # bound (a tick that dies nearly a deadline late cannot be saved) still leaves
             # the reason in the file a reader will open.
-            recorded = _record_tick_death(detail)
-            where = (
-                f"is recorded in {stall_watchdog.dump_path()}"
-                if recorded
-                else "could NOT be recorded, so this log line is the only trace"
-            )
+            where = _record_tick_death(detail)
             if giving_up:
                 logger.warning(
                     "session runtime: the stall bound's WORKLOAD tick died (%s); the tick's "
