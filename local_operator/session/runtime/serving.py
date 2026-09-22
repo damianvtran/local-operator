@@ -2053,15 +2053,36 @@ class ServingSessionHandle(SessionHandle):
             # path: the row is already in the spool, so a failure here loses the
             # RAISING and not the message, and it must not fail a delivery the
             # sender is about to be told succeeded.
+            # THE RECORD IS ONLY AS GOOD AS THE PROCESS THAT READS IT, and that
+            # process is normally DOWN (review round 5, R5-1). The wake
+            # supervisor exits 0 when nothing is fireable and the LaunchAgent's
+            # ``KeepAlive{SuccessfulExit:false}`` leaves it down until the next
+            # schedule PERSIST revives it (``wakes/install.py``,
+            # ``supervisor.serve``'s retirement note) — and every existing call to
+            # ``ensure_supervisor_installed`` is on that persist path
+            # (``wakes/arm.py``, ``cli.py``, ``mobile/install.py``), which a spooled
+            # peer message never touches. So without this call the obligation
+            # waits for an unrelated arm/login to raise the one process that can
+            # act on it, which is the very shape this PR exists to close: on an
+            # otherwise quiet store the record keeps a LIVE supervisor up and
+            # raises no dead one. Idempotent and never-raising by its own
+            # contract, exactly like the persist-path callers.
             from local_operator.paths import config_dir
             from local_operator.wakes.spooled import note_spooled_turn
 
+            root = config_dir()
             noted = str(getattr(session, "session_id", "") or "") or Path(directory).name
             note_spooled_turn(
-                config_dir(),
+                root,
                 noted,
                 cwd=str(getattr(self, "_desktop_cwd", "") or ""),
             )
+            try:
+                from local_operator.wakes.install import ensure_supervisor_installed
+
+                ensure_supervisor_installed(root)
+            except Exception:  # noqa: BLE001 — the raiser is best-effort, the row is not
+                logger.debug("could not ensure the wake supervisor for %s", noted, exc_info=True)
         if source == SOURCE_USER:
             return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE

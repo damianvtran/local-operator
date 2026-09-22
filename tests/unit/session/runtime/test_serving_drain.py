@@ -1176,3 +1176,35 @@ async def test_a_spooled_user_prompt_records_the_turn(
     record = read_spooled_turn(config_dir, session.transcript.directory.name)
     assert record is not None
     assert record["rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_turn_raises_the_process_that_can_run_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-1: recording an obligation is not enough — the READER has to exist.
+
+    The wake supervisor is normally DOWN (it exits 0 when nothing is fireable and
+    the LaunchAgent leaves it down), and every pre-existing call to
+    ``ensure_supervisor_installed`` is on the schedule-persist path, which a
+    spooled peer message never touches. So a spooled turn had to raise the one
+    process that can act on it, or the receipt still belonged to nobody on a quiet
+    store. Asserted at the call site, because ``install._config_lives_in_real_home``
+    refuses a sandbox store by design, so no isolated end-to-end cell can see it.
+    """
+    from local_operator.wakes import install
+    from local_operator.wakes import spooled as spooled_store
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    calls: list[Path] = []
+    monkeypatch.setattr(install, "ensure_supervisor_installed", lambda root: calls.append(root))
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    assert await host.receive_peer_message("run the census", wake=True) == SPOOL_RECEIPT_WAKE
+    assert calls == [config_dir], "a spooled wake must raise its reader"
+
+    calls.clear()
+    await host.receive_peer_message("no rush", mode="steer", wake=False)
+    assert calls == [], "a quiet note raises nobody"
+    assert spooled_store.read_spooled(config_dir) != {}, "…and the wake record is still there"

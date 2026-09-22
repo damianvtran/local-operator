@@ -535,3 +535,62 @@ def test_the_spool_stores_agree_on_what_the_owners_words_are(tmp_path: Path) -> 
     from local_operator.session.runtime.inbox import SOURCE_USER as INBOX_SOURCE_USER
 
     assert spooled.SOURCE_USER == INBOX_SOURCE_USER == "user"
+
+
+def test_clear_refuses_a_record_that_changed_under_the_caller(tmp_path: Path) -> None:
+    """R5-2: the compare-and-delete guard both clearers pass through.
+
+    Written TWICE, and the first attempt never landed — the patch step was
+    anchored on text that had already been reformatted and silently no-opped, so
+    the guard was live in the code and unpinned in the suite until review round 5
+    mutation-tested it. Kept explicit for that reason: removing the guard's early
+    return leaves every other cell green.
+    """
+    config_dir = tmp_path / "store"
+    spooled.note_spooled_turn(config_dir, "sess-guard")
+    judged = spooled.read_spooled_turn(config_dir, "sess-guard")
+    assert judged is not None
+
+    spooled.note_spooled_turn(config_dir, "sess-guard")
+
+    assert (
+        spooled.clear_spooled_turn(
+            config_dir, "sess-guard", expected_updated_at_ms=judged["updated_at_ms"]
+        )
+        is False
+    ), "a record re-noted since the caller judged it is not stale"
+    assert spooled.read_spooled_turn(config_dir, "sess-guard") is not None
+
+    current = spooled.read_spooled_turn(config_dir, "sess-guard")
+    assert current is not None
+    assert (
+        spooled.clear_spooled_turn(
+            config_dir, "sess-guard", expected_updated_at_ms=current["updated_at_ms"]
+        )
+        is True
+    ), "the same call against the value it read does clear it"
+
+
+def test_settling_re_arms_a_record_its_own_spool_still_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-2: the settle is two-way, because the spool is the authority.
+
+    A supervisor reading the file while ``drain_inbox`` had it emptied (the boot
+    drain re-appends what it will not deliver) can clear a record underneath a row
+    that is still waiting; the drain that runs afterwards is the process that can
+    see the row, so it re-notes it rather than letting the message lose its owner.
+    Unpinned until review round 5 proved the guard's removal was invisible.
+    """
+    from local_operator.session.runtime import inbox
+
+    config_dir = tmp_path / "store"
+    directory = _session(config_dir, "sess-k", rows=[_wake_row()])
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
+    assert spooled.read_spooled_turn(config_dir, "sess-k") is None
+
+    inbox.settle_owed_turn(directory, cwd="/tmp/work")
+
+    re_armed = spooled.read_spooled_turn(config_dir, "sess-k")
+    assert re_armed is not None, "a row that asks for a turn must not lose its owner"
+    assert re_armed["cwd"] == "/tmp/work"

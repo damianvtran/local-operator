@@ -23,6 +23,12 @@ reader would get with no artifact at all. It asserts the merged name, and the
 control still prints the measured pre-change verdict (``runtime-killed`` /
 ``unattributed``).
 
+WHAT IT DOES NOT COVER, stated rather than implied (review round 5, R5-3): the
+child arms through ``stall_watchdog.arm()`` and never beats, so this exercises the
+SILENCE leg only — the class and its reader. The other leg (loops running while
+the work stops advancing) is main's own composite-progress leg; exercising it
+here would mean driving the probe, not the artifact, and that is a different rig.
+
 **B. A handover that ended with no successor.** A session retired for a newer
 build with rows in its spool, and no runtime was ever raised for them. The
 sender's receipt said "held for the next runtime — it runs it", and no process

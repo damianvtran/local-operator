@@ -105,6 +105,15 @@ RETRY_CAP_S = 3600.0
 #:   ``supervisor._SPOOLED_ATTEMPT_REASONS``. A session whose own runtime is
 #:   still alive is not an attempt: nothing was tried, and the handover has not
 #:   even begun.
+#: * LATENCY HAS A CEILING BESIDE THE SLICE, and it is the supervisor's own sleep
+#:   (review round 5, R5-4): when it is awake the record is acted on within
+#:   ``SLICE_S`` (10 s), but a supervisor already asleep behind a scheduled wake
+#:   wakes at most ``MAX_SLEEP_S`` (1 h) later. Stated because the spool path's
+#:   own bound is the slice, and a reader who takes that as the whole bound would
+#:   be wrong by three orders of magnitude in the one case where nothing else is
+#:   due. (The writer also raises the supervisor itself when it records an
+#:   obligation — see ``serving._spool_for_successor`` for why that call has to be
+#:   there at all.)
 #: * IMMORTALITY IS THE PRICE, and it is the honest one: a session that still
 #:   owes a turn is still work, so the resident supervisor stays up to do it (one
 #:   boot per hour past the ceiling, not a loop). What stops it is the spool
