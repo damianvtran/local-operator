@@ -330,21 +330,33 @@ def _list(args: argparse.Namespace) -> int:
 
 
 def _warn_damaged(damaged: list[str]) -> None:
-    """Tell the operator about unreadable rows, and how to remove one.
+    """Tell the operator about unreadable rows, and how to deal with one.
 
-    On stderr with the id and the exact command, because a damaged record is
+    On stderr with the id and the exact command, because an unreadable record is
     actionable but only if the operator is given the one thing `rm NAME` cannot
     give them: the name is inside the ciphertext they cannot open.
+
+    TWO KINDS OF UNREADABLE ARE NAMED, because they have OPPOSITE remedies and
+    the list cannot tell them apart (round-3/round-4 review, M1/Q-6). A row that
+    was sealed under a lost key or altered is genuinely damaged and IS removable
+    with ``rm --id``; a row that merely needs a NEWER runtime
+    (``IncompatibleStore``, the record-format skew) is intact, and ``rm --id``
+    now REFUSES it — so the hint must send that case to ``lop update`` rather
+    than to a command that exits 2.
     """
     if not damaged:
         return
     _err(
-        f"warning: {len(damaged)} record(s) in this store cannot be decrypted and are not "
-        "listed above. They were sealed under a key that no longer exists, or they have "
-        "been altered."
+        f"warning: {len(damaged)} record(s) in this store could not be read and are not "
+        "listed above. One that no longer opens under any key, or that has been altered, "
+        "can be removed; one that was written by a NEWER version of this runtime is intact "
+        "and is fixed by upgrading, not by deleting."
     )
     for record_id in damaged:
-        _err(f"  {record_id}  (remove with: lop secret rm --id {record_id} --yes)")
+        _err(
+            f"  {record_id}  (damaged -> remove with: lop secret rm --id {record_id} --yes; "
+            "needs a newer runtime -> lop update)"
+        )
 
 
 def _describe(args: argparse.Namespace) -> int:

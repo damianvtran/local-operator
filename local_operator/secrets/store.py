@@ -917,10 +917,14 @@ class SecretStore:
         """Split every row into the records that open and the ids that do not.
 
         One pass, so ``list`` and ``status`` cannot disagree about which rows
-        are damaged. Only :class:`SecretCorrupt` and
+        are unreadable. Only :class:`SecretCorrupt` and
         :class:`IncompatibleStore` are caught per row: those mean "this record
-        is unreadable", which is precisely the condition to report and step
-        over. A failure to read the store at all still propagates.
+        could not be read", which is precisely the condition to report and step
+        over. The two are NOT the same fault (round-3 review, M2): a
+        ``SecretCorrupt`` row is genuine damage (a lost key, an altered byte),
+        while an ``IncompatibleStore`` row is intact and merely needs a newer
+        runtime — ``_warn_damaged`` names both remedies, because they differ. A
+        failure to read the store at all still propagates.
         """
         with closing(self._open(for_write=False)) as connection:
             rows = connection.execute(f"SELECT {_RECORD_COLUMNS} FROM secrets").fetchall()
@@ -940,7 +944,7 @@ class SecretStore:
         role: str = "agent",
         session_id: str | None = None,
     ) -> bool:
-        """Remove a row by its id, without needing to decrypt it.
+        """Remove a row by its id, decoding only enough to enforce the boundary.
 
         The repair path for a damaged record. :meth:`delete` looks a row up by
         blind index and decodes it, so it cannot touch a record whose name is
