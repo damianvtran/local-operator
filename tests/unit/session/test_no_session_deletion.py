@@ -1498,12 +1498,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/runtime/stall_watchdog.py::arm",
         "<path>.unlink",
-        "log_dir()+pid FILE this call just created; a header-only survivor reads as armed",
+        "log_dir()+pid FILEs of THIS pid: the header this call just created (a header-only "
+        "survivor reads as armed) and a deadline sibling an EARLIER holder of the pid left, "
+        "which would otherwise read as a beat of the life being armed (QA round 1, Q1)",
+        2,
     ),
     (
         "local_operator/session/runtime/stall_watchdog.py::disarm",
         "<path>.unlink",
         "log_dir()+pid FILE of a CLEAN exit; surviving means the process died disarmed",
+        2,
+    ),
+    # The deadline sibling is written THROUGH a sidecar temp so a concurrent reader
+    # never sees a truncated file (QA round 1, Q4). Both paths are the same
+    # `log_dir()` + int-pid pair the rows above argue for, in the same directory, so
+    # neither can name a session file; and the temp is this process's own pid-keyed
+    # name, written and consumed under `_LOCK`.
+    (
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        "os.replace",
+        "Atomic replace of this pid's OWN runtime-stall-<pid>.deadline from its pid-keyed temp",
+    ),
+    (
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        "<path>.unlink",
+        "Removes only its own pid-keyed temp file after a failed atomic replacement",
     ),
 )
 
@@ -1716,6 +1735,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
+        # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
+        # pid and nothing else (see the allow-list rows above): no session id, no
+        # caller input, so neither can name a path under sessions/.
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
     }
