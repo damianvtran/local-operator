@@ -2082,6 +2082,40 @@ def _progress_probe() -> "tuple[object, bool]":
     return _work_motion(handle), _step_in_flight(handle)
 
 
+def _busy_probe() -> bool:
+    """The stall bound's EXIT-LEG answer: does this process hold work in flight?
+
+    ``ServingSessionHandle.is_busy`` is the runtime's one authority for it — the same
+    predicate the reaper's WORK signal and ``may_refresh`` read, so "a turn, a
+    subagent, a job or a parked gate" means one thing in this process rather than two
+    — and it is supplied here rather than imported there because ``stall_watchdog``
+    must never import this module (see :func:`_progress_probe`).
+
+    NO HANDLE YET ANSWERS ``True``: the arming happens before the session exists, and
+    a runtime still constructing itself is not idle in any sense this bound may act
+    on. That is the deliberate asymmetry with :func:`_progress_probe`, which answers
+    "judge nothing" in the same window: the progress leg decides when to STOP WAITING
+    and must not start a clock against a boot, while this decides whether the timer
+    may END THE PROCESS, and the boot is precisely the window in which nothing has
+    been reported yet — the measured shape of the failures this exit leg exists to
+    remove was a runtime killed while it was still doing its work.
+
+    A handle without the probe — an older host, a reduced test double — reads the same
+    way, and so does a probe that raises. Unknown is not an invitation to cut.
+    """
+    handle = _live_handle
+    if handle is None:
+        return True
+    busy = getattr(handle, "is_busy", None)
+    if not callable(busy):
+        return True
+    try:
+        return bool(busy())
+    except Exception:  # noqa: BLE001 — an unreadable state must not authorise a cut
+        logger.debug("stall watchdog: the busy probe failed; holding the exit leg", exc_info=True)
+        return True
+
+
 async def _begin_drain(
     poll: _BuildPoll, handle: object, runtime: object, stop: asyncio.Event
 ) -> "_Drain | None":
@@ -4062,5 +4096,5 @@ if __name__ == "__main__":
     # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
     # both halves of that. Arming before ``main()`` also means a stall during
     # boot — the window nothing else can report — is bounded and named.
-    stall_watchdog.arm(probe=_progress_probe)
+    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe)
     sys.exit(main())
