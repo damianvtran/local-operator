@@ -571,8 +571,17 @@ def _fill_pad(root: Path, size: int, name: str = "bulk.dat") -> Path:
 
 
 def _allocated(path: Path) -> int:
-    """The bytes the volume holds for ``path``, which is the walk's own unit."""
-    return path.stat().st_blocks * 512
+    """The bytes the volume holds for ``path``, which is the walk's own unit.
+
+    ``lstat`` and not ``stat``: the walk reads every entry with
+    ``follow_symlinks=False``, so for a SYMLINK the number it counts is the
+    link's own allocation and never its target's. ``Path.stat()`` follows the
+    link and would hand back the target's blocks — the very number the walk test
+    below exists to keep out of the pad's total — and on a filesystem where a
+    symlink and the directory it points at happen to cost the same block the two
+    are indistinguishable, which is how a wrong measurement passes review.
+    """
+    return path.lstat().st_blocks * 512
 
 
 def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
@@ -639,13 +648,22 @@ def test_an_edit_into_a_pad_already_over_the_total_is_refused(
 ) -> None:
     """``edit`` has no payload size to give, so the total arm judges it on what
     the pad ALREADY holds rather than sending it through unmeasured: a pad that
-    is over the ceiling is over it however the next write arrives."""
-    root = _pad(tmp_path)
-    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
-    _fill_pad(root, 8192)
+    is over the ceiling is over it however the next write arrives.
 
-    with pytest.raises(ScratchpadContentError):
+    The ceiling is patched here, so the arm is asserted and not merely assumed: a
+    refusal that came from anywhere else would let this test pass for a reason it
+    does not name.
+    """
+    root = _pad(tmp_path)
+    ceiling = 4096
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", ceiling)
+    held = _allocated(_fill_pad(root, 8192))
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
         check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md")
+
+    assert f"the pad holds {held:,} bytes" in str(excinfo.value)
+    assert f"over the {ceiling:,}-byte ceiling for a pad" in str(excinfo.value)
 
 
 def test_a_pad_too_wide_to_measure_is_refused_rather_than_walked(
@@ -682,13 +700,19 @@ def test_overwriting_a_file_counts_its_bytes_once_and_not_twice(
     session to route around the pad with the tools it still has."""
     root = _pad(tmp_path)
     replaced = _fill_pad(root, 4096)
-    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", _allocated(replaced))
+    held = _allocated(replaced)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held)
 
     assert check_scratchpad_write(replaced, root, "scratchpad://bulk.dat", 1) is None
     # ...and the exclusion is not a hole in the ceiling: a DIFFERENT name in the
-    # same pad is judged against the pad it would join.
-    with pytest.raises(ScratchpadContentError):
+    # same pad is judged against the pad it would join. Named, not merely
+    # refused: the ceiling this test patches to the pad's own total is the arm
+    # that must answer, and any other refusal would pass here unremarked.
+    with pytest.raises(ScratchpadContentError) as excinfo:
         check_scratchpad_write(root / "other.csv", root, "scratchpad://other.csv", 1)
+
+    assert f"the pad holds {held:,} bytes" in str(excinfo.value)
+    assert f"over the {held:,}-byte ceiling for a pad" in str(excinfo.value)
 
 
 def test_the_replaced_file_is_recognised_when_the_root_is_spelled_differently(
@@ -724,15 +748,38 @@ def test_the_walk_never_follows_a_symlink_out_of_the_pad(
 
     The target is a whole over-budget tree, so a walk that followed the link
     would refuse this ordinary write and fail here.
+
+    The ceiling is set from what the pad ACTUALLY holds — the link's own
+    allocation plus 4 KiB of headroom for the payload — and not from a hard-coded
+    4,096. The walk's unit is the filesystem's, so on a filesystem that charges a
+    slow symlink a whole block the hard-coded ceiling left the pad holding
+    exactly its budget and the BUDGET refused the 8-byte write, at which point
+    this test failed without ever reaching the arm it names (CI shard 4, both
+    3.12 and 3.13). It passed locally only because APFS reports no blocks for a
+    symlink at all, so the two setups measured different pads.
+
+    The reason is asserted on top of the refusal, because a ceiling patched to
+    clear the pad can also be patched past its teeth: forcing the budget arm to
+    print the total it measured is what pins that total to the LINK's blocks.
+    A walk that followed the link reports the target tree's bytes there instead
+    and fails both this assertion and the allowed write above it.
     """
     outside = tmp_path / "outside"
     outside.mkdir()
     _fill_pad(outside, 8192, name="big.dat")
-    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
     root = _pad(tmp_path)
-    (root / "link").symlink_to(outside, target_is_directory=True)
+    link = root / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    held = _allocated(link)
+    headroom = 4096
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held + headroom)
 
     assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 8) is None
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", headroom + 8)
+
+    assert f"the pad holds {held:,} bytes" in str(excinfo.value)
 
 
 def test_an_edit_passes_no_size_and_is_judged_on_the_name_alone(tmp_path: Path) -> None:
