@@ -51,6 +51,7 @@ from local_operator.providers.registry import (
     is_decision_only,
     list_login_providers,
     resolve_env_key,
+    stored_provider_env_keys,
 )
 from local_operator.providers.usage import (
     USAGE_PROVIDERS,
@@ -465,6 +466,14 @@ class ProviderController:
                 # degrading to ``None`` here would show EVERY provider rather
                 # than the ones we positively established.
                 legacy = set()
+        # The store's provider-class rows, keyed by env-key NAME to match the
+        # rung list ``credential_file_names`` returns. This is the consolidated
+        # source; the plaintext file above is the transition-time second one.
+        #
+        # Through the manager's OWN root (R4): a controller built against a
+        # non-default ``credential_manager`` must consult the store that manager
+        # reads its other state from, not the HOME-derived default.
+        legacy |= stored_provider_env_keys(getattr(manager, "config_dir", None))
         persisted: set[str] = set()
         for definition in PROVIDER_REGISTRY:
             storage = credential_provider_id(definition.id)

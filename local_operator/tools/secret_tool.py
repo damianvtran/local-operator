@@ -75,20 +75,16 @@ class SecretParams(BaseModel):
 #: The tool description IS the interface — the only guidance a model reliably
 #: reads — so it states WHEN to reach for this, not merely what it does. It is
 #: also schema that ships on EVERY request in every session and subagent (the
-#: footprint ladder), so each clause has to earn its tokens: "store it as soon
-#: as you get one" and "retrieve NEVER returns the value" change behaviour and
-#: stay; the rationale behind them lives in `guide://credentials`, which costs
-#: nothing until it is read.
+#: footprint ladder), so each clause has to earn its tokens: the store-a-
+#: credential-when-it-is-handed-over nudge and "retrieve NEVER returns the
+#: value" change behaviour and stay; the rationale and the how-to-use mechanics
+#: (bash/eval forms, when not to store) live in `guide://credentials`, which
+#: costs nothing until it is read.
 _DESCRIPTION = (
-    "Store and use long-term secrets in the operator's encrypted store (same store as "
-    "`lop secret`). Store a credential as soon as you get one that outlives this session "
-    "— a token you minted, a key the user pasted — rather than a plaintext .env or only "
-    "this conversation; that is your decision to make. retrieve NEVER returns the value: "
-    "use secrets without reading them, via $(lop secret get NAME) in bash or "
-    'secrets["NAME"] in eval. list before asking the user for something they already '
-    "gave you. Do not store a one-off value or provider keys the harness manages. Never "
-    "echo a secret, write it to a file, or put it in a commit or PR. "
-    "See guide://credentials."
+    "Store and use secrets in the encrypted store (`lop secret`). Store a credential the user "
+    "hands you or one outliving this session, with a description so it is findable; a "
+    "non-technical user uses /credential. retrieve NEVER returns the value. Never echo, save or "
+    "commit one."
 )
 
 
@@ -159,6 +155,7 @@ async def execute_secret(
 
     from local_operator.secrets.access import open_store, session_id
     from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.store import is_provider_secret_name
 
     if params.op != "list" and not (params.name or "").strip():
         return _error(tool_call_id, "secret", f"'{params.op}' requires a secret name.")
@@ -231,6 +228,12 @@ async def execute_secret(
             # row for a retrieval that never handed out a byte — misreporting
             # the one trail the operator relies on. Existence is the whole
             # question this verb answers.
+            #
+            # The store's `role` defaults to "agent" on describe/delete, so this
+            # agent surface cannot inspect or remove a `LOP_PROVIDER_*` row — the
+            # same boundary `set`/`get` enforce. Nothing is passed here on
+            # purpose: defaulting to the restrictive side means a future verb
+            # added without a role argument is denied rather than served.
             record = store.describe(name)
             summary = f"{record.name} is stored"
             if record.description:
@@ -263,11 +266,25 @@ async def execute_secret(
                 details={"op": "delete", "name": name},
             )
         records = store.list()
+        # PROVIDER ROWS ARE NOT THE AGENT'S TO ENUMERATE (round-2 review, R2,
+        # PATCH C). `LOP_PROVIDER_*` names are written by the provider preflight
+        # and describe *machine* credentials; the operator manages them through
+        # `lop secret list`, which still shows them. The agent surface is the
+        # one a model drives, so it is filtered here rather than at the store:
+        # a model that cannot see the row cannot ask for it, and a name it
+        # never learns is not one it can name back into the destructive verbs.
+        records = [r for r in records if not is_provider_secret_name(r.name)]
         if not records:
+            # Distinguish "you have stored nothing" from "everything stored is
+            # a provider row you cannot see": the first asks the agent to store
+            # a credential, the second must not, or the guidance to check before
+            # asking would loop the model into offering to re-store a machine
+            # credential it is deliberately not shown.
             return _text(
                 tool_call_id,
                 "secret",
-                "No secrets are stored yet.",
+                "No agent-visible secrets are stored. Provider credentials "
+                "(LOP_PROVIDER_*) are managed outside this tool.",
                 details={"op": "list", "count": 0},
             )
         width = max(len(record.name) for record in records)

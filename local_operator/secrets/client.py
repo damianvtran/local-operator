@@ -474,7 +474,7 @@ def fetch_master_key(base: Path | None = None) -> bytes:
     return decode_bytes(key)
 
 
-def retrieve(name: str, base: Path | None = None) -> bytes:
+def retrieve(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
     """Fetch one secret's value through the broker.
 
     Routed through the broker rather than decrypted locally so the §6
@@ -482,8 +482,13 @@ def retrieve(name: str, base: Path | None = None) -> bytes:
     value and waits for its ack before this call returns. That ordering is why
     a value fetched inside ``$( )`` cannot reach the transcript ahead of the
     filter that scrubs it.
+
+    ``role`` is carried across the wire so the broker applies the namespace
+    check on ITS side too: the broker is the process that holds the key, so a
+    check that lived only in the client would be decoration for anyone who
+    spoke the protocol directly.
     """
-    reply = request("retrieve", base, name=name)
+    reply = request("retrieve", base, name=name, role=role)
     value = reply.get("value")
     if not isinstance(value, str):
         raise SecretStoreError("the broker returned no value")

@@ -445,19 +445,29 @@ def test_cli_import_pulls_no_engine_modules() -> None:
 
 
 def test_credential_update_command(tmp_home: Path) -> None:
+    """The command binds a READ-ONLY manager, so it never recreates the file.
+
+    ``CredentialManager(...)`` runs ``_ensure_config_exists`` and creates an empty
+    ``credentials.env``; this command writes only a store row, so it binds through
+    ``readonly`` (R5). The patch therefore targets the class and the assertion
+    reads its ``readonly`` return value — asserting on a bare constructor call
+    would pass against a regression to the creating path.
+    """
     manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.cli.CredentialManager") as manager_cls:
+        manager_cls.readonly.return_value = manager
         args = argparse.Namespace(key="TEST_API_KEY")
         assert credential_update_command(args) == 0
+        manager_cls.readonly.assert_called_once()
+        manager_cls.assert_not_called()
     manager.prompt_for_credential.assert_called_once_with("TEST_API_KEY", reason="update requested")
 
 
 def test_credential_delete_command(tmp_home: Path) -> None:
-    manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.providers.registry.remove_provider_key") as remove:
         args = argparse.Namespace(key="TEST_API_KEY")
         assert credential_delete_command(args) == 0
-    manager.set_credential.assert_called_once_with("TEST_API_KEY", "")
+    remove.assert_called_once_with("TEST_API_KEY")
 
 
 def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
@@ -465,7 +475,8 @@ def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
     convention), one quiet line, no stack-trace panel (item 4)."""
     manager = MagicMock()
     manager.prompt_for_credential.side_effect = KeyboardInterrupt
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.cli.CredentialManager") as manager_cls:
+        manager_cls.readonly.return_value = manager
         args = argparse.Namespace(key="OPENAI_API_KEY")
         assert credential_update_command(args) == 130
     err = capsys.readouterr().err
@@ -479,7 +490,8 @@ def test_credential_update_empty_input_exits_1_plain(tmp_home: Path, capsys) -> 
     manager.prompt_for_credential.side_effect = ValueError(
         "\033[1;31mOPENAI_API_KEY is required for this step.\033[0m"
     )
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.cli.CredentialManager") as manager_cls:
+        manager_cls.readonly.return_value = manager
         args = argparse.Namespace(key="OPENAI_API_KEY")
         assert credential_update_command(args) == 1
     err = capsys.readouterr().err
@@ -492,7 +504,8 @@ def test_credential_update_unknown_key_warns(tmp_home: Path, capsys) -> None:
     """A key the registry does not know gets a difflib suggestion but is still
     stored (custom providers are legitimate) (item 8)."""
     manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.cli.CredentialManager") as manager_cls:
+        manager_cls.readonly.return_value = manager
         args = argparse.Namespace(key="OPENAI_API_KY")  # typo
         assert credential_update_command(args) == 0
     err = capsys.readouterr().err

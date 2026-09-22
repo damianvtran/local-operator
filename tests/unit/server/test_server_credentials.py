@@ -85,14 +85,22 @@ async def test_list_credentials_error(test_app_client, mock_credential_manager):
 
 @pytest.mark.asyncio
 async def test_update_credential_success(test_app_client, mock_credential_manager):
-    """Test updating a credential successfully."""
+    """The PATCH writes a provider-class store row under the manager's root."""
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.store import provider_secret_name
+
     update_payload = CredentialUpdate(
         key="TEST_API_KEY",
         value="test-value",
     )
     response = await test_app_client.patch("/v1/credentials", json=update_payload.model_dump())
 
-    assert mock_credential_manager.get_credential("TEST_API_KEY").get_secret_value() == "test-value"
+    # The consolidated writer files the key as a LOP_PROVIDER_* row in the store
+    # rooted at the manager's config dir, NOT in the plaintext credentials.env.
+    stored = open_store(mock_credential_manager.config_dir).get(
+        provider_secret_name("TEST_API_KEY"), role="provider"
+    )
+    assert stored.decode() == "test-value"
 
     assert response.status_code == 200
     data = response.json()
@@ -145,9 +153,11 @@ async def test_update_credential_empty_key(test_app_client, mock_credential_mana
 @pytest.mark.asyncio
 async def test_update_credential_error(test_app_client, mock_credential_manager):
     """Test error handling when updating a credential."""
-    # Mock the set_credential method to raise an exception
-    with patch.object(
-        mock_credential_manager, "set_credential", side_effect=Exception("Test error")
+    # The route writes through the provider-namespace writer; a failure there
+    # must surface as a 500, not a silent success.
+    with patch(
+        "local_operator.providers.registry.store_provider_key",
+        side_effect=Exception("Test error"),
     ):
         update_payload = CredentialUpdate(
             key="TEST_API_KEY",

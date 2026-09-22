@@ -16,7 +16,7 @@ from typing import Dict, List
 
 from pydantic import SecretStr
 
-from local_operator.cli_style import CYAN, SUCCESS, can_encode, paint
+from local_operator.cli_style import CYAN, ERROR, SUCCESS, can_encode, paint
 
 # Name of the file used to store credentials in .env format
 CREDENTIALS_FILE_NAME: str = "credentials.env"
@@ -101,6 +101,35 @@ class CredentialManager:
         self.config_file = config_dir / CREDENTIALS_FILE_NAME
 
     @classmethod
+    def readonly(cls, config_dir: Path) -> "CredentialManager":
+        """Bind and load an instance WITHOUT creating the config dir or the file.
+
+        ``__init__`` runs :meth:`_ensure_config_exists`, whose whole job is to
+        create an empty ``credentials.env`` and re-tighten a loose one. That is
+        correct for a writer and WRONG for every flow that now writes the
+        encrypted store instead: ``lop credential update`` and ``lop search
+        setup`` were each resurrecting the plaintext file this consolidation
+        retires, on a host that had already been migrated and cleaned up (R5).
+        Those flows still need a bound manager — for ``config_dir`` and for the
+        status/landing readers — so the read-only construction is exposed here
+        rather than left to each caller reaching past ``__init__`` with
+        ``__new__``.
+
+        An ABSENT file is an empty credential set, not an error: a host that has
+        migrated has no file to read, and that is the expected end state. Every
+        other errno is raised, matching :meth:`read_key_names`.
+        """
+        manager = cls.__new__(cls)
+        manager._bind(config_dir)
+        try:
+            manager.load_from_file()
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
+            manager.credentials = {}
+        return manager
+
+    @classmethod
     def read_key_names(cls, config_dir: Path, *, non_empty: bool = True) -> List[str]:
         """Credential KEY NAMES from the store at ``config_dir``, read WITHOUT creating it.
 
@@ -146,6 +175,44 @@ class CredentialManager:
                 return []
             raise
         return manager.list_credential_keys(non_empty=non_empty)
+
+    @classmethod
+    def read_credentials(cls, config_dir: Path, *, non_empty: bool = True) -> Dict[str, SecretStr]:
+        """Credential KEY→VALUE pairs from the store at ``config_dir``, read WITHOUT creating it.
+
+        The value-carrying twin of :meth:`read_key_names`, and it exists for the
+        same reason: ``__init__`` runs ``_ensure_config_exists()``, which creates
+        the directory and an empty ``credentials.env``, so a MIGRATION that wants
+        to read the file before retiring it would otherwise recreate the very
+        file it is emptying. Nothing in this class is constructed here past
+        :meth:`_bind` — see :meth:`read_key_names` for why the read-only
+        construction belongs to the class rather than to each caller.
+
+        An ABSENT store is ``{}`` (the ``ENOENT`` policy of
+        :meth:`read_key_names`); every other errno is raised for the caller to
+        report as degraded.
+
+        ``non_empty`` mirrors :meth:`list_credential_keys`: a key recorded with
+        an empty value is not a credential, and a migration that wrote it into
+        the encrypted store would move a blank string across while looking like
+        it had moved a secret.
+        """
+        manager = cls.__new__(cls)
+        manager._bind(config_dir)
+        try:
+            manager.load_from_file()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return {}
+            raise
+        return {
+            key: value
+            for key, value in manager.get_credentials().items()
+            # Compared on the REVEALED string, not on the ``SecretStr`` object:
+            # pydantic defines no ``__bool__`` on ``SecretStr``, so an object's
+            # default truthiness would make every blank-valued key look real.
+            if not non_empty or value.get_secret_value()
+        }
 
     def load_from_file(self) -> Dict[str, SecretStr]:
         """Load credentials from the config file.
@@ -352,7 +419,7 @@ class CredentialManager:
         )
         border = h * line_length
 
-        # Colour is gated on NO_COLOR/tty/TERM by ``paint`` \u2014 a raw escape here
+        # Colour is gated on NO_COLOR/tty/TERM by ``paint`` — a raw escape here
         # painted literal ``[1;36m`` into a piped or dumb-terminal transcript.
         def cyan(text: str) -> str:
             return paint(text, CYAN)
@@ -391,8 +458,25 @@ class CredentialManager:
         if not credential:
             raise ValueError(f"{key} is required for this step.")
 
-        # Save the new API key to config file
-        self.set_credential(key, credential, write=True)
+        # Save the new key as a provider-class STORE row, the consolidated home
+        # for provider credentials. The store-first readers resolve it from
+        # there, so a name the operator pastes here takes effect immediately.
+        from local_operator.providers.registry import store_provider_key
+
+        try:
+            store_provider_key(key, credential)
+        except Exception as exc:  # noqa: BLE001 - one honest line, not a panel
+            from local_operator.ansi import strip_control_sequences
+
+            print(
+                paint(
+                    strip_control_sequences(f"Could not save {key}: {exc}"),
+                    ERROR,
+                    stream=sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+            raise ValueError(f"Could not save {key} to the credential store.") from exc
 
         # ASCII fallback for the check glyph too: a stdout that cannot encode the
         # box drawing cannot encode ✓ either, and crashing on the SUCCESS line

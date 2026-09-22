@@ -1556,7 +1556,14 @@ def credential_update_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    credential_manager = CredentialManager(config_dir())
+    # ``readonly``, NOT ``CredentialManager(...)``.
+    # ``__init__`` runs ``_ensure_config_exists``, so the plaintext
+    # ``credentials.env`` this consolidation retires was recreated by the very
+    # command that now writes only the encrypted store — on a host that had
+    # already migrated and deleted the file (R5). Nothing this command does needs
+    # the file: ``prompt_for_credential`` writes a provider-class STORE row, and
+    # ``config_dir`` is bound by ``_bind`` either way.
+    credential_manager = CredentialManager.readonly(config_dir())
     try:
         credential_manager.prompt_for_credential(args.key, reason="update requested")
     except KeyboardInterrupt:
@@ -1574,8 +1581,16 @@ def credential_update_command(args: argparse.Namespace) -> int:
 
 
 def credential_delete_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(config_dir())
-    credential_manager.set_credential(args.key, "")
+    """Remove a credential from the provider-class store namespace.
+
+    Deletes the ``LOP_PROVIDER_<KEY>`` store row. The plaintext file is left
+    untouched — a value that only ever lived there still has a reader during the
+    transition — but a store row the modern writer created is what this command
+    is expected to remove.
+    """
+    from local_operator.providers.registry import remove_provider_key
+
+    remove_provider_key(args.key)
     return 0
 
 

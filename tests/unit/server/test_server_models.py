@@ -310,9 +310,11 @@ def test_list_models_with_openrouter(mock_list_models, client, mock_credential_m
     mock_response = OpenRouterListModelsResponse(data=[mock_model1, mock_model2])
     mock_list_models.return_value = mock_response
 
-    # Set up a mock credential manager to return a fake API key
+    # The route resolves the key through the store-first reader; supply it as
+    # that reader's return value rather than by patching the retired
+    # CredentialManager file, which is no longer on the resolution path.
     with patch(
-        "local_operator.credentials.CredentialManager.get_credential",
+        "local_operator.providers.registry.provider_env_key",
         return_value="fake_api_key",
     ):
         response = client.get("/v1/models")
@@ -344,9 +346,9 @@ def test_list_models_with_openrouter(mock_list_models, client, mock_credential_m
 @patch.object(OpenRouterClient, "list_models")
 def test_list_models_no_api_key(mock_list_models, client, mock_credential_manager):
     """Test the list_models endpoint with no OpenRouter API key."""
-    # Set up a mock credential manager to return None for the API key
+    # No provider key resolves, so no OpenRouter client is built.
     with patch(
-        "local_operator.credentials.CredentialManager.get_credential",
+        "local_operator.providers.registry.provider_env_key",
         return_value=None,
     ):
         response = client.get("/v1/models")

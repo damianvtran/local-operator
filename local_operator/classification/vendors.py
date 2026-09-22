@@ -544,6 +544,13 @@ class _HttpDecisionVendor:
         a new REQUIRED keyword would break every one of them — a private seam that
         quietly raises through a test double is worse than one that reads its own
         state.
+
+        The static-key tiers are resolved STORE-FIRST: for each name in
+        ``env_key_names`` the provider-class store row (``LOP_PROVIDER_<name>``)
+        is read before falling through to ``manager.get_credential(name)``, which
+        is the legacy file plus the process environment. That keeps the tier
+        vocabulary unchanged — an index still names one credential — while making
+        a store row the value a login wrote outrank an ambient export.
         """
         for index, tier in enumerate(self.credential_tiers[self._tier :], start=self._tier):
             if tier == "authstore":
@@ -551,6 +558,11 @@ class _HttpDecisionVendor:
                 if stored:
                     return SecretStr(stored), index
                 continue
+            from local_operator.providers.registry import provider_secret_value
+
+            stored_key = provider_secret_value(tier, base=getattr(manager, "config_dir", None))
+            if stored_key:
+                return SecretStr(stored_key), index
             value = manager.get_credential(tier)
             if value:
                 return value, index

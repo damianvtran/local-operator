@@ -442,7 +442,7 @@ POST the same path accepts the closed `MCPControl` schema:
   fragment and no value. `environment_keys`/`header_keys` remain as INFORMATIONAL
   map keys and are never secret IDs — writing their values as credentials is the
   bug this metadata exists to prevent. `probe` additionally answers
-  `secret_refs`, `credential_state: [{id, source: encrypted|legacy|missing|
+  `secret_refs`, `credential_state: [{id, source: encrypted|missing|
   unavailable}]` and `key_submission_supported`; a server declaring no reference
   gets an honest setup sentence rather than a guessed field binding.
 - `remove`: name, exact owned scope, confirmed=true. The existing ownership resolver

@@ -84,8 +84,19 @@ def add_search_subparser(
 
 
 def _stack() -> tuple[ConfigManager, CredentialManager]:
+    """A config manager and a bound credential manager for the search verbs.
+
+    ``CredentialManager.readonly`` rather than the plain constructor: ``__init__``
+    runs ``_ensure_config_exists``, which CREATES an empty ``credentials.env``,
+    so every one of these verbs that only READS the legacy tier — and every one
+    that now writes a provider-class STORE row via ``_store_api_key`` — was
+    resurrecting the plaintext file this consolidation retires (R5). The readers
+    below (``provider_statuses``, ``_credential``) go through
+    ``[redacted]``, which still sees whatever file exists; nothing here
+    needs it created.
+    """
     base = config_dir()
-    return ConfigManager(base), CredentialManager(base)
+    return ConfigManager(base), CredentialManager.readonly(base)
 
 
 def format_search_status(manager: ConfigManager, credentials: CredentialManager) -> str:
@@ -127,13 +138,20 @@ def format_search_status(manager: ConfigManager, credentials: CredentialManager)
 
 
 def _store_api_key(provider_id: SearchProviderId, credentials: CredentialManager) -> None:
+    """Save a search provider's API key as a provider-class store row.
+
+    Writes ``LOP_PROVIDER_<KEY>`` with ``role="provider"`` — the consolidated
+    home for provider keys — so ``_credential`` finds it on the store-first leg.
+    """
+    from local_operator.providers.registry import store_provider_key
+
     key_name = _API_KEY_NAMES.get(provider_id)
     if key_name is None:
         raise ValueError(f"{provider_id} does not use an API key")
     value = getpass.getpass(f"{key_name}: ").strip()
     if not value:
         raise ValueError("API key was empty; nothing changed")
-    credentials.set_credential(key_name, value)
+    store_provider_key(key_name, value, description=f"Web search API key for {provider_id}")
 
 
 def _setup_tavily_oauth() -> int:
