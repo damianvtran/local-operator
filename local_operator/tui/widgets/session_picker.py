@@ -528,6 +528,52 @@ WAKE_MARKER = "◷"
 #: will not be alone in there.
 ATTACHED_MARKER = "○"
 
+#: A parent whose own turn is NOT running while it still owns work it delegated
+#: — ``1 subagent running``, or children parked waiting for a capacity slot.
+#:
+#: WHY IT NEEDS A GLYPH AT ALL. The state was reachable before this mark existed
+#: and rendered as ``●``/"Ready": ``ServingSessionHandle.is_conversationally_active``
+#: deliberately excludes subagents from the busy bit (publishing residency there
+#: made every live session claim to be working), so a parent that delegated and
+#: then stopped talking decorated as idle, and the picker — the one surface where
+#: a user can see the whole fleet — said "nothing is happening here" about the
+#: sessions with the most work in flight. Ink alone could not have fixed it: this
+#: column is read at a glance and ``muted`` against ``dim`` measured 1.90:1
+#: (see ``IDLE_MARKER``), so the state needs its own SHAPE.
+#:
+#: ``⇉`` (U+21C9 RIGHTWARDS PAIR OF ARROWS) — a NEW mark in this column, so
+#: the argument for it is its idiom rather than its precedent. The picker
+#: already speaks a doubled-arrow language: the cursor is ``›`` and the row being
+#: opened is ``»``, one cell each in the same ink, and ``⇉`` is that same doubling
+#: applied to "work moved onward to children". The desktop surface names this
+#: idea separately and in its own idiom (``Share2``, the icon on the trace's own
+#: "Delegated work" label); the two are deliberately not the same codepoint,
+#: because each surface draws with its own font stack.
+#:
+#: THE SHAPE HAS TO SURVIVE THE COLUMN, which is where the crowding argument
+#: comes in: this column already carries ``◷``, ``○``, ``●``, ``!``, ``⊘``,
+#: ``≈`` and the completion marks, and the design work that settled ``⊘``/``≈``
+#: (see ``COMPLETION_MARKERS``) is the standard to meet — no two shapes in the
+#: column may share a stroke direction. ``⇉`` is the only arrow-shaped
+#: silhouette here, and it is further separated from the one other mark that
+#: means "work is happening now" by being STATIC: ``busy`` owns the spinner and
+#: animates, this does not, so the two cannot be read as one state even at the
+#: moment a spinner frame happens to look like an arrow. Adding a second
+#: ANIMATION was the rejected alternative for exactly that reason — two
+#: animations would make two states mean one thing in the column where the
+#: motion is the signal.
+#:
+#: STATIC, in the ``accent`` ink the busy spinner uses — because the two are the
+#: same kind of fact (the session has live work) and the difference is WHO is
+#: doing it, which is the shape's job. ONE CELL, like every marker here, and a
+#: constraint rather than a preference: the column reserves ``STATE_COL_CELLS``
+#: for glyph plus separator, so a two-cell glyph eats the separator and the name
+#: starts flush against it (the ⏰ spelling of ``WAKE_MARKER`` did exactly that,
+#: caught in a rendered frame). Verified one cell with ``rich.cells.cell_len``
+#: AND by rendering, not by assuming Menlo covers it — the frame captured for
+#: this change is the evidence for both.
+DELEGATING_MARKER = "⇉"
+
 #: A runtime that is up and warm with NOBODY watching it. A DIFFERENT glyph
 #: from ``ATTACHED_MARKER``, not the same one in a quieter ink: round 1 (D6)
 #: measured `muted` against `dim` at **1.90:1**, below any threshold for
@@ -1036,6 +1082,22 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
     if row.live_state == "attached":
         return ATTACHED_MARKER, "muted"
+    if row.delegating is not None:
+        # BELOW ``attached`` and ABOVE the armed wake, the same rung
+        # ``CatalogEntry.status_code``/``status`` place it at, read from the same
+        # row-level fact (``SessionRow.delegating``) so the glyph and the tooltip
+        # cannot disagree. Above the wake because a wake is a future fact ("this
+        # will act at some point") and this is a present one ("work is running
+        # now, one layer down") — and above ``idle``/``dormant`` for the same
+        # reason ``◷`` is: bare residency is the least informative thing true of
+        # a live row. Below ``attached`` because ``○`` answers the one question
+        # this mark does not, "where am I?".
+        #
+        # The COUNT does not appear here: this column is one cell and the ladder
+        # is its contract. The number reaches the user through the tooltip, which
+        # renders ``CatalogEntry.status`` — the same ``{N} subagent(s) running``
+        # sentence the desktop row carries in its ``title``.
+        return DELEGATING_MARKER, "accent"
     if row.wakes and not row.wakes_dormant:
         return WAKE_MARKER, "muted"
     if row.live_state == "idle":
@@ -2896,6 +2958,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "wakes",
         "wakes_dormant",
         "kind",
+        # The two subagent counts. In the signature because they ARRIVE WHILE THE
+        # LIST IS OPEN — a child starting or a parked child picking up a slot is
+        # exactly the event this state exists to show, and it is sub-second
+        # while the list's own refresh is on a 30 s poll — and because they
+        # change what the row SAYS and DRAWS: the mark becomes `⇉` and the
+        # tooltip's sentence gains the count (``CatalogEntry.status``). Two rows
+        # differing only here are therefore not the same row on screen, which is
+        # the whole test for membership in this tuple.
+        "subagents_running",
+        "subagents_queued",
         # In the signature because it MOVES A ROW IN OR OUT OF THE LIST UNDER THE
         # OPEN PICKER: another frontend (the desktop app, a peer terminal)
         # archiving a conversation is exactly the event the reveal toggle's

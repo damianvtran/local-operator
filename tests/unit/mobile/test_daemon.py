@@ -1575,6 +1575,71 @@ def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
     assert rows[0]["leaving"] == "", rows[0]
 
 
+def test_the_phone_list_carries_the_delegated_work_from_the_record() -> None:
+    """The phone's count is the RECORD's, and a missing one is not a zero.
+
+    Two definitions of one number used to be in play. This list counted
+    ``status == "running"`` over the live projection while the record counts
+    ``RUNNING_SUBAGENT_STATUSES`` — which also holds ``starting`` and
+    ``pausing``, so a child spinning up was invisible on the phone — and a
+    session the daemon is not relaying has no projection at all. The record is
+    resident and heartbeating for every live session, so it is the one source
+    that answers for all of them.
+
+    ``None`` IS THE PART THAT MATTERS. A durable-only row has no live record,
+    and a record written by an older runtime carries no field: both must reach
+    the client as ``null``. Rendering either as ``0`` would tell the operator
+    there are no subagents on a session the phone could not ask about, which is
+    the same class of lie as an empty list standing in for an unreadable store.
+    """
+    from local_operator.session.runtime.types import SessionRecord
+
+    def record(session_id: str = "s-parent", pid: int = 4321, **extra: Any) -> SessionRecord:
+        return SessionRecord(
+            pid=pid,
+            kind="daemon",
+            session_id=session_id,
+            conversation_name="parent",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+            **extra,
+        )
+
+    daemon = MobileDaemon(port=0, password="pw")
+    parent = record(subagents_running=2, subagents_queued=1)
+    daemon.table.entries[parent.pid] = SessionEntry(parent)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["subagents_running"] == 2, rows[0]
+    assert rows[0]["subagents_queued"] == 1, rows[0]
+
+    # Parked-only is the state that must not read as idle, so the two counts
+    # travel as a pair rather than being summed here.
+    parked = record("s-parked", pid=4324, subagents_running=0, subagents_queued=2)
+    daemon.table.entries.pop(parent.pid)
+    daemon.table.entries[parked.pid] = SessionEntry(parked)
+    rows = daemon.table._merge_summaries({})
+    assert (rows[0]["subagents_running"], rows[0]["subagents_queued"]) == (0, 2), rows[0]
+
+    # A record from an older runtime: the field is absent, and absent is None.
+    old = record("s-older", pid=4325)
+    del old.subagents_running  # type: ignore[attr-defined]
+    del old.subagents_queued  # type: ignore[attr-defined]
+    daemon.table.entries.pop(parked.pid)
+    daemon.table.entries[old.pid] = SessionEntry(old)
+    rows = daemon.table._merge_summaries({})
+    assert rows[0]["subagents_running"] is None, rows[0]
+    assert rows[0]["subagents_queued"] is None, rows[0]
+
+    # And a durable-only row — no live entry at all — reports nothing rather
+    # than zero, which is what the phone's slot mark and chip are hidden on.
+    daemon.table.entries.pop(old.pid)
+    rows = daemon.table._merge_summaries({"s-durable": None})
+    assert rows[0]["subagents_running"] is None, rows[0]
+    assert rows[0]["subagents_queued"] is None, rows[0]
+
+
 # --- the phone's listing: membership, so an unreadable store is not an empty one --
 
 

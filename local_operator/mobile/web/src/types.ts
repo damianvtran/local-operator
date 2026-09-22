@@ -280,7 +280,16 @@ export interface SessionSummary {
 	    omit the field entirely, so readers must treat absence as false. */
 	unseen?: boolean;
 	pending_kind: "approval" | "ask" | "" | null;
-	subagents_running: number;
+	/** How many of this session's OWN delegated children are running. `null`
+	    means the daemon did not report a count — an older build, or a session
+	    with no live record at all — and MUST NOT be read as zero: a row that
+	    could not be asked must not be told "no subagents". Absent on a daemon
+	    that predates the field, so readers normalise with `?? null`. */
+	subagents_running: number | null;
+	/** Delegated children parked waiting for a capacity slot. Separate from the
+	    running count for the reason the record keeps them apart: a parked child
+	    spends nothing, but "queued with nothing running" is still not idle. */
+	subagents_queued?: number | null;
 	todos_open: number;
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */

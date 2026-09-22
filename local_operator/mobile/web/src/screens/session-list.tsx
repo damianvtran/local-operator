@@ -26,6 +26,17 @@ import { MARK_DATA_URI } from "../lib/mark";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
 
+/** The shared noun for a delegated child, in the singular at one.
+
+    "subagent" and not "agent": that is the record's own field name, the word
+    `/info` tallies in and the word the TUI's own stop notice uses. "Agent"
+    alone is ambiguous in a product with an "Agents" page of reusable PROFILES.
+    Singular at 1 matches the `Scheduled (1 wake)` style the rest of the product
+    uses. */
+function subagentNoun(n: number): string {
+	return n === 1 ? "subagent" : "subagents";
+}
+
 /** The right-cluster word `new`. It lingers through a 120ms opacity fade when
     the mark clears (session opened) instead of blinking out — but it MUST
     unmount once the fade lands: an opacity-0 `shrink-0` span would keep
@@ -98,6 +109,23 @@ function SessionCard({
 	   marks COMPLETED unviewed activity, never in-flight work. */
 	const decision = Boolean(s.needs_attention && pendingLabel);
 	const unread = Boolean(s.unseen) && !decision && !s.streaming;
+	/* The delegated-work counts, normalised once, and the derived state the slot
+	   ladder and the chip both read.
+
+	   `null` (or a field an older daemon never sent) means THE DAEMON DID NOT
+	   REPORT A COUNT, which is not the same fact as zero children: a durable-only
+	   row has no live record to read, and a pre-field record has no field. Both
+	   arms below stay silent about it — no mark, no chip — rather than rendering
+	   "0", which would tell the operator there are no subagents on a session the
+	   phone never managed to ask.
+
+	   "Queued with nothing running" COUNTS as delegating. A child parked waiting
+	   for a capacity slot is not spending anything, but the parent is certainly
+	   not idle, and that is the one shape a reader cannot infer from the running
+	   count alone. */
+	const running = typeof s.subagents_running === "number" ? s.subagents_running : null;
+	const queued = typeof s.subagents_queued === "number" ? s.subagents_queued : null;
+	const delegating = (running ?? 0) + (queued ?? 0) >= 1;
 	return (
 		<button
 			ref={ref}
@@ -142,13 +170,36 @@ function SessionCard({
 						   loading wheel, not just the text sweep — the sweep alone
 						   was too subtle to catch at a glance. */
 						<Spinner />
+					) : unread ? (
+						<span className="inline-block size-1.5 rounded-full bg-accent" />
+					) : delegating ? (
+						/* DELEGATING — the parent's own turn is not running but it still
+						   owns children. BELOW unread on purpose: the unread dot is a
+						   receipt for an outcome the operator has not seen yet, and a
+						   receipt must never be masked by live activity (the same rule
+						   the desktop and TUI ladders follow). ABOVE plain idle, which
+						   is the whole point of the state.
+
+						   TWO 4px DOTS rather than one, because this package carries no
+						   icon dependency and a single dot would be indistinguishable
+						   from the unread mark sitting one rung above it in the same
+						   slot and the same accent ink. The pair reads as "more than
+						   one thing moving", and the SHAPE is what separates the two
+						   states — the TUI's own reasoning for putting `⇉` in its
+						   column instead of recolouring `●`.
+
+						   2 × 4px + 2px gap = 10px inside the existing 12px slot, so the
+						   ladder's geometry and the title's start x are untouched. The
+						   dots are aria-hidden (the slot already is): the COUNT is
+						   carried as text by the chip below, which is what a screen
+						   reader should hear — a decorative mark is the wrong place
+						   for a number. */
+						<span className="flex items-center gap-[2px]">
+							<span className="inline-block size-1 rounded-full bg-accent" />
+							<span className="inline-block size-1 rounded-full bg-accent" />
+						</span>
 					) : (
-						<span
-							className={cn(
-								"inline-block size-1.5 rounded-full",
-								unread ? "bg-accent" : "bg-transparent",
-							)}
-						/>
+						<span className="inline-block size-1.5 rounded-full bg-transparent" />
 					)}
 				</span>
 				{decision && s.streaming ? (
@@ -184,11 +235,29 @@ function SessionCard({
 				    (spec §1): `new` truncates the title only, row height never
 				    changes. */}
 				<NewMark visible={unread} />
-				{s.subagents_running > 0 ? (
-					/* ⟳ and ☐ render as tofu boxes on phones whose system font lacks
-					   those codepoints. Text marks survive every font. */
+				{delegating ? (
+					/* The delegated-work count, in the shared noun. It keeps its place in
+					   the right cluster (the state word `new` rides before it) and keeps
+					   the chip's own geometry — the title truncates sooner on a narrow
+					   phone, which is the accepted trade for a fact this row exists to
+					   report.
+
+					   `subagents` and not `agents`: the record's own field name, the word
+					   `/info` tallies in, and the word the TUI's own stop notice uses.
+					   `agents` alone is ambiguous here — this product has an "Agents" page of
+					   reusable profiles.
+
+					   A QUEUED-ONLY parent says `N queued` rather than `N subagents`: the
+					   chip is a compact affordance, and the state it must not lose is
+					   that children are waiting — the full sentence with the noun is the
+					   catalogue's label, which the desktop and the TUI read.
+
+					   Text, not a glyph: ⟳ and ☐ render as tofu boxes on phones whose
+					   system font lacks those codepoints. Text marks survive every font. */
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						{s.subagents_running} agent{s.subagents_running === 1 ? "" : "s"}
+						{running
+							? `${running} ${subagentNoun(running)}`
+							: `${queued} queued`}
 					</span>
 				) : null}
 				{s.todos_open ? (

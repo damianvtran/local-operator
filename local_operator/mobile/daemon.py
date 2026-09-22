@@ -628,8 +628,37 @@ class SessionTable:
                     "updating": (str(getattr(entry.record, "updating", "") or "") if entry else ""),
                     "needs_attention": bool(p and p.pending),
                     "pending_kind": p.pending.kind if p and p.pending else "",
-                    "subagents_running": sum(
-                        1 for subagent in (p.subagents if p else []) if subagent.status == "running"
+                    # THE PARENT'S OWN COUNT, from the record — not from the live
+                    # projection this used to walk. Two definitions of one number
+                    # were in play: this line counted ``status == "running"`` over
+                    # ``p.subagents`` while the record counts ``RUNNING_SUBAGENT_STATUSES``
+                    # (``session/runtime/types.py``), which also holds ``starting``
+                    # and ``pausing``. The projection is the daemon's own view of a
+                    # session it is relay-tailing, and its ladder is what feeds the
+                    # phone's chip for a session the phone HAPPENS to be relaying;
+                    # every other row gets the count from a record that is always
+                    # resident and heartbeating. One source removes the chance that
+                    # two phone frames for one session disagree.
+                    #
+                    # THE FIELD STAYS ``None``-ABLE. A durable-only row (no live
+                    # entry at all) has no record and therefore no count, and a
+                    # record written by an older runtime carries no field: both are
+                    # ``None``, which the client must render as "not reported" —
+                    # never ``0``, which would assert "no subagents" about a
+                    # session nobody asked. That is what makes the two dict
+                    # entries below a deliberate pair rather than a copy of the
+                    # ``leaving``/``updating`` lines above.
+                    "subagents_running": (
+                        getattr(entry.record, "subagents_running", None) if entry else None
+                    ),
+                    # Queued children are carried separately for the reason the
+                    # record keeps them apart: a child parked waiting for a
+                    # capacity slot is not spending anything, but "children
+                    # queued with nothing running" is still not an idle session,
+                    # and it is the one shape a client cannot infer from the
+                    # running count alone.
+                    "subagents_queued": (
+                        getattr(entry.record, "subagents_queued", None) if entry else None
                     ),
                     "todos_open": sum(
                         1
