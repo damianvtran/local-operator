@@ -5430,22 +5430,26 @@ def test_the_continuation_limit_cause_is_a_named_involuntary_token():
 
 @pytest.mark.asyncio
 async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
-    """A parent note arriving WITH a still-moving todo list must not cut the run.
+    """A note arriving WITH a still-moving todo list must not cut the run.
 
-    Reviewer MAJOR-1, and the regression that made the first cut of this fix
-    wrong: the collector appends steering, then asides, then follow-ups, so a
-    boundary that carries an ASIDE *and* a follow-up was charged to whichever
-    producer happened to be first in the list — the bounded 8-budget — and a
-    parent's hub note could therefore still spend the allowance a child's own
-    moving todo list needs, which is the exact defect per-producer budgets were
-    introduced to close. The charge must follow the producer whose budget
-    actually bounds this re-entry: a follow-up in the batch WINS.
+    Reviewer MAJOR-1 (round 1), and the regression that made the first cut of
+    the fix wrong: the collector appends steering, then asides, then follow-ups,
+    so a boundary carrying an ASIDE *and* a follow-up was charged to whichever
+    producer was first — the bounded 8-budget — and a parent's hub note could
+    spend the allowance a child's own moving todo list needs. The charge must
+    follow the producer whose budget actually bounds the re-entry: a follow-up
+    in the batch WINS.
 
-    Discriminating shape: the follow-up producer reports progress on EVERY
-    yield (always a fresh list, as the real ``Session._todo_continuation`` does
-    — it latches on a byte-identical fingerprint), while the aside producer
-    fires far more than the 8-budget in total. Before the fix, the ninth such
-    boundary ends the run on a bare success; after it, the run keeps going.
+    WHY THE NOTE IS DEPOSITED IN ``on_before_yield``. A round-2 review proved an
+    earlier version of this test was BLIND to the rule it claims to pin: an
+    aside returned directly by ``get_aside_messages`` is eaten by the INNER
+    loop's inflight drain (``_collect_inflight_injections``), so the run never
+    reaches the OUTER-loop yield boundary the charge rule lives on — the old
+    test passed with the charge reverted. ``on_before_yield`` runs at that
+    boundary (``loop.py``, between ``before_yield`` and the collector), which is
+    also where a real parent's hub note lands, so the note is charged to a
+    producer budget and the rule is actually exercised. Measured on the pre-fix
+    head this cut off on the aside budget; on this head it runs on.
     """
 
     class FreshReminder:
@@ -5454,7 +5458,7 @@ async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
         def __init__(self) -> None:
             self.n = 0
 
-        def __call__(self) -> list[Any]:
+        async def __call__(self) -> list[Any]:
             self.n += 1
             return [
                 CustomMessage(
@@ -5467,10 +5471,23 @@ async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
             ]
 
     reminder = FreshReminder()
+    notes = {"n": 0}
+
+    pending_notes: list[Any] = []
+
+    def deposit_note() -> None:
+        # A parent's hub note, staged so the ASIDE producer returns it at the
+        # NEXT yield boundary. Depositing it into ``context.messages`` would not
+        # work (the collector reads the producers, not the context), and
+        # returning it from ``get_aside_messages`` on its own is eaten by the
+        # inner loop's inflight drain before the guard is reached — which is
+        # exactly why the first version of this test was blind to the rule.
+        notes["n"] += 1
+        pending_notes.append(lambda: Message.user(f"parent asks: how is it going? ({notes['n']})"))
 
     async def get_asides():
-        # One parent note on every yield — 12 of them, well past the 8-budget.
-        return [lambda: Message.user("parent asks: how is it going?")]
+        items, pending_notes[:] = list(pending_notes), []
+        return items
 
     def convert(messages):
         out = []
@@ -5481,14 +5498,14 @@ async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
                 out.append(Message.user(message.details["text"]))
         return out
 
-    # Enough model turns that, were the aside budget charged, the run would die.
     stream = ScriptedStream(
-        [[StreamTextDelta(delta="working"), StreamEndEvent(stop_reason="stop")] for _ in range(12)]
+        [[StreamTextDelta(delta="working"), StreamEndEvent(stop_reason="stop")] for _ in range(24)]
     )
     context = LoopContext(tools=[])
     config = make_config(
         stream,
         convert_to_llm=convert,
+        on_before_yield=deposit_note,
         get_aside_messages=get_asides,
         get_follow_up_messages=reminder,
     )
@@ -5498,8 +5515,8 @@ async def test_a_mixed_batch_charges_the_follow_up_budget_not_the_aside_one():
         events.append(event)
 
     # The run went past the aside budget: the fix charged the follow-up budget.
+    assert notes["n"] > 8, "the note producer never fired at the yield boundary"
     assert len(stream.requests) > 8
-    # And it did NOT end as a continuation cut-off.
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
     assert getattr(end, "cut_off_cause", "") != "continuation-limit"
