@@ -114,6 +114,67 @@ FIXTURE_VALUE = "QA-fixture-9c1f4a"
 #: without this prefix is a case origin/main passes too, i.e. no evidence at all.
 PRE_ESCAPED_LINE = "RESULTS = os.path.join(HERE)" + "\\n"
 
+#: The credential NAMES the identifier arm released, and the surfaces it released
+#: them on (agent review R1-1).
+#:
+#: **Why a table and not a handful of rows.** The arm's release was written as a
+#: rule over any multi-segment identifier, so it was spelling-INDEPENDENT: it took
+#: the value no matter which name carried it, on every surface an assignment is
+#: scrubbed through. A pin that covers one name on one surface is exactly the gap
+#: that let R1-1 through in the first place — the corpus's multi-word-password
+#: positives were all HYPHENATED, and the arm only touched the underscored
+#: spelling, so both differentials stayed silent while real credentials went
+#: readable. Every name here was measured released at that revision and masked at
+#: ``origin/main``.
+IDENTIFIER_ARM_NAMES: tuple[str, ...] = (
+    "PASSWORD",
+    "PGPASSWORD",
+    "MONGO_PASSWORD",
+    "DB_PASSWORD",
+    "API_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "POSTGRES_PASSWORD",
+    "KAFKA_SECRET",
+)
+
+#: The value ALPHABETS, paired with a label: the released class is the digit-free
+#: underscore-joined one, and the other two are its immediate neighbours, which
+#: stayed masked at the broken revision and must keep masking. The hyphenated
+#: neighbour is the spelling the corpus already pinned; the digit-carrying one is
+#: the floor the arm must not cross.
+IDENTIFIER_ARM_VALUES: tuple[tuple[str, str], ...] = (
+    ("digit-free, underscore-joined", "corr" + "ect_horse_bat" + "tery"),
+    ("digit-free, hyphen-joined", "corr" + "ect-horse-bat" + "tery"),
+    ("digit-carrying", "corr" + "ect_horse_bat" + "tery2"),
+)
+
+#: The surfaces each pair is scrubbed through. Built by :func:`_arm_spelling`
+#: rather than written out, so the file itself — which an agent reads through the
+#: very pass it describes — carries no credential-shaped assignment.
+IDENTIFIER_ARM_SPELLINGS: tuple[str, ...] = (
+    "assignment",
+    "export-prefixed",
+    "docker-compose",
+    "quoted",
+    "JSON field",
+)
+
+
+def _arm_spelling(name: str, spelling: str, value: str) -> str:
+    """One surface the released class was measured on, assembled from its parts."""
+    if spelling == "assignment":
+        return name + "=" + value
+    if spelling == "export-prefixed":
+        return "export " + name + "=" + value
+    if spelling == "docker-compose":
+        return name + ": " + value
+    if spelling == "quoted":
+        return name + '="' + value + '"'
+    if spelling == "JSON field":
+        return '{"' + name.lower() + '": "' + value + '"}'
+    raise AssertionError(f"unknown spelling {spelling!r}")
+
+
 #: Credential NAMES whose qualifier carries a word that also names a QUANTITY.
 #:
 #: The other direction of the count judgement, and the one that leaks when the
@@ -541,6 +602,56 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case(
         "xai" + "-Org/" + "Grok-Build9",
         "a slash-joined tail that is NOT a name: case and a digit make it a token",
+    ),
+    # --- 2026-09-21, R1-1: the class the identifier arm released --------------
+    # A credential-named assignment whose value is a digit-free underscore-joined
+    # phrase went from MASKED to NO HIT AT ALL under every name in
+    # ``IDENTIFIER_ARM_NAMES``, on every surface in ``IDENTIFIER_ARM_SPELLINGS`` —
+    # nothing registered for containment either, so the later exact-value pass
+    # could not contain it. The class lives in the POSITIVE half now, on the
+    # alphabets and surfaces the review measured, because the coverage gap (no row
+    # in this class on EITHER side) is what let it ship.
+    *(
+        Case(
+            _arm_spelling(name, spelling, value),
+            f"{spelling}: a {label} value under a credential name must be MASKED",
+        )
+        for name in IDENTIFIER_ARM_NAMES
+        for spelling in IDENTIFIER_ARM_SPELLINGS
+        for label, value in (IDENTIFIER_ARM_VALUES[0],)
+    ),
+    # ...and the two neighbours of that class, on the surface that carries them
+    # most often. A hyphen is a separator a person writing a password reaches for
+    # and the arm never touched it; a digit is the floor.
+    *(
+        Case(
+            _arm_spelling(name, "assignment", value),
+            f"the {label} neighbour of the released class, under a credential name",
+        )
+        for name in IDENTIFIER_ARM_NAMES
+        for label, value in IDENTIFIER_ARM_VALUES[1:]
+    ),
+    # --- 2026-09-21, R1-3: only an ESCAPE's letters may be detached -----------
+    # The first revision detached whatever followed a backslash, so a literal one
+    # in front of a name ate the name's own first letter and the mask was lost
+    # where origin/main had kept it. No escape spelling, so nothing may move.
+    Case(
+        "\\" + "PASSWORD=" + IDENTIFIER_ARM_VALUES[0][1],
+        "a literal backslash before a credential name is not an escape: the mask stays",
+    ),
+    # --- 2026-09-21, R1-2: an escaped break must not cut the MASK -------------
+    # A value whose own bytes carry an escaped break, and the value does NOT spell
+    # its own name (``_repeats_its_own_name`` would spare it for the other reason).
+    # The mask covers the whole run: at the revision under review the tail came
+    # back READABLE while the hit still graded ``complete=True``, and when the run
+    # before the break was shorter than the floor nothing was masked or registered.
+    Case(
+        "CLIENT" + "_SECRET=" + "alpha" + "_run" + "_body" + "\\n" + "more" + "_body" + "_material",
+        "a value carrying an ESCAPED break: the whole run is masked, tail included",
+    ),
+    Case(
+        "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material",
+        "the same with a run shorter than the floor before the break: still masked",
     ),
 )
 
@@ -989,6 +1100,53 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         "and " + "xai" + "-org/" + "grok" + "-build" + " sends it on every request.",
         "the same slug in the docstring prose that reported it",
+    ),
+    # --- 2026-09-21, R1-1: the boundary the narrowed arm draws ----------------
+    # The arm is scoped to a QUANTITY-NOUN tail, which is the judgement the two
+    # reported counters share — a plural quantity noun IS the quantity, so a usage
+    # counter's value is the name of another local. The boundary it leaves is real
+    # and it is pinned HERE rather than left to a paragraph: a passphrase spelled
+    # as an identifier, under a name whose tail is a quantity noun, is read as a
+    # NAME. Every other credential name keeps masking it (see the positive block).
+    # ``is_count_shaped`` does not cover these names — its tail arm wants a count
+    # word in the middle as well — which is why the arm is what spares them.
+    *(
+        Case(
+            name + "=" + IDENTIFIER_ARM_VALUES[0][1],
+            "the narrowed arm's boundary: a quantity-noun tail is a count, not a secret",
+        )
+        for name in ("API" + "_TOKENS", "NPM" + "_TOKENS", "REASONING" + "_TOKENS")
+    ),
+    # --- 2026-09-21, R1-4: the escapes a JSON rendering really writes ---------
+    # The count trap one escape away, in the spelling ``json.dumps`` writes for the
+    # characters it cannot spell in two: a raw U+2028 is a line break to
+    # ``str.splitlines`` and arrives as its own six-character spelling, so the
+    # false positive reproduced there too. Percent-encoding is deliberately NOT
+    # handled — no renderer on these surfaces writes one, and the pattern says so.
+    # ...and one the pre-escape judgement RELEASES, pinned rather than left to a
+    # reviewer to find: a value whose first line is a digit-free camelCase NAME is
+    # spared by the type-name clause, and with the escape read as the line break it
+    # is, the same assignment is spared on a REAL newline by ``origin/main`` too.
+    # So the escaped surface now agrees with the real one instead of masking more
+    # than it; the tail that used to come with it is no longer swallowed. The mask
+    # still covers the whole run whenever the first line IS a credential, which is
+    # the case the R1-2 fix is about.
+    Case(
+        "CLIENT" + "_SECRET=" + "alpha" + "Run" + "Body" + "\\n" + "more" + "Body" + "Material",
+        "a type-name-looking first line: the escape is a line break for the judgement too",
+    ),
+    *(
+        Case(
+            "RESULTS = os.path.join(HERE)"
+            + escape
+            + "MAX"
+            + "_TOKENS = "
+            + str(4096)
+            + escape
+            + "def run() -> None:",
+            f"the count trap under the six-character escape {escape}",
+        )
+        for escape in ("\\u2028", "\\u000a")
     ),
 )
 

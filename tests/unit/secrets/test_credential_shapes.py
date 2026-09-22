@@ -303,30 +303,34 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
 def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
     """The rendering a tool call is JOURNALLED in is a surface, and it has escapes.
 
-    Four claims, each measured on the incident that motivated the fix — a ``write``
-    of ordinary Python source whose file on disk holds no shape at all, whose
-    arguments are scrubbed in their JSON spelling where every newline is the two
-    characters ``\\`` and ``n``:
+    Four claims, each measured, all of them about the same incident — a ``write`` of
+    ordinary Python source whose file on disk holds no shape at all, whose arguments
+    are scrubbed in their JSON spelling where every newline is the two characters
+    ``\\`` and ``n``:
 
     * the escape's own letter is not part of the NAME, so the count trap still
-      counts (the first two assertions, and the escalation assertion beside them);
-    * the value does not cross an ESCAPED line either, so an ordinary constant is
-      not a 13-character value (the third);
-    * and the narrowing did not make the rendering a blind spot: a real key that
-      arrives in it is still masked, and still only up to the line it is on.
+      counts (the first block);
+    * the escape's letters are detached only when they ARE an escape's, so a literal
+      backslash before a name does not eat the name (the second);
+    * the escape is a line break for the JUDGEMENT, so an ordinary constant is not a
+      13-character value (the first block again) — and the MASK may only ever cover
+      more than the line the real spelling masks, never less (the third);
+    * and the MASK, unlike the judgement, keeps every byte the rendering gave it: a
+      value whose own bytes carry an escaped break is masked WHOLE, tail included
+      (the fourth) — the direction agent review R1-2 measured the other way round.
 
     Kept as its own test rather than only corpus rows because the corpus pins the
-    SPELLINGS while this pins the two INVARIANTS they rest on — a future edit can
-    satisfy every row by widening a rule somewhere else and still move this.
+    SPELLINGS while this pins the INVARIANTS they rest on — a future edit can satisfy
+    every row by widening a rule somewhere else and still move this. Every assertion
+    here discriminates: each one fails on ``origin/main`` (agent review R1-6 — the
+    ``reached_model`` assertion it replaces did not).
     """
-    # The escape's letter is the newline's, not the name's: the count trap applies.
-    # The prefix matters and is not decoration: a name the count trap covers is
-    # spared by ``is_count_shaped``, which keys on the name's FIRST segment, so only
-    # a name with something glued to its front can be a false positive here — and
-    # the only thing that glues itself there is the escape letter of the line break
-    # before it. The same three constructs WITHOUT the prefix are untouched on
-    # origin/main as well, which is the shape a vacuous case has.
-    for text in (
+    # 1. The escape's letter is the newline's, not the name's: the count trap applies.
+    # The prefix matters and is not decoration: a name the count trap covers is spared
+    # by ``is_count_shaped``, which keys on the name's FIRST segment, so only a name
+    # with something glued to its front can be a false positive here — and the only
+    # thing that glues itself there is the escape letter of the line break before it.
+    escaped_constructions = (
         PRE_ESCAPED_LINE
         + "MAX"
         + "_TOKENS = 4096"
@@ -334,17 +338,50 @@ def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() 
         + "def load_vendor_keys() -> dict[str, str]:",
         PRE_ESCAPED_LINE + "context_tokens=12345678" + "\\n" * 3 + "def run() -> None:",
         PRE_ESCAPED_LINE + "API" + "_KEY = PLACEHOLDER" + "\\n" * 3 + "def run() -> None:",
-    ):
-        assert scrub_shapes(text) == text, f"an escaped newline invented a credential in {text!r}"
+        # The same trap in the spellings ``json.dumps`` writes for a break it cannot
+        # spell in two characters, which is what a payload carrying a raw U+2028
+        # arrives as (agent review R1-4).
+        PRE_ESCAPED_LINE.replace("\\n", "\\u2028")
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\u2028" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+    )
+    for text in escaped_constructions:
+        assert scrub_shapes(text) == text, f"an escaped break invented a credential in {text!r}"
         assert match_shape_names(text) == []
-        assert redaction_shapes.shape_report(scrub_shapes_with_hits(text)[1]).reached_model is False
 
-    # ...and the value does not cross one either.
-    undelimited = "OPENROUTER_API_KEY=" + "QA-fixture-9c1f4a" + "\\n" + "next"
-    scrubbed = scrub_secrets(undelimited)
-    assert "QA-fixture-9c1f4a" not in scrubbed, "the key must still be masked"
-    assert scrubbed.startswith("OPENROUTER_API_KEY=[redacted]")
-    assert scrubbed.endswith("\\nnext"), "the next line is not part of the value"
+    # 2. Only an ESCAPE's letters may be detached from a name. A literal backslash is
+    # not one, and eating a letter made a credential name unreadable as a credential:
+    # the mask was lost where ``origin/main`` kept it (agent review R1-3).
+    literal_backslash = "\\" + "PASSWORD=" + "corr" + "ect_horse_bat" + "tery"
+    assert "corr" + "ect_horse_bat" + "tery" not in scrub_secrets(literal_backslash)
+    assert scrub_shapes(literal_backslash) != literal_backslash
+
+    # 3. A rendered break is a break for the JUDGEMENT, and the MASK may only ever
+    # cover MORE than the line the real spelling masks — never less. The two
+    # directions on one value: on a REAL break the line after it is a line like any
+    # other and stays readable; in the rendering the same assignment is masked whole.
+    carried = (
+        "CLIENT" + "_SECRET=" + "alpha" + "_run" + "_body" + "\\n" + "more" + "_body" + "_material"
+    )
+    on_a_real_break = carried.replace("\\n", "\n")
+    real_line = "alpha" + "_run" + "_body"
+    tail = "more" + "_body" + "_material"
+    assert real_line not in scrub_shapes(on_a_real_break), "both surfaces mask the value"
+    assert tail in scrub_shapes(on_a_real_break), "the real spelling keeps the next line"
+
+    # 4. ...and it is NOT a break for the MASK: the rendering masks the WHOLE run,
+    # where the revision under review left the tail readable under a hit still graded
+    # ``complete=True``.
+    scrubbed = scrub_secrets(carried)
+    assert real_line not in scrubbed, "the key must still be masked"
+    assert tail not in scrubbed, "the tail stayed readable"
+    assert scrubbed == "CLIENT" + "_SECRET=[redacted]"
+
+    short_run = "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material"
+    scrubbed = scrub_secrets(short_run)
+    assert "zip" + "tail" + "material" not in scrubbed, "a short run still crosses the break"
 
     # The escape is not the name's, so an assignment that begins right after one is
     # still an assignment — judged on the name the escape actually belongs to.
@@ -2560,7 +2597,31 @@ def _corpus_grading() -> str:
 #: the credentials arriving IN an escaped rendering would be a leak: a real key one
 #: escaped newline after its name, a real key whose line ends where the rendering
 #: says it does, and a slash-joined tail that is a token (case plus a digit).
-_CORPUS_GRADING_DIGEST = "d4b9ae95c40d15b2d600d1cecc33ebc619f5e75d86cf1ae8753b3a2ce201f6d3"
+#: MOVED ONCE MORE on 2026-09-21, in the commit that answers agent review R1-1,
+#: R1-2, R1-3 and R1-4 — and this one moves for TWO reasons, not one.
+#:
+#: The corpus grew from 357 rows to 422: 59 positives and 6 negatives, every one of
+#: them on a class R1-1 named. ``IDENTIFIER_ARM_NAMES`` crossed with
+#: ``IDENTIFIER_ARM_SPELLINGS`` and the digit-free underscore alphabet IS the
+#: released class: each of those rows was MASKED at ``origin/main`` and came back
+#: with NO HIT AT ALL — nothing registered, so nothing the later exact-value pass
+#: could contain — at the revision under review. The hyphenated and digit-carrying
+#: neighbours are pinned beside them, on the surface that carries them most often.
+#: The six negatives pin what the narrowed arm releases on purpose (three names
+#: whose tail is a quantity noun), what the six-character escape spellings do (two),
+#: and the one value class the pre-escape judgement releases on the escaped surface
+#: BECAUSE it releases it on the real one (one: a type-name-looking first line).
+#:
+#: AND ONE PRE-EXISTING ROW MOVES, which is the part a digest argument has to name.
+#: It is the positive the previous commit added for "a real key whose line ends where
+#: the rendering says it does": it masked up to the escape then, and it masks the
+#: WHOLE run now, because R1-2 measured that stopping there left a credential's tail
+#: readable under a hit still graded ``complete=True`` — and left it readable with no
+#: hit and no registration at all when the run before the escape was shorter than the
+#: floor. Exactly ONE of the 357 rows the previous constant covered moves, measured
+#: by grading all 357 through that revision's module and this one, field for field;
+#: it moves in the direction that keeps a credential out of the context window.
+_CORPUS_GRADING_DIGEST = "d92afbfd4d2dc65e2e9fa9d83f98b09043e49657ab24c3a6ce65e6a5a8c29e13"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
