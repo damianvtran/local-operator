@@ -771,8 +771,17 @@ def _read_row(
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "error_text", "") or "")).split()
         )
-        if not activity and cut_off:
-            activity = status_glyph(status, cut_off=True)[1]
+        if cut_off:
+            # The word LEADS the outcome prose, and deliberately does not wait
+            # for the prose to be empty: a real cut-off child always carries the
+            # classified notice as ``error_text``, so an ``if not activity`` guard
+            # was a branch the writer never reaches and the row stayed
+            # byte-identical to a plain provider failure (design D1 / reviewer
+            # MAJOR-2, measured at 140/100/60/40). Leading with the word makes the
+            # two states tell apart at a glance while keeping the sentence that
+            # says what happened on the same row.
+            word = status_glyph(status, cut_off=True)[1]
+            activity = f"{word} \u2014 {activity}" if activity else word
     else:
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "result_text", "") or "")).split()

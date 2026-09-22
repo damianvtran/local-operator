@@ -2678,3 +2678,66 @@ async def test_the_collapsed_caption_counts_a_pause_apart_from_a_cancel() -> Non
         caption = panel.summary_text()
         assert "paused" not in caption, caption
         assert "2 cancelled" in caption, caption
+
+
+@pytest.mark.asyncio
+async def test_the_dock_names_a_FAILED_cut_off_child_as_cut_off_not_failed() -> None:
+    """Design D1 / reviewer MAJOR-2: the state this PR actually produces.
+
+    The sibling test above covers ``interrupted`` + cause. But a child the LOOP
+    cuts off settles ``failed`` WITH a cause, and it always carries the
+    classified notice as ``error_text`` — so the first remediation's
+    ``if not activity and cut_off`` fallback was a branch the writer never
+    reaches, and the dock rendered ``✗ + prose``, byte-identical to an ordinary
+    provider failure. This pins the production shape and the CONTROL that makes
+    it discriminating: a failed child with NO cause must still read as a plain
+    failure, or a fix that labels every failure "cut off" would pass.
+    """
+    session = FakeSession()
+    now = time.time()
+    cut = _Job("cut", "draft the memo", status="failed")
+    cut.cut_off_cause = "continuation-limit"
+    cut.error_text = (
+        "the turn kept being asked to continue, so it was stopped and the pending message dropped."
+    )
+    cut.settled_at = now
+    plain = _Job("plain", "rank the leads", status="failed")
+    plain.error_text = "provider timeout: stream stalled: no data for 180s"
+    plain.settled_at = now
+    session.jobs = _fake_jobs(cut, plain)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        for _ in range(4):
+            await pilot.pause()
+        rendered = {
+            job_id: compose_row(
+                facts=row_facts(
+                    panel._jobs_by_id[job_id],
+                    fallback_id=job_id,
+                    current=False,
+                    paused=job_id in panel._paused_ids,
+                ),
+                stats=JobStats(),
+                spinner_glyph="⣾",
+                width=100,
+                rung=0,
+                column=40,
+                clock=6,
+                role_column=0,
+            ).plain
+            for job_id in panel._rows
+        }
+
+    # The cut-off child says so, and says it BEFORE its outcome prose.
+    assert "cut off" in rendered["cut"], rendered["cut"]
+    assert rendered["cut"].index("cut off") < rendered["cut"].index(
+        "kept being asked"
+    ), f"the row carries the words but not the signal: {rendered['cut']}"
+    # The control: a plain provider failure must NOT be relabelled.
+    assert "cut off" not in rendered["plain"], rendered["plain"]
+    assert rendered["cut"] != rendered["plain"], (
+        "a cut-off child and a plain failure render identically — the cause "
+        f"reaches no visible surface: cut={rendered['cut']!r} plain={rendered['plain']!r}"
+    )

@@ -509,7 +509,7 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # chose to spend, so the sentence says what ran out rather than naming an
     # actor — there is no reaper and no process to go looking for.
     CONTINUATION_LIMIT_CAUSE: (
-        "the turn reached its continuation limit with work still queued from one producer"
+        "the turn kept being asked to continue, so it was stopped and the pending message dropped"
     ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
