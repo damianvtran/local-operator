@@ -272,6 +272,48 @@ def test_a_stalled_loop_is_dumped_and_the_process_leaves(tmp_path: Path) -> None
     assert LOCAL_SENTINEL not in text, "faulthandler printed local values into the dump"
 
 
+def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Path) -> None:
+    """The dump states what it knows, so a reader is not left to infer a death.
+
+    THE DEFECT THIS PINS, measured 2026-09-22: a fire landed on the build carrying
+    #1419 43 s after install, on a runtime that was MID-TURN AND WORKING, and that
+    pid was still alive afterwards, same pid, no successor ever coming up -- while
+    the header said a dump below it meant the bound "ENDED this runtime". An
+    operator session read the pile of those dumps as a body count, published "31
+    bound-kills", and it reached the v0.62.2 release notes. The header is written
+    at ARM time, so the statement has to hold for EVERY fire it can precede, and
+    the one above it could not: a fire did not end that runtime.
+
+    So this asserts the field's own words in a dump that really FIRED (the state
+    the claim is about, not a header-only file), and asserts the verdict's wording
+    gone, because that sentence is the reading that shipped.
+
+    THE MUTATION THIS CELL EXISTS TO CATCH, and it is the reason a presence assert
+    is not enough on its own: drop ``{OBSERVATION_NOT_VERDICT}`` from the header in
+    ``arm`` and this cell -- and nothing else in the file -- goes red. A cell that
+    cannot fail would be the same class of thing as the header it pins.
+    """
+    resumed = tmp_path / "resumed.txt"
+    result = _run_script(
+        _PARKED_CHILD,
+        tmp_path,
+        args=(str(resumed), str(CHILD_BOUND_S)),
+    )
+    assert result.returncode == 1, f"the bound did not fire: {result.stdout!r} {result.stderr!r}"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+
+    assert stall_watchdog.FIRED_MARKER in text, "this cell is about a dump that fired"
+    assert stall_watchdog.OBSERVATION_NOT_VERDICT in text, (
+        "a fired dump does not say what a fire IS, so a reader is left to read a watchdog "
+        f"timer expiry as a death: {text[:400]!r}"
+    )
+    assert "ENDED this runtime" not in text, (
+        "the header asserts the verdict a fire never computes; a fire can precede a process "
+        f"that carries on, which is the incident this wording caused: {text[:400]!r}"
+    )
+
+
 _BEATING_CHILD = """
 import pathlib
 import sys
