@@ -145,7 +145,9 @@ from local_operator.scratchpad import (
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
+    ScratchpadContentError,
     ScratchpadPathError,
+    check_scratchpad_write,
     ensure_scratchpad_dir,
     parse_scratchpad_url,
     scratchpad_dir_of,
@@ -6702,15 +6704,24 @@ def _scratchpad_listing(
 
 
 def _scratchpad_target(
-    tool_call_id: str, tool_name: str, url: str, context: ToolContext | None
+    tool_call_id: str,
+    tool_name: str,
+    url: str,
+    context: ToolContext | None,
+    size: int | None = None,
 ) -> Path | ToolResult:
     """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
 
     Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
-    cannot forget part of: no scratchpad root, a malformed URL, and a URL that
-    names a directory. A scratchpad file needs a file name —
-    ``write(path="scratchpad://")`` is a refusal, not a silent write to the
-    directory's own path.
+    cannot forget part of: no scratchpad root, a malformed URL, a URL that
+    names a directory, and material a pad does not keep
+    (:func:`~local_operator.scratchpad.check_scratchpad_write`). A scratchpad
+    file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
+    silent write to the directory's own path.
+
+    ``size`` is the payload's length in bytes for the caller that has one
+    (``write``); it is optional because ``edit`` sees only its hunks and so is
+    judged on the name alone.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -6737,6 +6748,15 @@ def _scratchpad_target(
             f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. '{example}'; "
             f'read(path="{url}") lists what is already there.',
         )
+    # The content rules run LAST, after the address is settled: by here the URL
+    # is known to be well formed and to name a file inside the root, so a
+    # refusal can be about the material rather than about the address. A content
+    # refusal is the model's own argument at fault, exactly like a malformed
+    # URL, so it carries the same ``invalid arguments`` marker.
+    try:
+        check_scratchpad_write(target.path, root, url, size)
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
     # The root is created lazily by the write itself (``path.parent``), so a
     # scratchpad directory that does not exist yet is a normal first write.
     return target.path
@@ -8450,7 +8470,16 @@ async def execute_write(
         return refusal
     url = raw.strip()
     if _has_scratchpad_scheme(url):
-        scratchpad_target = _scratchpad_target(tool_call_id, "write", url, context)
+        # The payload is measured in BYTES, not characters: the ceiling is about
+        # what this write puts on a disk shared with every other session, and a
+        # multi-byte character costs more than one byte there.
+        scratchpad_target = _scratchpad_target(
+            tool_call_id,
+            "write",
+            url,
+            context,
+            size=len(params.content.encode("utf-8")),
+        )
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
         path = scratchpad_target

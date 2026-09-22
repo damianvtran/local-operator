@@ -117,6 +117,27 @@ class ScratchpadPathError(ValueError):
     """
 
 
+class ScratchpadContentError(ValueError):
+    """A well-formed URL pointed at material the pad does not keep.
+
+    A DIFFERENT fault from :class:`ScratchpadPathError`, and the distinction is
+    the reason for a second class. That one is about the ADDRESS: a URL that is
+    malformed or escapes the root, refused whatever happens to be at the end of
+    it. This one is about the CONTENT: the address is valid and resolves inside
+    the root, and what the caller wants to put there is build output, a
+    dependency tree or an archive rather than scratch. There is always an
+    alternative to name here — the material has a home, it simply is not this
+    one — so every message raised with this class must say WHERE the material
+    belongs. A path error has no such alternative to offer, which is why the
+    two must not be merged into one refusal.
+
+    A ``ValueError``, like the path error and for the same two reasons: a
+    caller that only guards broad shapes still catches it, and it is the
+    model's fault, so the tools turn it into an ``invalid arguments`` result
+    rather than a failure.
+    """
+
+
 class ScratchpadTarget(NamedTuple):
     """One parsed scratchpad URL. ``path`` is absolute and inside the root."""
 
@@ -315,3 +336,215 @@ def _resolve_scratchpad(path: Path, url: str) -> Path:
         raise ScratchpadPathError(
             f"Invalid scratchpad URL '{url}': cannot be resolved ({exc})"
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Content policy: the pad keeps scratch, not build output
+# ---------------------------------------------------------------------------
+# Why a policy is here at all, measured on this machine 2026-09-22: the session
+# store's scratchpads held 34.8 GB, and 34.6 GB of that belonged to sessions
+# which had already ENDED. The bytes were not the notes, scripts and rendered
+# frames the scheme exists for. They were 7.6 GB of compiled output
+# (.o/.map/.a), 6.5 GB of node_modules, 5.7 GB of extensionless binaries and
+# 2.6 GB of git packs, against 3.4 GB of intended material. Nothing refused any
+# of it, so a build tree written through the pad cost exactly what a note cost —
+# and because a pad is reclaimed only when its session goes away, that cost was
+# paid in full and then thrown away: the material was unreachable the moment the
+# session ended. Hence a REFUSAL at the write, naming where the material belongs
+# instead. Not a size report afterwards, and never a deletion — this module
+# removes nothing (see its docstring), and a policy that deleted would be free to
+# reap a pad whose owner is still working in it.
+#
+# The test is the NAME plus one coarse size ceiling, and deliberately nothing
+# else, because that is all a refusal can rest on without reading the payload:
+# a segment that is a build or dependency directory, an extension that is a
+# compiled artefact, an archive or a model, or a payload too large for a scratch
+# pad. Everything the pad is FOR survives it — a 20 MB shaped CSV, a rendered
+# frame, notes, a one-off script, a benchmark table.
+
+#: Path SEGMENTS refused wherever they appear BELOW the pad root: the build
+#: trees, dependency stores and caches of the toolchains this fleet runs.
+#:
+#: Matched as a whole segment and never as a substring, so ``node_modules-notes.md``
+#: and ``build-report.csv`` are ordinary scratch while ``node_modules/`` and
+#: ``build/`` are not. Ambiguous names are left OUT on purpose (``out``,
+#: ``objects``, ``bin``, ``lib``): a refusal that fires on a name an agent
+#: legitimately meant as scratch teaches it to route around the pad, which is
+#: how the user's own working tree ends up holding the litter instead.
+#:
+#: The dot-prefixed entries are already unreachable through a URL — the parser
+#: refuses every dotfile segment — and are listed anyway so the policy is stated
+#: in one place for a path that arrives from anywhere else.
+SCRATCHPAD_REFUSED_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        "bower_components",
+        "vendor",
+        "target",
+        "build",
+        "dist",
+        ".next",
+        ".nuxt",
+        ".svelte-kit",
+        ".turbo",
+        ".parcel-cache",
+        ".pnpm-store",
+        ".venv",
+        "venv",
+        "site-packages",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".gradle",
+        ".m2",
+        "Pods",
+        "DerivedData",
+        ".terraform",
+        ".lake",
+        ".git",
+    }
+)
+
+#: File EXTENSIONS refused below the pad root: compiled artefacts, build
+#: intermediates, archives, disk images, executables and model weights. None of
+#: these has a reading as scratch, and the non-image ones have no text to return
+#: through the scheme either (``read`` refuses their bytes as text), so a pad
+#: copy is unreadable as well as heavy.
+#:
+#: Compared case-insensitively, UNLIKE the segments: an extension is a
+#: well-known token whose canonical spelling is lower case, and the same archive
+#: arrives spelled ``ZIP`` from whatever tool upper-cased it. A directory name
+#: is instead a literal name the agent is about to create, so spelling it exactly
+#: is what keeps the refusal predictable.
+SCRATCHPAD_REFUSED_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".o",
+        ".obj",
+        ".a",
+        ".lib",
+        ".so",
+        ".dylib",
+        ".dll",
+        ".rlib",
+        ".rmeta",
+        ".class",
+        ".jar",
+        ".pyc",
+        ".pyo",
+        ".whl",
+        ".egg",
+        ".zip",
+        ".tar",
+        ".tgz",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".dmg",
+        ".iso",
+        ".img",
+        ".bin",
+        ".exe",
+        ".wasm",
+        ".onnx",
+        ".pt",
+        ".pth",
+        ".safetensors",
+        ".gguf",
+        ".model",
+        ".ckpt",
+    }
+)
+
+#: The most a single ``write`` may put in a pad, in bytes. Set far above real
+#: scratch on purpose — the largest artefact the audit found that the scheme
+#: exists FOR was a shaped CSV orders of magnitude below it, and a rendered frame
+#: is smaller still — so this catches a dump rather than shaping legitimate work.
+#: It is a per-write ceiling and NOT a cap on the folder: a pad may hold many
+#: files, and nothing budgets the sum (see ``guide://scratchpad``).
+SCRATCHPAD_MAX_WRITE_BYTES = 32 * 1024 * 1024
+
+#: The sentence every content refusal ends with: where the material DOES belong.
+#: A refusal that only says no sends the agent to the next-worst place — the
+#: user's working directory — which is the littering the scheme exists to
+#: prevent, so the alternative is part of the refusal rather than a note beside
+#: it. ``mktemp -d`` with no template lands in ``$TMPDIR``, NOT ``/tmp``: macOS's
+#: ``com.apple.tmp_cleaner`` prunes ``/tmp`` entries older than three days, so a
+#: template carrying that directory is the one way to put a live session's
+#: scratch under a reaper.
+SCRATCHPAD_ELSEWHERE = (
+    "Scratch belongs here; build output belongs in a git worktree "
+    "(`git worktree add <path>`), and a throwaway binary or archive in "
+    "`bash mktemp -d`, which lands in $TMPDIR rather than /tmp."
+)
+
+
+def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
+    """The segments of ``path`` BELOW ``root``, or the bare file name.
+
+    The comparison must judge only what is below the root, because ``path`` is
+    absolute and a pad routinely sits under a directory that is itself named
+    like a refused one — a session store inside a ``build/`` tree, a worktree
+    under ``target/`` — and judging the whole path would refuse every write in
+    that pad.
+
+    The resolved second attempt is for the other direction, and it is not
+    hypothetical: ``_scratchpad_root`` returns the context's string as a plain
+    ``Path`` while the parsed target is ``Path.resolve()``d, so a session
+    directory reached through a symlink (``/tmp`` is ``/private/tmp`` on macOS)
+    shares no textual prefix with it. Falling straight through to ``(path.name,)``
+    there would silently stop refusing ``node_modules`` altogether — the check
+    would answer "allowed" for exactly the writes it exists to refuse.
+    """
+    try:
+        return path.relative_to(root).parts
+    except ValueError:
+        pass
+    try:
+        return path.resolve().relative_to(root.resolve()).parts
+    except (OSError, RuntimeError, ValueError):
+        return (path.name,)
+
+
+def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
+    """Refuse a write whose NAME or SIZE is build output rather than scratch.
+
+    Raises :class:`ScratchpadContentError` on a refused segment, a refused
+    extension, or a ``size`` over :data:`SCRATCHPAD_MAX_WRITE_BYTES`; returns
+    ``None`` otherwise. ``url`` is echoed so the message names the address the
+    caller actually typed.
+
+    ``size`` is the payload's length in BYTES, and it is optional because
+    ``edit`` has none to give: an edit sees only its hunks, never the whole
+    file, so an edit is judged on the name alone. ``write`` passes the encoded
+    length — bytes and not characters, because the ceiling is about what lands on
+    the shared disk.
+
+    READS ARE DELIBERATELY NOT GATED. Pads written before this policy are full of
+    exactly these names, and their owner is the agent cleaning them up: a gate on
+    ``read`` would strand the very files it is meant to help retire, leaving only
+    a shell (given the absolute path) as the way in.
+    """
+    below = _relative_parts(path, root)
+    for segment in below:
+        if segment in SCRATCHPAD_REFUSED_SEGMENTS:
+            raise ScratchpadContentError(
+                f"{url}: '{segment}' is a build or dependency directory, not scratch. "
+                f"{SCRATCHPAD_ELSEWHERE}"
+            )
+    suffix = Path(below[-1]).suffix.lower() if below else ""
+    if suffix in SCRATCHPAD_REFUSED_SUFFIXES:
+        raise ScratchpadContentError(
+            f"{url}: '{suffix}' is a compiled, archived or model artefact, not scratch. "
+            f"{SCRATCHPAD_ELSEWHERE}"
+        )
+    if size is not None and size > SCRATCHPAD_MAX_WRITE_BYTES:
+        raise ScratchpadContentError(
+            f"{url}: {size} bytes is over the {SCRATCHPAD_MAX_WRITE_BYTES}-byte ceiling for a "
+            "single write. A payload this size belongs in a git worktree "
+            "(`git worktree add <path>`) or in a throwaway temp directory "
+            "(`bash mktemp -d`, which lands in $TMPDIR rather than /tmp). Keep the pad to what "
+            "you will read back: it is reclaimed only when the session ends."
+        )
