@@ -290,20 +290,41 @@ finished = pathlib.Path(sys.argv[1])
 assert stall_watchdog.arm(seconds=float(sys.argv[2])), "the child could not arm the bound"
 print(f"armed:{os.getpid()}", flush=True)
 
+#: The serving plane's beat period, and therefore its stamp period. IT IS PART OF
+#: THE CONTRACT WITH THE PARENT, not a decoration: a stamp has to land STRICTLY
+#: inside the bound, because the bound is what `_exit(1)`s this process.
+SERVING_BEAT_S = 0.2
+first_stamp = threading.Event()
+
 
 def serving_plane() -> None:
-    # Healthy, and it SAYS so: the test asserts these stamps landed, so a green
-    # run cannot be explained away by the serving plane having been stuck too.
+    # Healthy, and it SAYS so — on EVERY beat. An earlier revision stamped every
+    # 5th beat, which at this beat period put the only stamp at 5 x 0.2 s == 1.0 s:
+    # the same instant a 1 s bound (``SHORT_BOUND_S``) fires, so the print raced
+    # the exit and lost about half the time — measured 5 pass / 5 fail over 10
+    # runs in one session's QA and 2/8 on interleaved A/B runs in another, always
+    # with the primary assertions (rc == 1, no ``finished.txt``) green. Four
+    # stamps now fall inside the bound instead of one exactly on it, and the
+    # Event below orders the FIRST of them before the park.
     count = 0
     while True:
         stall_watchdog.beat(stall_watchdog.SERVING)
         count += 1
-        if count % 5 == 0:
-            print(f"serving-stamp:{count}", flush=True)
-        time.sleep(0.2)
+        print(f"serving-stamp:{count}", flush=True)
+        if count == 1:
+            first_stamp.set()
+        time.sleep(SERVING_BEAT_S)
 
 
 threading.Thread(target=serving_plane, daemon=True).start()
+# HAPPENS-BEFORE, NOT A RACE. The workload plane does not start parking until the
+# serving plane has already put a stamp on the parent's pipe, so the evidence the
+# parent asserts on cannot be scheduled into the exit. The wait carries no timeout
+# of its own and needs none: the bound armed above is this child's backstop, so a
+# serving thread that somehow never ran ends the process with the very `_exit(1)`
+# the parent's first assertion reads anyway (AGENTS.md, "Wait on the event, never
+# on the clock" — this is that rule inside the child, where the event exists).
+first_stamp.wait()
 
 # The workload plane: busy in the matcher, and it never reports its progress.
 subject = "credential-shaped text \u2603 x" * 20000
@@ -336,7 +357,10 @@ def test_a_parked_workload_plane_trips_the_bound_while_the_serving_plane_is_heal
 
     The serving plane's own stamps are asserted, so this cannot pass by having
     both planes frozen — which the single-threaded tests above already cover and
-    which would prove nothing about masking.
+    which would prove nothing about masking. That stamp is ordered rather than
+    raced: the child's serving plane stamps on its FIRST beat, and the workload
+    plane does not start parking until it has (see ``_TWO_PLANE_CHILD``), so the
+    evidence is on the pipe before the timer can take the process down.
     """
     finished = tmp_path / "finished.txt"
     result = _run_script(
