@@ -127,8 +127,8 @@ Text scratch of your own — notes, intermediate files, benchmark output, a one-
 holds what the user asked for, and not `/tmp` (macOS prunes it after three
 days, so a session can outlive its own scratch). `read scratchpad://` lists it,
 and `read`/`write`/`edit` take `scratchpad://<name>` like any path, printing
-the absolute path behind it; it dies with the session. `guide://scratchpad` has
-the rest.
+the absolute path behind it; it survives restarts, and only deleting or expiring
+the session clears it. `guide://scratchpad` has the rest.
 
 Keep the todo list honest. When a new requirement arrives mid-turn, `add` it
 instead of rewriting the list, and mark items `done` as you finish them rather
