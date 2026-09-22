@@ -382,9 +382,18 @@ DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE}
 
 #: The sentence for :data:`CUT_OFF_CAUSES`' ``runtime-overdue`` rung, and the one
 #: place the bound's number is spelled for a reader — RENDERED from the constant
-#: that enforces it, never typed here: this sentence is repeated by every surface
+#: that enforces it, never typed here: the sentence is repeated by every surface
 #: that repeats a cut-off (the live notice, the durable outcome, the sidebar), and a
 #: second copy of "15 min" is a copy that drifts.
+#:
+#: WHICH RUNTIMES CAN STILL RECORD THIS TOKEN: only ones that ran a build BEFORE the
+#: force-cut was removed. No arm records it any more — ``process._abandon_move``
+#: keeps the build it loaded and publishes ``UPDATE_FAILED_CAUSE`` instead — and the
+#: sentence STAYS for the reason the phrase does (see
+#: ``types.LEAVING_FOR_BUILD_OVERDUE``): a row written by an older runtime is read by
+#: this one, and ``death_verdict`` rung 2 narrates whatever token a row carries.
+#: Deleting the key would quietly demote those rows to the unknown-cause sentence,
+#: which is a worse report than a historical one.
 #:
 #: The import is FUNCTION-LOCAL, not module scope: this table is a leaf every
 #: runtime module may import, and the runtime's own vocabulary module is the wrong

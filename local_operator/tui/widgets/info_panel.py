@@ -219,10 +219,11 @@ _LEAVING_SHORT: dict[str, str] = {
     LEAVING_FOR_BUILD: "leaving for build",
     # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
     # cut of the long phrase: ``no movement`` is the runtime's own observation
-    # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled")
-    # and the bound is what a narrow reader most needs of a departure that has
-    # already spent it. Rendered from the constant, like the signal rung's, so the
-    # compact form cannot disagree with the long one.
+    # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled",
+    # and for why this phrase is HISTORICAL rather than deleted) and the bound is
+    # what a narrow reader most needs of a departure that has already spent it.
+    # Rendered from the constant, like the signal rung's, so the compact form
+    # cannot disagree with the long one.
     LEAVING_FOR_BUILD_OVERDUE: f"no movement {bound_text(BUILD_DRAIN_PROGRESS_S)}",
 }
 
