@@ -122,22 +122,62 @@ folds no-break space to a plain space, and
 `tests/unit/tui/test_visual_capture.py` pins both halves on a real export so the
 next census author inherits the parse instead of the trap.
 
-ONE MORE MACHINE VALUE IS IN THESE FRAMES, and it is recorded rather than fixed:
-the welcome splash prints its CWD, so the directory the probe is launched from is
-part of the picture — `static/tui-mesh-picker.png` carries the worktree root
-(`/Users/damian/local-operator-worktrees/mesh-network`), which is why the AE=0
-above is byte-exact only from the repository root. Measured 2026-09-22 by
-comparing the committed PNG against a capture from another directory, per row at
-the artifact's zoom: grid rows 15-21 (the version, model and cwd rows, the blank
-row and the keymap rows) each move left by 159 px — 419 to 260 — and the cwd row
-is the widest of them, which is why the block re-centers as a whole; grid row 31,
-the composer's status band, grows with it (the band prints the cwd's last
-component: `⌂ before` where the committed frame reaches `⌂ mesh-network`, so the
-band's right edge sits at x=588 instead of 1237). Everything between — the
-picker's own rows — is byte-identical (rows 23, 26-29 share their exact x
-extents). The page fixture already pins an isolated `~` cwd for the same reason
-(see the reference sizes below); pinning this one would change a shipped README
-figure, so it is written down here and left to a round that means to re-shoot it.
+THE SAME FRAME ARRIVES IN TWO FORMS, AND THE PARSE MUST AGREE ON BOTH (design round
+6, D34). The censuses read `App.export_screenshot`'s RAW text, while the artifact on
+disk is the `terminal_svg` projection of the same frame. The raw form escapes
+Textual's padding as the XML ENTITY `&#160;` — 201 of them in the picker frame, and
+ZERO literal U+00A0 bytes — and the ElementTree round-trip inside `terminal_svg`
+DECODES it, so the artifact carries 200 literal U+00A0 and no entity. A parse that
+folded only the literal form therefore reported one row ABSENT on the export and
+PRESENT on the artifact beside it — measured on one frame of the splash: `hits=0`
+against `hits=1` — while the census that believed the first wrote the artifact
+anyway. `svg_text_runs_by_row` now XML-unescapes the body before folding, and the
+picker's census was re-run on a frame that paints the row (it refuses, and writes
+nothing) and on the pinned one (it passes).
+
+The two forms also differ in a second way that matters to a row count: the raw
+export carries Rich's own chrome row, which `terminal_svg` strips — 34 rows against
+33 on the picker's frame. So pin the ROW, never a row count.
+
+TWO MORE MACHINE VALUES WERE IN THESE FRAMES, and both are now PINNED rather than
+recorded (design round 6, D35 and D36). Both were measured on 2026-09-22 at head
+`2d2ebcd0`:
+
+* **The version row.** The committed copy read `v0.59.11` and a fresh capture of the
+  SAME commit read `v0.62.1`: one row, bbox `x408..1179 y558..765`, and the cause was
+  not a commit — `pyproject.toml` is 0.62.1 at both heads, while this worktree's
+  `.venv` dist-info was rewritten when the fleet's shared interpreter was rebuilt.
+  `new_remote_shot.py` reads the row through an `importlib.metadata` call, i.e. from
+  the capturing INSTALL; `_pin_version` replaces that seam with a pinned value, the
+  same shape as the peers and the DNS probe.
+* **The cwd.** The welcome splash prints `os.getcwd()`, so the directory the probe is
+  launched from is part of the picture — the committed copy carried
+  `/Users/damian/local-operator-worktrees/mesh-network`, which is why the AE=0 above
+  was byte-exact only from the repository root. Measured by comparing the committed
+  PNG against a capture from another directory, per row at the artifact's zoom: grid
+  rows 15-21 (the version, model and cwd rows, the blank row and the keymap rows)
+  each moved left by 159 px — 419 to 260 — and the cwd row is the widest of them,
+  which is why the block re-centered as a whole; grid row 31, the composer's status
+  band, grew with it (the band printed the cwd's last component: `⌂ before` where the
+  committed frame reached `⌂ mesh-network`, so the band's right edge sat at x=588
+  instead of 1237). Everything between — the picker's own rows — was byte-identical.
+  `_pin_cwd` does what the page fixture already does (`scripts/pages_shot.py`): the
+  capture runs in a directory under this probe's own re-homed `HOME`, so the rows
+  read `~/workspace` and `⌂ ~/workspace` and nothing machine-specific is in the
+  frame. The two captures are the same bytes from the repository root and from `~`
+  (52973 bytes each), which is the property the AE=0 comparison needed.
+
+The rule this leaves behind is the general one, not the picker's: a shipped frame
+carries what the APP draws, never what the capturing machine happens to hold — and
+the version row is why, because it is the same class of value as the cwd and had
+already drifted with no commit behind it. Checked as a class rather than fixed as a
+one-off: `tui-mesh-sidebar.png` and `tui-mesh-network.png` carry NO version and NO
+cwd row (censused, 29 rows each, zero machine-looking rows), and the picker was
+re-shot in this round — `static/tui-mesh-picker.png`, `rsvg-convert -z 1.8`, still
+1584x1041, with 1.28% of its pixels differing from the previous copy, confined to
+grid rows 15-22 and 31. `scripts/eager_boot_shot.py`, which is a gallery case rather
+than a committed artifact, still paints the version, the update row and the cwd; it
+is named here so the next round that touches it pins them the same way.
 
 ## What changed
 

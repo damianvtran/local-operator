@@ -362,25 +362,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # no call in this group can name a path under `sessions/` — which is the whole
     # of the argument, and why they are argued in one block rather than one by one.
     #
-    # `_write_private_json` is the package's single staged-write path ("the only
-    # write path in this package"): the `os.replace` puts a tmp FILE over its
-    # target in the same network/ subdirectory, and the unlink removes only that
-    # call's own sidecar. `purge_network_artifacts` is `uninstall --purge`, whose
-    # blast radius the design fixes in §12: network records, invite files, queues,
-    # parked pairings, the audit log and the network-scoped catalogue — all under
+    # `_stage_private` is the package's single staged-write path ("the only write
+    # path in this package"), and it is where the calls actually live: the
+    # `os.replace` puts a tmp FILE over its target in the same network/
+    # subdirectory, and the unlink removes only that call's own sidecar. It is
+    # reached by `_write_private_json` (records, secrets, parked decisions, and
+    # `_write_private_text`'s invite token) as well as by `save`, which stages
+    # through it directly under the record's own lock — one staged-write path with
+    # three callers, not one function per writer. `purge_network_artifacts` is
+    # `uninstall --purge`, whose blast radius the design fixes in §12: network
+    # records, invite files, queues, parked pairings, the audit log and the
+    # network-scoped catalogue — all under
     # `network/`. The ONE session-shaped path in the package is the stamp, and it
     # gets its own block below.
     (
-        "local_operator/network/store.py::_write_private_json",
+        "local_operator/network/store.py::_stage_private",
         "os.replace",
-        "Staged 0600 write of one network-store FILE under <config>/network/...; "
-        "both sides are direct children of the same network/ subdirectory",
+        "The package's one staged 0600 write of a network-store FILE under "
+        "<config>/network/...; both sides are direct children of the same network/ "
+        "subdirectory",
     ),
     (
-        "local_operator/network/store.py::_write_private_json",
+        "local_operator/network/store.py::_stage_private",
         "<path>.unlink",
-        "Removes only this call's own .<name>.<pid>.tmp sidecar after the replace, "
-        "in the same directory under <config>/network/",
+        "Removes only this call's own .<name>.<pid>.<tid>.<token>.tmp sidecar after "
+        "the replace, in the same directory under <config>/network/",
     ),
     (
         "local_operator/network/store.py::_quarantine",

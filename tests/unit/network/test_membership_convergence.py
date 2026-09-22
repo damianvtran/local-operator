@@ -822,3 +822,106 @@ def test_a_wedged_relay_is_running_and_says_it_is_not_answering(
     message = net_cli._relay_unavailable_message()  # noqa: SLF001
     assert "is not running" not in message
     assert f"pid {os.getpid()}" in message
+
+
+# ---------------------------------------------------------------------------
+# Q16-1 — a rotation learned through the TABLE, not through the frame
+# ---------------------------------------------------------------------------
+
+
+def test_a_pulled_rotation_table_leaves_one_row_for_the_rotated_device(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer that pulls AFTER a rotation counts that member ONCE.
+
+    THE ROTATION IS DRIVEN BY THE CLI'S OWN VERB, and deliberately driven the way it
+    behaves when nothing is answering: ``lop network identity rotate`` rewrites the
+    record locally and announces nothing, so a member table is the ONLY route by
+    which a peer can learn the new id. That ordering — pull before the queued
+    ``net_identity_rotate`` frame — is what QA round 16 reproduced on a real device:
+    the merge appended the rotated row BESIDE the pre-rotation row it had never been
+    told to retire, so the peer held two active rows for one device and reported one
+    more member than the rotated device itself did.
+
+    What makes the retire lawful is not the merge's judgement: it is the statement
+    the rotation produced, which now rides on the row. So this cell also pins that
+    the peer still resolves the OLD id (a link that authenticated at it is not cut)
+    and that nothing about the retirement is a removal — no tombstone, no burned id.
+    """
+    hub = _make(devices, "hub")
+    peer = _make(devices, "peer")
+    record = _init_network(hub.server)
+    _join(peer, inviter=hub, monkeypatch=monkeypatch)
+    assert _members(hub) == _members(peer) == {hub.device_id, peer.device_id}
+
+    old_id = hub.device_id
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(hub.root))
+    # ``health`` is the verb's own "is a relay answering" probe; None is its
+    # no-answer half, which writes the record itself and announces to nobody.
+    monkeypatch.setattr(relay, "health", lambda *args, **kwargs: None)
+    assert net_cli._cmd_identity_rotate(Namespace(json=True)) == 0  # noqa: SLF001
+    rotated = store.load(record.network_id, hub.root)
+    new_id = rotated.self_device_id
+    assert new_id != old_id, "the verb did not rotate the device id"
+
+    link, reason = peer.server.dial(record.network_id, host=f"{hub.host}:{hub.port}", epoch=1)
+    assert link is not None, reason
+    assert peer.server._pull_members(link) == ""  # noqa: SLF001
+    view = store.load(record.network_id, peer.root)
+    assert _members(peer) == _members(hub)
+    assert [row.device_id for row in view.active_members() if row.device_id != peer.device_id] == [
+        new_id
+    ]
+    assert view.member(old_id) is view.member(new_id), "the old id must still resolve"
+    assert old_id not in view.removed_ids, "a rotation is not a removal"
+    assert all(row.removed_at is None for row in view.members)
+    # The proof came across the wire WITH the row, so the next device this one
+    # serves can make the same check rather than trusting this peer's word for it.
+    surviving = view.member(new_id)
+    assert surviving is not None
+    assert surviving.rotation_proof.get("sig_old")
+
+
+def test_the_announced_rotation_carries_its_statement_on_the_row(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ANNOUNCE half writes the proof too, not just the offline half.
+
+    The frame is the DELIVERY; the row is the route for a member the verb cannot
+    reach, and a peer that dials in afterwards reads the table rather than the frame.
+    Both halves of ``lop network identity rotate`` therefore leave the statement on
+    the row (``MemberRecord.rotation_proof``), and this is the half a live relay runs
+    — through ``announce_identity_rotation``, on a ``RelayServer`` the verb builds
+    for itself, which is also why that verb's ``sent`` counter reads 0 while its
+    ``queued`` does not (QA round 16, Q16-2).
+
+    The proof is verified the way a PEER verifies it — against the public key on the
+    row it already holds for the old id — because a statement that only round-trips
+    through our own writer proves nothing about what a peer can check.
+    """
+    hub = _make(devices, "hub")
+    peer = _make(devices, "peer")
+    record = _init_network(hub.server)
+    _join(peer, inviter=hub, monkeypatch=monkeypatch)
+    old_id = hub.device_id
+    peer_view = store.load(record.network_id, peer.root)
+    old_row = peer_view.member(old_id)
+    assert old_row is not None
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(hub.root))
+    # A truthy ``health`` is the verb's "a relay is answering" half, which announces
+    # instead of rewriting the record itself.
+    monkeypatch.setattr(relay, "health", lambda *args, **kwargs: {"ok": True})
+    assert net_cli._cmd_identity_rotate(Namespace(json=True)) == 0  # noqa: SLF001
+
+    rotated = store.load(record.network_id, hub.root)
+    assert rotated.self_device_id != old_id
+    self_row = rotated.member(rotated.self_device_id)
+    assert self_row is not None
+    proof = self_row.rotation_proof
+    assert proof["network_id"] == record.network_id
+    assert proof["old_device_id"] == old_id
+    assert proof["new_device_id"] == rotated.self_device_id
+    # Verified from the OTHER device's copy of the old key: what makes the row
+    # admissible to a peer that never saw the frame.
+    identity.verify_rotation_statement(proof, old_row.public_key)

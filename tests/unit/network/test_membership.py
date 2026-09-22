@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -414,6 +415,61 @@ def test_a_device_rotation_rewrites_the_row_in_place(root: Path) -> None:
     assert old.device_id in member.previous_ids
     assert record.member(old.device_id) is member  # resolvable by the old id too
     assert previous.device_id == old.device_id
+
+
+def test_a_rotation_statement_that_arrives_after_the_pull_is_a_no_op(root: Path) -> None:
+    """The frame and the table can arrive in EITHER order, and both are normal.
+
+    The rotation is queued to every member while the member table can be pulled at any
+    moment, so the same statement arrives on a record whose row a pull already
+    retired (``adopt_members``). Re-applying it must be a no-op rather than a refusal:
+    once the retirement has happened, the statement's ``old_device_id`` resolves to the
+    SUCCESSOR, whose key is the new one — so the ordinary path fails its own "the old
+    id is the fingerprint of the old key" check and answers a legitimate rotation with
+    an error. Nothing is written; the row is already what the statement asks for.
+    """
+    record, _state = _record()
+    _admit_peer(record)
+    lane = root / "peer"
+    old = identity.mint(lane, name="peer")
+    lane_row = record.member(PEER)
+    assert lane_row is not None
+    lane_row.device_id = old.device_id
+    lane_row.public_key = old.public_key
+    new, _previous = identity.rotate(lane, name="peer")
+    statement = identity.rotation_statement(old, new, NETWORK)
+
+    # THE PULL'S HALF, first: the row the rotated device publishes, adopted while the
+    # old row is still held, which is what retires it.
+    published = types.MemberRecord(
+        device_id=new.device_id,
+        public_key=new.public_key,
+        name="peer",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        previous_ids=[old.device_id],
+        rotation_proof=statement,
+        rotated_at=time.time(),
+        added_via="invite",
+    )
+    assert relay.adopt_members(record, [published.to_json()]) == (True, [new.device_id])
+    assert record.member(old.device_id) is record.member(new.device_id)
+
+    # NOW THE FRAME ARRIVES, exactly as it was queued, and finds its work already done.
+    member = relay.apply_device_rotation(record, statement)
+
+    assert member.device_id == new.device_id
+    assert record.member(old.device_id) is member
+    assert [row.device_id for row in record.active_members()] == [SELF, new.device_id]
+    # ...and the first application, with nothing retired yet, still rewrites in place.
+    fresh, _state = _record()
+    _admit_peer(fresh)
+    fresh_row = fresh.member(PEER)
+    assert fresh_row is not None
+    fresh_row.device_id = old.device_id
+    fresh_row.public_key = old.public_key
+    assert relay.apply_device_rotation(fresh, statement).device_id == new.device_id
+    assert [row.device_id for row in fresh.active_members()] == [SELF, new.device_id]
 
 
 def test_a_rotation_statement_without_the_old_key_is_refused(root: Path) -> None:

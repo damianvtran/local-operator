@@ -47,14 +47,34 @@ D32 reported.
 So the committed copy documents the BROKEN-RESOLVER machine while nothing said
 so, and a re-capture on a healthy one silently produced a different frame. The
 pin below is what ``known_peers`` is: the frame stops depending on what this
-machine can reach. THE VERSION ROW IS NOT PINNED, because it is not the same
-kind of value — it reads the INSTALLED version, not a remote one, and the frame
-is captured from a checkout whose version is a property of the commit. NOTE the
-row below it: the splash prints its CWD, so the invoking directory is part of
-the frame (`static/tui-mesh-picker.png` carries the worktree root), which is why
-the byte-exact comparison above must be run from the repository root. That is a
-separate determinism hole, deliberately left alone here rather than silently
-re-shot: see ``docs/VISUAL_CAPTURE.md``.
+machine can reach.
+
+TWO MORE ROWS OF THIS FRAME CAME FROM THE CAPTURING ENVIRONMENT RATHER THAN FROM
+THE CHECKOUT, and both are pinned here for the same reason (design round 6, D35
+and D36). Measured 2026-09-22 at head ``2d2ebcd0``:
+
+* THE VERSION ROW. The committed copy reads ``v0.59.11`` and a fresh capture of
+the SAME commit reads ``v0.62.1`` — one row, bbox ``x408..1179 y558..765``, the
+exact bbox D32 reported — and the cause was not a commit: ``pyproject.toml`` is
+0.62.1 at both heads, while this worktree's ``.venv`` dist-info was rewritten
+when the fleet's shared interpreter was rebuilt. The row is an
+``importlib.metadata`` read of the INSTALLED distribution, so it describes the
+capturing install, not the tree. THE CLAIM THIS DOCSTRING USED TO MAKE — that "the
+frame is captured from a checkout whose version is a property of the commit" — was
+refuted by that measurement; ``_pin_version`` is what makes it true again.
+* THE CWD ROW, and the composer band beside it. The splash prints ``os.getcwd()``,
+so the committed copy carries ``/Users/damian/local-operator-worktrees/mesh-network``
+and the band carries that path's tail — which is why the byte-exact comparison
+above had to be run from the repository root. ``_pin_cwd`` does what the page
+fixture already does (``scripts/pages_shot.py``): the capture runs in a directory
+under this probe's own re-homed ``HOME``, which the splash renders as
+``~/workspace``. Nothing machine-specific reaches a shipped frame, which is the rule
+rather than the one-off — the version row is the same class of value and had already
+drifted.
+
+Each pin is a fixture, and each is pinned at the seam the production call actually
+reads (a module attribute, or the process's own cwd), so what a reviewer compares is
+the frame's layout rather than the machine that took it.
 
 The isolation import must stay FIRST (it re-homes ``HOME`` /
 ``LOCAL_OPERATOR_CONFIG_DIR`` and drops every inherited ``CMUX_*`` before any
@@ -64,6 +84,7 @@ documents at length.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -73,6 +94,7 @@ import scripts.probe_isolation  # noqa: E402, F401
 from local_operator import update as update_mod  # noqa: E402
 from local_operator.network import peers as peers_mod  # noqa: E402
 from local_operator.network.peers import KnownPeer  # noqa: E402
+from local_operator.tui.widgets import welcome as welcome_mod  # noqa: E402
 from scripts.visual_capture import (  # noqa: E402
     refuse_flag_shaped_argument,
     save_capture,
@@ -126,6 +148,61 @@ DEFAULT_SIZE = (110, 34)
 #: absent one, and the census asserts it on the exported bytes.
 _UPDATE_ROW = "latest is v"
 
+#: The version the splash's version row shows in this frame — PINNED, not read
+#: (design round 6, D35; the measurements are in the module docstring). Set to the
+#: version THIS COMMIT declares, so the figure cannot document a version the tree
+#: never was; move it only with a re-shoot, because a pin left behind turns the
+#: frame into a picture of a release that never happened.
+PINNED_VERSION = "0.62.1"
+
+
+#: The directory name the frame's cwd rows show, under this probe's re-homed HOME
+#: (design round 6, D36). A child of HOME rather than HOME itself: at HOME the splash
+#: reads "~" but the composer band renders "~/" + ".", i.e. "~/." — and both rows are
+#: in the frame. A name a user's own frame would show, and one nothing else creates.
+PINNED_CWD = "workspace"
+
+
+def _pin_version() -> None:
+    """Make the splash's version row a fixture, like the peers and the probe.
+
+    The row resolves through ``welcome.app_version``, an ``importlib.metadata`` read
+    of the INSTALLED distribution, and that is a property of the environment the
+    capture runs in: rebuilding this worktree's ``.venv`` moved the committed frame's
+    version row by one value with `pyproject.toml` unchanged at both heads. Replacing
+    the module attribute is what the production call sees — ``session_welcome_info``
+    in that module calls it as a module global.
+    """
+
+    def app_version() -> str:
+        return PINNED_VERSION
+
+    welcome_mod.app_version = app_version  # type: ignore[assignment]
+
+
+def _pin_cwd() -> None:
+    """Home the capture under its own ``HOME``, so no personal path is in the frame.
+
+    The splash prints ``os.getcwd()`` and the composer band prints the same path
+    shortened, so a capture launched from the repository writes the worktree root
+    into the artifact — ``static/tui-mesh-picker.png`` carried
+    ``/Users/damian/local-operator-worktrees/mesh-network``. This is the page
+    fixture's own answer to that (``scripts/pages_shot.py``), applied at the seam the
+    app actually reads: the process's cwd.
+
+    ``HOME`` IS RESOLVED AND WRITTEN BACK FIRST, because the two halves of the app
+    spell this path differently without it: ``os.getcwd()`` answers with symlinks
+    resolved (``/private/var/...``) while ``Path.home()`` reads the environment
+    verbatim (``/var/...``), and ``_shorten_home`` collapses the second prefix out of
+    the first. Unresolved, the frame carries a temporary path instead of ``~/``.
+    """
+
+    home = Path(os.environ["HOME"]).resolve()
+    os.environ["HOME"] = str(home)
+    cwd = home / PINNED_CWD
+    cwd.mkdir(parents=True, exist_ok=True)
+    os.chdir(cwd)
+
 
 def _pin_update_check() -> None:
     """Make the splash's update row absent, whatever this machine can reach.
@@ -161,7 +238,9 @@ async def main() -> None:
         raise SystemExit(f"usage: new_remote_shot.py OUT.svg {{{'|'.join(VARIANTS)}}} [100x30]")
     # Before either is used: a mistyped flag here would be written to as a path.
     refuse_flag_shaped_argument(sys.argv[1], what="OUT")
-    out = Path(sys.argv[1])
+    # Resolved HERE, before `_pin_cwd` moves the process: a caller-relative OUT would
+    # otherwise be written relative to the fixture's own directory.
+    out = Path(sys.argv[1]).resolve()
     variant = sys.argv[2]
     if variant not in VARIANTS:
         raise SystemExit(f"unknown variant {variant!r}; expected one of {'|'.join(VARIANTS)}")
@@ -180,6 +259,10 @@ async def main() -> None:
     # Before the app boots: the splash's background probe runs on its own thread
     # and can land between any two `pilot.pause()` calls below.
     _pin_update_check()
+    # ...and the two rows that would otherwise be this machine's: the installed
+    # version the splash prints, and the directory it is launched from.
+    _pin_version()
+    _pin_cwd()
 
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.editor import Editor

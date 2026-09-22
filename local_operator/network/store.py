@@ -23,12 +23,21 @@ INSIDE it, so the record a body edits cannot predate a write it never saw.
 
 The lock, and therefore :func:`mutate`, is IN-PROCESS — the same boundary the
 write lock has always had, because the writers are several threads of one relay
-process. TWO PROCESSES writing one record are outside it, and ONE such writer is
-still open rather than merely hypothetical: ``network/cli.py:_cmd_rename`` saves
-without asking a live relay first, where every other mutating verb routes through
-``_relay_call`` and writes locally only when nothing answers. Closing that one
-needs a lock the filesystem holds (``flock``), not this one, so it is named here
-rather than left to be rediscovered.
+process. TWO PROCESSES writing one record are outside it, and the writer that does
+so is not hypothetical: ``network/cli.py`` has TWO verbs of that class, not one.
+``_cmd_rename`` saves without asking a live relay first, and ``_cmd_identity_rotate``
+writes the record from the CLI process either way — through
+:func:`announce_identity_rotation`, on a ``RelayServer`` the CLI builds for the
+announcement (which is why that verb's own ``sent`` reads 0 while its ``queued`` does
+not), or, when no relay answers at all, through this module directly. Both edit a
+record a live relay is writing, which is why the rotate verb re-reads and
+re-checks inside :func:`mutate` rather than trusting the listing it iterates.
+``_cmd_init``, ``_cmd_join`` and ``_invite_locally``'s no-answer fallback write the
+same way, but only where nothing is answering, which is the one case a CLI write is
+not racing anything. Closing the class needs a lock the filesystem holds
+(``flock``), not this one, so the members are named here rather than left to be
+rediscovered — and named as a SET, because an enumeration that says "one" where
+there are two is worse than none.
 
 THE SECRET LIVES IN A SEPARATE FILE FROM THE RECORD, deliberately. The record is
 what ``lop network show --json`` dumps, what a future syncer copies, and what the

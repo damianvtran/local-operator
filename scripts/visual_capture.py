@@ -18,6 +18,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+from html import unescape
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -169,9 +170,9 @@ def svg_text_runs_by_row(svg: str) -> list[list[str]]:
     joins a row, while a reader asking which run holds a glyph must not. The
     grouping is the part every caller got wrong in its own copy.
 
-    TWO THINGS ABOUT THIS EXPORT DEFEAT A NAIVE MATCH, and a census written
+    THREE THINGS ABOUT THIS EXPORT DEFEAT A NAIVE MATCH, and a census written
     without knowing them is a check that can never fire — worse than no census,
-    because it looks like one. Both were measured on 2026-09-22 against this
+    because it looks like one. All three were measured on 2026-09-22 against this
     helper's own export of the welcome splash:
 
     * A ROW IS NOT A SUBSTRING OF THE FILE. ``terminal_svg`` hands every grapheme
@@ -182,15 +183,27 @@ def svg_text_runs_by_row(svg: str) -> list[list[str]]:
       ``'!\\xa0latest\\xa0is\\xa0v0.62.2\\xa0—\\xa0/update\\n'``, so even after
       reassembling the row, ``"latest is v" in joined`` is still FALSE. Textual
       pads cells with no-break space and this export preserves it.
+    * THE SAME FRAME HAS TWO FORMS, AND THIS HELPER IS HANDED BOTH. ``App.
+      export_screenshot`` (what the shot scripts census) escapes that padding as
+      the XML ENTITY ``&#160;`` — 201 of them in a 110x34 frame, and ZERO literal
+      U+00A0 bytes — while ``terminal_svg`` round-trips through ElementTree, which
+      DECODES the entity, so the artifact written to disk carries 200 literal
+      U+00A0 and no entity. A parse that folds only the literal form reports the
+      update row ABSENT on the export and PRESENT on the very same frame's
+      artifact: measured on one frame, ``hits=0`` against ``hits=1``, and the
+      census that believed the first wrote the artifact anyway (design round 6,
+      D34). So the body is XML-unescaped first (which is what the string means — an
+      escaped ``<`` in a frame is a character, not markup) and the no-break space is
+      folded after it, whatever form it arrived in.
 
-    So the runs are returned with no-break space folded to a plain space: what a
-    reader of the frame sees is a space, and a census is a comparison against what
-    is on the screen. A caller comparing a token with no spaces (``◆``,
-    ``connecting…``) is unaffected by the fold.
+    The runs are therefore returned with no-break space folded to a plain space:
+    what a reader of the frame sees is a space, and a census is a comparison
+    against what is on the screen. A caller comparing a token with no spaces
+    (``◆``, ``connecting…``) is unaffected by the fold.
     """
     rows: dict[float, list[str]] = {}
     for y, body in _TEXT_ELEMENT.findall(svg):
-        text = _MARKUP.sub("", body).replace("\u00a0", " ")
+        text = unescape(_MARKUP.sub("", body)).replace("\u00a0", " ")
         rows.setdefault(float(y), []).append(text)
     return [rows[y] for y in sorted(rows)]
 

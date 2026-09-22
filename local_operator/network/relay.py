@@ -562,6 +562,210 @@ def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
     return "unreachable: " + "; ".join(f"{row.endpoint} {row.detail}" for row in attempts)
 
 
+def _row_for_id(record: NetworkRecord, device_id: str) -> MemberRecord | None:
+    """The row whose OWN id is ``device_id``, or ``None``.
+
+    Deliberately NOT ``record.member()``: that one resolves an id through
+    ``previous_ids`` as well, and this is the question underneath — a rotation
+    walk follows ids, not aliases.
+    """
+    for row in record.members:
+        if row.device_id == device_id:
+            return row
+    return None
+
+
+def _statement_covers(
+    record: NetworkRecord,
+    statement: Any,
+    *,
+    predecessor: MemberRecord,
+    successor: MemberRecord,
+) -> bool:
+    """Is ``statement`` the proven hop from ``predecessor`` to ``successor``, here?
+
+    THE SAME CHECKS ``apply_device_rotation`` MAKES, applied where the statement
+    arrives as data rather than as a frame. ``verify_rotation_statement`` already
+    requires the old id to be the fingerprint of the old key we hold and the new id
+    to be the fingerprint of the new key carried, and verifies ``sig_old`` — which is
+    the whole of "this is the same device, not an impostor claiming its name".
+
+    TWO CHECKS ON TOP OF IT, because a statement can be replayed where it does not
+    belong:
+
+    * ``network_id`` is checked HERE and is not checked by the verifier. A statement
+      is signed for ONE network (a statement usable anywhere would be a skeleton key
+      for the device's other memberships), so a statement signed for another network
+      must not move a row in this one.
+    * The row and the statement must name the same hop — ``old_device_id`` is the
+      predecessor's own id, ``new_*`` is the successor's, and the predecessor's id is
+      in ``previous_ids``. The two representations are written together by the same
+      rotation, so a row where they disagree is refused rather than half-believed.
+    """
+    if not isinstance(statement, dict) or not statement:
+        return False
+    if str(statement.get("network_id") or "") != record.network_id:
+        return False
+    if str(statement.get("old_device_id") or "") != predecessor.device_id:
+        return False
+    if str(statement.get("new_device_id") or "") != successor.device_id:
+        return False
+    if str(statement.get("new_public_key") or "") != successor.public_key:
+        return False
+    if predecessor.device_id not in successor.previous_ids:
+        return False
+    if not predecessor.public_key:
+        # Nothing to verify a statement against is not a proof of anything.
+        return False
+    try:
+        verify_rotation_statement(statement, predecessor.public_key)
+    except (MeshRefusal, TypeError, ValueError):
+        return False
+    return True
+
+
+def _rotation_retirements(
+    record: NetworkRecord, incoming: MemberRecord, *, survivor: MemberRecord
+) -> tuple[bool, list[MemberRecord]]:
+    """Which rows an incoming row retires as its own superseded selves.
+
+    Returns ``(adopt, retire)``, and the three answers are the whole rule:
+
+    * ``(True, [])`` — nothing is claimed. The row names no id this record knows as
+      its own past self, so it is an ordinary row (a member admitted after we
+      joined, a device we have never seen) and is adopted as the frame carries it.
+    * ``(True, [rows])`` — every id it presents as its own past self is covered by a
+      statement verified against the key THIS record holds for that id. Those rows
+      are superseded and the row takes their place.
+    * ``(False, [])`` — a claim the statements do not cover. Nothing is retired and
+      the row is NOT adopted.
+
+    WHY THE REFUSAL IS NOT A FOLD AND NOT AN ADD. Folding an unproven re-identification
+    would let any member hide another member's row — and, since ``record.member()``
+    resolves the retired id through the successor, alias it to itself — on the same
+    evidence the table already carries for a device we have never seen. Adopting it
+    unretired is the divergence this exists to prevent: two active rows for one
+    device, so the peer counts one more member than the device itself does (QA round
+    16, Q16-1). And a refusal costs nothing a later frame cannot fix: the rotation is
+    queued to every member, and it is the frame — with the statement, verified — that
+    applies the change. That is the design's own position for a device whose
+    continuity cannot be shown (``lop network identity rotate`` prints it): it is
+    unknown to that peer and must re-pair.
+
+    THE CHAIN IS WALKED ONE PROVEN HOP AT A TIME, because a device that has rotated
+    twice publishes both ids and a peer that pulled the table in between holds both
+    rows. Each hop's statement is verified against the key held for THAT row, and a
+    hop whose statement is missing or does not verify stops the walk: everything past
+    it is unproven, so the row is refused rather than partly applied.
+    """
+    claimed = {str(text) for text in (*incoming.previous_ids, _proof_old_id(incoming)) if text}
+    if not claimed:
+        return True, []
+    known: set[str] = set()
+    for text in claimed:
+        # AN ID THIS RECORD KNOWS is one it holds a row for, or one it has burned.
+        # An id we never knew (we joined after the rotation) is not a claim on
+        # anything here, so the row is an ordinary newcomer.
+        if text in record.removed_ids:
+            known.add(text)
+            continue
+        held = _row_for_id(record, text)
+        if held is not None and held is not survivor:
+            known.add(text)
+    if not known:
+        return True, []
+    retired: list[MemberRecord] = []
+    covered: set[str] = set()
+    step: Any = incoming.rotation_proof
+    successor = survivor
+    while isinstance(step, dict) and step:
+        old_id = str(step.get("old_device_id") or "")
+        row = _row_for_id(record, old_id)
+        if row is None or row is successor or any(row is item for item in retired):
+            break
+        if not row.active:
+            # A tombstone is not a predecessor to retire: removal is the epoch
+            # path's decision, and a rotation is not a route back in (the frame
+            # path refuses this statement too — the old id is not an active member).
+            break
+        if not _statement_covers(record, step, predecessor=row, successor=successor):
+            break
+        retired.append(row)
+        covered.add(old_id)
+        successor = row
+        step = row.rotation_proof
+    if not known <= covered:
+        return False, []
+    return True, retired
+
+
+def _proof_old_id(row: MemberRecord) -> str:
+    """The id a row's carried statement names as its predecessor, or ``""``.
+
+    Read as a CLAIM on equal footing with ``previous_ids``: a row that proves a hop
+    it does not list would otherwise be adopted beside the row the proof retires,
+    which is the divergence this whole rule exists to close.
+    """
+    proof = row.rotation_proof
+    if not isinstance(proof, dict):
+        return ""
+    return str(proof.get("old_device_id") or "")
+
+
+def _retire_superseded_rows(
+    record: NetworkRecord, rows: Sequence[MemberRecord], *, survivor: MemberRecord
+) -> None:
+    """Drop the rows a proven rotation superseded, keeping their ids RESOLVABLE.
+
+    THE IDS ARE KEPT, THE ROWS ARE NOT. ``record.member()`` resolves an id through
+    the successor's ``previous_ids``, so every retired id still answers — which is
+    what keeps a link that authenticated at the old id from being cut mid-turn, and
+    what makes this a SUPERSESSION rather than a deletion.
+
+    NOTHING IS TOMBSTONED. ``removed_ids`` is not written to and ``removed_at`` is
+    not stamped: a rotation is not a removal (§8.1's tombstone is how a removal is
+    represented), and a tombstone here would burn an id that is still this same
+    device — a later rotation's statement names it as ``old_device_id``, and
+    ``apply_device_rotation`` refuses a statement whose old id is not active.
+    """
+    for row in rows:
+        index = next(
+            (position for position, item in enumerate(record.members) if item is row), None
+        )
+        if index is not None:
+            del record.members[index]
+    carried = [str(text) for text in survivor.previous_ids if text]
+    for row in rows:
+        for text in (row.device_id, *row.previous_ids):
+            if text and text not in carried:
+                carried.append(str(text))
+    survivor.previous_ids = carried
+
+
+def _take_over_standing(local: MemberRecord, successor: MemberRecord) -> None:
+    """Give an adopted successor the standing THIS record already held for it.
+
+    THE RULE THE ALREADY-HELD BRANCH ALREADY FOLLOWS, and now it can be followed
+    exactly: the statement proves the successor IS the predecessor (signed by the
+    key we hold for it), so the role and capabilities this record resolved at
+    admission are the same device's, and only what a key rotation actually changes —
+    the id, the public key, the id list — comes from the row. This record's own
+    observations come along too, so a rotation does not erase evidence about a
+    device it is still watching.
+    """
+    successor.role = local.role
+    successor.capabilities = list(local.capabilities)
+    successor.added_at = local.added_at
+    successor.added_by = local.added_by or successor.added_by
+    successor.added_via = local.added_via
+    successor.last_seen_at = local.last_seen_at or successor.last_seen_at
+    successor.last_seen_instance = local.last_seen_instance or successor.last_seen_instance
+    successor.duplicate_count = max(local.duplicate_count, successor.duplicate_count)
+    successor.suspect = local.suspect or successor.suspect
+    successor.name = successor.name or local.name
+    successor.endpoints = list(successor.endpoints or local.endpoints)
+
+
 def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
@@ -584,10 +788,16 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
       as an admission frame's rows are, because without it the member is invisible
       to every surface here — listings, dialling, and the authoriser that has to
       recognise its frames.
-    * Nothing is ever REMOVED here. A peer with an older table (a device that
-      joined later than we did, or one that has not seen a newcomer) is the normal
-      case, and shrinking the table on the weaker evidence is how a mesh loses
-      members that are still members.
+    * A row that names one of OUR OWN rows as its past self is a ROTATION CLAIM, and
+      it is the one case where this merge moves a row rather than adding one:
+      the superseded row is retired, and the claim is believed only where the row
+      carries the signed statement that proves the hop (:func:`_rotation_retirements`).
+      One device, one row — the count a peer reports is the count the device itself
+      holds.
+    * Nothing is ever REMOVED on a peer's word alone. A peer with an older table (a
+      device that joined later than we did, or one that has not seen a newcomer) is
+      the normal case, and shrinking the table on the weaker evidence is how a mesh
+      loses members that are still members.
     """
     changed = False
     added: list[str] = []
@@ -603,6 +813,12 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
             continue
         existing = record.member(device_id)
         if existing is None:
+            adopt, retired = _rotation_retirements(record, incoming, survivor=incoming)
+            if not adopt:
+                continue
+            if retired:
+                _retire_superseded_rows(record, retired, survivor=incoming)
+                _take_over_standing(retired[-1], incoming)
             record.members.append(incoming)
             added.append(device_id)
             changed = True
@@ -612,6 +828,14 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
         # itself, and the row it lands on is the only place `_ensure_link` dials.
         if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
             existing.endpoints = list(incoming.endpoints)
+            changed = True
+        # THE SAME RETIREMENT RUNS HERE, against the row this record already holds as
+        # the successor: a record that learned the rotated row before it had the
+        # proof (or from a build without one) still retires the row the proof covers
+        # on the next pull of that table, rather than keeping both answers forever.
+        adopt, retired = _rotation_retirements(record, incoming, survivor=existing)
+        if adopt and retired:
+            _retire_superseded_rows(record, retired, survivor=existing)
             changed = True
     return changed, added
 
@@ -1376,6 +1600,11 @@ def announce_identity_rotation(
         # The read is inside the lock (``store.mutate``) and the guard re-checked
         # against what is on disk, so a record another writer already rotated is
         # left alone rather than rewritten from this loop's older listing.
+        #
+        # THE STATEMENT IS KEPT ON THE ROW as well as sent, because the table is the
+        # only route to a peer that was unreachable while this ran: whoever reads
+        # this row later can verify the hop instead of guessing that the new id is
+        # the same device (see ``MemberRecord.rotation_proof``).
         try:
             with store.mutate(record.network_id, root or server.root) as current:
                 old_member = current.self_member()
@@ -1384,6 +1613,7 @@ def announce_identity_rotation(
                 old_member.previous_ids = [*old_member.previous_ids, old.device_id]
                 old_member.device_id = new.device_id
                 old_member.public_key = new.public_key
+                old_member.rotation_proof = dict(statement)
                 old_member.rotated_at = time.time()
                 current.self_device_id = new.device_id
                 store.save(current, root or server.root)
@@ -1510,9 +1740,26 @@ def apply_device_rotation(
     The statement must be signed by the OLD key and the old id must be an ACTIVE
     member, so a rotation cannot be used to re-identify as anybody. The old id is
     kept in ``previous_ids`` for a bounded window so an in-flight link at the old
-    id is not cut mid-turn.
+    id is not cut mid-turn, and the statement itself is kept on the row
+    (``rotation_proof``) so a peer that only ever reads this device's table can
+    verify the hop rather than guess it.
     """
     old_id = str(statement.get("old_device_id") or "")
+    new_id = str(statement.get("new_device_id") or "")
+    # A STATEMENT WE HAVE ALREADY APPLIED IS A NO-OP, NOT A REFUSAL. The rotation is
+    # queued to every member, and the table can overtake that queue: a pull that
+    # retired this row (``adopt_members``) leaves the statement's ``old_device_id``
+    # resolving to the SUCCESSOR, whose key is the new one — so the ordinary path
+    # below would fail its own "the old id is the fingerprint of the old key" check
+    # and answer a duplicate delivery with an error. Nothing is written: the row is
+    # already what the statement asks for.
+    applied = _row_for_id(record, new_id) if new_id else None
+    if (
+        applied is not None
+        and old_id in applied.previous_ids
+        and applied.public_key == str(statement.get("new_public_key") or "")
+    ):
+        return applied
     member = record.member(old_id)
     if member is None or not member.active:
         raise MeshRefusal(
@@ -1520,13 +1767,13 @@ def apply_device_rotation(
             f"a device rotation names {old_id}, which is not an active member of {record.name}",
         )
     verify_rotation_statement(statement, member.public_key)
-    new_id = str(statement["new_device_id"])
     other = record.member(new_id)
     if other is not None and other.device_id != member.device_id:
         raise MeshRefusal("device_id_conflict", f"{new_id} is already a member of this network")
     member.previous_ids = [*member.previous_ids, member.device_id]
     member.device_id = new_id
     member.public_key = str(statement["new_public_key"])
+    member.rotation_proof = dict(statement)
     member.rotated_at = time.time() if now is None else now
     if persist:
         store.save(record, root)

@@ -50,7 +50,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay, store, types, wire
+from local_operator.network import identity, relay, store, types, wire
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
     devices,
@@ -364,6 +364,122 @@ def test_a_peers_older_table_never_shrinks_ours() -> None:
     changed, added = relay.adopt_members(record, [_row(SELF)])
     assert (changed, added) == (False, [])
     assert record.member(PEER) is not None
+
+
+# ---------------------------------------------------------------------------
+# The one row an incoming table may RETIRE — a proven key rotation
+# ---------------------------------------------------------------------------
+
+
+def _rotated(
+    record: types.NetworkRecord, root: Path
+) -> tuple[types.MemberRecord, dict[str, Any], dict[str, Any], Any, Any]:
+    """A real rotation, held the way a peer holds it.
+
+    Returns the row this record already holds for the device, the row the ROTATED
+    DEVICE publishes for itself, the statement that joins them, and the two
+    identities — because a made-up signature would pin the shape of the check rather
+    than the check itself, and a test that needs a second statement signed for
+    another network needs the old private half to build one.
+
+    Built from the product's own identity code: a minted keypair, a real ``rotate()``,
+    and the statement signed by the OLD key.
+    """
+    lane = root / "rotating"
+    old = identity.mint(lane, name="laptop")
+    new, _previous = identity.rotate(lane, name="laptop")
+    held = types.MemberRecord(
+        device_id=old.device_id,
+        public_key=old.public_key,
+        name="laptop",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        added_via="invite",
+    )
+    record.members.append(held)
+    published = {
+        # The row the ROTATED DEVICE publishes: its own id and key, the ids it came
+        # from, the statement that proves the hop — and a role it does not hold here.
+        "device_id": new.device_id,
+        "public_key": new.public_key,
+        "name": "laptop",
+        "role": "admin",
+        "capabilities": sorted(types.capabilities_for_role("admin")),
+        "previous_ids": [old.device_id],
+        "rotation_proof": identity.rotation_statement(old, new, record.network_id),
+        "rotated_at": time.time(),
+        "added_via": "invite",
+    }
+    return held, published, dict(published["rotation_proof"]), old, new
+
+
+def test_a_row_carrying_the_rotation_statement_retires_the_row_it_succeeded(root: Path) -> None:
+    """ONE DEVICE, ONE ROW: the row is retired, not left beside the row it succeeded.
+
+    The statement is what makes the retirement lawful — it is signed by the key THIS
+    record holds for the row being retired — and it is the same check the live
+    ``net_identity_rotate`` frame makes, applied to a statement that arrived as part
+    of a member table. Without the retirement the peer keeps two active rows for one
+    device and reports one more member than that device does (QA round 16, Q16-1).
+
+    What is asserted beyond the count is that the retirement is a SUPERSESSION and
+    not a removal: the old id still resolves, nothing is burned, no row is
+    tombstoned, and the standing this record resolved at admission stands.
+    """
+    record = _record(SELF)
+    held, published, statement, _old, _new = _rotated(record, root)
+
+    changed, added = relay.adopt_members(record, [published])
+
+    assert (changed, added) == (True, [published["device_id"]])
+    surviving = record.member(published["device_id"])
+    assert surviving is not None
+    assert record.member(held.device_id) is surviving, "the retired id must still resolve"
+    assert [row.device_id for row in record.active_members()] == [SELF, published["device_id"]]
+    assert held.device_id not in record.removed_ids, "a rotation is not a removal"
+    assert all(row.removed_at is None for row in record.members)
+    assert surviving.role == "read", "a peer does not get to promote the device it relays"
+    assert surviving.added_via == "invite"
+    assert surviving.rotation_proof == statement
+
+
+@pytest.mark.parametrize("tamper", ["no_statement", "another_network", "edited_signature"])
+def test_a_rotation_claim_this_record_cannot_verify_retires_nothing(
+    root: Path, tamper: str
+) -> None:
+    """A re-identification this record cannot verify must not move a row.
+
+    THE MECHANISM THIS GUARDS. The merge's rows are relayed claims, and a row that
+    names one of OUR rows as its past self is the one case where a merge could retire
+    a member. Believed on a bare claim, any member could hide a third device: the row
+    goes, and since ``record.member()`` resolves the retired id through the successor,
+    that id would answer with the claimant's key — so the member's own frames stop
+    matching its own row. So the claim is refused in BOTH directions, nothing retired
+    and nothing adopted, because adopting it unretired is the two-active-rows
+    divergence this rule exists to close.
+
+    The three tampered forms are the ones that look like proof: none at all, a real
+    statement signed for ANOTHER network (a statement names the network it rotates
+    within, so it is not usable anywhere), and a real statement whose signature has
+    been edited.
+    """
+    record = _record(SELF)
+    held, published, statement, old, new = _rotated(record, root)
+    if tamper == "no_statement":
+        published.pop("rotation_proof")
+    elif tamper == "another_network":
+        published["rotation_proof"] = identity.rotation_statement(
+            old, new, "n_ffffffffffffffffffffffff"
+        )
+    else:
+        published["rotation_proof"] = {**statement, "sig_old": wire.b64u(b"0" * 64)}
+
+    changed, added = relay.adopt_members(record, [published])
+
+    assert (changed, added) == (False, []), f"{tamper} moved a row"
+    assert record.member(held.device_id) is held
+    assert [row.device_id for row in record.active_members()] == [SELF, held.device_id]
+    assert record.member(published["device_id"]) is None, f"{tamper} was adopted anyway"
 
 
 # ---------------------------------------------------------------------------

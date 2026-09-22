@@ -2492,7 +2492,7 @@ def _cmd_identity_rotate(args: argparse.Namespace) -> int:
     ``rotate`` rather than discarded.
     """
     from local_operator.network import store
-    from local_operator.network.identity import load, rotate
+    from local_operator.network.identity import load, rotate, rotation_statement
 
     previous = load()
     if previous is None:
@@ -2510,16 +2510,35 @@ def _cmd_identity_rotate(args: argparse.Namespace) -> int:
         announced = relay_mod.announce_identity_rotation(server, old, new)
         server.stop()
     else:
-        for record in store.list_networks():
-            if record.self_device_id == old.device_id:
-                record.self_device_id = new.device_id
-                member = record.member(old.device_id)
-                if member is not None:
-                    member.previous_ids = [*member.previous_ids, member.device_id]
-                    member.device_id = new.device_id
-                    member.public_key = new.public_key
-                    member.rotated_at = time.time()
-                store.save(record)
+        # NOTHING IS ANSWERING, so this process owns the record for the moment — and
+        # it edits it the way every other writer here does: the statement is built
+        # per network (it names the network it rotates within), the record is
+        # re-read INSIDE the store's lock, and the row is re-checked against what is
+        # on disk, so no save from another thread is reverted from this process's
+        # older listing. The statement is KEPT ON THE ROW, because the table is the
+        # only route to a peer this verb cannot reach: whoever pulls it later can
+        # verify the hop instead of seeing an unfamiliar device.
+        for listed in store.list_networks():
+            if listed.self_device_id != old.device_id:
+                continue
+            statement = rotation_statement(old, new, listed.network_id)
+            try:
+                # A network forgotten between the listing and this rewrite is not a
+                # reason to abandon the rest of them (the announce path's rule).
+                with store.mutate(listed.network_id) as record:
+                    if record.self_device_id != old.device_id:
+                        continue
+                    record.self_device_id = new.device_id
+                    member = record.member(old.device_id)
+                    if member is not None:
+                        member.previous_ids = [*member.previous_ids, member.device_id]
+                        member.device_id = new.device_id
+                        member.public_key = new.public_key
+                        member.rotation_proof = dict(statement)
+                        member.rotated_at = time.time()
+                    store.save(record)
+            except FileNotFoundError:
+                continue
         announced = {"sent": 0, "queued": 0}
     _audit(
         "device_rotated",
@@ -2538,8 +2557,9 @@ def _cmd_identity_rotate(args: argparse.Namespace) -> int:
         [
             f"rotated this device from {old.device_id} to {new.device_id}",
             f"announced to {announced['sent']} peer(s); queued for {announced['queued']}",
-            "a peer that never receives the statement will see this device as unknown and must "
-            "re-pair — nothing can prove continuity without the old key",
+            "a peer that never gets the statement — by frame or in this device's member row, "
+            "which carries it — sees this device as unknown and must re-pair: nothing can "
+            "prove continuity without the old key",
         ],
     )
 
