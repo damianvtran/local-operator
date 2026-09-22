@@ -388,6 +388,35 @@ def test_scratchpad_guide_says_where_binary_scratch_goes() -> None:
     assert "scratchpad://" in section
 
 
+def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
+    """The content policy is enforced at the TOOLS, and this guide is the
+    document read right next to the ``$LOCAL_OPERATOR_SCRATCHPAD`` recipe that
+    hands a shell the pad path.
+
+    Review round 1 (F1): the bullet said build output was "refused by name if you
+    try" beside that recipe, which reads as a property of the pad — while the
+    channel that produced the measured 34.8 GB (a compiler and a package manager
+    in a shell) is not policed at all, and the check has one call site either
+    way. The claim and its boundary are pinned TOGETHER, because the failure this
+    guards is a later revision keeping the rule and dropping the honest half —
+    which is exactly how the over-claim got written.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    section = body[body.index("## Use something else for") : body.index("## The protocol")]
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so an
+    # assertion on the raw bytes would pin the line width rather than the claim.
+    collapsed = " ".join(section.split())
+
+    assert "Build output" in collapsed
+    assert "git worktree add" in collapsed
+    # The boundary: the tools are checked, a shell is not.
+    assert "enforced at the TOOLS and not in a shell" in collapsed
+    assert "NOT policed" in collapsed
+
+
 def test_scratchpad_guide_makes_a_rendered_frame_first_class_content() -> None:
     """The correction this pin exists for. The guide used to say a binary put in
     the pad "cannot be read back — the reader refuses it", and it named an image
