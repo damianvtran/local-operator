@@ -444,6 +444,10 @@ class DesktopFeed:
         self.presence = presence or DesktopDeliveryPublisher(root)
         self._bridged = bridged or (lambda: frozenset())
         self._task: asyncio.Task[None] | None = None
+        #: The first subscriber's open snapshot must follow its asynchronous
+        #: no-replay baseline. Otherwise a write between the two reads can be
+        #: absent from ``open`` and then adopted by the baseline without a frame.
+        self._baseline_ready: asyncio.Future[None] | None = None
         self._revision: tuple[int, int, int] | None = None
         self._published_sequence = 0
         self._acknowledgements: dict[str, int] = {}
@@ -804,6 +808,7 @@ class DesktopFeed:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        self._baseline_ready = loop.create_future()
         self._task = loop.create_task(self._poll_loop())
 
     async def _poll_loop(self) -> None:
@@ -813,8 +818,20 @@ class DesktopFeed:
         (``_expire_watches``' shape): an idle backend must not hold a 10 Hz
         timer for a stream nobody is reading.
         """
+        baseline_ready = self._baseline_ready
         try:
-            await asyncio.to_thread(self._take_baseline)
+            try:
+                await asyncio.to_thread(self._take_baseline)
+            except Exception as error:  # noqa: BLE001 — fail the connection, not hang it
+                if baseline_ready is not None and not baseline_ready.done():
+                    baseline_ready.set_exception(error)
+                raise
+            else:
+                # ``open`` waits on this handshake before taking its snapshot:
+                # the baseline remains the connection boundary, and intervening
+                # authoring writes can no longer be hidden by a later token read.
+                if baseline_ready is not None and not baseline_ready.done():
+                    baseline_ready.set_result(None)
             failures = 0
             # ``-inf`` rather than 0.0: the comment below says the FIRST failure
             # is reported immediately, and with 0.0 that was only true on a host
@@ -2017,7 +2034,19 @@ class DesktopFeed:
     # -- the open frame ----------------------------------------------------
 
     async def _open_frame(self, subscription: FeedSubscription) -> dict[str, Any]:
-        """The connection's snapshot: attention state and the two invalidation counters."""
+        """The connection's snapshot: attention state and the two invalidation counters.
+
+        The poller's no-replay baseline must finish first. If the snapshot ran
+        before it, an authoring write between those reads could be adopted by
+        ``_take_baseline`` without appearing in either the snapshot or a frame.
+        """
+        baseline_ready = self._baseline_ready
+        if baseline_ready is not None:
+            await baseline_ready
+        elif self._authoring_token is None:
+            # A synchronous subscriber has no poller task, but still needs the
+            # same first-connection boundary before its open snapshot.
+            await asyncio.to_thread(self._take_baseline)
         attention, catalogue_revision, authoring_revision = await asyncio.to_thread(self._snapshot)
         return self._frame(
             "open",
