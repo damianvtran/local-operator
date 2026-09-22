@@ -2209,11 +2209,23 @@ class AgentLoop:
             # 97,189 output tokens (95,098 of them reasoning). A host that wants a
             # different bound names ``max_tokens`` explicitly.
             request_model = model
+            # The array to advertise: a host that publishes tools supplies
+            # ``get_tools`` and owns how often the array may move (see
+            # ``LoopConfig.get_tools`` — one publish per turn on the session
+            # host, because the array sits ahead of the conversation in the
+            # cache prefix). Resolution is untouched: ``_plan_call`` still reads
+            # the LIVE ``context.tools``, so a tool that arrived after this
+            # array was published is executable even though it is not yet
+            # advertised.
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
                 messages=list(converted),
-                tools=list(context.tools),
+                tools=(
+                    list(config.get_tools())
+                    if config.get_tools is not None
+                    else list(context.tools)
+                ),
                 effort_ceiling=effort_ceiling,
                 context_tokens_hint=context_tokens_hint,
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,

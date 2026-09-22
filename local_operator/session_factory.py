@@ -2795,6 +2795,18 @@ def _make_system_blocks_provider(
     """
 
     environment = _env_details(cwd)
+    # The HOST capability answer, taken ONCE at construction and passed to every
+    # render (see ``prompts_api.host_capability_probes`` for the measured
+    # incident). It is read here for the same reason ``user_instructions`` and
+    # ``repo_guidance`` above are: it reaches block 0, and a block-0 change
+    # starts a NEW persisted prefix epoch for the live session — so a probe that
+    # moves with the desktop app's heartbeat would reprice every session on the
+    # machine from a timer no one asked for. Also published on the provider
+    # below, so ``Session._reconcile_tool_inventory`` renders the inventory
+    # note from the SAME answer instead of probing again.
+    from local_operator.prompts_api import host_capability_probes
+
+    host_has_browser, host_has_console = host_capability_probes()
     cached_key: tuple[Any, ...] | None = None
     cached_blocks: list[str] = []
 
@@ -2872,6 +2884,8 @@ def _make_system_blocks_provider(
             # requirement 4). Absent a probe this is True, so every host that
             # is not a detached runtime is unaffected.
             interactive=interactive,
+            host_has_browser=host_has_browser,
+            host_has_console=host_has_console,
         )
         cached_key = key
         return list(cached_blocks)
@@ -2882,6 +2896,12 @@ def _make_system_blocks_provider(
     setattr(provider, "append_only_state", True)
     setattr(provider, "repo_guidance", repo_guidance)
     setattr(provider, "knowledge_hooks", hooks)
+    # The frozen host answer, for the session's own re-render of block 1. Two
+    # renderers of one note must not be able to disagree, and the alternative
+    # (block 1 probing live while block 0 is pinned) would journal a state delta
+    # on every heartbeat flip with no authority behind it.
+    setattr(provider, "host_has_browser", host_has_browser)
+    setattr(provider, "host_has_console", host_has_console)
     return provider
 
 
@@ -3962,17 +3982,46 @@ async def wire_mcp_into_session(
                 selected.append(tool)
         return selected
 
-    def refresh_selected(source: list[AgentTool]) -> None:
+    def refresh_selected(source: list[AgentTool]) -> bool:
+        """Rebind the session's inventory to the currently selected MCP tools.
+
+        Returns whether the swap reaches the NEXT MODEL CALL, for the resolver's
+        reply (see ``Session.refresh_tools``): the tools array is published at
+        most ONCE per turn, so a grow or a shrink that lands after this turn's
+        first provider call is deferred to the next turn.
+
+        A REMOVAL THEREFORE NEVER MOVES THE PUBLISHED ARRAY MID-TURN, which is
+        the rule ``Session._reconcile_web_tools`` follows and a shrink through
+        here used to bypass. The reason is the cache prefix: the tools array
+        rides ahead of the conversation, so removing one tool from it reprices
+        every message behind it. What IS immediate is the inventory — this still
+        swaps the live set, so the removed tool stops resolving at once and the
+        prompt's inventory block reports the change through its usual delta.
+
+        THE MODEL THAT CALLS THE SCHEMA IT CAN STILL SEE GETS A TYPED REFUSAL,
+        ``Tool not found: <name>`` (``harness/loop.py``'s synthetic unknown-tool
+        fault), not the tool's own answer. The approval gate runs only after a
+        tool RESOLVES, and nothing here resolves — the top-level fallback
+        resolver serves names in ``_mcp_deferred_origins`` only. That refusal is
+        the accepted cost of holding the array still, and the transport is why
+        it is the right one: a server that dropped away cannot answer for
+        itself, so leaving it resolvable would buy a transport error where the
+        model could have had a planning refusal. ``_reconcile_web_tools``
+        reaches the opposite conclusion about the INVENTORY on the same class of
+        edit — it defers that change to the turn boundary — because a web tool
+        that is still resolvable has a per-call gate that answers "disabled";
+        see its docstring. The two policies differ on purpose.
+        """
         live = list(getattr(session, "_tools", None) or getattr(session, "tools", None) or ())
         base = [tool for tool in live if tool.name not in installed_mcp] or base_inventory
         selected = selected_tools(source)
         installed_mcp.clear()
         installed_mcp.update(tool.name for tool in selected)
-        session.refresh_tools(base + selected)
+        return session.refresh_tools(base + selected)
 
-    def activate(server_name: str, raw_tool_name: str) -> None:
+    def activate(server_name: str, raw_tool_name: str) -> bool:
         enabled_origins.add((server_name, raw_tool_name))
-        refresh_selected(manager.get_tools())
+        return refresh_selected(manager.get_tools())
 
     def preload_opted_in_tools(source: list[AgentTool]) -> bool:
         """Activate the whole inventory of every server that opted into it.
