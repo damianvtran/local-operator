@@ -1131,10 +1131,25 @@ def _has_no_image_media(block: ImageContent) -> bool:
     """Whether ``block`` carries no image bytes AT ALL — nothing to send, ever.
 
     Deliberately the NARROWEST possible question, and the docstring is the
-    boundary: a block is refused here iff NO decoder that could be asked for
-    its bytes pulls a single one out — empty, whitespace-only, padding-only, or
-    corrupt beyond recovery. Anything that yields bytes under ANY of the three
-    decodes below is left alone.
+    boundary: this function answers ONLY "did any of the decodes below pull a
+    byte out of this payload", and refuses the block when NONE did — it does
+    NOT and cannot decide that the payload is corrupt, malformed, or
+    unrecognised, and it must not be read as saying so. Empty, whitespace-only
+    and padding-only payloads are the shapes that fall out of that test, and
+    so does anything else no decoder can recover; anything that yields bytes
+    under ANY of the three decodes is left alone, whether or not those bytes
+    are an image at all.
+
+    The KEPT side is therefore WIDER than it looks, and deliberately so: the
+    tolerant decoder recovers bytes from a lot of things that are not base64
+    (review round 2 measured 29,070 payload strings against this function,
+    with **0** newly refused by the third decode, prose like ``"no image
+    here"`` among those now kept). That is the correct direction — the
+    alternative is silently replacing real media with a text notice, which is
+    unrecoverable context loss the user cannot see — and the cost of the
+    tolerance falls on the SEND side, where the sticky
+    :func:`~local_operator.providers.failover.is_image_rejection` degrade and
+    the two acceptability strips already handle bytes a provider will not take.
 
     THREE decodes, not two, and the third is the one that matters most. The
     strict/lenient pair are the SAME decoder parameterised on character
