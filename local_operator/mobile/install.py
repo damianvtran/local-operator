@@ -37,7 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from local_operator import launchd, procname, procstate, supervisors
+from local_operator import launchd, memory_guard, procname, procstate, supervisors
 from local_operator.mobile.auth import (
     generate_password,
     load_password,
@@ -104,6 +104,34 @@ _PIN_PROBE_TIMEOUT = 20.0
 
 #: How long to wait between samples while a signalled group dies.
 _GROUP_POLL_SECONDS = 0.05
+
+#: The floor under the computed MEMORY ceiling for one build step, in MB.
+#: Judgement, not a calibration, and it is a SECOND floor rather than
+#: ``memory_guard``'s own for a measured reason: that one (64 MB) is sized against
+#: the smallest things the bash tool runs, and a package-manager child is two orders
+#: of magnitude past it — measured on this host 2026-09-21, a bare ``node -e ''``
+#: peaks at 11.6 MB while ``pnpm --version`` in an empty directory peaks at
+#: **120.8 MB**. A ceiling below a real step's own interpreter would kill every
+#: build on a pressured host and report it as "reduce peak memory", which is not a
+#: thing the reader can do to a pnpm. 256 MB is ~2x that measurement: enough for a
+#: real step on a tight host, and still an order of magnitude under the incident's
+#: growth (+5 GB per 25 s), so the kill lands while the reserve is still holding the
+#: machine up.
+_STEP_MEMORY_FLOOR_MB = 256
+
+#: Seconds a build group that has breached the MEMORY ceiling gets between SIGTERM
+#: and SIGKILL. Deliberately NOT :data:`_BUILD_KILL_GRACE`: that window is priced for
+#: a cooperative exit, and at the incident's measured rate (0.2-0.4 GB/s, see
+#: :func:`_pin_mismatch`) five seconds spends up to 2 GB — the whole of the 2,048 MB
+#: reserve the ceiling already held back, i.e. exactly the margin the kill exists to
+#: keep. One group poll is ~20 MB at the worst measured rate, and a group that is
+#: over budget has no cooperative exit left to make.
+_BUILD_MEMORY_KILL_GRACE = _GROUP_POLL_SECONDS
+
+#: The header a memory kill leads with. The SAME word the bounded bash command
+#: reports with (``memory_guard``'s §5 contract): the failure is the same failure
+#: whichever path hit it, and an operator greps for one string.
+_STEP_MEMORY_HEADER = "MEMORY LIMIT EXCEEDED"
 
 #: How long ``corepack enable`` may run before its group is signalled. Short by
 #: design: it writes shims and prints a summary, and the thing it can wait on —
@@ -532,6 +560,174 @@ def _reap_step_and_die(
         raise SystemExit(128 + signum) from None
 
 
+class StepMemoryExceeded(subprocess.SubprocessError):
+    """A build step whose process GROUP crossed the memory ceiling for one step.
+
+    Public, unlike the helpers around it, because it is part of what
+    :func:`_run_build_step` promises: this is the THIRD way a step can end, beside
+    "finished" and ``subprocess.TimeoutExpired``.
+
+    A ``SubprocessError`` on purpose — the base ``subprocess.TimeoutExpired`` has —
+    so the two bounds are one shape to a caller, and two consequences of that are
+    load-bearing. :func:`_runner_reports` already answers ``None`` for a step it
+    could not finish (``except (OSError, subprocess.SubprocessError)``), which is
+    what keeps :func:`_pin_mismatch`'s fail-open intact when the ceiling is what
+    stopped a probe; and :func:`_build_bundle` words it as a failed step exactly as
+    it words the time bound. ``args[0]`` is the operator-facing sentence.
+    """
+
+
+def _mb_text(value_bytes: int) -> str:
+    """A memory figure a reader can compare at a glance (GB above 1 GB)."""
+    if value_bytes >= 1024 * 1024 * 1024:
+        return f"{value_bytes / (1024**3):.1f} GB"
+    return f"{value_bytes / (1024 * 1024):.0f} MB"
+
+
+def _step_memory_report(sample: memory_guard.Sample, budget: memory_guard.Budget) -> str:
+    """What an operator reads when a build step was killed for memory.
+
+    The same SHAPE the guarded bash command reports
+    (:meth:`memory_guard.Guard.over_budget_message`): the header word first, then
+    the MEASURED peak against the ceiling and the device it was derived from —
+    naming the numbers is what lets the reader size the retry.
+
+    The REMEDY clause is this path's own, and that is deliberate. The bash copy
+    closes with ``memory_mb``/``bash.memory.limit_mb``; neither exists on
+    ``lop mobile install``, and naming a knob the reader cannot turn is the defect
+    this module has been fixed for twice already (see the remedy sentences in
+    :func:`_build_bundle`). The honest remedy here is the one that does work: the
+    ceiling is a function of what is FREE, so it rises on its own once the host has
+    room — free memory, then re-run. ONE line, because every caller shows it inside
+    a summary line of its own and :func:`_failure_detail` reads line by line.
+    """
+    device = f"on a {budget.total_mb} MB device" if budget.total_mb else "on this device"
+    return (
+        f"{_STEP_MEMORY_HEADER}: this build step's process group reached "
+        f"{_mb_text(sample.bytes_used or 0)}, over the {budget.ceiling_mb} MB ceiling "
+        f"for one build step {device}. The group was killed; the install is fine and "
+        "nothing else on the machine was touched. A package manager that cannot "
+        "finish an install fans out until the machine dies, so free memory and "
+        f"re-run `lop mobile install` — the ceiling is half of what is available "
+        f"minus a {budget.reserve_mb} MB reserve, so it rises on its own once the "
+        "host has room"
+    )
+
+
+def _step_memory_budget() -> memory_guard.Budget:
+    """The memory ceiling ONE build step gets, from the SHARED budget arithmetic.
+
+    WHY SHARED, and this is the whole reason the build path is a small change
+    rather than a second guard: ``0.5 x available minus reserve`` and the reserve
+    constants are the ONE budget vocabulary on this machine
+    (``docs/design/process-memory-guard.md`` §3.2, which mirrors ``conftest.py``),
+    and a second copy of them here is a number nobody would notice had drifted —
+    the failure mode that doc exists to prevent. §10 of that doc names this path as
+    phase 2's first consumer ("the ``Guard`` class is deliberately reusable so phase
+    2 is wiring, not design"), i.e. wiring, which is what this is.
+
+    The FLOOR is the one thing the caller names (:data:`_STEP_MEMORY_FLOOR_MB`),
+    because "ordinary command" and "one package-manager build step" are different
+    sizes; the arithmetic itself is untouched.
+
+    The config keys are deliberately NOT read here, unlike the bash tool's
+    ``_configured_memory_budget``. ``ConfigManager(config_dir)`` WRITES a
+    default ``config.yml`` when none exists, and this path runs on fresh clones,
+    in containers, and from ``lop update``'s snapshot builder — a memory bound is
+    not a good enough reason to start creating the operator's config from a build.
+    A config that says nothing therefore gets the protection, which is the
+    documented default anyway.
+    """
+    return memory_guard.compute_budget(floor_mb=_STEP_MEMORY_FLOOR_MB)
+
+
+def _step_memory_guard(pgid: int | None) -> memory_guard.Guard | None:
+    """A guard bound to THIS step's group, or ``None`` when there is nothing to bound.
+
+    ``None`` on a host with no process groups to sample (Windows: ``os.getpgid``
+    does not exist there, so :func:`_step_group` already answered ``None``) and on
+    a host whose memory probes cannot answer (``source == "disabled"``). Both are
+    the pre-guard behaviour and neither may raise: an install must not fail because
+    a probe could not describe the host.
+
+    The guard only ever reads and kills the pgid it is HANDED here, which is the
+    one :func:`_step_group` remembered from this step's own spawn — it never
+    enumerates a group of its own, so it cannot touch ``lop`` or a sibling process
+    (``memory_guard`` §6/F5).
+    """
+    if pgid is None:
+        return None
+    budget = _step_memory_budget()
+    if budget.source == "disabled":
+        return None
+    return memory_guard.Guard(pgid, budget)
+
+
+def _wait_for_step(
+    proc: subprocess.Popen[str],
+    guard: memory_guard.Guard | None,
+    bound: float,
+) -> tuple[str, str, str | None]:
+    """Wait up to ``bound`` seconds, sampling the group's memory while it runs.
+
+    Returns ``(stdout, stderr, report)``: ``report`` is the operator-facing sentence
+    when the group crossed its ceiling and the caller must kill the group, or
+    ``None`` when the step ended on its own. Raises ``subprocess.TimeoutExpired``
+    when the TIME bound elapses first — the behaviour this replaced
+    (``proc.communicate(timeout=bound)``) and the only other way out.
+
+    WHY A SLICE LOOP, and this is the point of the whole change. One blocking
+    ``communicate(timeout=bound)`` cannot see the group it waits for, so a memory
+    bound bolted beside it would never fire in time to matter: the incident's growth
+    (+100 processes and +5 GB every 25 s) is orders of magnitude past any sane
+    ceiling long before a 600 s wait returns — the host is dead first. So the wait
+    is taken in ``guard.tick_s`` slices with a sample between them, and the ceiling
+    is the wall that actually fires; the time bound is the backstop.
+
+    A failed sample is never a kill (``Guard.should_kill`` requires a MEASURED
+    reading), so a hiccupping ``ps`` leaves the step alone — F6, and the reason this
+    cannot make an install flakier than it was. The SOFT line is not consumed here
+    either: the bash tool paints that advisory on the live update stream, and a
+    build step has no such stream, so showing it would be a line nobody sees.
+
+    On the memory arm the returned streams are EMPTY, deliberately: the reason the
+    step ended is the report, and the caller is about to reap the group (which
+    drains those pipes) rather than report a partial build log as a failure detail.
+
+    Re-entering ``communicate`` is documented ("Catching this exception and
+    retrying communication will not lose any output") and the OTHER half of that
+    property — that it does not DUPLICATE what it already read — is not in the
+    docs, so both halves are pinned by a test
+    (``test_a_sliced_wait_captures_the_same_streams_as_one_blocking_call``). The
+    captured streams are what :func:`_failure_detail` reads, and a bound that cost
+    the step's own error message would be a worse install, not a safer one.
+    """
+    if guard is None:  # pragma: no cover - Windows and unmeasurable hosts
+        stdout, stderr = proc.communicate(timeout=bound)
+        return stdout, stderr, None
+    deadline = time.monotonic() + bound
+    while True:
+        # A slice that RUNS OUT rather than one that blocks past the deadline, and
+        # zero is a legal slice: `communicate(timeout=0)` is an immediate poll, so a
+        # step that exits exactly at the deadline still has its output collected
+        # before the bound is declared fired.
+        slice_s = max(0.0, min(guard.tick_s, deadline - time.monotonic()))
+        try:
+            stdout, stderr = proc.communicate(timeout=slice_s)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            return stdout, stderr, None
+        if time.monotonic() >= deadline:
+            # Same shape the single blocking call raised: ``cmd`` is the argv and
+            # ``timeout`` the bound, which is what _build_bundle words as
+            # "Command '...' timed out after N seconds".
+            raise subprocess.TimeoutExpired(proc.args, bound)
+        sample = guard.sample_sync()
+        if guard.should_kill(sample):
+            return "", "", _step_memory_report(sample, guard.budget)
+
+
 def _run_build_step(
     argv: Sequence[str],
     cwd: Path,
@@ -551,10 +747,24 @@ def _run_build_step(
     spawning — +100 processes and +5 GB every 25 s until the host had 0.1 GB free
     and no swap, and was rebooted.
 
+    THE TIME BOUND CANNOT BE THE WALL FOR THAT FAILURE, and this is the arithmetic
+    the second bound below exists for. The recorded rate is +5 GB per 25 s = 0.2 GB/s
+    steady, with bursts to 0.4 GB/s (3.2 GB in the first 8 s of the reproduction),
+    so a 600 s bound permits on the order of ``0.2 GB/s x 600 s = 120 GB`` of growth
+    before it fires — against a 36 GB host and a 32 GB device. The host is dead
+    three orders of magnitude before the clock helps. So the step now runs under a
+    MEMORY bound too (:func:`_wait_for_step`), reusing ``memory_guard``'s per-command
+    ceiling and its group sampler rather than inventing a second budget — the
+    arithmetic and the reserve vocabulary have ONE owner on this machine
+    (``docs/design/process-memory-guard.md`` §10 names this path as phase 2's first
+    consumer, so this is wiring rather than design). The time bound stays as the
+    backstop, which is all it can honestly be.
+
     So the step runs in its own session/group and the GROUP is signalled on every
     path that can end the wait:
 
-    * the bound firing;
+    * the memory ceiling firing (the third rung, added with the second bound);
+    * the time bound firing;
     * an abort raised IN this process (Ctrl-C -> ``KeyboardInterrupt``);
     * an EXTERNAL stop signal (SIGTERM/SIGHUP/SIGQUIT), which raises nothing here
       and is why :func:`_arm_step_handlers` exists;
@@ -598,8 +808,9 @@ def _run_build_step(
         proc_box[0] = proc
         pgid = _step_group(proc)
         pgid_box[0] = pgid
+        guard = _step_memory_guard(pgid)
         try:
-            stdout, stderr = proc.communicate(timeout=bound)
+            stdout, stderr, memory_report = _wait_for_step(proc, guard, bound)
         except subprocess.TimeoutExpired:
             _reap_step_group(proc, pgid)
             raise
@@ -611,6 +822,14 @@ def _run_build_step(
             # nothing here at all; that is `_arm_step_handlers`' half.
             _reap_step_group(proc, pgid)
             raise
+        if memory_report is not None:
+            # The group is over its ceiling and still growing, so the SIGTERM
+            # window is one poll rather than _BUILD_KILL_GRACE (see that constant).
+            # Reaped BEFORE raising, for the same reason the time-bound arm reaps
+            # before re-raising: whatever the caller does with the exception, the
+            # tree is not left behind.
+            _reap_step_group(proc, pgid, grace=_BUILD_MEMORY_KILL_GRACE)
+            raise StepMemoryExceeded(memory_report)
         _sweep_step_group(proc, pgid)
     finally:
         _disarm_step_handlers(handlers)
@@ -927,10 +1146,24 @@ def _pin_mismatch(runner: Sequence[str], web_dir: Path) -> str | None:
 
     The comparison is against what the RESOLVED runner reports, never against
     the pin's own claim, because the pin is the thing in doubt. A runner that
-    cannot answer (no output, non-zero exit, the probe's own timeout) is NOT
-    refused: the bound protects that case, and refusing an install because a
-    probe was inconclusive would trade a rare hang for a common false refusal on
-    machines whose pnpm is entirely fine.
+    cannot answer (no output, non-zero exit, the probe's own timeout, or a memory
+    kill — see below) is NOT refused: the bound protects that case, and refusing an
+    install because a probe was inconclusive would trade a rare hang for a common
+    false refusal on machines whose pnpm is entirely fine.
+
+    AND THAT GROUNDS IS NOW TRUE, which it was not when it was written — stated
+    here because the fail-open above is justified BY the bound, so the fail-open is
+    only as good as the bound. A probe that has started resolving the pin instead of
+    answering grows at the measured 0.4 GB/s (3.2 GB in its first 8 s), and
+    ``_PIN_PROBE_TIMEOUT`` is 20 s: a TIME bound therefore permitted roughly another
+    8 GB before it could fire, on a host that had 0.1 GB free. The probe now runs
+    through :func:`_run_build_step` like every other step, so it is under the same
+    memory-sampled wait and is stopped at the ceiling a few ticks in — well inside
+    the probe's own 20 s and orders of magnitude inside the 600 s a bundle step
+    gets. The fail-open posture is deliberately LEFT ALONE: it can now rest on a
+    bound that holds at the recorded numbers, and flipping it to fail-closed would
+    cost every user with an inconclusive probe an install for a hang the ceiling
+    already stops.
     """
     pinned = _pinned_pnpm(web_dir)
     if pinned is None or _corepack_shaped(runner):
@@ -1135,9 +1368,18 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
         if mismatch is not None:
             return mismatch
         for args in (["install", "--frozen-lockfile"], ["build"]):
-            result = _run_build_step(
-                [*runner, *args], web_dir, timeout=_BUILD_STEP_TIMEOUT, env=env
-            )
+            try:
+                result = _run_build_step(
+                    [*runner, *args], web_dir, timeout=_BUILD_STEP_TIMEOUT, env=env
+                )
+            except StepMemoryExceeded as exc:
+                # Named with the STEP, not only with the guard's sentence: which
+                # step was too big is half of what the operator has to act on
+                # (`install` and `build` are different workloads, and the retry is
+                # a different command for each), and the sentence is the other
+                # half. Still inside the outer `try`, so a memory kill can never
+                # escape this function as a traceback.
+                return f"pnpm {' '.join(args)} failed: {exc}"
             if result.returncode != 0:
                 # A failed `build` can leave a dist/ behind: vite writes it
                 # before npm's `postbuild` guard judges it, and the guard
@@ -1151,7 +1393,12 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
                 if _dist_index(web_dir).exists() and _verify_bundle(web_dir) is not None:
                     _discard_bundle(web_dir)
                 return f"pnpm {' '.join(args)} failed: {_failure_detail(result)}"
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
+        # ``SubprocessError`` rather than ``TimeoutExpired``: the two bounds
+        # _run_build_step enforces are one shape (see StepMemoryExceeded), so a
+        # step the ceiling stopped on a path that does not name its own step — the
+        # `corepack enable` in _package_runner above all — is worded here rather
+        # than raised out of an install.
         return f"bundle build failed: {exc}"
     if not _dist_index(web_dir).exists():
         return "build ran but dist/index.html is still missing"

@@ -90,7 +90,8 @@ _SOFT_FRACTION = 0.8
 #: to protect. This is a pressure floor on the reserve, nothing more.
 _SWAP_FLOOR_MB = 256
 
-#: Small-device floor. The reserve arithmetic above can drive the ceiling to zero
+#: Small-device floor, and the DEFAULT floor: the bash tool's. The reserve arithmetic
+#: above can drive the ceiling to zero
 #: on a tight host (~1 GB available on an 8 GB device: `min(512, 1024 - 1024)` =
 #: 0 MB), which would kill every command the instant it started — a guard that is
 #: worse than no guard. Measured on this host: the smallest command that actually
@@ -104,6 +105,12 @@ _SWAP_FLOOR_MB = 256
 #: genuinely needs more than this asks for it — `memory_mb=`, or `mode=manual`.
 #: (At 1.5 GB available the arithmetic gives 512 MB, above this floor — the floor
 #: binds at ~1 GB, the case named here and in the contract's §11.)
+#:
+#: It is only the DEFAULT. A caller whose command is not an ordinary one names its
+#: own through ``compute_budget(floor_mb=...)`` — see ``mobile.install``'s
+#: ``_STEP_MEMORY_FLOOR_MB``, which is ~2x the measured cost of a package-manager
+#: child. The floor is a parameter rather than a second calculation downstream
+#: precisely so the reserve arithmetic has ONE owner.
 _MIN_CEILING_MB = 64
 
 #: Where the config keys live under `values`, spelled ONCE and shared with the
@@ -289,6 +296,7 @@ def compute_budget(
     soft_fraction: float = BASH_MEMORY_SOFT_FRACTION_DEFAULT,
     override_mb: float | None = None,
     enabled: bool = BASH_MEMORY_ENABLED_DEFAULT,
+    floor_mb: int = _MIN_CEILING_MB,
     runner: Runner | None = None,
 ) -> Budget:
     """Resolve the per-command ceiling from config + host memory.
@@ -313,6 +321,17 @@ def compute_budget(
     needs no measurement (the caller, or the config, already said what the
     number is), so their ``available_mb`` is honestly ``None`` rather than a
     ``vm_stat`` subprocess spent only to populate a cosmetic field.
+
+    ``floor_mb`` is the small-device floor, and it is a PARAMETER because the
+    caller owns the judgement of what "ordinary" means for the command it is
+    bounding. ``_MIN_CEILING_MB`` (the default) is calibrated against the smallest
+    things the bash tool is asked to run — a ``git status`` at ~3 MB, a bare
+    interpreter at ~15 MB — while a package-manager build child is two orders of
+    magnitude larger (measured: ~121 MB for a plain ``pnpm --version``; see
+    ``mobile.install._STEP_MEMORY_FLOOR_MB``). Defaulting rather than adding a
+    second budget calculation downstream is the point: the reserve arithmetic has
+    ONE owner, so a caller can price its own command without a copy of these
+    numbers that nobody would notice had drifted.
     """
     base = runner or _default_runner
 
@@ -406,12 +425,13 @@ def compute_budget(
     budget_mb = max(0, min(budget_mb, effective_available - reserve_mb))
     ceiling_mb = int(budget_mb)
 
+    floor_mb = max(0, int(floor_mb))
     floored = False
-    if ceiling_mb < _MIN_CEILING_MB:
+    if ceiling_mb < floor_mb:
         # §10's small-device hazard made concrete: the reserve arithmetic can land
         # on 0, which would kill every command on the first tick. The floor keeps
         # ordinary commands alive; it is not a licence for a big job.
-        ceiling_mb = _MIN_CEILING_MB
+        ceiling_mb = floor_mb
         floored = True
 
     reason = (
@@ -419,7 +439,7 @@ def compute_budget(
         f"minus {reserve_mb} MB reserve{floor_reason}"
     )
     if floored:
-        reason += f" (raised to the {_MIN_CEILING_MB} MB small-device floor)"
+        reason += f" (raised to the {floor_mb} MB floor for this command)"
     return with_ceilings(ceiling_mb, "auto", reason, reserve_mb)
 
 
@@ -562,6 +582,18 @@ class Guard:
         TUI frame, which is exactly what this guard must not do.
         """
         return await asyncio.to_thread(self._sample_sync)
+
+    def sample_sync(self) -> Sample:
+        """The same reading as :meth:`sample`, for a caller that has no event loop.
+
+        The bash tool polls from the session's loop, so it hops into a worker
+        thread to keep a ``ps`` read off the frame. ``mobile.install``'s build step
+        is plain synchronous code (the install path is not async), so there is no
+        loop for the hop to be scheduled on and the honest spelling is the read
+        itself. Same call, same :class:`Sample`, same never-raise contract: an
+        unmeasurable tick yields ``None`` usage and never a kill.
+        """
+        return self._sample_sync()
 
     def _sample_sync(self) -> Sample:
         soft = self.soft_bytes
