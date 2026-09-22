@@ -75,6 +75,14 @@ def _child_env(root: Path) -> dict[str, str]:
         "LOCAL_OPERATOR_CONFIG_DIR": str(root / ".local-operator"),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "TERM": "xterm-256color",
+        # THE NOTIFICATION GATE, and it is not decoration: this rig spawns real
+        # ``local-operator`` children, and a child that can raise a notification
+        # puts whatever this rig (or a mock session it drives) says onto the
+        # operator's lock screen. ``tests/unit/test_notification_isolation.py``
+        # sweeps for builders that hand a child an environment and forget this;
+        # the whole reason is that a bespoke mapping is built rather than
+        # inherited, so inheriting the gate by accident is not the property.
+        "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
     }
 
 
@@ -102,7 +110,7 @@ def _phase_a(root: Path) -> int:  # noqa: C901 — a script, and the print IS th
             f" w.arm(seconds={RIG_STALL_S});"
             " print('armed', flush=True); time.sleep(60)",
         ],
-        env={**os.environ, "HOME": str(root)},
+        env={**os.environ, "HOME": str(root), "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1"},
         stdout=subprocess.PIPE,
     )
     print(f"child pid {child.pid}")
