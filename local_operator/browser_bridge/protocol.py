@@ -76,7 +76,14 @@ def proto_supported(
 #: options page, and `download` behind the optional `downloads` permission the
 #: operator grants when they turn that switch on (design §17.13). 0.1.18
 #: advertised capabilities and served `upload` unconditionally.
-EXPECTED_EXTENSION_VERSION = "0.1.19"
+#:
+#: The number ABOVE this constant moved to 0.1.20 without any behaviour change,
+#: because 0.1.19 had come to name two trees: seven commits landed under
+#: `extension/` after `97753b4c` without the bump the rule requires, so
+#: `97753b4c:extension` (`8a49f477…`) and `origin/main:extension` (`270538e3…`)
+#: both read `0.1.19`. Nothing shipped under it, so the repair is a renumber —
+#: see `docs/store/release-record.md`, v0.1.20.
+EXPECTED_EXTENSION_VERSION = "0.1.20"
 
 #: The first extension version that serves each capability-gated method.
 #:
