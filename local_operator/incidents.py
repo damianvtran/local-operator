@@ -485,6 +485,18 @@ KILL_CAUSE = "runtime-killed"
 #: a wait or a spin?") is the leg, and ``stall_watchdog.fired_leg`` names it.
 STALL_BOUND_CAUSE = "runtime-stall-bound"
 
+#: The LOOP'S own bound (``harness/loop.py``, the outer-loop continuation guard).
+#: Involuntary, and NOT an error the model made: the turn had more work queued
+#: than its producer's budget allows. Named rather than left as the bare
+#: ``AgentEndEvent`` it used to be, because a bare end reads as a COMPLETED
+#: ANSWER on every surface — a child cut off mid-list arrived at its parent
+#: saying it had finished, which is the silent half of the subagent-stall
+#: report. It is a token in this table rather than a private string so
+#: :func:`is_cut_off_cause` answers True and every existing renderer (the
+#: attention outcome, the subagent panel's "cut off" row, the roster) names it
+#: without being taught a new field.
+CONTINUATION_LIMIT_CAUSE = "continuation-limit"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
@@ -493,6 +505,12 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # actor outside the victim, and a reader who found one of those would go
     # looking for a reaper or a sweep that never ran.
     STALL_BOUND_CAUSE: _stall_bound_cause_sentence(),
+    # Bounded on PURPOSE, unlike the arms above: the bound is a budget the loop
+    # chose to spend, so the sentence says what ran out rather than naming an
+    # actor — there is no reaper and no process to go looking for.
+    CONTINUATION_LIMIT_CAUSE: (
+        "the turn reached its continuation limit with work still queued from one producer"
+    ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     # The BOUNDED handover: a build drain that stopped waiting for its own work

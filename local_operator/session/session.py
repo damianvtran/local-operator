@@ -7228,13 +7228,38 @@ class Session:
         the live row instead of naming a different failure.
         """
         cause = self._cut_off_cause
+        if not cause and not self._deliberate_stop_noted:
+            # A cause can also be STAMPED ON THE EVENT by the harness itself —
+            # the loop's own continuation guard is the first writer of that
+            # shape (``harness/loop.py``, ``CONTINUATION_LIMIT_CAUSE``). Nothing
+            # armed it: no process is going away and no rung noted it, so the
+            # event IS the only record. Without reading it here the stamped
+            # token would be dropped on the floor and the end would keep
+            # ``aborted=True, error=None`` — i.e. read as a DELIBERATE stop on
+            # every surface, which is the misclassification this taxonomy calls
+            # worse than the bug it fixes.
+            #
+            # The deliberate-stop guard is the same one ``note_cut_off`` applies:
+            # positive evidence of a user's own stop outranks anything.
+            cause = event.cut_off_cause
         if not cause:
             return event
         if not event.aborted:
             return event
         if event.error:
             return event
-        detail = self._cut_off_detail
+        # ADOPT a cause that only the event carried, so every downstream reader
+        # that consults the flag (``_publish_attention_outcome``'s durable
+        # reason, ``_last_turn_outcome``'s siblings) names the same cause this
+        # event does. Consumption on the end event is the established rule for
+        # this field.
+        #
+        # The DETAIL is deliberately not adopted: an event-carried cause has no
+        # parenthetical, and ``_cut_off_detail`` may still hold the process's own
+        # note for a cause that lost to this one.
+        if not self._cut_off_cause:
+            self._cut_off_cause = cause
+        detail = self._cut_off_detail if self._cut_off_cause == cause else ""
         return event.model_copy(
             update={
                 "aborted": False,
