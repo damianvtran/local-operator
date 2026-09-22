@@ -65,7 +65,10 @@ def seed() -> ProviderController:
         {"type": "oauth", "access": "capture", "refresh": "capture", "expires": 4102444800000},
     )
     store.upsert_credential("openrouter", {"type": "api_key", "key": "capture"})
-    return ProviderController(store, CredentialManager(config_dir()))
+    # ``readonly`` because this script only READS the credential picture: the
+    # plain ``CredentialManager.__init__`` creates and re-tightens the legacy
+    # plaintext file, which a capture must not do (PR2a retired that file).
+    return ProviderController(store, CredentialManager.readonly(config_dir()))
 
 
 async def main() -> None:
