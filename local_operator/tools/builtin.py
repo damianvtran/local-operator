@@ -145,6 +145,8 @@ from local_operator.redaction_shapes import (
     pem_header_line_end,
     scrub_secrets_with_hits,
     shape_report,
+    straddling_form_start,
+    stream_hold_window,
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
@@ -2483,14 +2485,17 @@ class _PipeRedactor:
     inside the window is not split.
 
     **The hold is the max of two rules, and this is the honest one.** ``pending``
-    is bounded by ``max(_PIPE_HOLD_LIMIT, longest registered value + one window)``:
-    the KNOWN-value rule below is older, is not a window rule at all, and holds
-    whatever a registered value needs — measured, a 24,576-byte registered value
-    peaks at 31,072 bytes held at 64 KiB reads, where the same input under this
-    limit alone peaks at 8,192. That is bounded by what the SESSION knows rather
-    than by what the child prints, which is the property the cap exists for, and
-    it is the same in kind as the shape rule: a value too long to be complete in
-    the buffer is split here too, registered or not.
+    is bounded by ``max(_PIPE_HOLD_LIMIT, self.hold + longest spelling)``: the
+    KNOWN-value rule below is older, is not a window rule at all, and holds
+    whatever a registered value needs. ``self.hold`` is a WINDOW and not a
+    whole-buffer bound — the tail this filter keeps is that window plus the
+    spelling it is holding off, so a value of N characters whose widest spelling
+    is the escaped one (4N) can hold up to ``min(4N, 64 KiB) + 4N`` characters.
+    That is bounded by what the SESSION knows rather than by what the child
+    prints, which is the property the cap exists for, and it is the same in kind
+    as the shape rule: a value too long to be complete in the buffer is split
+    here too, registered or not (round-1 review, F4/Q2 — the residual is stated
+    there rather than implied here).
 
     **Both of those rules run over the SPELLINGS of a value, not its bytes.**
     A value the mask catches reversed, in hex or base64 is also a value the cut
@@ -2501,8 +2506,24 @@ class _PipeRedactor:
     (:func:`~local_operator.redaction_shapes.credential_forms`), which is the
     same spelling list the mask below uses — one policy, so "the mask would have
     caught it" and "the cut was moved off it" cannot disagree about what a value
-    looks like. The cost is one ``str.find`` per spelling per feed, over a buffer
-    already bounded by the rules above.
+    looks like. The cost is one ``str.find`` per spelling per feed, confined to a
+    window around the cut rather than scanning the buffer to its end.
+
+    **A WINDOW FLOOR is what makes the line rule safe, and it is not optional.**
+    The line rule releases every complete line, which is decidable only for a
+    spelling that cannot CONTAIN a line terminator. A registered multi-line value
+    (a pretty-printed service-account JSON, a multi-line ``.env`` blob) and the
+    ``\n``-joined spelling both carry one, so a line-aligned writer made each of
+    its lines look like a decidable prefix and the value was published line by
+    line — into the live card and the peekable job tail, the one surface nothing
+    re-reads. Nothing downstream could repair it: a line is not one of the
+    enumerated spellings, so the settle-time pass had nothing to match either.
+    So the cut is floored by ``self.hold`` as well as ruled by the line rule: the
+    last ``hold`` characters are never published, which means a spelling that
+    spans lines is not released until it is whole. ``self.hold`` is
+    :func:`~local_operator.redaction_shapes.stream_hold_window` — the same window
+    ``StreamMasker`` uses, from the one function that computes it, so the two
+    chunked surfaces cannot disagree about what is held.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
@@ -2562,7 +2583,17 @@ class _PipeRedactor:
             key=len,
             reverse=True,
         )
-        self.lookbehind = max((len(form) for form in self.forms), default=1) - 1
+        #: How many characters this filter never publishes from the end of its
+        #: buffer — the SAME window ``StreamMasker`` uses (one function, so the
+        #: two chunked surfaces cannot disagree about what is held).
+        #:
+        #: This replaces ``self.lookbehind``, which was computed as exactly this
+        #: number and then read nowhere (round-1 review, F7): the release point
+        #: did not hold a window at all, so a registered value containing a line
+        #: terminator — a pretty-printed service-account JSON, a multi-line
+        #: ``.env`` — was published one LINE at a time, and a line is not one of
+        #: the enumerated spellings, so no later pass could repair it (F1/Q1).
+        self.hold = stream_hold_window(self.secrets)
 
     def refresh(self, values: Sequence[str]) -> None:
         """Adopt a newly-widened value set mid-stream.
@@ -2572,10 +2603,20 @@ class _PipeRedactor:
         Re-read per chunk, which is what makes a value that arrives at the same
         moment as the bytes it must scrub still get scrubbed.
 
-        The lookbehind can only GROW here, never shrink below what is already
-        held back: ``pending`` is untouched, so a longer new secret straddling
-        this chunk boundary is still resolved on the next feed.
+        The hold can only GROW here, never shrink below what is already held
+        back: ``pending`` is untouched, so a longer new secret straddling this
+        chunk boundary is still resolved on the next feed.
+
+        **Unchanged sets return immediately.** This is called once per read (a
+        64 KiB chunk), and rebuilding every value's spelling list is real work —
+        measured at 68 µs for five ordinary secrets and 61 ms for one oversized
+        value, per read, for as long as the value stays registered (round-1
+        review, F5). The list is a pure function of the value set, so the same
+        set cannot produce a different answer.
         """
+        current = sorted({value for value in values if value}, key=len, reverse=True)
+        if current == self.secrets:
+            return
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
@@ -2821,6 +2862,25 @@ class _PipeRedactor:
         # release the line rule does not cover, and it is the one that used to
         # publish a credential in two unmasked halves.
         spans = self._shape_safe_spans(text) if cap_forced else []
+        # THE WINDOW FLOOR, and it is what closes the line-terminator leak: the
+        # newline rule above releases every complete line, which is decidable for
+        # a spelling that cannot contain a newline and is exactly wrong for one
+        # that does — the value's own line terminator made each line look like a
+        # decidable prefix, so a multi-line registered value was published line by
+        # line into the live card and the peekable job tail, the one surface
+        # nothing re-reads (round-1 review F1 / QA Q1). Holding the last `hold`
+        # characters back means a spelling that spans lines is never released
+        # until it is whole, which is when the mask below can match it.
+        #
+        # `min` against the cap-forced cut above, so the two rules compose the way
+        # they are documented: the cap bounds the buffer in the ordinary case
+        # (hold is small), and a registered value larger than the cap wins, which
+        # is the pre-existing posture for a known value (see the class docstring).
+        # It sits BEFORE the fixed point below, and that placement is what lets it
+        # compose with the three rules there: every one of them only ever moves the
+        # cut LEFT, so none can undo the floor, and the floor can land inside a value
+        # or a short line fragment that those rules then get the last word on.
+        cut = min(cut, max(len(text) - self.hold, 0))
         # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
         # for a shape can put it inside a value, a value move can put it inside a line,
         # and the line hold can expose a value — so each is re-checked against the
@@ -2855,10 +2915,9 @@ class _PipeRedactor:
             previous_cut = cut
             if spans:
                 cut = self._cut_outside(cut, spans)
-            for form in self.forms:
-                start = text.find(form, max(cut - len(form) + 1, 0))
-                if 0 <= start < cut < start + len(form):
-                    cut = start
+            start = straddling_form_start(text, cut, self.forms)
+            if start >= 0:
+                cut = start
             if cut and (self._in_key_block or block_open):
                 break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
                 if 0 < cut - break_at < PEM_BODY_FLOOR:

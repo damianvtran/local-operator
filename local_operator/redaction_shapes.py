@@ -4149,6 +4149,35 @@ _TRANSFORM_MIN_VALUE_LEN = 12
 #: which is the shape a bounded policy has to refuse.
 _SEPARATOR_RUN_SEPARATORS = (" ", "-", ".", ":", "\n")
 
+#: A percent-escape and a ``\\uXXXX`` escape, for the case-swapped spellings.
+#: Anchored on the escape's own introducer so the substitution can only ever
+#: touch digits INSIDE an escape — an ordinary character of the value is left
+#: exactly as the encoder wrote it (see :func:`_lowered_escape_digits`).
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+_UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9A-Fa-f]{4}")
+
+
+def _lowered_escape_digits(text: str) -> str:
+    """``text`` with every escape's HEX DIGITS lowercased, and nothing else.
+
+    Only the digits: a percent-encoded spelling carries ordinary characters of
+    the value beside its escapes (``quote`` leaves unreserved bytes alone), and
+    lowercasing those would produce a string that is not a spelling of the value
+    at all — over-masking a different string, which is a defect in this module.
+    """
+    return _PERCENT_ESCAPE_RE.sub(lambda match: match.group(0).lower(), text)
+
+
+def _uppered_unicode_digits(text: str) -> str:
+    """``text`` with every ``\\uXXXX`` escape's hex digits uppercased.
+
+    The same discipline as :func:`_lowered_escape_digits` and for the same
+    reason: ``json.dumps`` writes ``\\n``, ``\\"`` and ``\\\\`` with lowercase
+    letters that are part of the escape's SPELLING, and uppercasing those would
+    yield a string no encoder emits.
+    """
+    return _UNICODE_ESCAPE_RE.sub(lambda match: match.group(0).upper(), text)
+
 
 def credential_forms(value: str) -> tuple[str, ...]:
     """Every spelling of ``value`` the exact-VALUE pass masks, longest first.
@@ -4168,17 +4197,36 @@ def credential_forms(value: str) -> tuple[str, ...]:
     * base64 in all four spellings a command may produce: standard and URL-safe,
       each padded and unpadded;
     * hex, lower and upper case;
+    * the three SPACED hex spellings the dump tools actually print — single-space
+      byte pairs (``hexdump -C``, ``' '.join(f'{b:02x}' …)``), double-space byte
+      pairs (``od -An -tx1``'s column layout) and ``xxd``'s DEFAULT 2-byte
+      grouping. ``xxd -p`` is the contiguous form above; plain ``xxd`` is not,
+      and a dump is a real accident path (``lop secret get X | xxd``);
     * hex behind a backslash escape (``\\x71``, ``\\x7A``), which is what
       ``repr``, ``xxd -p | sed`` and a shell ``printf`` leave behind;
     * percent-encoding, both the path form (``%20``) and the form-value form
-      (``+``);
+      (``+``), each also with its escape digits lowercased (``%2f`` — the two
+      cases are the same encoding, and which one a command emits is a librarian
+      choice: ``urllib`` uses upper, hand-rolled encoders use lower);
     * JSON string escaping, both the ASCII-escaped form (``\\u00e9``) and the
-      raw-Unicode form;
+      raw-Unicode form, the first also with its digits uppercased;
     * the characters of the value spread by one uniform separator.
 
     A value shorter than :data:`_TRANSFORM_MIN_VALUE_LEN` gets the verbatim
     spelling only — see that constant for why.
+
+    **What the families still do not reach, stated rather than implied.** A hex
+    dump of a value longer than one ``xxd`` line (16 bytes) is broken by the
+    tool's own line wrap — a newline plus an 8-digit offset prefix every 16
+    bytes — so no contiguous needle spans it; and MIXED-case hex digits inside
+    one escape (``\\x71Ab``) are not enumerated, because enumerating them is
+    2**k forms, which is the exponential shape this policy refuses. The pure
+    lower and upper spellings, which is what encoders emit, are covered.
     """
+    if not value:
+        # The empty value has no spelling; returning ``("",)`` here would let a
+        # direct caller put the marker between every character of every text.
+        return ()
     if len(value) < _TRANSFORM_MIN_VALUE_LEN:
         return (value,)
     raw = value.encode("utf-8")
@@ -4188,14 +4236,24 @@ def credential_forms(value: str) -> tuple[str, ...]:
     forms += [standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("=")]
     hex_lower = raw.hex()
     forms += [hex_lower, hex_lower.upper()]
+    pairs = [f"{byte:02x}" for byte in raw]
+    forms += [
+        " ".join(pairs),
+        "  ".join(pairs),
+        " ".join("".join(pairs[index : index + 2]) for index in range(0, len(pairs), 2)),
+    ]
     forms += [
         "".join(f"\\x{byte:02x}" for byte in raw),
         "".join(f"\\x{byte:02X}" for byte in raw),
     ]
+    quoted = urllib.parse.quote(value, safe="")
+    quoted_plus = urllib.parse.quote_plus(value, safe="")
+    forms += [quoted, quoted_plus, _lowered_escape_digits(quoted)]
+    forms += [quoted_plus, _lowered_escape_digits(quoted_plus)]
+    escaped_json = json.dumps(value)[1:-1]
     forms += [
-        urllib.parse.quote(value, safe=""),
-        urllib.parse.quote_plus(value, safe=""),
-        json.dumps(value)[1:-1],
+        escaped_json,
+        _uppered_unicode_digits(escaped_json),
         json.dumps(value, ensure_ascii=False)[1:-1],
     ]
     forms += [separator.join(value) for separator in _SEPARATOR_RUN_SEPARATORS]
@@ -4217,8 +4275,13 @@ def longest_redaction_form(values: Iterable[Optional[str]]) -> int:
     find the straddling spelling and move the cut off it (:class:`StreamMasker`).
     It is a property of the VALUE SET, not of the text, which is what makes the
     window bounded by what the session knows rather than by what a command
-    prints — and it bounds the buffer, because the retained tail never has to
-    exceed it plus the spelling itself.
+    prints.
+
+    It is NOT a whole-buffer bound and must not be described as one: the retained
+    tail is this much PLUS the spelling it is holding off (window plus needle), so
+    a value of N characters whose escaped spelling is 4N holds up to 4N plus the
+    window. See :func:`stream_hold_window` for the window itself and
+    :data:`_STREAM_HOLD_LIMIT` for the cap on the first term only.
     """
     longest = 0
     for value in values:
@@ -4227,15 +4290,72 @@ def longest_redaction_form(values: Iterable[Optional[str]]) -> int:
     return longest
 
 
-#: The most text :class:`StreamMasker` holds back before publishing anyway.
+#: The cap on the WINDOW a chunker holds back (not on its buffer — see
+#: :func:`stream_hold_window`).
 #:
-#: A memory bound, deliberately NOT a value-length bound. A registered value is
-#: otherwise unbounded (a session can register a pasted blob), and a chunker
-#: whose buffer grows with the longest registered value is one a caller can wedge
-#: by registering a large one. 64 KiB is far above the longest spelling a real
-#: credential has — a 32-character secret's backslash-escaped form is 128
-#: characters — and far below the retention caps the rest of the pipeline uses.
+#: A bound on the first term of ``window + needle``, deliberately NOT a
+#: value-length bound. A registered value is otherwise unbounded (a session can
+#: register a pasted blob), and a chunker whose window grew with it would be one
+#: a caller can wedge by registering a large one. 64 KiB is far above the longest
+#: spelling a real credential has — a 32-character secret's backslash-escaped
+#: form is 128 characters — and far below the retention caps the rest of the
+#: pipeline uses.
 _STREAM_HOLD_LIMIT = 65536
+
+
+def stream_hold_window(values: Iterable[Optional[str]]) -> int:
+    """How many characters a chunker must hold back for ``values``.
+
+    ``min(longest_redaction_form(values), _STREAM_HOLD_LIMIT)`` — one function
+    rather than the expression twice, because BOTH chunked surfaces must agree on
+    the number: :class:`StreamMasker` for the eval worker's frames and
+    ``tools/builtin._PipeRedactor`` for the bash live stream and the peekable job
+    tail. A surface that holds a different amount publishes a spelling the other
+    one would have held, which is how the bash pipe came to publish a multi-line
+    registered value one line at a time (the round-1 blocker: 0 held windows on
+    that side against a spelling that contains its own line terminator).
+
+    The number this returns is the WINDOW, not the whole buffer: the buffer a
+    caller needs is the window plus the spelling it is holding off.
+    """
+    return min(longest_redaction_form(values), _STREAM_HOLD_LIMIT)
+
+
+def straddling_form_start(text: str, cut: int, forms: Sequence[str]) -> int:
+    """The start offset of a spelling that straddles ``cut``, or ``-1``.
+
+    A spelling that straddles a cut STARTS in ``[cut - len(form) + 1, cut)`` —
+    it begins before the cut and ends after it — so the search is confined to
+    that window plus the spelling's own length instead of scanning the buffer to
+    its end. That confinement is what makes the rule affordable on an oversized
+    registered value, where the unbounded scan dominated the per-read cost
+    (round-1 review, F5).
+
+    Returns the EARLIEST straddling start found, and the caller moves its cut
+    there and re-checks: moving a cut back can put it inside a spelling that was
+    previously clear, so both callers (``StreamMasker._safe_cut`` and
+    ``tools/builtin._PipeRedactor._release_point``) run this to a fixed point.
+
+    A one-character spelling is skipped: it cannot straddle a position. Neither
+    can an empty one, which :func:`credential_forms` no longer produces.
+    """
+    for form in forms:
+        length = len(form)
+        if length <= 1:
+            continue
+        window_start = max(cut - length + 1, 0)
+        # `end` is the last offset a whole match may END at, so it is
+        # `cut - 1 + length`: a match starting one character before the cut needs
+        # exactly that much room. `str.find` needs the whole needle inside
+        # `[start, end)`, so passing anything less would hide the very match the
+        # rule exists to find.
+        window_end = cut + length - 1
+        start = text.find(form, window_start, window_end)
+        while start != -1 and start < cut:
+            if start + length > cut:
+                return start
+            start = text.find(form, start + 1, window_end)
+    return -1
 
 
 class StreamMasker:
@@ -4322,7 +4442,10 @@ class StreamMasker:
                 reverse=True,
             )
         )
-        self._hold = min(longest_redaction_form(current), _STREAM_HOLD_LIMIT)
+        # The SAME window the bash pipe filter sizes its hold from, through the
+        # one function that computes it: two surfaces that disagree here publish
+        # what the other one holds.
+        self._hold = stream_hold_window(current)
 
     def push(self, text: str, *, final: bool = False) -> str:
         """Mask what may be published now; hold the rest until it is decidable."""
@@ -4357,15 +4480,10 @@ class StreamMasker:
         if cut <= 0:
             return 0
         while True:
-            moved = cut
-            for form in self._forms:
-                start = self._pending.find(form, max(cut - len(form) + 1, 0))
-                if 0 <= start < cut < start + len(form):
-                    moved = start
-                    break
-            if moved == cut:
+            start = straddling_form_start(self._pending, cut, self._forms)
+            if start < 0:
                 return cut
-            cut = moved
+            cut = start
 
     @property
     def withheld(self) -> int:
@@ -4402,10 +4520,17 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     policy bounds and what a test pins.
     """
     result = text
-    ordered = sorted((value for value in values if value), key=len, reverse=True)
+    # The `str` filter is in the GENERATOR, not a guard inside the loop: `key=len`
+    # is applied by `sorted` while it builds the list, so a truthy non-`str` entry
+    # (a bug in whatever built the list) would raise `TypeError` from `len()`
+    # before any guard could skip it — turning a tool result into a tool crash,
+    # which is the one failure a redaction pass must never have.
+    ordered = sorted(
+        (value for value in values if isinstance(value, str) and value),
+        key=len,
+        reverse=True,
+    )
     for value in ordered:
-        if not isinstance(value, str):
-            continue
         for form in credential_forms(value):
             if form in result:
                 result = result.replace(form, REDACTION_MARKER)
