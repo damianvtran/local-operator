@@ -537,9 +537,7 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     if not all(isinstance(action, Mapping) for action in decoded):
         return value, False
     if trailing:
-        observation_ids, _uses_string_actions = _batch_observation_ids(
-            {"actions": decoded}
-        )
+        observation_ids, _uses_string_actions = _batch_observation_ids({"actions": decoded})
         offset, exhausted = _competing_batch_offset(
             trailing,
             observation_ids,
@@ -599,8 +597,7 @@ def _batch_observation_ids(value: Any) -> tuple[set[str], bool]:
         observation_ids.update(
             action["observation_id"]
             for action in actions
-            if isinstance(action, Mapping)
-            and isinstance(action.get("observation_id"), str)
+            if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
         )
     return observation_ids, uses_string_actions
 
