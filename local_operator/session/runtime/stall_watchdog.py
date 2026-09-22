@@ -1222,12 +1222,17 @@ def _holds_work(busy: "BusyProbe | None") -> bool:
     THREE ANSWERS, NOT TWO, and the two negative ones are different facts:
 
     * **the probe answers** (``True``/``False``) — the arm holds iff it says so;
-    * **the probe RAISED** → ``True``. Here the process DID tell us it has a way to
-      report work and the report could not be read, so the unreadable state must not
-      authorise a cut. ``True`` is also this module's fail-safe direction for the one
-      decision that is irreversible: the dump is written either way, so the cost of
-      holding wrongly is one ``lop stop`` against a turn that nothing can
-      reconstruct;
+    * **the probe RAISED** → ``True``, and this is an INVARIANT rather than a detail:
+      the process told us it has a way to report work and the report could not be read,
+      so the unreadable state must not authorise a cut AND must not suppress the fire
+      either. ``True`` means the FIRE still happens — the timer expires, the dump is
+      written, the class recorded, the held marker appended — and only ``_exit`` is
+      refused. That is pinned by
+      ``test_an_UNREADABLE_work_report_still_fires_and_holds``, which drives a real
+      child with a raising probe and asserts the fired marker is in the dump. The cost
+      of holding wrongly is one ``lop stop`` against a turn that nothing can
+      reconstruct, and the way out is the control ladder's SIGKILL rung (driven against
+      a real wedged process in ``test_the_escape_hatch_reaches_a_runtime_wedged_in_a_c_call``);
     * **no probe was supplied** → ``False``, i.e. TODAY'S BEHAVIOUR. This is a caller
       that has been given no way to report what it is doing (a rig, an in-process
       host, a test of the liveness leg alone), and the bound's documented contract

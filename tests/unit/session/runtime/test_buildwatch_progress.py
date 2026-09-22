@@ -43,7 +43,6 @@ from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.process import (
     _Drain,
-    _drain_detail_at_exit,
     _drain_for,
     _reaper,
 )

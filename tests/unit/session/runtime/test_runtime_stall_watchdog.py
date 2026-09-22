@@ -3312,8 +3312,17 @@ def busy():
     return flag.exists()
 
 
+def unreadable():
+    # A probe that cannot answer — the state a bug in the predicate would leave.
+    # A comment and not a docstring: this child is a string inside the test file, so a
+    # nested triple quote would end it early (measured once already).
+    raise RuntimeError("the work report could not be read")
+
+
 if variant == "busy":
     armed = stall_watchdog.arm(seconds=bound, busy=busy)
+elif variant == "raises":
+    armed = stall_watchdog.arm(seconds=bound, busy=unreadable)
 elif variant == "idle":
     armed = stall_watchdog.arm(seconds=bound, busy=lambda: False)
 else:
@@ -3371,6 +3380,46 @@ def test_a_fire_with_work_in_flight_dumps_and_the_runtime_SURVIVES(tmp_path: Pat
     assert text.count(stall_watchdog.FIRED_MARKER) >= 1, (
         f"the bound never fired, so this cell proves nothing about a fire it survived: "
         f"{text[:600]!r}"
+    )
+    assert any(
+        line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+    ), f"the dump does not say the fire was held: {text[:900]!r}"
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
+
+
+def test_an_UNREADABLE_work_report_still_fires_and_holds(tmp_path: Path) -> None:
+    """THE INVARIANT: no path withholds the fire. Only the exit is ever refused.
+
+    The sibling failure this protects against is an abstention — a bound that stops
+    bounding, so a genuinely wedged runtime never gets its evidence and never surfaces.
+    That is worse than the cut it replaced, and it is the shape a "hold the exit"
+    change invites: re-arm the timer away, or skip the fire, when the predicate cannot
+    be evaluated.
+
+    So this is the surviving cell's child with a probe that RAISES, and what is
+    asserted is that the bound fired anyway: the dump exists with the fired marker, it
+    says the fire was held, and the process is alive to have written its sentinel.
+    ``_holds_work`` answers True for an unreadable report, and ``process._busy_probe``
+    answers the same way for each of its three unknown cases — no handle yet, a handle
+    with no probe, a probe that raised — so the decision is always "we cannot prove
+    this runtime is idle", and the EVIDENCE is never a function of that answer.
+    """
+    sentinel = tmp_path / "sentinel.txt"
+    result = _run_script(
+        _EXIT_LEG_CHILD,
+        tmp_path,
+        args=(str(sentinel), str(SHORT_BOUND_S), "unused", "raises", "0", "4"),
+    )
+
+    assert result.returncode == 0, (
+        f"an unreadable work report ended the runtime, which is the cut this change "
+        f"removes: rc={result.returncode} {result.stdout!r} {result.stderr!r}"
+    )
+    assert sentinel.read_text(encoding="utf-8") == "stopped on its own terms"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+    assert text.count(stall_watchdog.FIRED_MARKER) >= 1, (
+        f"the fire was WITHHELD when the predicate could not be read: {text[:600]!r}"
     )
     assert any(
         line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
