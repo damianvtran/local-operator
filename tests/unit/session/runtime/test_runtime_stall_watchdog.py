@@ -2487,6 +2487,29 @@ def test_a_failing_record_cannot_defeat_the_give_up(
     assert sum("could not be written" in message for message in messages) == deaths, messages
 
 
+class _ExplodingLogger:
+    """A logger whose calls raise — optionally only for the messages it is told to.
+
+    ``RecursionError`` rather than a synthetic ``RuntimeError``: in this venv
+    ``StreamHandler.emit`` re-raises it instead of routing it to ``handleError``, so a runtime
+    wedged enough to blow the recursion limit can reach this path for real. That is why a log
+    call must not be able to break the path it reports on (agent review round 4, MINOR).
+
+    ``only`` is for a cell that still needs the OTHER lines to arrive — the cancellation cell
+    asserts the record's own warning is present, so only its own line explodes there — and
+    ``None`` explodes on everything.
+    """
+
+    def __init__(self, real: logging.Logger, only: str | None = None) -> None:
+        self._real = real
+        self._only = only
+
+    def warning(self, message: str, *args: object, exc_info: bool = False) -> None:
+        if self._only is None or self._only in message:
+            raise RecursionError("rig: maximum recursion depth exceeded while reporting")
+        self._real.warning(message, *args, exc_info=exc_info)
+
+
 def test_a_failing_record_does_not_replace_a_cancellation(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2495,7 +2518,10 @@ def test_a_failing_record_does_not_replace_a_cancellation(
     An un-totaled ``note_tick_death`` in the cancellation path raised where the shutdown
     path had already committed to re-raising, so the supervisor ended ``OSError`` where it
     was asked for ``cancelled`` — a diagnostic replacing a terminal state, one branch over
-    from the give-up that the cell above covers.
+    from the give-up that the cell above covers. Round 4 added the LOG LINE beside that
+    write to the same cell: it now raises for its own message only, so the assertion below
+    about the record's warning still holds while the branch is shown to end ``cancelled``
+    with no report possible either.
 
     The REAL tick is left in place (it sleeps), so the cancellation lands on the object
     production creates and the assertion is about how the supervisor ENDS.
@@ -2503,6 +2529,11 @@ def test_a_failing_record_does_not_replace_a_cancellation(
     from local_operator.session.runtime import process
 
     monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(
+        process,
+        "logger",
+        _ExplodingLogger(process.logger, only="was cancelled while the session was live"),
+    )
 
     def unwritable_record(plane: str, reason: str) -> bool:
         raise OSError("rig: the record cannot be written")
@@ -2577,6 +2608,53 @@ def test_a_failing_dump_path_cannot_defeat_the_give_up(
     )
     assert any("GIVES UP" in message for message in messages), messages
     assert any("dump path could not be resolved" in message for message in messages), messages
+
+
+def test_a_failing_log_cannot_defeat_the_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REPORT MUST NOT BREAK THE PATH IT REPORTS ON (agent review round 4, MINOR).
+
+    Round 2 made the record total and round 3 made its clause total; the give-up's own
+    ``logger.warning`` still sat between the decision and the ``return`` — as did the guard's,
+    which is the one that keeps the supervision alive at all. Rigged, the give-up never
+    happened: the log's exception reached the guard, the guard slept and the loop went round
+    again (321 creations in 6 s, against 4 for the control). Every log call in the supervision
+    now goes through ``_safe_warning``, so the logger here raises on EVERY message — and the
+    recovery stamp raises too, which is what drives each cycle into the guard, so that call is
+    exercised rather than assumed.
+
+    The records are the point: with the log impossible, the dump still carries every death.
+    A missing log line is a missing diagnostic, never a missing event.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(process, "logger", _ExplodingLogger(process.logger))
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    def unwritable_stamp(plane: str) -> None:
+        raise OSError("rig: the recovery stamp cannot be written")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+    monkeypatch.setattr(stall_watchdog, "beat", unwritable_stamp)
+
+    asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=20.0))
+
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor never reached its decision ({deaths} creations) while its logger "
+        f"raised, so a report that cannot be made defeats the give-up"
+    )
+    assert stall_watchdog.tick_deaths(os.getpid(), tmp_path) == (stall_watchdog.WORKLOAD,) * (
+        process.STALL_BEAT_RESTARTS + 1
+    ), "the dump lost deaths when the log could not be written: the record depends on the report"
 
 
 def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
