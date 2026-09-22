@@ -369,13 +369,33 @@ def verify_rotation_statement(statement: dict[str, Any], old_public_key: str) ->
     the fingerprint of the carried public key (so the row we write cannot be made
     to claim an id nobody can prove); and the signature verifies over the
     statement with ``sig_old`` removed.
+
+    ``network_id`` IS IN ``required`` AND IS NOT COMPARED HERE, which is the whole of
+    this verifier's part in the network binding. Its presence is this function's
+    business because a statement that names NO network is malformed rather than
+    somebody else's — and the field is inside the signed canonical body below, so a
+    receiver cannot be handed one that was renamed in flight. WHICH network it must
+    name is the caller's, because only the caller holds the record it would be
+    applied to: ``relay._statement_names_network`` is that comparison, and both
+    routes to a row (the table and the frame) go through it. Leaving the field out
+    of ``required`` split that authority in two — the helper read a missing field as
+    "not this network" while this tuple implied no opinion — so a reader had to
+    decide which of the two was authoritative. Now the split is stated: presence
+    here, equality there.
     """
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     from local_operator.network.types import HandshakeRefusal
 
-    required = ("old_device_id", "new_device_id", "new_public_key", "sig_old", "rotated_at")
+    required = (
+        "network_id",
+        "old_device_id",
+        "new_device_id",
+        "new_public_key",
+        "sig_old",
+        "rotated_at",
+    )
     missing = [field for field in required if not statement.get(field)]
     if missing:
         raise HandshakeRefusal(
