@@ -454,7 +454,10 @@ async def test_an_unanticipated_raise_from_the_engage_is_still_an_attempt(
 
     counted = spooled.read_spooled_turn(config_dir, "sess-belt")
     assert counted is not None and counted["attempts"] == 1
-    assert counted["last_error"] == "failed"
+    assert counted["last_error"] == "raised", (
+        "the belt's word must not claim the engage failed: it may have started a "
+        "runtime before it raised (round 3, R3-1)"
+    )
 
 
 def test_dropping_a_deferral_still_judges_the_record_it_clears(
@@ -490,3 +493,43 @@ def test_dropping_a_deferral_still_judges_the_record_it_clears(
     assert (
         seen.get("expected_updated_at_ms") == judged["updated_at_ms"]
     ), "the drop must not unlink a record on a judgement it cannot still see"
+
+
+def test_dropping_a_deferral_spares_the_owners_own_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-2: the drop refuses when the spool holds the OWNER's own words.
+
+    A ``SOURCE_USER`` row is dischargeable by exactly the raise the deferral is
+    declining — the successor's boot drain RUNS it, durable history or not — so a
+    record that arrived for one must survive; the deferral judgement is about the
+    peer rows beside it. Pinned because it is the one guard this round added whose
+    removal nothing else noticed (round 3 proved that by mutation).
+    """
+    from local_operator.session.runtime import inbox
+
+    config_dir = tmp_path / "store"
+    directory = _session(config_dir, "sess-owner-row", rows=[_owner_row(), _note_row()])
+    spooled.note_spooled_turn(config_dir, "sess-owner-row")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
+    assert spooled.spool_has_owner_row(directory) is True
+
+    inbox.drop_owed_turn(directory)
+
+    assert (
+        spooled.read_spooled_turn(config_dir, "sess-owner-row") is not None
+    ), "the owner's message is deliverable by a raise; its record must survive"
+
+
+def test_the_spool_stores_agree_on_what_the_owners_words_are(tmp_path: Path) -> None:
+    """R3-3: two modules, one token, and a rename must not desynchronise them.
+
+    ``spooled.SOURCE_USER`` and ``inbox.SOURCE_USER`` are the same wire value
+    spelled in two places, and ``spool_owes_turn``/``spool_has_owner_row`` decide
+    whether a message has an owner by comparing against it. A rename on one side
+    alone would fail in the UNSAFE direction: rows would stop counting as
+    turn-asking, and the message would lose its owner silently.
+    """
+    from local_operator.session.runtime.inbox import SOURCE_USER as INBOX_SOURCE_USER
+
+    assert spooled.SOURCE_USER == INBOX_SOURCE_USER == "user"

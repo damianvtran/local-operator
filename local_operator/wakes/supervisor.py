@@ -1175,11 +1175,12 @@ class _Sweeper:
                         exc,
                         exc_info=True,
                     )
-                # AND IT IS AN ATTEMPT (round 2, R2-1): this is a raise that did
-                # not happen. Without it the walk would be silent on exactly the
-                # shape that repeats most cheaply — an exception thrown before
-                # `_engage_one` could report anything of its own.
-                _outcome("failed")
+                # AND IT IS AN ATTEMPT (round 2, R2-1): this is a raise the
+                # sweeper could not attribute. Without it the walk would be silent
+                # on exactly the shape that repeats most cheaply — an exception
+                # thrown before `_engage_one` could report anything of its own.
+                # `raised`, not `failed` (round 3, R3-1): see the constant.
+                _outcome("raised")
                 return False
             finally:
                 # Popped in the task itself rather than in a done-callback so
@@ -1365,6 +1366,13 @@ def _has_fireable_wakes(
 #:   the retry cost bounded.
 #: * ``failed`` — the engage itself could not start a runtime (a cold-start
 #:   failure, a refusal).
+#: * ``raised`` — the engage RAISED out of the sweeper's belt, which is NOT the
+#:   same thing (review round 3, R3-1): ``_engage_one`` can raise after
+#:   ``engage_runtime`` has already returned (the ``_note_delivered`` hop below
+#:   it), so a runtime may well have started. Counting it is right — the walk
+#:   must not retry immediately — but calling it ``failed`` would put a word in
+#:   ``last_error`` that can be false, and the store's records are read by people
+#:   asking what happened.
 #:
 #: ``live`` IS DELIBERATELY ABSENT (review round 1, R1-1, major). A live record
 #: means the session is SERVED — the handover has not begun, nothing was tried,
@@ -1376,7 +1384,7 @@ def _has_fireable_wakes(
 #: change exists to close. ``ghost`` is absent for a different reason: the
 #: reconciler drops a record whose session directory is gone, so there is
 #: nothing to walk.
-_SPOOLED_ATTEMPT_REASONS = frozenset({"wedged", "failed"})
+_SPOOLED_ATTEMPT_REASONS = frozenset({"wedged", "failed", "raised"})
 
 
 def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> None:
@@ -1396,6 +1404,14 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> 
     """
     if reason not in _SPOOLED_ATTEMPT_REASONS:
         return
+    # ON THE LOOP, DELIBERATELY (review round 3, R3-4). The sibling ledger write
+    # beside this one goes through ``asyncio.to_thread``, and this does not: the
+    # record is one ~200-byte JSON file read, rewritten and ``os.replace``d with
+    # no fsync (``spooled._write``), so it is a couple of syscalls against a
+    # process whose slice is ten seconds — while the ledger's write is a
+    # read-modify-write of a directory that may hold every session on the host.
+    # Threading this would buy nothing and would make the callback awaitable,
+    # which the engage's own call sites are not.
     try:
         from local_operator.wakes.spooled import note_attempt, read_spooled_turn
 
