@@ -541,6 +541,20 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "How the built-in tools execute.",
     ),
+    # LIVE, and its own section, for the reason ``tools`` is LIVE: ``execute_bash``
+    # reads these through a fresh ``ConfigManager(config_dir())`` per call, so an
+    # edit lands on the next command. Deliberately NOT in ``shell_environment``,
+    # whose members are NEW_LAUNCH because the agent's own shell can lower them:
+    # the memory ceiling is a resource policy the OPERATOR owns, and a loosening
+    # by the agent is no privilege escalation — the kill only ever stops the
+    # agent's own command, never the runtime.
+    Section(
+        "memory_guard",
+        "Command memory limit",
+        Scope.LIVE,
+        "A per-command RAM ceiling, so one oversized command is killed instead of "
+        "taking the whole device down.",
+    ),
     # Split out of ``tools`` (review round 1, M2), for the reason the module's
     # own history gives for ``providers`` and ``web_tools``: scope is uniform
     # within a section by construction, and these three keys are the one part of
@@ -2692,9 +2706,71 @@ SETTINGS: tuple[Setting, ...] = (
         help=_BASH_SHELL_HELP,
         empty_unsets=True,
     ),
+    # -- memory_guard -------------------------------------------------------
+    # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
+    # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than
+    # imported, for the same reason the row above is not (this module must stay
+    # cheap for the CLI, ``tools.builtin``/``memory_guard`` must not be pulled in).
+    # LIVE: the reader is a fresh ConfigManager per command (see the section).
+    Setting(
+        key="bash.memory.enabled",
+        path=("bash", "memory", "enabled"),
+        section="memory_guard",
+        label="Command memory limit",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Give every bash command a RAM ceiling. A command whose process group "
+            "crosses it is killed (its group only, never lop) so it cannot take "
+            "the device down; the model is told to use less memory."
+        ),
+        choices=_bool_choices("cap command memory", "no ceiling"),
+    ),
+    Setting(
+        key="bash.memory.mode",
+        path=("bash", "memory", "mode"),
+        section="memory_guard",
+        label="Ceiling source",
+        kind=Kind.ENUM,
+        default="auto",
+        help=(
+            "'auto' derives the ceiling from the memory this device has free right "
+            "now, so it tightens on its own when the machine is busy. 'manual' "
+            "pins it to the number below."
+        ),
+        choices=(
+            Choice("auto", "auto", "derive from available memory (default)"),
+            Choice("manual", "manual", "use the limit_mb below"),
+        ),
+    ),
+    Setting(
+        key="bash.memory.limit_mb",
+        path=("bash", "memory", "limit_mb"),
+        section="memory_guard",
+        label="Manual ceiling (MB)",
+        kind=Kind.INT,
+        default=0,
+        help=(
+            "The ceiling when 'manual' is selected above. 0 means use the auto "
+            "ceiling instead, so leaving this at 0 never disables the guard."
+        ),
+    ),
+    Setting(
+        key="bash.memory.soft_fraction",
+        path=("bash", "memory", "soft_fraction"),
+        section="memory_guard",
+        label="Advisory threshold",
+        kind=Kind.FLOAT,
+        default=0.8,
+        help=(
+            "Fraction of the ceiling at which one advisory line is emitted. It is "
+            "only an advisory — userspace cannot slow an allocation — so it warns "
+            "before the kill, it does not prevent it."
+        ),
+    ),
     # -- shell_environment ----------------------------------------------
-    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the same
-    # way as the row above. The three rows are one policy and are read together
+    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the
+    # same way as the rows above. The three rows are one policy and are read
     # by one reader, but they are three settings rather than a JSON blob because
     # each answers a different question and each has a shape the editor already
     # knows: a mode to pick, and two name lists to type.

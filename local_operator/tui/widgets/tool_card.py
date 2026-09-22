@@ -456,6 +456,12 @@ LIVE_HEADER_RUNNING = "⋯ running"
 #: banners are themselves legible as "nothing yet", so the frame stays honest;
 #: it is this clause that stops being load-bearing, not the card.
 LIVE_HEADER_PENDING = "no output yet"
+#: The one-cell lead on the live memory advisory (see
+#: :meth:`ToolCard.set_live_advisory`). A glyph rather than colour alone, for the
+#: reason the live header carries one: the distinction has to survive a
+#: monochrome capture or a colour-blind reader, and `!` is the card's existing
+#: vocabulary for "attention, not failure" (the settled error row uses `✗`).
+LIVE_ADVISORY_GLYPH = "!"
 #: How often a live card repaints, in seconds. ONE timer drives both the
 #: duration on the collapsed row and the streaming body, for the reason the
 #: subagent panel gives for its own single tick: a repaint scheduled per
@@ -1261,6 +1267,13 @@ class ToolCard(ExpandableActionBlock):
         #: yields it to progress; progress is what the user opens the card for
         #: ("if we wish to"), so it costs no rows until then.
         self._live: list[str] = []
+        #: The soft memory advisory as a PERSISTENT state line, or None. Set from
+        #: the update's structured field (see :meth:`set_live_advisory`) and
+        #: painted under the live header until the card settles. Distinct from
+        #: ``_live`` on purpose: the advisory is the HARNESS speaking, not the
+        #: command's output, and keeping it out of the output tail is what stops
+        #: it scrolling off a chatty command (design review D1).
+        self._live_advisory: str | None = None
         #: Lines the bound has discarded off the FRONT of ``_live``, announced
         #: on a marker row so a truncated live view never reads as complete.
         self._live_dropped = 0
@@ -2021,6 +2034,7 @@ class ToolCard(ExpandableActionBlock):
         """
         self._stop_clock()
         self._live = []
+        self._live_advisory = None
         self._live_dropped = 0
         self._live_elided = False
         self._live_dirty = False
@@ -2187,6 +2201,24 @@ class ToolCard(ExpandableActionBlock):
             if isinstance(parent, TranscriptView):
                 parent.invalidate_name_col()
         self._refresh_row()
+
+    def set_live_advisory(self, advisory: str | None) -> None:
+        """Paint (or clear) the live memory advisory as a persistent state line.
+
+        A SEPARATE channel from :meth:`set_partial_detail` on purpose: the
+        advisory is the harness talking, not the command's output, so it must not
+        share the output buffer's tail cap or its drop marker (design review D1).
+        Setting it does not by itself repaint — the card's own 1 Hz tick does,
+        like every other live change — but it marks the card dirty so a tick that
+        takes new output also re-lays the height the extra row needs.
+
+        ``None`` clears it. The producer calls this with the latch's line on
+        every update while the condition holds and stops sending it once cleared.
+        """
+        if advisory == self._live_advisory:
+            return
+        self._live_advisory = advisory
+        self._live_dirty = True
 
     def set_partial_detail(self, detail: str) -> None:
         """Take the tool's output SO FAR into the card's live view.
@@ -2652,6 +2684,7 @@ class ToolCard(ExpandableActionBlock):
         """
         dim = bindings.style("tool.live.dim")
         accent = bindings.style("tool.live.header")
+        advisory_style = bindings.style("tool.live.advisory")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
         # State, then time, then the caveat — read left to right that is "it is
@@ -2682,6 +2715,27 @@ class ToolCard(ExpandableActionBlock):
         # See `bindings.BY_ELEMENT["tool.live.header"].note` for why this rides
         # `accent`.
         row.append(truncate_cells(header, line_width), style=accent)
+        # The soft memory advisory is a PERSISTENT STATE line, immediately under
+        # the header — NOT text prepended to the output tail.
+        #
+        # Design review D1: prepending it to the summary put it at the HEAD of a
+        # block that keeps the TAIL (`LIVE_MAX_LINES`), so on a chatty command —
+        # exactly the memory-pressure case it exists for — it scrolled off, and
+        # the one-shot latch meant the next snapshot overwrote it anyway. Painted
+        # here it never competes with output and never scrolls: it stays on the
+        # card for as long as `_live_advisory` is set (cleared at settle, and by
+        # `set_live_advisory(None)` if the condition ever clears).
+        #
+        # D2: it rides `tool.live.advisory` (the theme's amber), so it reads as
+        # the harness talking rather than as a line the command printed — `dim`
+        # here is the command's OWN stdout ink. The leading `!` glyph states it
+        # in the card's one-cell state vocabulary for a monochrome capture.
+        if self._live_advisory:
+            row.append("\n" + indent, style=dim)
+            row.append(
+                truncate_cells(f"{LIVE_ADVISORY_GLYPH} {self._live_advisory}", line_width),
+                style=advisory_style,
+            )
         if self._live_elided or self._live_dropped > 0:
             plural = "s" if self._live_dropped != 1 else ""
             marker = (

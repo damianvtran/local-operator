@@ -77,6 +77,7 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
@@ -1581,12 +1582,24 @@ def _ambiguous_report(
     )
 
 
-def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
-    """Build a non-throwing error result (loop never raises into the model)."""
+def _error(
+    tool_call_id: str,
+    tool_name: str,
+    message: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> ToolResult:
+    """Build a non-throwing error result (loop never raises into the model).
+
+    ``details`` carries structured payload for renderers and compaction pruning
+    the same way :func:`_text`'s does — the memory guard uses it to record the
+    measured group peak and the ceiling behind a MEMORY LIMIT EXCEEDED result.
+    """
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         content=[TextContent(text=message)],
+        details=details,
         is_error=True,
     )
 
@@ -2015,6 +2028,51 @@ def _configured_bash_shell() -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _configured_memory_budget(override_mb: float | None) -> memory_guard.Budget:
+    """Resolve this command's memory budget from config + host, at CALL time.
+
+    Fresh ``ConfigManager`` per call for the same reason ``_configured_bash_shell``
+    uses one: the ``memory_guard`` keys are LIVE, so an edit lands on the next
+    command. A config read that fails means "the constants' defaults" (enabled,
+    auto) so a command still runs when ``config.yml`` is broken.
+
+    The ``memory_mb`` argument is passed through to ``compute_budget`` even when
+    the config read failed — the caller said the number, so it does not depend on
+    the config being readable. That is about a config-read FAILURE, not the
+    precedence over the off switch: ``enabled=False`` still wins over a positive
+    ``memory_mb``, because ``enabled`` is the machine-wide master switch (F9;
+    contract §6/§7, QA round 1 Q1).
+    """
+    mode = memory_guard.BASH_MEMORY_MODE_DEFAULT
+    limit_mb = memory_guard.BASH_MEMORY_LIMIT_MB_DEFAULT
+    soft_fraction = memory_guard.BASH_MEMORY_SOFT_FRACTION_DEFAULT
+    enabled = memory_guard.BASH_MEMORY_ENABLED_DEFAULT
+    try:
+        config = ConfigManager(config_dir())
+        mode = config.get_nested_value(memory_guard.BASH_MEMORY_MODE_PATH, mode)
+        limit_mb = config.get_nested_value(memory_guard.BASH_MEMORY_LIMIT_MB_PATH, limit_mb)
+        soft_fraction = config.get_nested_value(
+            memory_guard.BASH_MEMORY_SOFT_FRACTION_PATH, soft_fraction
+        )
+        enabled = config.get_nested_value(memory_guard.BASH_MEMORY_ENABLED_PATH, enabled)
+    except Exception:  # noqa: BLE001 — config trouble must never block a command
+        pass
+    # Guard the TYPES as well as the values: a hand-edited config.yml can hold a
+    # string where a number belongs, and a bad value must degrade to the default
+    # rather than raise inside the guard that is supposed to protect the command.
+    return memory_guard.compute_budget(
+        mode=mode if isinstance(mode, str) else memory_guard.BASH_MEMORY_MODE_DEFAULT,
+        limit_mb=limit_mb if isinstance(limit_mb, int) and not isinstance(limit_mb, bool) else 0,
+        soft_fraction=(
+            float(soft_fraction)
+            if isinstance(soft_fraction, (int, float)) and not isinstance(soft_fraction, bool)
+            else memory_guard.BASH_MEMORY_SOFT_FRACTION_DEFAULT
+        ),
+        override_mb=override_mb,
+        enabled=enabled if isinstance(enabled, bool) else memory_guard.BASH_MEMORY_ENABLED_DEFAULT,
+    )
+
+
 class BashParams(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -2044,6 +2102,18 @@ class BashParams(BaseModel):
             "still bounds the run."
         ),
     )
+    # Terse on purpose, like every field here: the schema rides every request.
+    # The semantics are the three the reader needs — unset = config, 0 = no
+    # budget for this call, > 0 = explicit ceiling in MB.
+    memory_mb: float | None = Field(
+        default=None,
+        description=(
+            "Optional RAM ceiling in MB for this command's process group. Omit to "
+            "use the configured budget; 0 disables the limit for this call; a "
+            "positive number overrides it. Exceeding the limit kills the command's "
+            "group."
+        ),
+    )
 
 
 #: What the live card shows while the pipe is holding an unterminated line.
@@ -2061,6 +2131,17 @@ _LIVE_PENDING_TEXT = "no output yet"
 #: not paint them.
 _WITHHELD_LIVE_OUTPUT = (
     "[live output withheld: this session's credential filter could not read its sink]"
+)
+
+#: The MEMORY LIMIT EXCEEDED line when the guard's own numbers are not available —
+#: a kill that arrived without a retained sample (a cancellation landing in the
+#: same tick). Plain text, no markdown: the tool card paints Text, so backticks
+#: would land literally. It still tells the model to reduce peak memory, which is
+#: the whole point of the line.
+MEMORY_EXCEEDED_FALLBACK = (
+    "MEMORY LIMIT EXCEEDED: this command exceeded the device memory budget and was "
+    "killed; the session is fine. Reduce peak memory and retry: stream instead of "
+    "loading all rows, lower the batch size, or process the input in chunks."
 )
 
 #: A PEM armour header, and a base64 body line. Only a header opens the streaming
@@ -3040,6 +3121,31 @@ async def execute_bash(
         spawned_pgid = os.getpgid(process.pid)
         group_reaper.register_group(spawned_pgid, params.command)
 
+    # The memory guard, bound to EXACTLY the group we just spawned. It is built
+    # only when we actually captured a pgid AND the budget resolved to something
+    # armed: a command whose group id could not be read is Windows-shaped (the
+    # guard is a POSIX feature — os.killpg/getpgid do not exist there) and runs
+    # unguarded, and a `source="disabled"` budget (config off, non-measurable
+    # host) is the pre-guard behaviour. The guard can only ever read and kill
+    # THIS pgid: it never discovers a group of its own, so it cannot touch the
+    # runtime or a sibling session (F5).
+    memory_budget = _configured_memory_budget(params.memory_mb)
+    guard: memory_guard.Guard | None = None
+    if spawned_pgid is not None and memory_budget.source != "disabled":
+        guard = memory_guard.Guard(spawned_pgid, memory_budget)
+    elif memory_budget.source == "disabled":
+        # One line, once, on the reason the guard is not protecting this
+        # command. Logged rather than streamed: a per-command advisory would be
+        # wallpaper, and `source="disabled"` is a machine-wide condition.
+        logger.debug("memory guard disabled for this command: %s", memory_budget.reason)
+
+    # The soft advisory line, held for the life of the command once the guard
+    # fires it. PERSISTENT, not one-shot: it rides the card's state line on every
+    # update so it stays painted until the command settles (design review D1).
+    # The guard's own latch stops it RE-FIRING; this cell is what makes the ONE
+    # firing stay visible rather than surviving a single 500 ms snapshot.
+    memory_advisory: str | None = None
+
     def _unregister_group() -> None:
         # Drop this group's ledger line once it is confirmed dead, so a clean
         # run leaves nothing for the startup sweep to consider and a long host
@@ -3049,6 +3155,24 @@ async def execute_bash(
             return
         with contextlib.suppress(Exception):
             group_reaper.unregister_group(spawned_pgid)
+
+    def _reap_synchronously() -> None:
+        """The drain/reap tail's NON-awaiting cleanup, shareable by early returns.
+
+        The steering-path memory branch returns before the tail (it cannot await
+        there — a caught cancellation would re-deliver), but the group is already
+        killed, so its ledger line, its transport and the abort waiter still need
+        releasing. Every step here is synchronous or a cancel, so it is safe on a
+        cancelled task (review round 1, m2). Idempotent: the normal tail runs the
+        same steps, so calling this on the way to that tail would be harmless too.
+        """
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        _unregister_group()
+        if abort_waiter is not None and not abort_waiter.done():
+            abort_waiter.cancel()
 
     stdout_chunks = _BashOutput()
     stderr_chunks = _BashOutput()
@@ -3186,10 +3310,28 @@ async def execute_bash(
             # Bytes are arriving and being held; ``(empty)`` would tell the
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
+        summary = _bash_output_summary(stdout, stderr)
+        # The soft (memory.high) advisory is carried as its OWN field, not
+        # prepended to the output text (design review D1). Prepended, it rode the
+        # HEAD of a block that keeps the TAIL, so on a chatty command — the exact
+        # memory-pressure case it exists for — it scrolled off, and the one-shot
+        # latch meant the next snapshot overwrote it anyway. As a field it reaches
+        # the card's persistent state line and stays put.
+        #
+        # ADVISORY ONLY — see the module docstring: userspace cannot throttle an
+        # allocation, so this is a warning, never a slowdown. The line is the
+        # latch's text; once the guard has fired it we resend the SAME line on
+        # every subsequent update (the latch returns it once, so it is held here),
+        # so it stays painted until the command settles.
+        advisory = memory_advisory
         on_update(
             AgentToolUpdate(
-                content=[TextContent(text=_bash_output_summary(stdout, stderr))],
-                details={"tool_name": "bash", "running": True},
+                content=[TextContent(text=summary)],
+                details={
+                    "tool_name": "bash",
+                    "running": True,
+                    "memory_advisory": advisory,
+                },
             )
         )
 
@@ -3200,7 +3342,44 @@ async def execute_bash(
 
     timed_out = False
     aborted = False
+    # Set when the memory guard kills this command's group. A THIRD branch beside
+    # timed_out/aborted, reading the same _kill(): the drain/reap tail below runs
+    # unchanged, and the result builder turns the flag into the MEMORY LIMIT
+    # EXCEEDED line. Checked on the detach path too, so a memory-killed command is
+    # never reported as "continues in the background" (§10).
+    memory_exceeded = False
+    memory_sample: memory_guard.Sample | None = None
     next_update = loop.time() + 0.5
+    # The memory tick rides the SAME 250 ms cadence as the timeout/abort wait, so
+    # it adds no loop and no new blocking call. The guard's sample() runs the ps
+    # read in a thread (never on the loop thread) — a blocking read here would
+    # stall the TUI frame, which is the failure this guard must not introduce.
+    mem_tick = guard.tick_s if guard is not None else 0.25
+    next_mem_sample = loop.time() + mem_tick
+
+    async def _memory_tick() -> bool:
+        """Sample the guarded group; kill and return True on a hard breach.
+
+        Unknown usage (None) is never a kill — ``should_kill`` requires a measured
+        reading, so a hiccupping ``ps`` leaves the command alone (F6). The soft
+        advisory is folded into the next live update, not emitted as a second
+        stream.
+        """
+        nonlocal memory_exceeded, memory_sample, memory_advisory
+        if guard is None:
+            return False
+        sample = await guard.sample()
+        memory_sample = sample
+        if guard.should_kill(sample):
+            memory_exceeded = True
+            _kill()
+            return True
+        # One-shot: ``soft_notice`` latches internally, so a group sitting over
+        # the soft line does not re-arm this.
+        notice = guard.soft_notice(sample)
+        if notice:
+            memory_advisory = notice
+        return False
 
     def _detach_to_job(jobs: Any, headline: str) -> ToolResult:
         """Hand the running process to a background job and return its id.
@@ -3238,8 +3417,11 @@ async def execute_bash(
             # budget, keeps the readers alive to drain the pipes, and reports
             # the exit status + bounded output as the job result.
             del job_id
+            nonlocal next_mem_sample
             timed_out_bg = False
             cancelled_bg = False
+            memory_exceeded_bg = False
+            bg_sample: memory_guard.Sample | None = None
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
 
@@ -3289,6 +3471,16 @@ async def execute_bash(
                     if asyncio.get_running_loop().time() > bg_deadline:
                         timed_out_bg = True
                         break
+                    # The memory guard's tick rides the SAME 250 ms wait: a
+                    # command that detached via steering or background=True is
+                    # still bounded. sample() runs the ps read in a thread.
+                    if guard is not None and asyncio.get_running_loop().time() >= next_mem_sample:
+                        next_mem_sample = asyncio.get_running_loop().time() + mem_tick
+                        bg_sample = await guard.sample()
+                        if guard.should_kill(bg_sample):
+                            memory_exceeded_bg = True
+                            _kill()
+                            break
                     await asyncio.wait({bg_wait}, timeout=0.25)
                     # The status line a human reads in the TUI while the job
                     # runs. Deliberately a heartbeat and not the output itself:
@@ -3296,7 +3488,7 @@ async def execute_bash(
                     # tail), and mirroring it into a field every renderer
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
-                await cleanup(kill=cancelled_bg or timed_out_bg)
+                await cleanup(kill=cancelled_bg or timed_out_bg or memory_exceeded_bg)
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
                 # into process cleanup first, then preserve cancellation so the
@@ -3309,6 +3501,25 @@ async def execute_bash(
             err = _redact_tool_text(err, context)
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            if memory_exceeded_bg:
+                head = (
+                    guard.over_budget_message(bg_sample)
+                    if guard is not None and bg_sample is not None
+                    else MEMORY_EXCEEDED_FALLBACK
+                )
+                # Structured details on the job row, mirroring the foreground
+                # result's `details` (contract §8.2, review round 1 m3): a
+                # renderer or compaction can read the measured peak and ceiling
+                # by key instead of parsing the head text. `report_progress`
+                # merges a mapping into `latest_details`, so this rides the same
+                # channel the heartbeat uses without displacing it.
+                report_progress(
+                    {
+                        "memory_exceeded": True,
+                        "memory_peak_bytes": guard.peak_bytes if guard else None,
+                        "memory_ceiling_bytes": guard.hard_bytes if guard else None,
+                    }
+                )
             if cancelled_bg:
                 head = "CANCELLED (process killed)"
             out, err, footer, _spill_details = await asyncio.to_thread(
@@ -3438,6 +3649,13 @@ async def execute_bash(
                 aborted = True
                 _kill()
                 break
+            if loop.time() >= next_mem_sample and guard is not None:
+                # Sampled BEFORE the update gate so a breach kills in the same
+                # tick the number is fresh. ``_memory_tick`` never raises into the
+                # loop: a probe failure is "unknown", which is never a kill.
+                next_mem_sample = loop.time() + mem_tick
+                if await _memory_tick():
+                    break
             if loop.time() >= next_update:
                 _emit_update()
                 next_update = loop.time() + 0.5
@@ -3460,6 +3678,35 @@ async def execute_bash(
             # No job manager to own a detached child: kill rather than leak.
             _kill()
             raise
+        if memory_exceeded:
+            # §10: a memory-killed command must NEVER be reported as "continues
+            # in the background". The guard set the flag before its _kill(), so if
+            # a steering CancelledError arrives in the same tick the memory branch
+            # wins.
+            #
+            # We return here rather than falling into the drain/reap tail below:
+            # awaiting there after a caught cancellation would re-deliver the
+            # cancellation and lose the attribution this branch exists to
+            # preserve. But skipping the tail must not skip its SYNCHRONOUS
+            # cleanup — the group is already killed, so reap its ledger line and
+            # release its transport here (review round 1, m2). The `await`s of
+            # the tail are what we cannot do; `_unregister_group()`,
+            # `transport.close()` and cancelling the abort waiter are not.
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            message = (
+                guard.over_budget_message(memory_sample)
+                if guard is not None and memory_sample is not None
+                else MEMORY_EXCEEDED_FALLBACK
+            )
+            return _error(
+                tool_call_id,
+                "bash",
+                # The COMMAND line is scrubbed like every other result line: a
+                # command can carry a credential (see the abort branch above).
+                f"{message}\n{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+            )
         return _detach_to_job(
             jobs,
             "steering interrupted; the command continues in the background. "
@@ -3542,6 +3789,26 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    if memory_exceeded:
+        # The MEMORY LIMIT EXCEEDED line goes FIRST, exactly where TIMEOUT goes,
+        # because the tool card keeps the HEAD of at most 40 lines — a line at the
+        # end of a long result is the first thing its truncation drops.
+        message = (
+            guard.over_budget_message(memory_sample)
+            if guard is not None and memory_sample is not None
+            else MEMORY_EXCEEDED_FALLBACK
+        )
+        parts.insert(0, message)
+        # An ordinary _error, NOT _invalid_arguments: the argument was
+        # satisfiable, the machine said no. The kill already yields a non-zero
+        # return code; the line makes it ATTRIBUTABLE, so the model learns the
+        # command itself was too big rather than retrying it identically.
+        details = dict(spill_details or {})
+        details["memory_exceeded"] = True
+        if guard is not None:
+            details["memory_peak_bytes"] = guard.peak_bytes
+            details["memory_ceiling_bytes"] = guard.hard_bytes
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     # ONE advisory line when the command is shaped like a credential dump, so the
     # model learns the safer form at the moment it needs it rather than after the
     # secret is already in the transcript. It rides the RESULT, not the stream:

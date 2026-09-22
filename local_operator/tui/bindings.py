@@ -463,6 +463,21 @@ _TOOL_ROW_BINDINGS: tuple[Binding, ...] = (
             'card\'s answer to "is it alive", and it has to survive a still frame.'
         ),
     ),
+    Binding(
+        "tool.live.advisory",
+        "warning",
+        "raised",
+        Role.OUTCOME,
+        Surface.TOOL_ROW,
+        note=(
+            "The soft memory advisory — a harness STATE line, not program output. "
+            "It rides `warning` (the theme's amber), never `dim`: on the same card "
+            "`dim` is how the command's OWN stdout is painted, so the advisory in "
+            "`dim` read as a line the program printed (design review D2). `danger` "
+            "is deliberately NOT used — the advisory is a warning, not an error, "
+            "and the kill itself settles as an ordinary `✗` error row."
+        ),
+    ),
     # -- _append_input_body: arguments -------------------------------------
     Binding("tool.args.dim", "dim", "surface", Role.NEUTRAL, Surface.TOOL_ROW),
     Binding("tool.args.label", "label", "surface", Role.REFERENCE, Surface.TOOL_ROW),

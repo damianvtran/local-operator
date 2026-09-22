@@ -578,7 +578,23 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: (``tests/unit/tui/test_keymap_pilot.py``), which asserts the same two
 #: directions this file does: a write from another process reaches a running
 #: app, and a write from the /settings page in THIS process moves this pane.
-HOST_OWNED_LIVE_SECTIONS = {"appearance", "runtime", "approvals", "keymap", "desktop"}
+#:
+#: ``memory_guard`` is host-owned for the ``desktop`` reason: its keys are read
+#: at COMMAND time by the bash tool, not by the ``Session``. ``execute_bash``
+#: builds a fresh ``ConfigManager(config_dir())`` per call (the same shape as
+#: ``_configured_bash_shell`` next to it), so a write from another process lands
+#: on the very next command and there is no session attribute for a probe here to
+#: watch move. Its live read is covered where it lives:
+#: ``tests/unit/test_memory_guard.py`` (the budget resolution and the kill) and the
+#: settings path-pin test in ``tests/unit/test_settings_io.py``.
+HOST_OWNED_LIVE_SECTIONS = {
+    "appearance",
+    "runtime",
+    "approvals",
+    "keymap",
+    "desktop",
+    "memory_guard",
+}
 
 
 def _live_sections() -> set[str]:
