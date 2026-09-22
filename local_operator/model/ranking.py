@@ -108,16 +108,22 @@ class ModelRow:
 
 #: `(tier, preferred_router, -score, version_key, row)` — the shape `rank_rows` sorts.
 #:
-#: ``preferred_router`` sits ABOVE ``-score`` for the reason
-#: :func:`_preferred_router_rank` records: on the ``auto`` query the preference has
-#: to beat a higher-scoring OpenRouter match (``openrouter/auto`` scores 7 to
-#: ``radient/auto``'s 6, so a rung below the score would leave the order unchanged).
+#: ``preferred_router`` sits ABOVE ``-score``, and the reason is the SCORED branch
+#: alone — it is the only one carrying a score to outrank. On the ``auto`` query
+#: ``openrouter/auto`` scores 7 to ``radient/auto``'s 6, so a rung below the score
+#: would leave that branch's order unchanged. The empty-query branch has no score
+#: at all and this rung is simply the first non-tier term there; see
+#: :func:`_preferred_router_rank`.
 _RankEntry = tuple[tuple[int, int], int, int, tuple[float, float, str], "ModelRow"]
 
 
-#: The model id of the Radient auto-router, appended to the aggregator's own
-#: namespace (``radient``/``auto``).
-_AUTO_ROUTER_MODEL_ID = "auto"
+#: The ROUTE the preference elevates: ``(provider, model_id)``, the Radient
+#: auto-router appended to the aggregator's own namespace. Deliberately NOT the id
+#: alone: any provider can serve a model called ``auto``, and
+#: :func:`local_operator.model.discovery.is_meta_route_id` is the predicate over
+#: the ID set this route is a member of — see :func:`_preferred_router_rank` for
+#: why that predicate is not reused here.
+_PREFERRED_ROUTER = ("radient", "auto")
 
 
 def _preferred_router_rank(row: ModelRow) -> int:
@@ -138,22 +144,51 @@ def _preferred_router_rank(row: ModelRow) -> int:
     ``(-0.0, -0.0, …)`` because neither id holds a number. So the ordering was a
     property of the ids, not a decision.
 
-    The operator chose the precedence: ``radient/auto`` leads the ``auto`` query
-    for EVERY user, including one who has only signed in to OpenRouter. That is
-    why there is no credential or account check here — the harness maker's own
-    router is presented first on purpose, not because it is the one signed in.
+    QUERY-INDEPENDENT, and that is the intent rather than an accident of where it
+    was inserted: the rung lifts the row for EVERY query the route matches, not
+    only the literal ``auto``. A partial query shows it plainly: for ``aut``
+    ``openrouter/openrouter/auto`` scores 5 to ``radient/auto``'s 4, yet the
+    operator's own reading of the preference — "Radient Auto comes first at the
+    top" — is that it lead whenever it is OFFERED. Since the dogfood catalogue
+    always offers it, ``auto`` is the only query the rule is experienced with, but
+    scoping the rung to ``needle == "auto"`` would make every partial spelling
+    (``aut``, ``au``) rank it behind the OpenRouter rows it leads for ``auto``,
+    which is the incoherent half-measure.
 
-    Only ``radient/auto`` is elevated, and NARROWLY: OpenRouter is an aggregator
-    the operator also uses, so demoting OpenRouter rows wholesale would be a much
-    larger behavioural change deserving its own design review. A caller that
-    builds rows from a different catalogue still gets the same precedence, which
-    is the point of ranking owning it rather than the picker.
+    It leads for every user who CAN RUN it, not every user unconditionally: the
+    connected tier outranks this rung, so a user signed in only to OpenRouter
+    still leads with the OpenRouter row and never sees this one at all — the
+    picker drops an unconnected row before ranking
+    (``providers.catalogue.picker_rows``). Presenting a row the account cannot run
+    above one it can was never the ask; the ask was precedence among the rows on
+    offer.
+
+    Only the Radient route in :data:`_PREFERRED_ROUTER` is elevated, and NARROWLY:
+    OpenRouter is an aggregator the operator also uses, so demoting OpenRouter
+    rows wholesale would be a much larger behavioural change deserving its own
+    design review. A caller that builds rows from a different catalogue still gets
+    the same precedence, which is the point of ranking owning it rather than the
+    picker.
+
+    WHY THE ROUTE LITERAL RATHER THAN ``is_meta_route_id``. The predicate owns
+    "which ids name a ROUTER, per provider" (``discovery._META_ROUTE_IDS``, which
+    also names OpenRouter's ``openrouter/auto``), and the reviewer's suggestion to
+    reuse it was tested rather than assumed: importing it costs ~15 ms of marginal
+    import (``discovery`` is otherwise resident — ``providers.registry`` already
+    pulls the same ``httpx``/``pydantic`` stack ``model.registry`` does — but under
+    the module's own budget no import is free), and with the provider gate it does
+    NOT do this job: ``radient`` is an aggregator, so the predicate is ALSO true of
+    ``radient/openrouter/auto``, which this PR deliberately leaves BELOW the
+    OpenRouter rows. Reusing it would silently lift that row too — a second
+    behavioural change this finding did not ask for. So the id is stated here as a
+    ROUTE, and the drift the finding feared (a new router id needing two updates)
+    is named in the comment above rather than traded for a wider rung.
 
     The gate on the PROVIDER matters for the same reason ``is_meta_route_id`` is
     provider-scoped: a local ``ollama/auto`` is a model a user can simply have,
     and it must not be lifted by a bare id test.
     """
-    return 0 if row.provider == "radient" and row.model_id == _AUTO_ROUTER_MODEL_ID else 1
+    return 0 if (row.provider, row.model_id) == _PREFERRED_ROUTER else 1
 
 
 def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
@@ -181,11 +216,13 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     A PREFERRED-ROUTER rung sits ABOVE the score and the version key, in BOTH
     branches, so ``/model`` with no query and ``/model auto`` agree. It is the one
     non-lexical thing here and it is a product preference rather than a heuristic:
-    it lifts ``radient/auto`` above every other row — see
-    :func:`_preferred_router_rank` for the measured order that motivated it and
-    how narrowly it is scoped. It has to outrank the SCORE rather than merely
-    ``_version_key``, because on the ``auto`` query the OpenRouter rows score
-    higher (7 to 6) and a rung below the score would change nothing.
+    it lifts ``radient/auto`` above every other row — QUERY-INDEPENDENTLY, for any
+    query the route matches, which is the intent and not merely the ``auto`` case
+    — see :func:`_preferred_router_rank` for the measured order that motivated it,
+    the partial-query case that shows the width, and how narrowly it is scoped. It
+    has to outrank the SCORE rather than merely ``_version_key``, because on the
+    ``auto`` query the OpenRouter rows score higher (7 to 6) and a rung below the
+    score would change nothing.
 
     DECISION-ONLY PROVIDERS ARE DROPPED, in both branches, before any scoring.
     This is the surface ``/model`` offers the catalogue THROUGH, and ranking is

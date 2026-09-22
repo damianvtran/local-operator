@@ -302,20 +302,46 @@ def _chat_providers() -> list[ProviderDefinition]:
     ``PROVIDER_REGISTRY`` carries it — ``openai``/``openai-device``,
     ``xai``/``xai-oauth``, ``zai``/``zai-oauth``,
     ``alibaba-token-plan``/``alibaba-token-plan-oauth`` as well. Those four are
-    already de-duplicated on the DESKTOP picker by the connected-only filter
-    (only ``openai`` is in ``usable_providers``, so ``openai-device``'s rows are
-    hidden), but they still reached the LIVE catalogue and the phone's sheet, so
-    naming radient here would have been a special case of a general rule. The
-    flavour's target is always a non-decision-only registry row, so a flavour is
-    dropped exactly when its base is in the chat providers — which is always.
+    already de-duplicated on the DESKTOP picker by the connected-only filter, but
+    the filter that does it is NOT "only the base is usable": the flavour is
+    suppressed only when an OAUTH row exists, so a KEY-ONLY OpenAI install has
+    BOTH ``openai`` and ``openai-device`` in ``usable_providers`` (measured
+    2026-09-22: ``usable_openai_key_only`` has both, while adding an OAuth row
+    drops ``openai-device``). What actually keeps the desktop clean on every
+    install is this catalogue filter, which is the point — the four flavours still
+    reached the LIVE catalogue and the phone's sheet, so naming radient here would
+    have been a special case of a general rule. The flavour's target is always a
+    non-decision-only registry row, so a flavour is dropped exactly when its base
+    is in the chat providers — which is always.
 
-    A caller that names a flavour explicitly is therefore served the BASE
-    catalogue, not the flavour's. That is lossless for the reason above (same
-    credential, same listing) and no such caller exists: flavours are not
-    hostings ``configure_model`` accepts, so nothing may run under one, and
-    :meth:`live_catalogue`'s ``providers`` argument is a credential-admission
-    filter (the phone's ``persisted_providers``) rather than a way to request a
-    prefix.
+    A caller that names a flavour explicitly is served the BASE catalogue ONLY IF
+    IT ALSO NAMES THE BASE. A flavour-ONLY ``providers`` set matches no chat
+    provider (the flavour is already gone from the registry above), so
+    ``live_catalogue(providers={"radient-key"})`` returns ``rows: []`` and
+    ``statuses: {}``. The alias is NOT resolved in the narrowing step: that
+    argument is a credential-admission filter and an empty answer is the CORRECT
+    one for a CHAT catalogue request naming only a row that can never feed one —
+    the same answer an empty collection gets, honoured literally. No in-tree
+    caller hits it: the phone passes :meth:`persisted_providers`, whose answer CAN
+    name the flavour (a key-only install measures ``['radient', 'radient-key']``)
+    but ALWAYS names the BASE alongside it — the stored row lands under the base,
+    and the flavour is admitted only because that base row is present — so a
+    flavour-ONLY set never arises. Adding a translation there would put a second
+    spelling of ``store_credentials_as`` on the admission path, which is what this
+    filter exists to avoid.
+
+    A flavour IS a hosting that ``configure_model`` accepts — ``get_provider_definition``
+    resolves all five, so a spec can be built and the sentence that used to stand
+    here ("flavours are not hostings ``configure_model`` accepts, so nothing may
+    run under one") was false. A session that names one RUNS: the spec carries the
+    flavour's own id (measured: ``build_model_spec("radient-key", "auto")`` yields
+    ``provider="radient-key"`` at ``https://api.radienthq.com/v1``) and the stream
+    path resolves the credential through the auth store's own alias cascade, which
+    is why ``get_api_key`` returns the same key under both spellings (measured:
+    ``radient-key`` and ``radient`` both yield the stored key). Dropping the
+    flavour ROW is therefore lossless for a different reason than "nothing can run
+    under it": the base and the flavour resolve to ONE credential and therefore ONE
+    listing, so the base row already carries every model the flavour row would.
     """
     chat = [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
     ids = {definition.id for definition in chat}

@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Resolve the operator's real cache BEFORE ``probe_isolation`` rewrites HOME to
-# its sandbox, or the seed below would copy the sandbox's own (empty) cache.
+# its sandbox: this is the READ-ONLY source for the seed below, and it must be
+# captured while HOME still points at the operator's own tree.
 _REAL_CACHE = Path(os.environ.get("HOME", "~")).expanduser() / ".local-operator" / "cache"
 
 import scripts.probe_isolation  # noqa: E402,F401  (isolates HOME/config on import)
@@ -53,12 +54,19 @@ def seed() -> ProviderController:
     STORAGE id (``radient`` for both the OAuth and the pasted-key form), which is
     what a real login or ``lop credential update`` writes — see ``AuthStore``.
     """
-    cache = Path("~/.local-operator/cache").expanduser()
-    cache.mkdir(parents=True, exist_ok=True)
+    # The SANDBOX cache, NOT the operator's: ``probe_isolation`` has already
+    # repointed HOME to a session-unique sandbox by the time ``seed()`` runs, so
+    # this path resolves inside it and the copies below land there. The two are
+    # named apart on purpose — ``_REAL_CACHE`` above is the read-only SOURCE,
+    # resolved before isolation; this is the writable TARGET. A later edit that
+    # made them one expression would turn the seed into a write against the
+    # operator's live cache, which is the trap the reviewer flagged.
+    sandbox_cache = Path("~/.local-operator/cache").expanduser()
+    sandbox_cache.mkdir(parents=True, exist_ok=True)
     for name in SEEDED_LISTINGS:
         source = _REAL_CACHE / name
         if source.exists():
-            shutil.copy2(source, cache / name)
+            shutil.copy2(source, sandbox_cache / name)
     store = AuthStore(default_db_path())
     store.upsert_credential(
         "radient",

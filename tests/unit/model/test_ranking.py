@@ -184,6 +184,47 @@ def test_the_radient_auto_router_leads_the_auto_query_and_the_empty_one():
         assert rank_rows(rows, query)[0].selector == "radient/auto", query
 
 
+def test_the_preference_is_query_independent_not_scoped_to_the_literal_auto():
+    """The rung lifts the route for any query it matches, and that is the intent.
+
+    A partial query is the only place the width shows: ``aut`` scores
+    ``openrouter/openrouter/auto`` 5 to ``radient/auto``'s 4, so a rung that only
+    fired on the literal ``auto`` would rank the OpenRouter row first here. The
+    operator's reading ("Radient Auto comes first at the top") is that it lead
+    whenever it is offered, so this pins the wider behaviour rather than leaving it
+    as an undocumented consequence of the insertion point. See
+    ``_preferred_router_rank``.
+    """
+    rows = [
+        _row("openrouter/openrouter/auto", aggregated=True),
+        _row("radient/auto", aggregated=True),
+    ]
+    assert _score("openrouter/openrouter/auto", "aut") == 5
+    assert _score("radient/auto", "aut") == 4
+    assert [row.selector for row in rank_rows(rows, "aut")][0] == "radient/auto"
+
+
+def test_the_preference_lifts_only_the_radient_auto_route():
+    """``radient/openrouter/auto`` is a router id reached through Radient's namespace
+    and is deliberately NOT elevated: it stays below the OpenRouter rows.
+
+    This is why the rung names the ROUTE rather than reusing ``is_meta_route_id``,
+    which is true of this id too (see ``_preferred_router_rank``) — reusing it
+    would lift this row as well, a second behavioural change the preference did not
+    ask for.
+    """
+    rows = [
+        _row("openrouter/openrouter/auto", aggregated=True),
+        _row("radient/openrouter/auto", aggregated=True),
+        _row("radient/auto", aggregated=True),
+    ]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "radient/auto",
+        "openrouter/openrouter/auto",
+        "radient/openrouter/auto",
+    ]
+
+
 def test_the_preference_is_provider_scoped_not_a_bare_id_test():
     """``ollama/auto`` is a model a user can simply have and must not be lifted.
 

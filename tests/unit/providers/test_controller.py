@@ -3655,13 +3655,15 @@ async def test_an_oauth_radient_install_lists_one_namespace_not_two(
 async def test_an_explicit_providers_argument_served_the_flavour_still_yields_the_base(
     controller, store, monkeypatch
 ) -> None:
-    """A caller naming a flavour is served the BASE catalogue, not the flavour's.
+    """A caller naming a flavour AND its base is served the BASE catalogue only.
 
-    The phone's ``providers`` argument is ``persisted_providers()``, which returns
-    both spellings for a key-only install (measured: ``['radient', 'radient-key']``).
-    The flavour is dropped from ``_chat_providers`` before the narrowing is
-    applied, so the base provider's one copy of the listing is what comes back —
-    and the flavour is never fetched for its own prefix.
+    The phone's ``providers`` argument is ``persisted_providers()``, whose answer
+    names the flavour for a key-only install (measured: ``['radient',
+    'radient-key']``) but always names the BASE alongside it — the stored row lands
+    under the base id, and the flavour is admitted only because that base row is
+    present. The flavour is dropped from ``_chat_providers`` before the narrowing
+    is applied, so the base provider's one copy of the listing is what comes back
+    — and the flavour is never fetched for its own prefix.
     """
     store.upsert_credential("radient-key", {"key": "rk", "type": "api_key"})
     calls = _listing(
@@ -3677,6 +3679,35 @@ async def test_an_explicit_providers_argument_served_the_flavour_still_yields_th
     assert "radient-key" not in calls, "the flavour is never fetched for its own prefix"
     assert {entry.provider for entry in entries} == {"radient"}
     assert set(statuses) == {"radient"}
+
+
+@pytest.mark.asyncio
+async def test_a_flavour_ONLY_providers_set_yields_nothing_and_that_is_the_contract(
+    controller, store, monkeypatch
+) -> None:
+    """The honest answer for a set that names no chat provider: no rows, no status.
+
+    ``providers`` is a CREDENTIAL-ADMISSION filter — the ids whose accounts a
+    caller may speak for — not a way to request a prefix, and a flavour has already
+    been dropped from the registry by the time the narrowing runs. So a set naming
+    ONLY ``radient-key`` matches no chat provider and the answer is empty, which is
+    the same answer an empty collection gets, honoured literally. The alias is
+    deliberately NOT resolved here: that would put a second spelling of
+    ``store_credentials_as`` on the admission path.
+
+    No in-tree caller passes a flavour-only set (the phone's
+    ``persisted_providers()`` always names the base alongside the flavour), so this
+    pins the CONTRACT rather than a live behaviour — the docstring on
+    ``_chat_providers`` states it, and this test is what keeps the two from
+    drifting apart again.
+    """
+    store.upsert_credential("radient-key", {"key": "rk", "type": "api_key"})
+    _listing(monkeypatch, {"radient": [DiscoveredModel(id="auto")]})
+
+    entries, statuses = await controller.live_catalogue(providers={"radient-key"})
+
+    assert entries == []
+    assert statuses == {}
 
 
 def test_initial_catalogue_layers_cached_aggregators_without_network(
