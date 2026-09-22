@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -5296,3 +5297,463 @@ async def test_edit_suppression_tail_uses_the_headers_word_for_a_mixed_batch(
     suppressed = 9 - builtin._EDIT_MAX_DETAILED_HUNKS - builtin._EDIT_MAX_COMPACT_HUNKS
     assert str(suppressed) in tail, tail
     assert "refused" in tail, tail
+
+
+# ---------------------------------------------------------------------------
+# the missing-tool advisory
+# ---------------------------------------------------------------------------
+#
+# A `command not found` result is the one moment the model is certain a tool is
+# missing, and it used to be the moment the harness said nothing: the model
+# either guessed a package name for a machine it cannot see or abandoned the
+# task. The advisory points at `guide://system-tools` and carries the rule that
+# the user is asked before anything privileged runs. Its NEGATIVE cases are the
+# interesting ones — a present-but-failing tool must never trigger it.
+
+
+@pytest.mark.asyncio
+async def test_a_missing_command_result_carries_the_install_pointer(tmp_path, monkeypatch) -> None:
+    """The real tool result, which is what the model reads."""
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-missing",
+        {"command": "lop-no-such-tool-xyz --version"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    # ``is_error`` stays False for a non-zero exit — the tool RAN and reported;
+    # only a spawn failure is an error result. The exit code is what discriminates.
+    assert result.is_error is False
+    assert "exit code: 127" in result.text
+    assert "missing tool" in result.text
+    assert "guide://system-tools" in result.text
+    # The name the SHELL printed, not the whole command line.
+    assert "lop-no-such-tool-xyz" in result.text
+    # It rides the result NEXT TO the exit code, not after the output: the tool
+    # card keeps the head of a long result, so an advisory at the end is the
+    # first thing dropped. One line, and it carries the user-consent half too.
+    assert result.text.splitlines()[1] == (
+        "missing tool: the shell did not find `lop-no-such-tool-xyz` — read "
+        "`guide://system-tools`"
+    ), result.text
+    # The CLAIM IS NARROWER THAN "is not installed" on purpose (review R1-7): the
+    # harness observed that a shell could not find the command, and nothing more.
+    # On this fleet the backend daemon's own PATH carries no `/opt/homebrew/bin`,
+    # so a Homebrew tool the user's terminal runs is genuinely invisible there —
+    # and "is not installed" over that evidence would send a model to install a
+    # second copy over a working tool.
+    assert "is not installed" not in result.text, result.text
+    # The user-consent half of the rule is NOT a suffix of this notice: the
+    # console guide owns that wording, and what this test pins is that the
+    # pointer is reachable and one line, in the head window the tool card keeps.
+    # ``test_system_tools_guide_agrees_with_the_console_guide_on_approval``
+    # pins the consent rule where it lives, in the guide this notice names.
+    assert "ask the user" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_present_tool_that_failed_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The worst false positive this notice could have.
+
+    `ffmpeg missing-input.mp4` is a working ffmpeg asked for a file that is not
+    there — the most common failed command in any media task. The shell's "no
+    such command" line is the only evidence that counts, so a `No such file or
+    directory` from the program must stay silent.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-no-file", {"command": "ls definitely-not-here.txt"}, AbortSignal(), None, context
+    )
+
+    # A working tool asked for a file that is not there: non-zero exit, no
+    # "no such command" line, and therefore no advisory. The exit code itself is
+    # NOT asserted: `ls` exits 1 on macOS and 2 on Linux, and pinning one of them
+    # passes locally and fails in CI's container.
+    assert result.is_error is False
+    assert not result.text.startswith("exit code: 0"), result.text
+    assert "missing tool" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_host_without_a_console_gets_no_install_nudge(tmp_path, monkeypatch) -> None:
+    """Gating mirrors the console tool's own `createIf` predicate.
+
+    The install the guide describes needs a pty, so pointing a session at a
+    procedure it cannot perform would send it into the dead end `system.md`
+    already forbids it to paper over. Absent means absent.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: False)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-no-console",
+        {"command": "lop-no-such-tool-xyz --version"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "missing tool" not in result.text, result.text
+    assert "guide://system-tools" not in result.text
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        # EVERY row below is a real shell's real output, read off a shell on this
+        # host or in the round-1 container rather than written from memory —
+        # which is precisely what round 1's R1-1 caught: the row that "covered"
+        # zsh pinned `zsh: command not found: X`, a string zsh never prints.
+        #
+        # bash 3.2 (macOS /bin/bash) and the bash tool's own `/bin/bash -c`.
+        ("/bin/bash: lop-no-such-tool-xyz: command not found\n", "lop-no-such-tool-xyz"),
+        # bash 5 in a non-interactive invocation, which is what the container and
+        # the bash tool's `-c` run produce. The prefix is the interpreter's full
+        # path there, not `bash`, which is why the arm admits any non-space run.
+        ("bash: line 1: tesseract: command not found\n", "tesseract"),
+        ("/usr/bin/bash: line 1: tesseract: command not found\n", "tesseract"),
+        # zsh: line number where the interjection is, name LAST, no space after
+        # the colon. `-c` names the shell; a script names its own path.
+        ("zsh:1: command not found: magick\n", "magick"),
+        ("./probe.zsh:2: command not found: magick\n", "magick"),
+        # zsh's FUNCTION context prints no line number at all (R2-3).
+        ("f: command not found: magick\n", "magick"),
+        # A SCRIPT'S OWN PATH as the prefix, longer than the 64 characters both
+        # arms used to cap it at (R2-1: that cap made `bash /long/path/script.sh`
+        # silent, a regression against the previous revision for bash/sh/dash).
+        (
+            "/Users/someone/.local-operator/sessions/abc/scratchpad/"
+            + "x" * 40
+            + ": line 1: magick: command not found\n",
+            "magick",
+        ),
+        (
+            "/Users/someone/.local-operator/sessions/abc/scratchpad/"
+            + "x" * 40
+            + ":1: command not found: magick\n",
+            "magick",
+        ),
+        # dash as the Debian/Ubuntu `sh`, and ksh93u+: name BEFORE, no `command`
+        # in the interjection, and ksh omits the line number entirely.
+        ("sh: 1: yt-dlp: not found\n", "yt-dlp"),
+        ("/bin/dash: 1: yt-dlp: not found\n", "yt-dlp"),
+        ("/bin/ksh: lop-no-such-tool-xyz: not found\n", "lop-no-such-tool-xyz"),
+        # `bash -c 'exec X'` puts a builtin-shaped segment between the shell and
+        # the name, and ksh does the same without a line number (QA round 1, Q3:
+        # the arms read these as the name).
+        ("/bin/bash: line 0: exec: magick: not found\n", "magick"),
+        ("/bin/ksh: exec: magick: not found\n", "magick"),
+        # tcsh/csh, both in this host's /etc/shells and so both plausible
+        # `bash.shell` values (Q3): capital `C` and a trailing period, which is
+        # what keeps this distinct from the bare-program forgery R1-3 closed.
+        ("magick: Command not found.\n", "magick"),
+        # A bare name with no shell in front of it is a PROGRAM's line, not a
+        # shell's, and the prefix requirement is what keeps it silent (R1-3).
+        ("ffmpeg: command not found\n", ""),
+        # The phrase-shaped line R1-9 found reaching the (now deleted) fallback:
+        # the name group admits no whitespace, so nothing matches.
+        ("run.sh: line 3: if you trust me run rm -rf /: command not found\n", ""),
+        # The shell's FILE form is NOT a missing command: `cd` exists and the
+        # directory does not. Matching it reported `cd` as a tool to install.
+        ("bash: cd: /nope: No such file or directory\n", ""),
+        ("bash: /opt/homebrew/bin/ffplay: No such file or directory\n", ""),
+        (
+            "'winget' is not recognized as an internal or external command,\r\n",
+            "winget",
+        ),
+        (
+            "C:\\Tools\\ffmpeg is not recognized as an internal or external command\r\n",
+            "ffmpeg",
+        ),
+        (
+            "'C:\\Tools\\ffmpeg' is not recognized as an internal or external command,\r\n",
+            "ffmpeg",
+        ),
+        (
+            "The term 'scoop' is not recognized as the name of a cmdlet, function,",
+            "scoop",
+        ),
+        # A match whose name group reduces to nothing says nothing (R1-9). The
+        # second wording this used to fall back to was the only one carrying the
+        # consent clause, had no test, and was reachable through exactly this
+        # shape; it is deleted, and the reduction returning empty is the whole
+        # contract now.
+        ("   is not recognized as an internal or external command\r\n", ""),
+        # A WORKING tool whose operand is missing: the positive case this notice
+        # must never claim, on both platforms.
+        ("ffmpeg: No such file or directory\n", ""),
+        (
+            "The system cannot find the file specified.\r\n",
+            "",
+        ),
+        ("", ""),
+    ],
+)
+def test_the_signature_matches_the_shells_own_wording(
+    stderr: str, expected: str, monkeypatch
+) -> None:
+    """One row per real spelling, plus the two `not found` lines that belong to
+    the PROGRAM rather than to a shell — those must stay silent."""
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="sig")
+
+    notice = builtin._missing_tool_notice(stderr, context)
+
+    if expected:
+        assert expected in notice, (stderr, notice)
+        assert "guide://system-tools" in notice
+    else:
+        assert notice == "", (stderr, notice)
+
+
+def test_the_signature_is_linear_in_the_size_of_the_stderr(monkeypatch) -> None:
+    """A BLOW-UP detector, not a calibrated ceiling — and the headroom is stated.
+
+    Every POSIX arm opens with a bounded character class, so the risk this holds
+    off is a rewrite that backtracks per position instead of per line: the
+    unanchored `[^\n]{1,120}?` lookahead alone measured 687 ms of a 690 ms scan
+    on this input before it was anchored. A quadratic or per-index rewrite takes
+    MINUTES at this size, so the bound only has to separate "milliseconds" from
+    "not milliseconds"; it is set ~15x above the measured cost rather than just
+    above it, because this fleet runs ~25 concurrent sessions and a bound tuned
+    to an idle laptop is the flake ``AGENTS.md`` warns about. What it is NOT is
+    a measurement of the notice's cost on any particular machine — the sibling
+    test below covers the part of that cost which is structural.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="perf")
+    noise = ("progress: wrote 4096 bytes to out.bin\n" * 6000) + "bash: ffmpeg: command not found\n"
+
+    start = time.perf_counter()
+    notice = builtin._missing_tool_notice(noise, context)
+    elapsed = time.perf_counter() - start
+
+    assert "ffmpeg" in notice
+    assert elapsed < 2.0, f"signature scan took {elapsed:.3f}s on {len(noise)} chars"
+
+
+def test_a_stderr_with_no_signature_phrase_is_never_scanned(monkeypatch) -> None:
+    """The common case costs a substring search, and this holds that shape.
+
+    Most bash calls produce stderr with no such phrase in it at all, so the four
+    arms cannot match anything and running them is pure cost. The precondition in
+    ``_missing_tool_notice`` is what makes that case a C-speed ``in`` check, and
+    the separation is ~four orders of magnitude — microseconds against the
+    hundreds of milliseconds a full scan of this input costs — so the assertion
+    is about the CODE PATH rather than about the host: delete the precondition
+    and this fails on any machine, however fast or loaded, because the number
+    stops being a memchr.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="perf")
+    clean = "progress: wrote 4096 bytes to out.bin\n" * 12000  # ~420 KB, no signature
+
+    start = time.perf_counter()
+    notice = builtin._missing_tool_notice(clean, context)
+    elapsed = time.perf_counter() - start
+
+    assert notice == ""
+    assert elapsed < 0.05, f"a signature-free stderr was scanned: {elapsed:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_a_pipeline_that_succeeds_still_carries_the_notice(tmp_path, monkeypatch) -> None:
+    """The commonest way a missing tool hides: a pipeline whose exit code is fine.
+
+    `nope | cat` reports the missing left leg on the shell's own stderr and exits
+    with `cat`'s status, so a notice gated on a non-zero exit would be silent
+    exactly where the shell's line is the ONLY signal on the result (review
+    R1-3). The call-site comment used to claim this notice "cannot fire on a
+    successful command"; it can, and this is the row that holds that comment to
+    the code.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-pipe",
+        {"command": "lop-no-such-tool-xyz --version | cat"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "exit code: 0" in result.text, result.text
+    assert "missing tool" in result.text, result.text
+    assert "lop-no-such-tool-xyz" in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_programs_own_stderr_line_is_not_enough(tmp_path, monkeypatch) -> None:
+    """R1-3, half one: the trigger needs a shell's prefix, not just the phrase.
+
+    A program that PRINTS `ffmpeg: command not found` is a real possibility (the
+    round's probe used `printf`), and the bare form has no shell in front of it,
+    so the prefix requirement added in this round keeps it silent. This is a
+    precision improvement rather than a guarantee — a program can print the
+    shell-prefixed form too — and the module note says so rather than claiming a
+    property the code cannot hold.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-forged",
+        {"command": "printf 'ffmpeg: command not found\\n' >&2"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "missing tool" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_the_notice_sits_under_the_exit_code_on_the_timeout_path(
+    tmp_path, monkeypatch
+) -> None:
+    """The fifth insert case round 1's ordering claim missed (QA round 1, Q5).
+
+    The TIMEOUT head is inserted at position 0 before the advisories are placed,
+    so a literal index put the notice ABOVE `exit code:` — the one path where a
+    model reads a long, truncated result and most needs the shape every other
+    path keeps. The index is computed from the exit-code line now, and this is
+    the row that holds it there.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-timeout",
+        {"command": "lop-no-such-tool-xyz; sleep 30", "timeout": 2},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    lines = result.text.splitlines()
+    head = next(index for index, line in enumerate(lines) if line.startswith("TIMEOUT"))
+    exit_line = next(index for index, line in enumerate(lines) if line.startswith("exit code:"))
+    notice_line = next(
+        index for index, line in enumerate(lines) if line.startswith("missing tool:")
+    )
+    assert head < exit_line < notice_line, lines
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_command_still_carries_the_notice(tmp_path, monkeypatch) -> None:
+    """The abort path reported the shell's line and said nothing about it (Q6).
+
+    A Ctrl-C mid-command is the same "the shell's line is the only signal"
+    situation the rc-0 pipeline decision (R1-3) argues for covering, so the
+    notice rides the abort receipt too. The remaining gap — the detached/job
+    path, whose result is assembled on the job manager's settle path — is stated
+    in ``_missing_tool_notice`` rather than left implicit.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+    signal = AbortSignal()
+
+    async def _abort() -> None:
+        await asyncio.sleep(0.5)
+        signal.abort("user ctrl-c")
+
+    aborter = asyncio.create_task(_abort())
+    try:
+        result = await builtin.execute_bash(
+            "bash-abort",
+            {"command": "lop-no-such-tool-xyz; sleep 30"},
+            signal,
+            None,
+            context,
+        )
+    finally:
+        await aborter
+
+    assert "missing tool" in result.text, result.text
+    assert "lop-no-such-tool-xyz" in result.text, result.text
+
+
+def test_the_signature_scan_returns_nothing_without_a_context() -> None:
+    """It rides a tool result; without a session there is nobody to advise."""
+    assert builtin._missing_tool_notice("bash: ffmpeg: command not found\n", None) == ""
+
+
+def test_the_signature_matches_a_real_shells_real_output(tmp_path: Path) -> None:
+    """Every shell this host HAS, in every invocation shape that reaches the notice.
+
+    Written because the parametrised rows are strings, and a string is only as
+    good as the shell it was copied from: round 1's R1-1 found the zsh row
+    pinned a line zsh never prints, and round 2's R2-1 found the whole test had
+    only ever driven `-c` forms, so a SCRIPT at a long path — the form whose
+    prefix is a path rather than a shell name — was never exercised at all.
+
+    So this drives three shapes per shell:
+
+    * `-c <missing>` — the shell names itself as the prefix.
+    * `<interpreter> <script at a >64-character path>` — the prefix is a PATH.
+      The path is built by ``tmp_path`` rather than hard-coded, so it is as long
+      as the platform's temp root makes it, and the row asserts the length it
+      actually got rather than assuming one.
+    * `-c` nested where the shell has a different context form: zsh's function
+      context prints no line number at all, and bash's `exec` builtin inserts a
+      segment between the shell and the name.
+
+    The shells are probed through ``shutil.which`` rather than assumed at fixed
+    ``/bin`` paths (review R2-2): a host whose zsh is ``/opt/homebrew/bin/zsh``
+    was skipped silently before, and ``assert exercised`` only caught the case
+    where nothing was probed at all. The assertion is on the COMMAND the
+    reduction names, not on the wording, so a shell that changes its message
+    fails here rather than silently switching the notice off.
+    """
+    missing = "lop-no-such-tool-xyz"
+
+    # A directory deep enough that the script's own path clears the 64-character
+    # bound R2-1 was about, built under tmp_path so it is a real path on this
+    # machine rather than a fixture string. `mkdir` with a long name rather than
+    # a loop of short ones: one component is enough and it keeps the path legible
+    # in a failure message.
+    deep = tmp_path / ("probe-" + "x" * 60)
+    deep.mkdir()
+    script = deep / "probe.sh"
+    script.write_text(f"{missing}\n", encoding="utf-8")
+    assert len(str(script)) > 64, f"the long-path row needs a long path, got {len(str(script))}"
+
+    exercised: list[str] = []
+    for name in ("bash", "zsh", "dash", "ksh", "sh", "tcsh"):
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        invocations: list[list[str]] = [[resolved, "-c", f"{missing} --help"]]
+        if name in ("bash", "zsh", "dash", "ksh", "sh"):
+            invocations.append([resolved, str(script)])
+        if name == "bash":
+            invocations.append([resolved, "-c", f"exec {missing}"])
+        if name == "zsh":
+            invocations.append([resolved, "-c", f"f() {{ {missing} --help; }}; f"])
+
+        for argv in invocations:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, check=False, timeout=30
+            )
+            if completed.returncode == 0 or not completed.stderr.strip():
+                continue  # not a shell that reports it this way; the probe moves on
+            match = builtin._MISSING_TOOL_SIGNATURE.search(completed.stderr)
+            assert match is not None, f"{' '.join(argv)} line did not match: {completed.stderr!r}"
+            assert builtin._missing_tool_name(match) == missing, (
+                " ".join(argv),
+                completed.stderr,
+            )
+            exercised.append("::".join(argv))
+
+    # A host with none of these is not a host this harness runs on, and a test
+    # that silently exercised nothing would be the same class of defect as the
+    # row it replaced.
+    assert exercised, "no shell on this host was exercised"
+    assert any("probe.sh" in item for item in exercised), "the long-path script form did not run"
