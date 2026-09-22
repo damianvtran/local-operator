@@ -7,6 +7,7 @@ import asyncio
 import base64
 import io
 import sys
+import textwrap
 import time
 import types
 import warnings
@@ -54,14 +55,18 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.providers.failover import ProviderError
+from local_operator.session.attachments import AttachmentStore
 from local_operator.session.session import (
     _PRE_ABORT_DROP_NOTICE_AT,
     IMAGE_DROPPED_NOTICE,
+    IMAGE_MISSING_MEDIA_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
+    MISSING_MEDIA_NOTICE,
     Session,
     _callable_accepts_one_positional,
     _is_persistable_message,
     _paired_prefix,
+    _without_unresolvable_frames,
 )
 from local_operator.session.transcript import Transcript
 
@@ -5293,3 +5298,271 @@ async def test_the_scratchpad_root_is_none_outside_the_session_store(tmp_path) -
         assert not (tmp_path / "agents" / "trained" / "scratchpad").exists()
     finally:
         await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Missing attachment media: a block whose payload is gone must never be sent
+# ---------------------------------------------------------------------------
+#
+# The transcript references media by digest and the store behind it is not
+# guaranteed to still hold the bytes — an external cleaner deleted 20,715 of
+# the operator's 21,051 payloads. ``_resolve_attachments`` degrades such a
+# reference to empty ``data`` (correct: the archive must survive a resume), and
+# the empty block then reached the wire as ``data:image/png;base64,``, which is
+# what every provider refuses with a permanent 400 — for every turn, and for
+# ``/compact`` too, because compaction has to send the history it summarises.
+# These tests pin the RENDER seam that stops it, and the archive it leaves alone.
+
+
+def _large_png_b64() -> str:
+    """A VALID PNG comfortably over the store's externalization floor.
+
+    A flat fill compresses to almost nothing, so the image is filled with
+    incompressible noise — anything under ``_ATTACHMENT_FLOOR_BYTES`` stays
+    inline in the transcript row and there would be no reference to lose.
+    """
+    import os
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", (256, 256), os.urandom(256 * 256 * 3)).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _missing_media_message(prefix: str = "shot") -> Message:
+    return Message(
+        role="user",
+        content=[
+            TextContent(text=prefix),
+            ImageContent(data="", mime_type="image/png"),
+        ],
+    )
+
+
+def _wire_image_urls(messages: list[Message]) -> list[str]:
+    """Every ``image_url`` the OpenAI-compatible client would put on the wire.
+
+    Serialized through the REAL ``_message_to_openai`` rather than by reading
+    ``block.data``: the defect was never in the block, it was in the string
+    that serializer builds, so the assertion has to be made on that string.
+    """
+    from local_operator.providers.clients import _message_to_openai
+
+    urls: list[str] = []
+    for message in messages:
+        content = _message_to_openai(message).get("content")
+        if not isinstance(content, list):
+            continue
+        urls.extend(part["image_url"]["url"] for part in content if part.get("type") == "image_url")
+    return urls
+
+
+def test_a_payload_less_image_becomes_a_notice_and_never_a_wire_block():
+    messages, dropped = _without_unresolvable_frames([_missing_media_message()])
+
+    assert dropped == 1
+    assert _wire_image_urls(messages) == [], "an empty image block reached the wire"
+    assert [getattr(block, "text", None) for block in messages[0].content] == [
+        "shot",
+        IMAGE_MISSING_MEDIA_NOTICE,
+    ]
+
+
+def test_whitespace_and_corrupt_payloads_count_as_no_bytes():
+    """The discriminator is \"decodes to zero bytes\", not \"is the empty string\"."""
+    for payload in ("", "   ", "\n\t", "!!! not base64 !!!"):
+        messages, dropped = _without_unresolvable_frames(
+            [
+                Message(
+                    role="user",
+                    content=[
+                        TextContent(text="x"),
+                        ImageContent(data=payload, mime_type="image/png"),
+                    ],
+                )
+            ]
+        )
+        assert dropped == 1, payload
+        assert _wire_image_urls(messages) == [], payload
+
+
+def test_real_bytes_survive_even_when_the_format_is_unrecognised():
+    """The negative case: proves the discriminator is not too aggressive.
+
+    ``_rebound_history_images`` documents that a block whose header
+    ``sniff_image`` cannot name "may be perfectly acceptable to the provider" —
+    a HEIF, or a host without Pillow to read the header. Dropping such a block
+    destroys real context, so only a payload with no bytes is refused.
+    """
+    real_png = _sized_png_b64((8, 8))
+    # Valid base64 that decodes to non-empty bytes no sniffer we ship knows.
+    unknown_format = base64.b64encode(b"\x00\x00\x00\x18ftypmif1" + b"\x11" * 64).decode("ascii")
+    # Line-wrapped base64: strict decoding refuses it, a lenient decoder reads
+    # it. It holds real bytes, so refusing it here would be the one error this
+    # pass must not make — hence the tolerant fallback decode.
+    wrapped = "\n".join(textwrap.wrap(real_png, 64))
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text="look"),
+            ImageContent(data=real_png, mime_type="image/png"),
+            ImageContent(data=unknown_format, mime_type="image/heif"),
+            ImageContent(data=wrapped, mime_type="image/png"),
+        ],
+    )
+    rendered, dropped = _without_unresolvable_frames([message])
+
+    assert dropped == 0
+    assert rendered[0] is message, "an untouched message must not be copied"
+    urls = _wire_image_urls(rendered)
+    assert len(urls) == 3
+    assert all(not url.endswith("base64,") for url in urls), urls
+
+
+def test_consecutive_missing_frames_collapse_to_one_notice():
+    """A snapcompact archive replays dozens of frames between two text edges;
+    an identical apology line per frame would cost more than the summary."""
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text="shots"),
+            ImageContent(data="", mime_type="image/png"),
+            ImageContent(data="   ", mime_type="image/png"),
+            ImageContent(data="", mime_type="image/png"),
+            TextContent(text="tail"),
+        ],
+    )
+    rendered, dropped = _without_unresolvable_frames([message])
+
+    assert dropped == 3
+    assert [getattr(block, "text", None) for block in rendered[0].content] == [
+        "shots",
+        IMAGE_MISSING_MEDIA_NOTICE,
+        "tail",
+    ]
+
+
+async def _session_with_lost_media(tmp_path, monkeypatch):
+    """A session whose transcript references media the store no longer holds.
+
+    Built the way the product builds it: the image is externalized on append,
+    the store's payload is deleted out from under the reference (exactly the
+    external cleaner's effect), and replay resolves the digest to ``None``.
+    Drives ``_resolve_attachments`` through ``build_llm_history`` so the fix is
+    proven at the real seam rather than on a hand-made empty block.
+
+    The payload must clear ``transcript._ATTACHMENT_FLOOR_BYTES`` or it stays
+    inline in the row and there is no reference to lose: hence incompressible
+    noise rather than a flat fill, which a 1 KiB floor would not even notice.
+    """
+    store_root = tmp_path / "attachments"
+    monkeypatch.setattr("local_operator.session.attachments.attachments_dir", lambda: store_root)
+    transcript = Transcript(tmp_path / "session")
+    transcript._attachments = AttachmentStore(store_root)
+    payload = _large_png_b64()
+    assert len(payload) > 1024, "the payload must clear the externalization floor"
+    await transcript.append_message(
+        Message(
+            role="user",
+            content=[
+                TextContent(text="the shot"),
+                ImageContent(data=payload, mime_type="image/png"),
+            ],
+        )
+    )
+    assert list(store_root.glob("*.bin")), "the payload must have been externalized"
+    for path in store_root.glob("*"):
+        path.unlink()
+
+    replayed = transcript.build_llm_history()
+    assert any(
+        isinstance(block, ImageContent) and block.data == ""
+        for message in replayed
+        for block in message.content
+    ), "replay must degrade the lost reference to empty data — the premise of the bug"
+
+    session = make_session(tmp_path, ScriptedStream(["ok"]))
+    session._context.messages = replayed
+    return session, transcript
+
+
+@pytest.mark.asyncio
+async def test_render_history_omits_a_payload_the_store_lost(tmp_path, monkeypatch):
+    session, transcript = await _session_with_lost_media(tmp_path, monkeypatch)
+
+    rendered = session._render_history(list(session._context.messages))
+
+    assert _wire_image_urls(rendered) == [], "the empty image still reached the wire"
+    assert any(
+        getattr(block, "text", None) == IMAGE_MISSING_MEDIA_NOTICE
+        for message in rendered
+        for block in message.content
+    )
+    # The ARCHIVE is untouched: the row still carries its digest reference, so
+    # /export, a fork, and a session rehydrated from a RESTORED store all still
+    # see the image. Only the wire copy is degraded.
+    assert '"attachment"' in transcript.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_render_history_omits_missing_media_on_the_keep_images_path(tmp_path, monkeypatch):
+    """``keep_images=True`` is compaction's kept-window rebuild — the path that
+    must not bake the hole into the live context, and the path that used to
+    send the empty block and earn the 400 for ``/compact`` itself."""
+    session, _transcript = await _session_with_lost_media(tmp_path, monkeypatch)
+
+    rendered = session._render_history(list(session._context.messages), keep_images=True)
+
+    assert _wire_image_urls(rendered) == []
+    assert any(
+        getattr(block, "text", None) == IMAGE_MISSING_MEDIA_NOTICE
+        for message in rendered
+        for block in message.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_render_for_compaction_omits_missing_media(tmp_path, monkeypatch):
+    """``/compact`` failed identically because it sends the history it is
+    summarising; the fix has to reach the compaction render too."""
+    session, _transcript = await _session_with_lost_media(tmp_path, monkeypatch)
+
+    rendered = session._render_for_compaction()
+
+    assert _wire_image_urls(rendered) == []
+
+
+@pytest.mark.asyncio
+async def test_a_real_image_on_the_keep_images_path_still_reaches_the_wire(tmp_path):
+    """The companion negative case at the session level: the pass must not be
+    silently dropping every image it sees."""
+    session = make_session(tmp_path, ScriptedStream(["ok"]))
+    session._context.messages = [
+        Message(
+            role="user",
+            content=[
+                TextContent(text="look"),
+                ImageContent(data=_sized_png_b64((8, 8)), mime_type="image/png"),
+            ],
+        )
+    ]
+
+    rendered = session._render_history(list(session._context.messages), keep_images=True)
+
+    assert len(_wire_image_urls(rendered)) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_loss_is_announced_once_per_session(tmp_path, monkeypatch):
+    session, _transcript = await _session_with_lost_media(tmp_path, monkeypatch)
+    notices: list[NoticeEvent] = []
+    session.subscribe(
+        lambda event: notices.append(event) if isinstance(event, NoticeEvent) else None
+    )
+
+    for _ in range(3):
+        session._render_history(list(session._context.messages))
+    await wait_for(lambda: any(event.text == MISSING_MEDIA_NOTICE for event in notices))
+
+    assert [event.text for event in notices] == [MISSING_MEDIA_NOTICE]

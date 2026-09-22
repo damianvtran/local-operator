@@ -1116,6 +1116,64 @@ IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been
 #: images, and the notice must not claim they are gone for good.
 IMAGE_OMITTED_TEXT_ONLY_NOTICE = "[image omitted: the current model does not accept images]"
 
+#: Stands in for an image whose PAYLOAD is no longer anywhere to be found — the
+#: attachment store lost the bytes under a transcript that still references
+#: them. Distinct from both notices above, and the distinction is not cosmetic:
+#: nothing was refused by the provider and no model changed, so neither existing
+#: sentence describes this, and a notice that claimed either would send the user
+#: looking for a remedy that does not apply. Says where the media went, because
+#: the one thing that would help — restoring the store — is not something the
+#: user will guess from "image omitted".
+IMAGE_MISSING_MEDIA_NOTICE = "[image omitted: its data is no longer in the attachment store]"
+
+
+def _has_no_image_media(block: ImageContent) -> bool:
+    """Whether ``block`` carries no image bytes AT ALL — nothing to send, ever.
+
+    Deliberately the NARROWEST possible question, and the docstring is the
+    boundary: a block is refused here iff NO decoder we would send with pulls a
+    single byte out of its payload — empty, whitespace-only, or corrupt beyond
+    recovery. Anything that yields bytes, wire form and all, is left alone.
+
+    Nothing about the FORMAT is asked. A block whose header
+    :func:`~local_operator.media.sniff_image` cannot name is NOT refused:
+    :func:`_rebound_history_images` documents that such a block "may be
+    perfectly acceptable to the provider" (a HEIF, or a host without Pillow to
+    read the header), and dropping it would destroy context on a guess. Yes,
+    this means decoding the payload to measure it, where a magic sniff would be
+    a header read — but the sniff can only answer a question we must NOT ask,
+    and the decode is the same cost :func:`~local_operator.imaging.rebound_oversize_image`
+    already pays for every block at this seam (a header read cannot answer it,
+    because a header read IS the sniff).
+
+    The strict decode is tried first and the lenient one only after it — the
+    order is load-bearing in the direction that MATTERS. Strict alone would
+    refuse a payload that is merely line-wrapped (``"QUJD\\nREVG"`` decodes to
+    ``b"ABC"`` with the newlines stripped and with ``validate=True`` raises
+    instead), and refusing readable bytes is the one error this function exists
+    to avoid; lenient alone would accept ``"="``, which is nothing but padding
+    and decodes to nothing. Together they answer the intended question exactly:
+    neither decoder finds a byte in it.
+
+    A block that DOES carry bytes is left to the two mechanisms that own it:
+    :func:`_rebound_history_images` for size, and the sticky provider degrade
+    (:func:`~local_operator.providers.failover.is_image_rejection`) for bytes a
+    provider refuses. This pass must not pre-empt either.
+    """
+    data = block.data
+    if not isinstance(data, str) or not data.strip():
+        return True
+    for validate in (True, False):
+        try:
+            decoded = base64.b64decode(data, validate=validate)
+        except (ValueError, TypeError):
+            continue
+        if decoded:
+            return False
+    # Neither decoder produced a byte: the block has no media to lose, and the
+    # provider would only ever be handed the same malformed payload.
+    return True
+
 
 def _rebound_history_images(messages: list[Message]) -> list[Message]:
     """Shrink any image block in the rendered history that is over the cap.
@@ -1182,6 +1240,23 @@ FRAMES_SHED_NOTICE = (
     "just sent, it was large enough to be dropped too — send it again on its own."
 )
 
+#: The user-facing announcement for :data:`IMAGE_MISSING_MEDIA_NOTICE`, and it
+#: says something the render-level block deliberately does not: the media is
+#: GONE, and the session will keep working anyway. Both halves are needed. A
+#: notice that only reported the omission would leave the user re-attaching an
+#: image that cannot come back (the payload was deleted — re-sending a screenshot
+#: the model can no longer see is the right move for the size-shed case and the
+#: wrong one here), and one that only offered reassurance would not explain the
+#: hole. Names the store, because "the attachment store" is the phrase in
+#: ``/export`` and the config tree the user can go and look at.
+MISSING_MEDIA_NOTICE = (
+    "An image attached earlier in this conversation is missing: the file that "
+    "held it is no longer in the attachment store, so its contents cannot be "
+    "restored. The rest of the conversation is intact and the session will keep "
+    "working — the model will see a note in place of that image. Re-attach it if "
+    "you still have it."
+)
+
 
 #: How far the wire budget tightens each time the provider refuses a request
 #: as too large. Reaching that branch proves the configured budget was too
@@ -1229,6 +1304,64 @@ def _shed_frames_to_budget(messages: list[Message], *, budget: int) -> tuple[lis
     except ImportError:
         return messages, 0
     return shed_frames_to_wire_budget(messages, budget=budget)
+
+
+def _without_unresolvable_frames(messages: list[Message]) -> tuple[list[Message], int]:
+    """Replace every payload-less image block with a one-line notice.
+
+    The third render degrade, and the one for a block that is not unacceptable
+    to anybody — it is EMPTY. A transcript references its media by digest
+    (:data:`~local_operator.session.transcript.ATTACHMENT_KEY`) rather than
+    carrying it inline, and the store behind that reference is not guaranteed
+    to still hold the bytes: a cleaner the user ran pruned them, or the
+    transcript was copied without the store. ``_resolve_attachments`` re-hydrates
+    what it can and leaves ``data`` empty for what it cannot (see
+    :data:`~local_operator.session.transcript.ATTACHMENT_MISSING`), which is
+    correct — the archive degrades rather than raising — and the empty block
+    then reproduced a permanent 400 at the wire:
+
+        .messages[4].image[0]: You have uploaded an unsupported image. …
+
+    Every turn failed the same way, INCLUDING ``/compact``, which has to send
+    the history in order to summarise it, and the session's own in-memory
+    image degrade did not help a restarted process (that flag is not persisted).
+    The media is gone and nothing can restore it, so the only fix is to stop
+    sending a block that has no content to lose.
+
+    Applied to the RENDERED history and NEVER to the transcript, exactly like
+    :func:`_rebound_history_images` and :func:`_without_images`: the stored
+    block keeps its reference, so ``/export``, forks, and a session rehydrated
+    from a RESTORED store all still see the image.
+
+    ``_has_no_image_media`` is the whole discriminator and is deliberately
+    narrow — see its docstring for why asking about the format here would cost
+    the user real context.
+
+    Consecutive drops collapse to ONE notice, like :func:`_without_images` and
+    for the same reason: a snapcompact archive replays as dozens of frames
+    between two text edges, and dozens of identical apology lines cost more
+    context than the summary they stand in for. Returns ``(messages, dropped)``
+    so the caller can announce the loss once per session.
+    """
+    out: list[Message] = []
+    dropped = 0
+    for message in messages:
+        if not any(isinstance(block, ImageContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        changed = False
+        for block in message.content:
+            if isinstance(block, ImageContent) and _has_no_image_media(block):
+                dropped += 1
+                changed = True
+                if content and getattr(content[-1], "text", None) == IMAGE_MISSING_MEDIA_NOTICE:
+                    continue
+                content.append(TextContent(text=IMAGE_MISSING_MEDIA_NOTICE))
+            else:
+                content.append(block)
+        out.append(message.model_copy(update={"content": content}) if changed else message)
+    return out, dropped
 
 
 def _without_images(messages: list[Message], *, model_incapable: bool = False) -> list[Message]:
@@ -1951,6 +2084,11 @@ class Session:
         #: Latch for the render seam's byte shed notice (see
         #: ``_announce_frames_shed_once``). Per session, not per render.
         self._frames_shed_announced = False
+        #: Latch for ``_announce_missing_media_once`` (a block whose payload the
+        #: attachment store no longer holds). Per session, not per render, for the
+        #: same reason as its two siblings — the render runs on every provider
+        #: call, and the loss is a fact about the archive, not about this turn.
+        self._missing_media_announced = False
         #: Session-local tightening of the configured wire budget, set only by
         #: an actual provider 413 (``_recover_if_request_too_large``). ``None``
         #: means "use the configured value"; it is never persisted, because it
@@ -2673,6 +2811,26 @@ class Session:
         # `function_call` and `function_call_output` and is rejected for the
         # same reason Anthropic rejects the coalesced form.
         rendered = _pair_spliced_tool_results(rendered)
+        # ...and immediately after THAT, before every condition below, because
+        # this pass has no condition to belong to: it is not about the model and
+        # not about the provider, so there is nothing it could key on and no
+        # state under which an empty block becomes sendable. Placement is the
+        # whole correctness argument — above the early returns it applies on all
+        # of them (the sticky ``_images_rejected`` strip already runs on the
+        # result, and ``_without_images`` leaves a text notice where this one
+        # puts it), and on the ``keep_images=True`` path, which is compaction's
+        # kept-window rebuild and the exact path that must not bake the loss
+        # into the live context.
+        #
+        # Deliberately ABOVE the ``_images_rejected`` early return despite that
+        # test's own reasoning about decoding order: a missing block is missing
+        # regardless, and this keeps ONE application covering every branch. The
+        # ordering is only observable in the pathological case of the two states
+        # set at once — and ``_set_images_rejected`` clears the size flag when it
+        # sets the sticky one, so there is no such steady state to order against.
+        rendered, missing_media = _without_unresolvable_frames(rendered)
+        if missing_media:
+            self._announce_missing_media_once(missing_media)
         if self._images_rejected:
             # Nothing to rebound once images are being dropped outright, and
             # dropping first saves decoding a block that is about to become a
@@ -2753,6 +2911,41 @@ class Session:
             self._image_drop_diagnostic(),
         )
         self._spawn_background(self._emit(NoticeEvent(text=FRAMES_SHED_NOTICE, kind="warning")))
+
+    def _announce_missing_media_once(self, dropped: int) -> None:
+        """Say, once per session, that a screenshot left the context for good.
+
+        The third of the three render announces, and the only one whose news is
+        that the media is GONE. The other two report a loss the user can act on
+        — switch to a model that accepts images, and they come back; the frames
+        shed for size are still in the archive. Here nothing is recoverable: an
+        external cleaner deleted the payload the transcript points at, and the
+        notice exists so the user is told WHY the conversation is missing the
+        thing they remember attaching, rather than watching the model answer
+        around it.
+
+        Once per session, from a latch, for the reason its siblings are: the
+        render runs on every turn and every compaction, and the missing payload
+        is a standing fact about the transcript — a per-render notice would say
+        the same sentence on every request. Silent with no running loop, with
+        the latch left unset so a later render on the loop can still announce
+        (exactly ``_announce_frames_shed_once``); the omission has already been
+        applied either way, and the announcement is never what makes the request
+        legal.
+        """
+        if self._missing_media_announced:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._missing_media_announced = True
+        logger.warning(
+            "omitted %d image block(s) whose payload is no longer in the " "attachment store (%s)",
+            dropped,
+            self._missing_media_diagnostic(),
+        )
+        self._spawn_background(self._emit(NoticeEvent(text=MISSING_MEDIA_NOTICE, kind="warning")))
 
     def _announce_text_only_omission_once(self, rendered: list[Message] | None = None) -> None:
         """Say, once per session, that the active model is not seeing the
@@ -3271,6 +3464,39 @@ class Session:
                 kind="warning",
             )
         )
+
+    def _missing_media_diagnostic(self) -> str:
+        """What the omitted payload-less block(s) look like, for the log.
+
+        Sibling of :meth:`_image_drop_diagnostic`, and it exists because the
+        logged shape here INVERTS that one's: a normal image block is worth
+        knowing by its magic (``89504e47`` is a PNG), while the whole point of
+        this degrade is that there is nothing to sniff — ``b64_len`` and the
+        ``mime_type`` sidecar are the entire evidence that the transcript once
+        pointed at real media. Reads the CONVERTED context rather than the
+        rendered history for the same reason its sibling does: the render no
+        longer carries the blocks being reported on by the time this runs.
+
+        Structure only — never message text, never a payload. The blocks here
+        are by definition empty, but the guard against a future loosening of
+        :func:`_has_no_image_media` printing bytes into a log stays.
+        """
+        try:
+            images = [
+                block
+                for message in self._convert_to_llm(list(self._context.messages))
+                for block in message.content
+                if isinstance(block, ImageContent) and _has_no_image_media(block)
+            ]
+            if not images:
+                return "no payload-less image blocks in the context"
+            first = images[0]
+            return (
+                f"{len(images)} payload-less image block(s); first: "
+                f"mime={first.mime_type} b64_len={len(first.data)}"
+            )
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must never break the degrade
+            return f"diagnostic unavailable: {exc!r}"
 
     def _image_drop_diagnostic(self) -> str:
         """Structure of the images this degrade is about to drop, for the log.
