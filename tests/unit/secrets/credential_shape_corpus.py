@@ -639,6 +639,18 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "\\" + "PASSWORD=" + IDENTIFIER_ARM_VALUES[0][1],
         "a literal backslash before a credential name is not an escape: the mask stays",
     ),
+    # ...and the spelling where a literal backslash is DECIDABLE (agent review
+    # R2-F2). A rendering writes a LITERAL backslash as TWO of them, so the
+    # character before the name is still a backslash and `t` is an escape letter:
+    # R1-3's fix ate it anyway, `oken` is not a credential name, and the mask was
+    # lost here with no hit and nothing registered — so no later exact-value pass
+    # could contain the value either. Two backslashes are the one spelling where the
+    # reading is not ambiguous, which is why this row is a positive rather than a
+    # documented residual.
+    Case(
+        "\\\\" + "token=" + FIXTURE_VALUE,
+        "a DOUBLED backslash is a literal one: the name after it is not an escape's",
+    ),
     # --- 2026-09-21, R1-2: an escaped break must not cut the MASK -------------
     # A value whose own bytes carry an escaped break, and the value does NOT spell
     # its own name (``_repeats_its_own_name`` would spare it for the other reason).

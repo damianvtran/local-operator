@@ -1429,12 +1429,33 @@ def _name_after_an_escape(match: Match[str]) -> str:
     and an escalated rotation notice filed for an assignment of a small integer
     constant, the file on disk holding no shape at all.
 
-    **Only an ESCAPE's letters are detached** (agent review R1-3). The first
-    revision of this helper detached whatever followed a backslash, so a literal
-    backslash before a single-segment credential name ate the name's own first
-    letter, the name stopped being credential-shaped, and the mask was lost where
-    ``origin/main`` had kept it. :data:`_ESCAPE_LETTERS` accepts only the escape
-    spellings above, so a backslash that is not one changes nothing.
+    **Only an ESCAPE's letters are detached, and only when the backslash is not
+    itself escaped** (agent review R1-3, R2-F2). The first revision of this helper
+    detached whatever followed a backslash, so a literal backslash before a
+    single-segment credential name ate the name's own first letter, the name stopped
+    being credential-shaped, and the mask was lost where ``origin/main`` had kept it.
+    :data:`_ESCAPE_LETTERS` accepts only the escape spellings above, so a backslash
+    that is not one changes nothing.
+
+    The R1-3 answer left the other half of the same reading open, and R2-F2 measured
+    it: a rendering writes a LITERAL backslash as TWO of them, so the character
+    before the name is still a backslash and ``t`` is an escape letter — the strip
+    ate it, ``oken`` is not a credential name, and the mask was gone with no hit and
+    nothing registered, so no later exact-value pass could contain it either.
+    Measured 2026-09-21: ``"\\\\" + "token=" + <value>`` was masked at
+    ``origin/main`` and came back READABLE here. A doubled backslash is the one
+    spelling where this reading is DECIDABLE — a backslash with a backslash before it
+    is an escaped literal, and the letter after it is the name's own — so it is the
+    one spelling where the answer may not be guessed.
+
+    What stays undecidable is stated rather than smoothed over: an UNDOUBLED
+    backslash before a name whose first letter is an escape letter IS that escape's
+    spelling on the surfaces this pass reads (a tool call's arguments and a tool
+    result are both JSON), so the name really does begin after it and the mask is
+    correctly absent — the same reading that spares ``C:\\tokens``, where the
+    pre-escape grammar masked a path segment. On a surface where such a backslash is
+    a literal (a shell word) that is a loss, and it is the residual this helper
+    cannot settle from the bytes at hand.
 
     The letters are read off the NAME rather than off the text before it, because the
     name group starts INSIDE the escape: its first character is the escape's own
@@ -1447,7 +1468,11 @@ def _name_after_an_escape(match: Match[str]) -> str:
     """
     name = match.group(1)
     start = match.start(1)
-    if start and match.string[start - 1] == "\\":
+    # ``start < 2 or match.string[start - 2] != "\\"`` is the "the backslash is not
+    # ITSELF escaped" half of the docstring's rule (agent review R2-F2): a doubled
+    # backslash is how a rendering writes a literal one, so the name after it
+    # follows a literal backslash and the letter at its front is its own.
+    if start and match.string[start - 1] == "\\" and (start < 2 or match.string[start - 2] != "\\"):
         letters = _ESCAPE_LETTERS.match(name)
         if letters is not None:
             return name[len(letters.group(0)) :]

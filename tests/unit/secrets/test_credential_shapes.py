@@ -310,8 +310,9 @@ def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() 
 
     * the escape's own letter is not part of the NAME, so the count trap still
       counts (the first block);
-    * the escape's letters are detached only when they ARE an escape's, so a literal
-      backslash before a name does not eat the name (the second);
+    * the escape's letters are detached only when they ARE an escape's — in either
+      spelling of a literal backslash — so a literal backslash before a name does
+      not eat the name (the second);
     * the escape is a line break for the JUDGEMENT, so an ordinary constant is not a
       13-character value (the first block again) — and the MASK may only ever cover
       more than the line the real spelling masks, never less (the third);
@@ -322,8 +323,12 @@ def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() 
     Kept as its own test rather than only corpus rows because the corpus pins the
     SPELLINGS while this pins the INVARIANTS they rest on — a future edit can satisfy
     every row by widening a rule somewhere else and still move this. Every assertion
-    here discriminates: each one fails on ``origin/main`` (agent review R1-6 — the
-    ``reached_model`` assertion it replaces did not).
+    here discriminates against at least ONE of the two revisions under review (agent
+    review R1-6, R2-F3), and which one it fails on is stated beside it: the count-trap
+    block fails on ``origin/main``, while the literal-backslash block, the tail and
+    the short-run assertions PASS there and fail only on ``5f757d9c``. Summing them
+    into "each one fails on ``origin/main``" was a claim the measurements do not
+    support.
     """
     # 1. The escape's letter is the newline's, not the name's: the count trap applies.
     # The prefix matters and is not decoration: a name the count trap covers is spared
@@ -357,6 +362,17 @@ def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() 
     literal_backslash = "\\" + "PASSWORD=" + "corr" + "ect_horse_bat" + "tery"
     assert "corr" + "ect_horse_bat" + "tery" not in scrub_secrets(literal_backslash)
     assert scrub_shapes(literal_backslash) != literal_backslash
+
+    # 2b. ...and the DOUBLED spelling of the same literal backslash, which is how a
+    # rendering writes one. The backslash before the name is itself escaped, so
+    # nothing may be detached: R1-3's answer checked only that SOMETHING backslashish
+    # preceded the name, and a name that IS a credential word lost its mask here with
+    # no hit and nothing registered (agent review R2-F2). This is the half that fails
+    # at the revision under review, where the block above passes there and fails on
+    # ``5f757d9c``.
+    escaped_literal_backslash = "\\\\" + "token=" + FIXTURE_VALUE
+    assert FIXTURE_VALUE not in scrub_secrets(escaped_literal_backslash)
+    assert scrub_shapes(escaped_literal_backslash) != escaped_literal_backslash
 
     # 3. A rendered break is a break for the JUDGEMENT, and the MASK may only ever
     # cover MORE than the line the real spelling masks — never less. The two
@@ -2621,7 +2637,20 @@ def _corpus_grading() -> str:
 #: floor. Exactly ONE of the 357 rows the previous constant covered moves, measured
 #: by grading all 357 through that revision's module and this one, field for field;
 #: it moves in the direction that keeps a credential out of the context window.
-_CORPUS_GRADING_DIGEST = "d92afbfd4d2dc65e2e9fa9d83f98b09043e49657ab24c3a6ce65e6a5a8c29e13"
+#:
+#: MOVED AGAIN on 2026-09-21, in the commit that answers agent review R2-F2, and this
+#: one has the shape of a measurement too: the corpus grew from 422 rows to 423 — ONE
+#: added positive, the doubled-backslash spelling of a literal backslash before a
+#: credential word — and the 422 rows the constant above covered produce THAT digest
+#: byte for byte under the fixed module, recomputed through this very function with
+#: the added row filtered out. So not a masked text, not a label, not a value, not a
+#: window, not a ``complete``, not an ``exposed`` moved for any pre-existing row. The
+#: added row is the specification of the fix and it is the only row whose grading
+#: moves: at the revision above it came back with NO hit and nothing registered (the
+#: value readable), and it now carries ``credential-assignment`` as complete and
+#: contained. The class is a credential that LOST its mask, which is why the row is
+#: pinned in the POSITIVE half rather than argued about in prose.
+_CORPUS_GRADING_DIGEST = "2a29fe4cf4f548c96837f1bf9583e4206f0fb793dfbf346c32dcf9e3e77b6beb"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
