@@ -1188,6 +1188,10 @@ _INLINE_PYTHON = frozenset({"python", "python3"})
 #: (required non-finding (iii)).
 _SOURCE_VERBS = frozenset({"get", "file", "run"})
 
+#: Commands that move a path's contents somewhere else, so a value's copy keeps
+#: its debt under a new name.
+_PATH_MOVERS = frozenset({"cp", "mv", "ln", "install"})
+
 #: Redirect targets that are not a file: the value still reaches this result.
 _STDOUT_DEVICES = frozenset({"/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"})
 
@@ -1748,6 +1752,18 @@ class _ShellAnalyzer:
         if command in _INTERPRETERS or command in _INLINE_PYTHON or command == "xargs":
             self._interpreter(stage, command, flow_in, stdin, span, name, depth)
             return _Flow(value=flow_in.value, path=flow_in.path, name=name, span=span)
+
+        # -- a copy or a rename carries the debt to the new path --------------
+        # `cp f g` does not print anything, but the copy is now readable under a
+        # name nothing else in this command would recognise — following it is the
+        # difference between a read rule and a read rule with an obvious way
+        # around it. Only the DESTINATION is registered: the origin already is.
+        if command in _PATH_MOVERS and path_hit:
+            targets = [
+                word for word in words[1:] if not self._word_text(word).strip().startswith("-")
+            ]
+            if targets:
+                self._register_path(self._word_text(targets[-1]), targets[-1].span)
 
         # -- a consumer: the value was used, not printed ----------------------
         # `curl -H "…$v"`, `docker login --password-stdin`, a client argv, a

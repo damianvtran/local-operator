@@ -126,6 +126,22 @@ def test_non_finding_i_the_sanctioned_inline_use_is_allowed() -> None:
         assert not result.refused
 
 
+def test_a_copy_of_a_written_value_carries_the_read_rule_with_it() -> None:
+    """`cp f g; cat g` is the same leak one path later.
+
+    The read rule tracks the *value*, not one filename: a copy does not print
+    anything, but it is what would make a targeted read rule trivial to walk
+    around.
+    """
+    refused = scan_command(
+        "lop secret get [redacted] > /tmp/tok; cp /tmp/tok /tmp/copy; cat /tmp/copy"
+    )
+    assert refused.refused
+    assert refused.findings[0].rule == "shell.read-of-secret-file-path"
+    # ... and the copy alone is still the guide-sanctioned contained form.
+    assert not scan_command("lop secret get [redacted] > /tmp/tok; cp /tmp/tok /tmp/copy").refused
+
+
 def test_non_finding_ii_length_only_is_allowed() -> None:
     """(ii) `${#VAR}` and `lop secret get X | wc -c` — a length is not a value.
 
