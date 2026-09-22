@@ -1765,7 +1765,15 @@ class _FakeClock:
     def time(self) -> float:
         return 1_700_000_000.0
 
-    def strftime(self, _fmt: str) -> str:
+    def localtime(self, _timestamp: float) -> str:
+        # ``_note_quiet_plane`` formats the instant a plane last reported, and it is
+        # reached from ``beat`` — which the cells in the executing-loop section drive
+        # directly, so this pair has to exist for them. A fixed string is enough: the
+        # assertion those cells make is about the DEADLINE, and what this renders is a
+        # human-readable echo of it.
+        return "2026-01-01 00:00:00"
+
+    def strftime(self, _fmt: str, _stamp: object = None) -> str:
         return "2026-01-01 00:00:00"
 
 
@@ -3306,7 +3314,24 @@ def _observed_dump(tmp_path: Path, pid: int) -> tuple[Path, Any]:
     return dump, handle
 
 
-def test_a_moving_frame_is_a_sign_of_life_and_a_still_one_is_not(
+def _watch_this_thread(armed: Any, plane: str, frames: dict[int, "_Frame"], frame: "_Frame") -> int:
+    """Learn THIS thread as a plane's loop, with ``frame`` visible under a fake sys.
+
+    The production learn site is ``beat`` (see ``_Armed.loop_thread``); the cells in
+    this section drive the observation directly, so they perform the same two steps
+    it does. THE THREAD HAS TO BE REAL AND LIVE: the observation asks ``is_alive()``
+    before it reads a frame, so a stand-in object here would be testing the fixture
+    rather than the module.
+    """
+    thread = threading.current_thread()
+    armed.loop_thread[plane] = thread
+    ident = thread.ident
+    assert ident is not None, "the test thread has no ident, so no frame can be read"
+    frames[ident] = frame
+    return ident
+
+
+def test_a_moving_frame_is_observed_and_a_still_one_is_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The observation itself, on a controlled frame: movement, not wedgedness.
@@ -3316,66 +3341,85 @@ def test_a_moving_frame_is_a_sign_of_life_and_a_still_one_is_not(
     ever show one of its two answers. Each assertion is a different reason the frame
     might not read as movement, and each has to fall on the correct side:
     the first look has nothing to compare against, an unchanged frame is a park, a
-    changed line or a changed function is execution, and a thread that is GONE is not
-    movement either — inventing a sign of life from an unreadable frame would extend
-    the bound on exactly the runtime that cannot be looked at.
+    changed line or a changed function is execution, and a frame that cannot be read
+    is not movement either — inventing a sign of life from an unreadable frame would
+    extend the bound on exactly the runtime that cannot be looked at.
+
+    AND THE OBSERVATION IS NOT THE EXTENSION, which is what the closing assertion
+    pins: none of this moves ``sign_of_life``. The timestamp the deadline is measured
+    from has exactly ONE writer, the granted path in ``_extend_for_execution``, so a
+    reader may see movement recorded in the dump on a run that was then cut at the
+    bound — the refused hand-off. Letting the observation move the deadline is the
+    defect ``test_a_raising_probe_does_not_move_the_deadline_a_sibling_beats_on``
+    exists for.
     """
     fake_sys = _FakeSys()
     monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
     dump, handle = _observed_dump(tmp_path, 4243)
     armed = stall_watchdog._Armed(dump, handle, 4.0, 4243, lambda: ("still", True))
+    # THE SIBLING IS PARKED FAR OUT, and it has to be stated rather than left to the
+    # seed: ``_Armed.__init__`` stamps the SERVING plane with the host's own
+    # ``time.monotonic()``, whose ORIGIN differs by machine (seconds since boot on a CI
+    # runner, hours on a long-lived host). Leaving it implicit made the closing
+    # deadline assertion depend on which of the two stamps was earlier, which is how it
+    # passed here and failed on the runner (``assert 502.78 == (507.0 + 4.0)``).
     armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
-    armed.loop_thread[stall_watchdog.WORKLOAD] = 7
-    fake_sys.frames[7] = _Frame("loop.py", 11, "walk")
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
 
     # THE FIRST LOOK: nothing to compare against, so nothing is executing. This is
     # what keeps a moment of silence after a beat from reading as a moving loop.
     assert armed.observe_execution(500.0) == ((), ())
-    assert armed.executing_at == {}, "the first look claimed movement out of nothing"
+    assert armed.last_move == {}, "the first look claimed movement out of nothing"
     # THE SAME FRAME: a park, in the one shape the bound exists for.
     assert armed.observe_execution(501.0) == ((), ())
     assert (
         armed.sign_of_life(stall_watchdog.WORKLOAD) == 100.0
     ), "an unchanged frame moved the plane's sign of life"
-    # A DIFFERENT LINE: executing, and the stamp is replaced by the observation.
-    fake_sys.frames[7] = _Frame("loop.py", 12, "walk")
+    # A DIFFERENT LINE: executing, and the observation is dated.
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
     assert armed.observe_execution(502.0) == (
         (stall_watchdog.WORKLOAD,),
         (stall_watchdog.WORKLOAD,),
     )
-    assert armed.sign_of_life(stall_watchdog.WORKLOAD) == 502.0
+    assert armed.last_move[stall_watchdog.WORKLOAD] == 502.0
+    assert (
+        armed.sign_of_life(stall_watchdog.WORKLOAD) == 100.0
+    ), "the observation alone moved the deadline, so a refused hand-off would too"
     # A DIFFERENT FUNCTION, same line: still executing — the triple, not the line.
-    fake_sys.frames[7] = _Frame("loop.py", 12, "other_walk")
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "other_walk")
     moved, noted = armed.observe_execution(503.0)
     assert moved == (stall_watchdog.WORKLOAD,)
     assert moved and not noted, (
         "the SAME stretch opened a second record, so the artifact grows per look "
         "rather than per stretch"
     )
-    assert armed.sign_of_life(stall_watchdog.WORKLOAD) == 503.0
-    # THE THREAD IS GONE: an unreadable frame is not movement.
-    del fake_sys.frames[7]
+    assert armed.last_move[stall_watchdog.WORKLOAD] == 503.0
+    # A FRAME THAT CANNOT BE READ is not movement.
+    del fake_sys.frames[ident]
     assert armed.observe_execution(504.0) == ((), ())
     assert (
-        armed.sign_of_life(stall_watchdog.WORKLOAD) == 503.0
+        armed.last_move[stall_watchdog.WORKLOAD] == 503.0
     ), "a frame that could not be read was counted as a sign of life"
     # A FRAME THAT COMES BACK IS A NEW BASELINE, not a movement: there is nothing to
     # compare it against, exactly as on the first look. Inventing a sign of life from
     # a gap would be claiming progress on the strength of being unable to look.
-    fake_sys.frames[7] = _Frame("loop.py", 12, "walk")
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
     assert armed.observe_execution(505.0) == ((), ())
-    assert armed.sign_of_life(stall_watchdog.WORKLOAD) == 503.0
+    assert armed.last_move[stall_watchdog.WORKLOAD] == 503.0
     # ...AND A STRETCH ENDS WHEN THE LOOP STAMPS FOR ITSELF AGAIN, not when a single
     # look happens to catch the same line twice: the top frame alternates between a
     # call and its caller, so a rule keyed on one still look would re-record the same
     # stretch several times a second. This is the stamp, and the next movement after
     # it is therefore a NEW stretch.
-    fake_sys.frames[7] = _Frame("loop.py", 13, "walk")
+    fake_sys.frames[ident] = _Frame("loop.py", 13, "walk")
     moved, noted = armed.observe_execution(506.0)
     assert moved == (stall_watchdog.WORKLOAD,)
     assert not noted, "a gap in readability ended the stretch, but nothing reported"
     armed.last_beat[stall_watchdog.WORKLOAD] = 507.0
-    fake_sys.frames[7] = _Frame("loop.py", 14, "walk")
+    fake_sys.frames[ident] = _Frame("loop.py", 14, "walk")
     moved, noted = armed.observe_execution(508.0)
     assert moved == (stall_watchdog.WORKLOAD,)
     assert noted == (
@@ -3384,6 +3428,225 @@ def test_a_moving_frame_is_a_sign_of_life_and_a_still_one_is_not(
     # A PLANE WITH NO LEARNED THREAD IS NEVER OBSERVED — the never-engaged class, and
     # why the fix cannot reach it.
     assert stall_watchdog.SERVING not in armed.loop_thread
+    # AND NOTHING ABOVE GRANTED AN EXTENSION: the observation is complete and the
+    # deadline is still the plane's own stamp plus the bound.
+    assert armed.executing_at == {}, "an observation moved the deadline without a grant"
+    assert (
+        armed.deadline() == armed.last_beat[stall_watchdog.WORKLOAD] + 4.0
+    ), "the observation moved the deadline the bound fires on"
+    handle.close()
+
+
+def test_a_recycled_ident_does_not_extend_a_plane_whose_loop_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DEAD PLANE IS CUT EVEN WHEN ITS IDENT IS TAKEN BY A LIVE THREAD.
+
+    The observation used to key on ``threading.get_ident()``, which CPython RECYCLES:
+    on this host six sequential short-lived threads collapsed to one distinct ident.
+    Once the plane's loop thread had ended, ``sys._current_frames()[ident]`` began
+    returning some OTHER live thread's frames, so an executing stranger read as the
+    dead plane still working — ``executing_at`` advanced and the liveness leg abstained
+    on a plane with no reporter, indefinitely. That is precisely the fail-safe the tick
+    supervision documents (``_watch_stall_beats``: a plane whose reporter is gone is
+    ended one deadline after its last stamp), so the module was defeating its own
+    promise. The old cells only covered the shape where the ident is ABSENT from the
+    frame map, which is the wrong shape for a recycled one — hence this cell.
+
+    THE CELL ASSERTS ITS OWN PRECONDITION: the live thread must really hold the dead
+    thread's ident, or the recycling it exists to exercise did not happen and the
+    rest of the assertions would pass vacuously.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump, handle = _observed_dump(tmp_path, 4251)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4251, lambda: ("still", True))
+    # The learn site itself, not a hand-written field: the plane is learned by a beat
+    # ISSUED FROM the short-lived thread, exactly as a runtime learns it.
+    monkeypatch.setattr(stall_watchdog, "_ARMED", armed)
+    ended = threading.Thread(
+        target=lambda: stall_watchdog.beat(stall_watchdog.WORKLOAD), name="dead-loop", daemon=True
+    )
+    ended.start()
+    ended.join(timeout=5)
+    assert not ended.is_alive(), "the plane's loop thread did not end, so nothing is dead"
+    assert armed.loop_thread[stall_watchdog.WORKLOAD] is ended
+    dead_ident = ended.ident
+    assert dead_ident is not None
+
+    # A LIVE THREAD TAKES THE SAME IDENT. Spawned one at a time and joined unless it
+    # reused the dead thread's ident, because that reuse is the whole mechanism.
+    live: threading.Thread | None = None
+    for _ in range(64):
+        candidate = threading.Thread(target=lambda: time.sleep(30), name="ident-thief", daemon=True)
+        candidate.start()
+        if candidate.ident == dead_ident:
+            live = candidate
+            break
+        candidate.join(timeout=5)
+    assert live is not None, (
+        "no short-lived thread reused the dead loop's ident, so this cell cannot say "
+        "anything about the recycled-ident shape"
+    )
+    assert live.is_alive()
+
+    # Its frames, under the SAME ident the dead plane is keyed by, and moving between
+    # the two looks below — which is what an ident-keyed lookup would read as the dead
+    # plane executing.
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    fake.wall = 101.0
+    monkeypatch.setattr(stall_watchdog, "_ARMED", armed)
+    fake_sys.frames[dead_ident] = _Frame("stranger.py", 11, "moving")
+    try:
+        assert armed.observe_execution(500.0) == ((), ())
+        fake_sys.frames[dead_ident] = _Frame("stranger.py", 12, "moving")
+        assert armed.observe_execution(501.0) == (
+            (),
+            (),
+        ), "a live stranger's frames were read as the dead plane executing"
+        # THE ASSERTION THE FINDING ASKS FOR: the plane is CUT, not abstained. Its
+        # deadline is its own last stamp plus the bound, untouched by the stranger.
+        assert armed.executing_at == {}, "the dead plane was granted an extension"
+        assert armed.sign_of_life(stall_watchdog.WORKLOAD) == 100.0
+        assert armed.pin() == (stall_watchdog.WORKLOAD, 104.0), (
+            "the deadline a sibling's beat would re-arm from moved for a plane whose "
+            "loop is gone"
+        )
+        # ...and the sibling's own beat re-arms the SHARED timer from that same
+        # unchanged deadline, which is the path the extension would have travelled.
+        spy.armed.clear()
+        stall_watchdog.beat(stall_watchdog.SERVING)
+        assert spy.armed, "the sibling's beat did not reach the timer"
+        assert spy.armed[-1][0] == pytest.approx(
+            104.0 - fake.wall, abs=1e-9
+        ), "a beat re-armed the shared timer for an extension a dead plane never earned"
+    finally:
+        if live is not None:
+            live.join(timeout=0)
+        handle.close()
+
+
+def test_a_raising_probe_does_not_move_the_deadline_a_sibling_beats_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE REFUSAL IS TOTAL: an unevaluable probe cannot move the shared deadline.
+
+    Property (a) is stated in three places — the module docstring,
+    ``_extend_for_execution`` and ``_read_probe``: the extension is refused unless a
+    probe was supplied AND answered on that very sample, so a runtime whose progress
+    leg is inert or unevaluable keeps today's behaviour rather than becoming
+    unbounded. THE REFUSAL USED TO GATE ONLY THE SAMPLER'S OWN RE-ARM: the timestamp
+    was written by the OBSERVATION, before any leg decided, and ``pin``/``deadline`` —
+    which a ``beat`` on the OTHER plane re-arms the shared C timer from — read it
+    unconditionally. So an executing loop with a raising probe survived on a runtime
+    whose sibling kept stamping: the deadline never counted down.
+
+    The discriminating assertion is therefore on ``pin()`` and on the duration a
+    sibling's ``beat`` actually hands the C timer, not on whether the sampler armed
+    anything: ``spy.armed == []`` was already true and stayed true, which is why the
+    pre-fix cell was green while the process was unbounded.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    def broken() -> tuple[object, bool]:
+        raise RuntimeError("the probe cannot read live session state right now")
+
+    dump, handle = _observed_dump(tmp_path, 4252)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4252, broken)
+    monkeypatch.setattr(stall_watchdog, "_ARMED", armed)
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    fake.wall = 101.0
+
+    # Two samples with the loop's frames MOVING, which is the state the extension
+    # exists for — and the probe raises for both, so neither earns one.
+    assert stall_watchdog._sample(armed) is False
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    fake.wall += 1.0
+    assert stall_watchdog._sample(armed) is False
+
+    assert armed.executing_at == {}, "the refused hand-off still wrote the extension"
+    assert armed.pin() == (
+        stall_watchdog.WORKLOAD,
+        104.0,
+    ), "an unevaluable probe moved the deadline, so the runtime is unbounded"
+    # THE SIBLING IS THE CARRIER, and this is the number it hands the C timer.
+    spy.armed.clear()
+    stall_watchdog.beat(stall_watchdog.SERVING)
+    assert spy.armed, "the sibling's beat did not reach the timer"
+    assert spy.armed[-1][0] == pytest.approx(104.0 - fake.wall, abs=1e-9), (
+        f"the sibling's beat re-armed for {spy.armed[-1][0]}s instead of counting down "
+        f"from the plane's own stamp plus the bound"
+    )
+    handle.close()
+
+
+def test_a_failed_re_arm_leaves_the_timer_on_the_shorter_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ONE BRANCH THAT DECIDES "fire early rather than late", exercised.
+
+    An extension that cannot be handed to ``faulthandler`` leaves the timer on its
+    PREVIOUS deadline, which is shorter than the extension would have been — the safe
+    direction, and a claim that was only commented before this cell existed. What must
+    NOT happen is the alternative reading, that a failed re-arm withdraws the bound:
+    the deadline the extension recorded stays in force, so every later beat and the
+    progress leg still measure from it.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    fake_sys = _FakeSys()
+    monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
+
+    class _RaisingFaulthandler(_FakeFaulthandler):
+        """A C timer that refuses every arming, which is the branch under test."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            #: What the extension TRIED to hand the timer, so "did it try" and "did it
+            #: land" stay separate facts.
+            self.attempts: list[float] = []
+
+        def dump_traceback_later(self, seconds: float, **kwargs: Any) -> None:
+            self.attempts.append(seconds)
+            raise OSError("the C timer refused this arming")
+
+    spy = _RaisingFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump, handle = _observed_dump(tmp_path, 4253)
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4253, lambda: ("still", True))
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
+    armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
+    armed.last_beat[stall_watchdog.SERVING] = 9_999.0
+    fake.wall = 101.0
+
+    assert stall_watchdog._sample(armed) is False
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
+    fake.wall += 1.0
+    assert stall_watchdog._sample(armed) is False, "a failed re-arm fired the bound"
+    assert spy.attempts, "the extension never reached the C timer at all"
+    # The extension is IN FORCE even though the arming failed: a later beat measures
+    # from it, which is what keeps a transient arming failure from being a way for the
+    # hand-off to be silently withdrawn.
+    assert armed.executing_at == {stall_watchdog.WORKLOAD: fake.wall}
+    assert armed.deadline() == fake.wall + 4.0
     handle.close()
 
 
@@ -3407,15 +3670,16 @@ def test_the_abstention_records_the_observation_and_re_arms_the_timer(
 
     dump, handle = _observed_dump(tmp_path, 4244)
     armed = stall_watchdog._Armed(dump, handle, 4.0, 4244, lambda: ("still", True))
-    armed.loop_thread[stall_watchdog.WORKLOAD] = 7
     # The OTHER plane kept stamping, so the deadline in play is the executing one's.
     # Without this the serving plane's own silence is the earliest deadline and the
     # sibling names IT, which is correct behaviour and not what this cell is about.
     armed.last_beat[stall_watchdog.WORKLOAD] = 100.0
     armed.last_beat[stall_watchdog.SERVING] = 9_999.0
-    fake_sys.frames[7] = _Frame("loop.py", 11, "walk")
+    ident = _watch_this_thread(
+        armed, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
     assert stall_watchdog._sample(armed) is False, "the first look fired"
-    fake_sys.frames[7] = _Frame("loop.py", 12, "walk")
+    fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
     fake.wall += 1.0
     assert stall_watchdog._sample(armed) is False, "an executing loop was cut"
     assert spy.armed, "the abstention never reached the C timer, so the bound still ran out"
@@ -3432,18 +3696,22 @@ def test_the_abstention_records_the_observation_and_re_arms_the_timer(
     # only thing standing between a moving frame and an unbounded process.
     bare_dump, bare_handle = _observed_dump(tmp_path, 4245)
     bare = stall_watchdog._Armed(bare_dump, bare_handle, 4.0, 4245, None)
-    bare.loop_thread[stall_watchdog.WORKLOAD] = 7
     bare.last_beat[stall_watchdog.WORKLOAD] = 100.0
     bare.last_beat[stall_watchdog.SERVING] = 9_999.0
+    bare_ident = _watch_this_thread(
+        bare, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
+    )
     assert stall_watchdog._sample(bare) is False
     spy.armed.clear()
-    fake_sys.frames[7] = _Frame("loop.py", 13, "walk")
+    fake_sys.frames[bare_ident] = _Frame("loop.py", 13, "walk")
     fake.wall += 1.0
     assert stall_watchdog._sample(bare) is False
     assert spy.armed == [], (
         "the bound abstained with no progress leg to hand the runtime to, so a "
         "frames-moving loop would now be unbounded"
     )
+    assert bare.executing_at == {}, "the refused hand-off moved the deadline anyway"
+    assert bare.deadline() == 104.0
     assert stall_watchdog.executing_planes(4245, tmp_path) == (stall_watchdog.WORKLOAD,)
     handle.close()
     bare_handle.close()
@@ -3488,7 +3756,15 @@ def test_the_observation_sees_calls_rather_than_instruction_level_progress() -> 
             total += leaf(3)
 
     def changes_seen(worker: Any) -> int:
-        """How often the top frame triple differs between two 20 ms looks."""
+        """How often the top frame triple differs between two 20 ms looks.
+
+        SIXTY LOOKS AND NOT TWENTY, because the assertion is a COUNT of differences
+        and the count is a sampled statistic: measured under fleet load, a 20-look run
+        once came back with 2 where the same code returned 3-5 unloaded
+        (``assert 2 >= 3``), which is a flake in the CELL and not a thinner
+        discriminator — the underlying measurement is 42/65 against 0/53. The extra
+        ~0.8 s of runtime is what buys a margin the host's load cannot close.
+        """
         running = [True]
         thread = threading.Thread(target=worker, args=(running,), daemon=True)
         thread.start()
@@ -3497,7 +3773,7 @@ def test_the_observation_sees_calls_rather_than_instruction_level_progress() -> 
         try:
             time.sleep(0.1)
             seen, previous = 0, None
-            for _ in range(20):
+            for _ in range(60):
                 frame = sys._current_frames().get(ident)
                 if frame is not None:
                     triple = (frame.f_code.co_filename, frame.f_lineno, frame.f_code.co_name)
@@ -3514,7 +3790,7 @@ def test_the_observation_sees_calls_rather_than_instruction_level_progress() -> 
     call_changes = changes_seen(calling)
 
     assert call_changes >= 3, (
-        f"a call-heavy loop showed only {call_changes} frame changes in 20 looks, so "
+        f"a call-heavy loop showed only {call_changes} frame changes in 60 looks, so "
         f"the observation cannot see the projection walk it was added for"
     )
     assert bare_changes <= 4, (
@@ -3878,8 +4154,16 @@ def test_a_blocked_probe_does_not_hold_the_lock_a_beat_needs(tmp_path: Path) -> 
         def probe() -> tuple[object, bool]:
             # The shape the real one has when it is slow: it reached the state it
             # needs and is waiting for it, with the lock NOT held around this.
+            #
+            # SEVERAL TIMES THE STAMP'S DEADLINE, and that margin is the cell's whole
+            # reliability: with both waits at 10 s the probe releases itself at the
+            # same instant the stamp's own wait expires, so whichever reaches the wire
+            # first decides a coin flip. Measured against the literal pre-fix module:
+            # 2 false greens in 8 runs, and 3 of 3 against an equivalent hand-written
+            # mutant. The pre-fix shape has the beat queued behind a lock this call
+            # holds, so it now loses deterministically instead of sometimes.
             entered.set()
-            released.wait(10)
+            released.wait(60)
             return "still", True
 
         assert stall_watchdog.arm(
