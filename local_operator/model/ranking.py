@@ -132,10 +132,11 @@ def _preferred_router_rank(row: ModelRow) -> int:
         radient/auto                       <-- the row the operator wanted first
         radient/openrouter/auto-beta
 
-    The two OpenRouter rows led because, among rows tied on the connected and
-    aggregated rungs, ``-score`` and ``_version_key`` did not separate them from
-    ``radient/auto``, and the tie fell through to the input order (registry
-    order, openrouter before radient) — an incidental fact, not a decision.
+    The two OpenRouter rows led because the ``-score`` rung placed them there:
+    ``openrouter/auto`` scores 7 to ``radient/auto``'s 6 (the OpenRouter id carries
+    the query twice as a contiguous run), and the version keys collide at
+    ``(-0.0, -0.0, …)`` because neither id holds a number. So the ordering was a
+    property of the ids, not a decision.
 
     The operator chose the precedence: ``radient/auto`` leads the ``auto`` query
     for EVERY user, including one who has only signed in to OpenRouter. That is

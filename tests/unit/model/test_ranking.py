@@ -166,13 +166,13 @@ def test_the_radient_auto_router_leads_the_auto_query_and_the_empty_one():
     """The measured ordering the operator asked for, in both sort branches.
 
     BEFORE this rule the picker led with the two OpenRouter rows on the query
-    ``auto``: among rows tied on the connected and aggregated rungs the score and
-    version rungs did not separate them from ``radient/auto``, so the tie fell
-    through to registry order (openrouter before radient) — an incidental fact,
-    not a decision. The OpenRouter rows SCORE HIGHER (7 to 6), which is exactly
-    why the preference rung sits above ``-score``: a rung below it changes
-    nothing here. Asserted with no query as well, because ``/model`` opens on the
-    empty sort and the two surfaces must agree.
+    ``auto``, because the ``-score`` rung put them there: ``openrouter/auto``
+    scores 7 to ``radient/auto``'s 6 (the OpenRouter id carries the query twice as
+    a contiguous run) and the version keys collide at ``(-0.0, -0.0, …)``. The
+    OpenRouter rows thus SCORE HIGHER, which is exactly why the preference rung
+    sits above ``-score``: a rung below it changes nothing here. Asserted with no
+    query as well, because ``/model`` opens on the empty sort and the two surfaces
+    must agree.
     """
     rows = [
         _row("openrouter/openrouter/auto", aggregated=True),
