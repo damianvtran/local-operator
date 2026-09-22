@@ -8618,7 +8618,7 @@ class OperatorApp(App[None]):
         self._restate_composer_refusal()
         return True
 
-    def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None]:
+    def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None] | None:
         """Start a sidebar navigation to ``session_id`` — the ONE way to switch.
 
         Extracted so the notification-click path (:meth:`viewer_resume_session`)
@@ -8634,7 +8634,32 @@ class OperatorApp(App[None]):
         Cancelling the outgoing session's worker group first is part of that
         contract and not an optimisation: those workers still hold the
         presentation the navigation is about to replace.
+
+        A SESSION ANOTHER DEVICE HOLDS IS NAMED, NOT OPENED (UX round 5, U27),
+        and that guard is asked HERE so it is asked by every caller of this
+        function rather than by the one that remembered. The list carries a
+        peer's sessions, so the pick that reaches this function can name one —
+        and this used to hand the bare id to a navigation that looks it up in
+        THIS device's store, fail, and print ``Could not open conversation: This
+        conversation is no longer available`` about a conversation running on
+        the other machine, in the same frame in which ``/resume`` on that same id
+        printed the device it is running on. ``None`` is that refusal, and it
+        means the sentence was the whole outcome: nothing was started, no
+        transition was opened, and no draft was moved. A caller that needs to
+        know whether a switch is under way must read the return value rather than
+        assume a task came back — :meth:`viewer_resume_session` does exactly that
+        before it attaches its own settle callback.
         """
+        if session_id:
+            from local_operator.paths import config_dir
+
+            if self._announce_remote_session(session_id, config_dir()):
+                # NOTHING IS HEADED ANYWHERE, so the intent a burst of keys reads
+                # is cleared here exactly as the no-op arm above clears it: a
+                # refusal must not leave the next `ctrl+shift+down` stepping from
+                # a row this device cannot open.
+                self._sidebar_navigation.intend("")
+                return None
         self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
         return self._sidebar_navigation.select(session_id)
 
@@ -14007,6 +14032,63 @@ class OperatorApp(App[None]):
         # without remembering the symbol.
         self._resume_session(arg.strip() or RESUME_LATEST, notice)
 
+    def _announce_remote_session(self, session_id: str, root: Path) -> bool:
+        """Say the peer's sentence for ``session_id`` when ANOTHER DEVICE holds it.
+
+        THE ONE GUARD BEHIND EVERY WAY A USER NAMES A SESSION THEY ARE NOT ON
+        (UX round 5, U27). ``/resume <id>`` asked this question and the SIDEBAR'S
+        OWN PICK did not, so one session was answered two ways in one frame: the
+        composer said ``<id> is running on pixel-8 — /network sessions --peer
+        pixel-8 lists it …`` while ``enter`` on the row under the ``⇄ pixel-8``
+        heading said ``Could not open conversation: This conversation is no
+        longer available`` — the local store's FileNotFoundError, about a
+        conversation running perfectly well on the other machine, with no device,
+        no command and no next step in it. The design assigns the peer sentence
+        to that exact act (``mesh-ui.md`` §1.3: "a remote session picked from the
+        list"), so ONE guard is what keeps the sentence, the vocabulary and the
+        remote-before-local precedence from drifting a second time.
+
+        CACHE-ONLY ON THE HIT, ONE READ ON THE MISS. It reads the producer the
+        sidebar's poll fills (``peer_session_rows``), so a row the user can SEE
+        costs a tuple scan on the path every pick and every ``/resume`` takes; the
+        read happens only when this device holds NO directory for the id, which is
+        what keeps a local resume from paying a dial (UX round 3, U20 — the guard
+        used to be cache-only with no fallback, so a user who had not opened the
+        sidebar this session got no guard at all, measured A/B on one build and
+        one id). Opening a remote session needs ``projection.resolve_owner`` wired
+        into the factory, which has no consumer in this tree yet — so the refusal
+        says what DOES reach it rather than pretending the row was dead.
+
+        Returns whether it spoke. A ``True`` is the WHOLE outcome for that id: the
+        caller must return without starting anything (that is the difference U27
+        was about — the pick used to start a navigation anyway and report the
+        local store's failure over the top of this sentence).
+        """
+        from local_operator.resume import UNNAMED_DEVICE
+        from local_operator.session.peer_rows import peer_session_row, peer_session_rows
+
+        remote = peer_session_row(session_id, root)
+        if remote is None and not (root / "sessions" / session_id).is_dir():
+            peer_session_rows(root)
+            remote = peer_session_row(session_id, root)
+        if remote is None or not remote.owner_device:
+            return False
+        self._system_notice(
+            f"{session_id} is running on {remote.owner_label or UNNAMED_DEVICE} — "
+            # THE REMEDY NAMES THE DEVICE THE SENTENCE JUST NAMED (QA round
+            # 11 Q-R11-2 / UX round 2 U12). It printed the 34-character
+            # id beside the device's own label, so the command it invites
+            # the user to run was spelled with the one word that sentence
+            # had just replaced. The NAME when there is one, and the full
+            # id otherwise — never ``owner_label``'s 8-cell abbreviation,
+            # which is a column here and not something the relay resolves.
+            f"/network sessions --peer "
+            f"{remote.owner_device_name or remote.owner_device} lists it, "
+            "--engage warms it, --stop ends it",
+            "warning",
+        )
+        return True
+
     def _resume_session(
         self, resume_id: str, notice: NoticeFn, *, preserve_outgoing: bool = False
     ) -> None:
@@ -14028,11 +14110,9 @@ class OperatorApp(App[None]):
         from local_operator.paths import config_dir
         from local_operator.resume import (
             RESUME_LATEST,
-            UNNAMED_DEVICE,
             live_runtime_pid,
             resolve_resume_id,
         )
-        from local_operator.session.peer_rows import peer_session_row
 
         try:
             # Resolve ``@latest`` to a concrete id BEFORE the owner check.
@@ -14043,51 +14123,16 @@ class OperatorApp(App[None]):
             concrete = resume_id
         if concrete != RESUME_LATEST:
             # A SESSION ON ANOTHER DEVICE IS NOT RESUMABLE FROM HERE YET (review
-            # round 4 MINOR 3). The producer puts a peer's sessions in this
-            # list, so a row selected from the sidebar now names one — and
-            # without this guard the resume factory would look it up in THIS
+            # round 4 MINOR 3, and UX round 5 U27 made it the SAME guard the
+            # sidebar's own pick asks). The producer puts a peer's sessions in
+            # this list, so a row selected from the sidebar names one — and
+            # without the guard the resume factory would look it up in THIS
             # machine's store, fail, and report a missing session about a session
-            # that is running perfectly well one device over.
-            #
-            # CACHE-ONLY ON THE HIT, ONE READ ON THE MISS. `peer_session_row`
-            # never reads and never dials, so a row this device already knows about
-            # costs a tuple scan on the path every /resume takes.
-            #
-            # A MISS IS NOT AN ANSWER, THOUGH (UX round 3, U20). That cache is
-            # filled by the SIDEBAR's poll, so a user who has not opened the sidebar
-            # this session — the common case for someone who copied an id out of
-            # `/network sessions --all-peers` or a chat message — got NO guard at
-            # all: the composer cleared and nothing was said, measured A/B on one
-            # build and one id. So a miss triggers ONE listing read, and the gating
-            # is what keeps the hot path hot: the read happens only when this device
-            # holds NO directory for the id, so resuming a LOCAL session never pays
-            # it, and `peer_session_rows`'s own TTL makes a repeat of a genuinely
-            # unknown id free rather than a second dial. Opening a remote session
-            # needs `projection.resolve_owner` wired into the factory, which has no
-            # consumer in this tree yet — so the refusal says what DOES reach it
-            # rather than pretending the row was dead.
-            root = config_dir()
-            remote = peer_session_row(concrete, root)
-            if remote is None and not (root / "sessions" / concrete).is_dir():
-                from local_operator.session.peer_rows import peer_session_rows
-
-                peer_session_rows(root)
-                remote = peer_session_row(concrete, root)
-            if remote is not None and remote.owner_device:
-                self._system_notice(
-                    f"{concrete} is running on {remote.owner_label or UNNAMED_DEVICE} — "
-                    # THE REMEDY NAMES THE DEVICE THE SENTENCE JUST NAMED (QA round
-                    # 11 Q-R11-2 / UX round 2 U12). It printed the 34-character
-                    # id beside the device's own label, so the command it invites
-                    # the user to run was spelled with the one word that sentence
-                    # had just replaced. The NAME when there is one, and the full
-                    # id otherwise — never ``owner_label``'s 8-cell abbreviation,
-                    # which is a column here and not something the relay resolves.
-                    f"/network sessions --peer "
-                    f"{remote.owner_device_name or remote.owner_device} lists it, "
-                    "--engage warms it, --stop ends it",
-                    "warning",
-                )
+            # that is running perfectly well one device over. The sentence, the
+            # cache policy and the cold-cache fallback all live in
+            # `_announce_remote_session`, so this arm and the pick cannot answer
+            # one session two ways.
+            if self._announce_remote_session(concrete, config_dir()):
                 return
             owner = live_runtime_pid(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
@@ -24666,6 +24711,22 @@ class OperatorApp(App[None]):
                 task = self._select_sidebar_session(session_id)
             except Exception as exc:  # noqa: BLE001 — the error IS the answer
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
+                return
+            if task is None:
+                # REFUSED WITH A SENTENCE INSTEAD OF A SWITCH (UX round 5, U27):
+                # `_select_sidebar_session` returns `None` for a session ANOTHER
+                # DEVICE holds, having named the device it is running on. The ack
+                # this endpoint owes its caller means DISPLAYED, and nothing is —
+                # so this is the same failure a navigation that does not land
+                # answers with, and the caller's spawn fallback runs for the click
+                # that asked for a window. Reading the return value is also what
+                # keeps `started` and `settled` off a task that was never created.
+                loop.call_soon_threadsafe(
+                    _set_unless_done,
+                    future,
+                    None,
+                    RuntimeError(f"could not display {session_id}"),
+                )
                 return
             started = task
 

@@ -228,3 +228,86 @@ async def test_the_guard_speaks_without_the_sidebar_ever_having_polled(
         link.close("test")
     finally:
         server_b.stop()
+
+
+@pytest.mark.asyncio
+async def test_picking_a_peer_row_from_the_sidebar_names_the_device_not_the_local_store(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 5, U27: the LIST PICK asks the same guard ``/resume`` asks.
+
+    Measured on the branch, in ONE frame and two lines apart: with the sidebar
+    focused on a row under the ``⇄ pixel-8`` heading, ``enter`` printed
+
+        ! Could not open conversation: This conversation is no longer available
+
+    while ``/resume <the same id>`` printed
+
+        ! 8dbb1d07f3a3 is running on pixel-8 — /network sessions --peer pixel-8 …
+
+    The session exists only on the peer, so the pick told the user their
+    conversation was gone while it was running on the other machine — and it took
+    the local-not-found path the ``/resume`` arm exists to avoid. The pick posts
+    ``SessionSidebar.Selected(id)`` (``widgets/session_sidebar.py``,
+    ``action_select``, which is what ``enter`` on the list runs), and this posts
+    exactly that message: the act the round measured, through the handler the app
+    wires it to.
+
+    TWO ASSERTIONS CARRY THE FINDING, and the second is the one a fix that merely
+    added a sentence would fail: the peer's name reaches the transcript, AND
+    nothing was started — the navigation must not run at all, because a
+    navigation that runs prints the local store's sentence over the guard's.
+    """
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    _seed(server_b.root, REMOTE_ID)
+    link, reason = server_a.dial(record.network_id, host=f"{host_b}:{port_b}", epoch=record.epoch)
+    assert link is not None, reason
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    try:
+        # THE ROW THE USER PICKED has to be in the list they picked it from: the
+        # sidebar's own read, through the production producer and a live relay.
+        assert [row.id for row in peer_session_rows(server_a.root)] == [REMOTE_ID]
+
+        from local_operator.tui.app import OperatorApp
+        from local_operator.tui.widgets.session_sidebar import SessionSidebar
+        from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+        launched: list[str | None] = []
+
+        def _resume_factory(resume_id: str | None = None) -> Any:
+            launched.append(resume_id)
+            return _factory(FakeSession())
+
+        app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_resume_factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(40):
+                await pilot.pause()
+                if app._session is not None:
+                    break
+            app.post_message(SessionSidebar.Selected(REMOTE_ID))
+            await pilot.pause()
+            await pilot.pause()
+
+            shown = " ".join(_notices(app))
+            assert server_b.identity.name in shown, (
+                "the pick did not name the device holding the session: " f"{shown!r}"
+            )
+            assert REMOTE_ID in shown, shown
+            assert "--engage warms it" in shown, shown
+            # THE LOCAL STORE'S SENTENCE IS THE DEFECT, so its absence is the
+            # assertion — on the pick path it was the whole answer.
+            assert "no longer available" not in shown, shown
+            assert "Could not open conversation" not in shown, shown
+            # AND NOTHING WAS STARTED. A navigation would have printed the local
+            # failure above and left the app mid-transition.
+            assert (
+                app._sidebar_navigation.requested_id == ""
+            ), "the pick started a navigation for a session this device does not have"
+
+        assert launched == [], "picking a peer's row reached the resume factory"
+        assert not (server_a.root / "sessions" / REMOTE_ID).exists()
+        link.close("test")
+    finally:
+        server_b.stop()

@@ -2247,8 +2247,11 @@ def peer_reason_words(reason: str) -> str:
     class, because the tail is whatever the dial raised: a vocabulary of Python
     class names would be a second registry to keep, and the distinction a reader
     needs is "nothing answered", not which exception said so. The token is not
-    lost — ``lop network peers`` prints it per candidate, which is the detail
-    view these summaries are a summary OF.
+    lost — it is the ``reason`` field of the ``--json`` payload every one of these
+    verbs still ships, which is the machine surface these summaries are a summary
+    OF. It used to be printed per candidate by ``lop network peers`` as well, and
+    UX round 5's U28 removed that: a human listing is not where a Python class
+    name belongs, and the human line and the payload are the two registers.
     """
     token = (reason or "").strip()
     if not token:
@@ -2272,6 +2275,42 @@ def peer_reason_words(reason: str) -> str:
     # module has never seen: an unreadable reason is still "it did not answer" to
     # the person reading the row.
     return "it did not answer"
+
+
+#: The session plane's ``state`` tokens, in the words a person reads. See
+#: :func:`session_state_words` for why the token itself is not the answer.
+SESSION_STATE_WORDS: dict[str, str] = {
+    "stored": "not running",
+}
+
+
+def session_state_words(state: str) -> str:
+    """One session-plane state token, in the words the other surfaces use.
+
+    ``stored`` is the federated catalogue's word for the second of its two
+    states (``live``, and this): a session that exists durably on its owning
+    device with NO runtime behind it right now. It is also the token
+    ``/network sessions`` printed in its STATE column (UX round 5, U29), where it
+    was a third vocabulary for a state the rest of the app already shows: the
+    sidebar paints that same session under a ``⇄`` heading with a row mark, and
+    the listing's reader had to infer three of its four columns from shape alone.
+
+    "not running" is the app's own phrase for exactly this condition rather than
+    a gloss invented here: ``info.collect`` describes the stored half of a
+    listing as "sessions that are NOT running — directories under
+    ``config_dir()/sessions/`` with no live record", and it is what the row's own
+    other columns already say (``lop sessions`` prints ``—`` for a stored row's
+    PID, RSS and heartbeat, because there is no process to measure). The local
+    listing keeps the token in ``STATE`` deliberately — that column holds seven
+    cells consumers branch on, ``stored`` among them (``cli.STATE_COLUMN_WIDTH``)
+    — so this is the federated listing's phrasing, not a rename of that contract.
+
+    A token this table does not know is passed through unchanged: an unrecognised
+    state is not evidence of "not running", and inventing a word for it would be
+    the same defect one state over.
+    """
+    token = (state or "").strip()
+    return SESSION_STATE_WORDS.get(token, token)
 
 
 #: What a SESSION with no stored name is called, on every surface that has to

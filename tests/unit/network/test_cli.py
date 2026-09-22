@@ -401,3 +401,59 @@ def test_doctor_is_healthy_and_exits_zero_when_no_check_fails(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert "code" not in payload
+
+
+def test_a_peer_row_is_a_name_and_words_never_the_wire_token() -> None:
+    """UX round 5, U28: `/network peers` printed the id and the exception class.
+
+    The row the round measured, on the surface a person reads from the composer::
+
+        unreachable  d_1a2b3c…  pixel-8  connect_failed:ConnectionRefusedError
+
+    Three faults in one line: a stage token plus a Python class name where the
+    sibling create arm says "cannot be reached from this device right now", and a
+    peer addressed by the 34-character id every other surface replaces with its
+    name (``mesh-ui.md`` §1.2 gives the id a column of its own, eight characters
+    of it; the sidebar's heading is ``⇄ <label>``). The token and the id are both
+    still in this verb's ``--json`` payload — that is the machine surface, and the
+    row below asserts they are the fields kept there rather than deleted.
+
+    The composer prints whatever this verb's human lines say (``_publish_network_run``
+    in ``tui/app.py``, pinned by ``test_the_receipt_is_the_clis_own_line``), so
+    this is the line the user sees.
+    """
+    device_id = "d_" + "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+    row = {
+        "device_id": device_id,
+        "name": "pixel-8",
+        "reachable": False,
+        "reason": "connect_failed:ConnectionRefusedError",
+    }
+    line = net_cli._peer_line(row)  # noqa: SLF001
+    assert line == "pixel-8 cannot be reached from this device right now (it did not answer)"
+    assert "connect_failed" not in line
+    assert "ConnectionRefusedError" not in line
+    assert device_id not in line
+    # The NAME when the peer has one, and the one shared spelling when it does
+    # not (design round 1, D8) — never the id.
+    assert net_cli._peer_line({**row, "name": ""}) == (  # noqa: SLF001
+        "unnamed device cannot be reached from this device right now (it did not answer)"
+    )
+    # A peer that answered is a state word, and nothing else.
+    assert net_cli._peer_line({**row, "reachable": True, "reason": ""}) == (  # noqa: SLF001
+        "pixel-8  reachable"
+    )
+
+
+def test_the_session_planes_state_token_is_said_in_words() -> None:
+    """U29's other half: ``stored`` is the catalogue's token, not a sentence.
+
+    ``live`` passes through unchanged on purpose: an unrecognised token is not
+    evidence of "not running", and inventing a word for it would be the same
+    defect one state over.
+    """
+    from local_operator.resume import session_state_words
+
+    assert session_state_words("stored") == "not running"
+    assert session_state_words("live") == "live"
+    assert session_state_words("") == ""
