@@ -7762,7 +7762,8 @@ def _preflight_api_key(
     failover; doing network refresh here can turn a transient OAuth failure
     into a false "API key is required" startup error that prevents access to
     the TUI's login command. With no stored row, the AuthStore cascade still
-    checks environment and legacy ``credentials.env`` keys.
+    checks the exported environment (the legacy ``credentials.env`` file is no
+    longer a rung, PR2a).
 
     Providers that need no key (ollama, test) and anything the provider
     registry cannot answer pass through — a preflight must never block a

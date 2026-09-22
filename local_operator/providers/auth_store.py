@@ -10,8 +10,9 @@ First match wins:
 2. config override (``models.yml``/gateway pointer)
 3. OAuth credential (auto-refresh + stickiness/round-robin)
 4. API key persisted by ``login`` (``source="login"``)
-5. env var — including the legacy ``credentials.env`` file read through
-   ``local_operator.credentials.CredentialManager`` when importable
+5. env var — the process environment. After PR2a the plaintext
+   ``credentials.env`` file is no longer read on this tier (the store's
+   provider-class rows are, above), so an export is the only ambient source
 6. stored API key without ``source="login"``
 7. fallback resolver (custom providers)
 
@@ -3096,7 +3097,8 @@ class AuthStore:
         # step 5, regardless of which later tier ends up winning).
         pin(None)
 
-        # 5. Env var tier (process env, then legacy credentials.env).
+        # 5. Env var tier (the process environment; the plaintext credentials.env
+        # file is no longer read here, PR2a).
         env_key = self._env_api_key(provider)
         if env_key:
             return env_key, None

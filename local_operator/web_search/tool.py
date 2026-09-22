@@ -24,7 +24,11 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import validation_error_result
-from local_operator.web_search.models import SearchProviderId, SearchResponse
+from local_operator.web_search.models import (
+    SearchProviderId,
+    SearchResponse,
+    WebSearchSettings,
+)
 from local_operator.web_search.providers import PROVIDERS, tavily_response_from_payload
 from local_operator.web_search.service import (
     WebSearchService,
@@ -338,6 +342,50 @@ WEB_SEARCH_DISABLED_MESSAGE = (
 )
 
 
+def _search_digest_key(
+    service: "WebSearchService", settings: WebSearchSettings, params: "WebSearchParams"
+) -> tuple[str, str, str, str, int, str | None]:
+    """The singleflight key for one search call.
+
+    Only a digest of the EXPORTED credential values behind the resolved chain
+    scopes duplicate work, so two calls with different credentials do not
+    coalesce. Store rows are deliberately NOT digested: they resolve identically
+    for every consumer of the same config root, so they cannot vary between two
+    calls in one process; the environment is the only per-call input. The
+    plaintext ``credentials.env`` leg this used also to read is GONE (PR2a).
+
+    The RESOLVED, non-rotating chain, not ``settings.providers``: an
+    auto-joined provider's credential (EXA_API_KEY, PARALLEL_API_KEY,
+    DEEPSEEK_API_KEY) sits outside the priority prefix, and two calls with
+    different credentials behind it must not coalesce. ``resolve()`` rather than
+    ``candidates()`` because the rotation offset moves per call and the key must
+    be stable.
+
+    A NAMED function rather than an inline block so the plaintext sweep
+    (``tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py``) can
+    prove the removed leg's value reaches no digest: a removal no callable
+    reaches is removal nothing exercises.
+    """
+    auth = hashlib.sha256(
+        json.dumps(
+            {
+                key: os.environ.get(key, "")
+                for provider in service.resolve()
+                for key in PROVIDERS[provider].credential_keys
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return (
+        "search",
+        settings.model_dump_json(),
+        auth,
+        params.query.strip(),
+        params.max_results,
+        params.provider,
+    )
+
+
 async def execute_web_search(
     tool_call_id: str,
     args: dict[str, Any],
@@ -385,36 +433,7 @@ async def execute_web_search(
         # independent calls rather than borrowing another caller's lifecycle.
         io = context.web_io if context is not None else None
         if io is not None and service.tavily_oauth_search is None:
-            # Digest the EXPORTED credential values behind the resolved chain, so
-            # two calls with different credentials do not coalesce. Store rows are
-            # deliberately NOT digested: they resolve identically for every
-            # consumer of the same config root, so they cannot vary between two
-            # calls in one process; the environment is the only per-call input.
-            # The plaintext ``credentials.env`` leg this used to also read is GONE
-            # (PR2a). The RESOLVED, non-rotating chain, not ``settings.providers``:
-            # an auto-joined provider's credential (EXA_API_KEY,
-            # PARALLEL_API_KEY, DEEPSEEK_API_KEY) sits outside the priority prefix,
-            # and two calls with different credentials behind it must not coalesce.
-            # ``resolve()`` rather than ``candidates()`` because the rotation
-            # offset moves per call and the key must be stable.
-            auth = hashlib.sha256(
-                json.dumps(
-                    {
-                        key: os.environ.get(key, "")
-                        for provider in service.resolve()
-                        for key in PROVIDERS[provider].credential_keys
-                    },
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            key = (
-                "search",
-                settings.model_dump_json(),
-                auth,
-                params.query.strip(),
-                params.max_results,
-                params.provider,
-            )
+            key = _search_digest_key(service, settings, params)
             work = io.singleflight(key, search)
         else:
             work = search()
