@@ -72,8 +72,8 @@ class Rule:
     The table is the inspection surface: a reviewer reads one ``Rule`` and sees
     the case it catches, the constraint behind it, and — the half that keeps a
     scanner from becoming a menace — the counterexamples it must NOT fire on.
-    ``examples``/``counterexamples`` are not prose: ``tests/unit/harness/
-    test_secret_sinks.py`` iterates this tuple and runs every entry through the
+    ``examples``/``counterexamples`` are not prose: ``tests/unit/secrets/
+    test_secret_sink_scan.py`` iterates this tuple and runs every entry through the
     scanner, so a rule that stops firing its own examples fails the suite.
     """
 
@@ -121,6 +121,14 @@ RULES: tuple[Rule, ...] = (
             "printf '%s\\n' \"$(lop secret get GITHUB_TOKEN)\"",
             'v=$(lop secret get GITHUB_TOKEN); base64 <<< "$v"',
             'v=$(lop secret get GITHUB_TOKEN); echo "${v:0:8}"',
+            # POSIX backticks are the same substitution as `$( )` and were
+            # invisible before R1-1 — the table carried no backtick at all,
+            # which is how the hole stayed green.
+            'echo "`lop secret get GITHUB_TOKEN`"',
+            'v="`lop secret get GITHUB_TOKEN`"; echo "$v"',
+            "echo `lop secret get GITHUB_TOKEN`",
+            # `read` binds through a builtin, not an `=` (R1-3).
+            'read -r l < <(lop secret get GITHUB_TOKEN); echo "$l"',
             'cat "$(lop secret get GITHUB_TOKEN)"',
         ),
         counterexamples=(
@@ -267,6 +275,10 @@ RULES: tuple[Rule, ...] = (
             "lop secret get GITHUB_TOKEN > /tmp/token; head -c 8 /tmp/token",
             'p=$(lop secret file GCP_SA_JSON); cat "$p"',
             "cat <<EOF > /tmp/creds\n$(lop secret get GITHUB_TOKEN)\nEOF\nsed -n 1p /tmp/creds",
+            # The ASSIGNMENT spelling has to be bound inside the body too, or
+            # the redirect target is never registered and the read-back is
+            # allowed with only the output filter in the way (R1-7).
+            'cat > /tmp/creds2 <<EOF\nKEY="$(lop secret get GITHUB_TOKEN)"\nEOF\ncat /tmp/creds2',
         ),
         counterexamples=(
             'p=$(lop secret file GCP_SA_JSON); gcloud --key-file "$p" auth …',
@@ -335,6 +347,9 @@ RULES: tuple[Rule, ...] = (
             'v=$(lop secret get GITHUB_TOKEN); curl -H "Authorization: Bearer $v" https://x',
             "set -x; echo hello",
             "set -e; v=$(lop secret get GITHUB_TOKEN); curl -H 'Bearer $v' https://x",
+            # Attribute flags are not tracing: `declare -x` marks for export.
+            "v=$(lop secret get [redacted]); declare -x v",
+            "v=$(lop secret get [redacted]); export -n v",
         ),
     ),
     Rule(
@@ -428,7 +443,7 @@ RULES: tuple[Rule, ...] = (
         ),
         counterexamples=(
             "sh -c 'echo hello'",
-            "v=$(lop secret get GITHUB_TOKEN); sh -c 'curl -H \"Bearer $TOKEN\" https://x',"
+            "v=$(lop secret get GITHUB_TOKEN); sh -c 'curl -H \"Bearer $TOKEN\" https://x'",
             "find . -name '*.py' | xargs grep -l TODO",
         ),
     ),
@@ -459,6 +474,45 @@ RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
+        label="shell.environment-dump-of-source",
+        verdict="printing",
+        lang="shell",
+        question="Does the command print the variable or environment a value was bound into?",
+        why=(
+            "A value does not have to be named as an operand to be printed. "
+            "`export V=$(lop secret get NAME); printenv V`, `V=$(…); export V; "
+            "env | grep V=` and `V=$(…); set | grep V=` all hand the raw value "
+            "back, and none of them puts it in a printer's argv — which is why "
+            "the emitter rule cannot see them. The dumper's REACH is what "
+            "decides: `printenv` and bare `env` show the EXPORTED namespace, "
+            "bare `set`/`export`/`declare` show the shell's own variables, and "
+            "any of them with a real operand is a consumer handing the value to "
+            "a child (`env V=… client`) rather than printing it."
+        ),
+        rewrite=(
+            "Let the consumer print its own result: "
+            "`lop secret run --secret [redacted] -- client`, or `v=$(lop secret get "
+            'NAME); curl -H "Authorization: Bearer $v" …`. Do not export a value '
+            "and then dump the environment."
+        ),
+        examples=(
+            "export V=$(lop secret get GITHUB_TOKEN); printenv V",
+            "V=$(lop secret get GITHUB_TOKEN); export V; env | grep V=",
+            "declare V=$(lop secret get GITHUB_TOKEN); printenv",
+            "export V=$(lop secret get GITHUB_TOKEN); env",
+            "V=$(lop secret get GITHUB_TOKEN); set | grep V=",
+            "export V=$(lop secret get GITHUB_TOKEN); export",
+        ),
+        counterexamples=(
+            'v=$(lop secret get GITHUB_TOKEN); env V="$v" some-client --flag',
+            "printenv PATH",
+            "printenv HOME",
+            "set -e",
+            "env",
+            'v=$(lop secret get GITHUB_TOKEN); curl -H "Authorization: Bearer $v" https://x',
+        ),
+    ),
+    Rule(
         label="shell.unresolved-source-region",
         verdict="unresolved",
         lang="shell",
@@ -485,11 +539,18 @@ RULES: tuple[Rule, ...] = (
             'echo "$(lop secret get GITHUB_TOKEN)\n',
             "cat <<EOF\n$(lop secret get GITHUB_TOKEN)\n",
             'echo $(lop secret get "GITHUB_TOKEN',
+            # R1-8: deeper than the walk follows, which used to answer `none`
+            # where six levels were refused — the opposite polarity.
+            'echo "$("$("$("$("$("$("$(lop secret get GITHUB_TOKEN)")")")")")")"',
         ),
         counterexamples=(
             "echo 'unterminated-looking but no source here",
             "cat <<'EOF'\n$(lop secret get X)\nEOF",
             "ls -la /tmp",
+            # R1-4: an apostrophe inside an unquoted body is the SCRIPT's
+            # text, not an unterminated quote.
+            "cat <<EOF > /tmp/m\nIt's fine\nEOF\nv=$(lop secret get GITH"
+            'UB_TOKEN); curl -H "Bearer $v" https://x',
         ),
     ),
     Rule(
@@ -528,6 +589,23 @@ RULES: tuple[Rule, ...] = (
             'print(len(secrets["GITHUB_TOKEN"]))',
             'print("GITHUB_TOKEN" in secrets)',
             "print([name for name in secrets])",
+            # Q1's boundary: a print of something DERIVED from the request is not
+            # a print of the value. The response was built WITH it and does not
+            # carry it, and `_value_taint` is the test that says so.
+            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'ers={"Authorization": f"Bearer {token}"})\nprint(resp.status'
+            ")",
+            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'ers={"Authorization": f"Bearer {token}"})\nprint(str(resp.st'
+            "atus))",
+            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'ers={"Authorization": f"Bearer {token}"})\nprint(resp.url)',
+            'token = secrets["[redacted]"]\nresp = requests.get(url, head'
+            'ers={"Authorization": f"Bearer {token}"})\nprint(len(resp.re'
+            "ad()))",
+            'token = secrets["[redacted]"]\ndone = subprocess.run(["curl"'
+            ', "-H", "Authorization: Bearer " + token, url], capture_outp'
+            'ut=True)\nprint("rc", done.returncode)',
         ),
     ),
     Rule(
@@ -863,6 +941,11 @@ def _read_parens(text: str, open_index: int) -> tuple[str, int]:
         if text.startswith("$(", i) or text.startswith("<(", i) or text.startswith(">(", i):
             _inner, i = _read_parens(text, i + 1)
             continue
+        if ch == "`":
+            # A backtick group inside `$( )` is opaque to the paren count: a `)`
+            # inside it belongs to the inner command, not to this group.
+            _inner, i = _read_backtick(text, i)
+            continue
         if ch == "(":
             depth += 1
         elif ch == ")":
@@ -893,6 +976,42 @@ def _read_backtick(text: str, start: int) -> tuple[str, int]:
     raise _LexFault("unbalanced backtick substitution", start)
 
 
+def _iter_expansions(text: str) -> list[tuple[str, tuple[int, int]]]:
+    """The ``$( )`` and backtick groups in a here-doc body, in order.
+
+    Deliberately not a command lexer — see :meth:`_ShellAnalyzer._heredoc_flow`:
+    a body is data, so only the two constructs that really run are read out of
+    it. An unbalanced group is DROPPED rather than raised: bash fails the whole
+    command at expansion time, so there is nothing to print, and raising here is
+    what produced R1-4's false refusal in the first place.
+    """
+    found: list[tuple[str, tuple[int, int]]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text.startswith("$(", i):
+            try:
+                inner, end = _read_parens(text, i + 1)
+            except _LexFault:
+                break
+            found.append((inner, (i, end)))
+            i = end
+            continue
+        if text[i] == "`":
+            try:
+                inner, end = _read_backtick(text, i)
+            except _LexFault:
+                break
+            found.append((inner, (i, end)))
+            i = end
+            continue
+        i += 1
+    return found
+
+
 def _read_word(text: str, start: int) -> tuple[_Word, int]:
     """Read one word (quoting and substitutions included) from ``start``.
 
@@ -916,7 +1035,12 @@ def _read_word(text: str, start: int) -> tuple[_Word, int]:
         ch = text[i]
         if ch in " \t\n":
             break
-        if ch in "|&;()<>" or ch == "`":
+        # NOT a word terminator: `` ` `` opens a POSIX command substitution, the
+        # same thing `$(` is. Leaving it in this break set (R1-1) made
+        # `echo "` + backtick + `lop secret get X` + backtick + `"` answer `none`
+        # while the child ran and the raw value landed in the result — and made
+        # `_read_backtick` below dead code.
+        if ch in "|&;()<>":
             break
         if ch == "\\":
             if i + 1 >= n:
@@ -954,6 +1078,15 @@ def _read_word(text: str, start: int) -> tuple[_Word, int]:
                 if text.startswith("$(", i):
                     flush()
                     inner, end = _read_substitution(text, i)
+                    pieces.append(_Piece(inner, "subst", (i, end)))
+                    i = end
+                    buf_start = i
+                    continue
+                if text[i] == "`":
+                    # The other command substitution, and just as live inside
+                    # double quotes as `$(` is.
+                    flush()
+                    inner, end = _read_backtick(text, i)
                     pieces.append(_Piece(inner, "subst", (i, end)))
                     i = end
                     buf_start = i
@@ -1188,6 +1321,15 @@ _INLINE_PYTHON = frozenset({"python", "python3"})
 #: (required non-finding (iii)).
 _SOURCE_VERBS = frozenset({"get", "file", "run"})
 
+#: Prefixes that BIND an assignment rather than commanding with it: `export
+#: V=$(lop secret get X)` is the same binding as `V=$(…)` and then some — the
+#: value is in the child environment, which `printenv`/`env` print (R1-2).
+_BINDING_PREFIXES = frozenset({"export", "declare", "local", "readonly", "typeset"})
+
+#: Commands that can dump a variable's value out of the environment or the shell
+#: rather than by naming it as an operand.
+_ENV_DUMPERS = frozenset({"printenv", "env", "set", "export", "declare"})
+
 #: Commands that move a path's contents somewhere else, so a value's copy keeps
 #: its debt under a new name.
 _PATH_MOVERS = frozenset({"cp", "mv", "ln", "install"})
@@ -1274,6 +1416,12 @@ class _ShellAnalyzer:
         self.file_vars: dict[str, str] = {}
         #: Paths a value was written into during THIS command text.
         self.tainted_paths: dict[str, tuple[int, int]] = {}
+        #: Names this command put into the exported namespace (R1-2), whose
+        #: values an environment dump can print without naming the secret.
+        self.exported_vars: set[str] = set()
+        #: The text of a substitution this walk was too deep to follow (R1-8),
+        #: and of the here-doc bodies it could not place.
+        self._skipped_deep = ""
         #: The whole-command conditions: recorded during the walk, judged after
         #: it, because `set -x` and `ps` can appear before or after the source.
         self._xtrace: tuple[tuple[int, int], str] | None = None
@@ -1362,6 +1510,10 @@ class _ShellAnalyzer:
         for piece in word.pieces:
             if piece.kind == "subst":
                 if depth >= _MAX_DEPTH:
+                    # The bound used to `continue`, which made SEVEN levels of
+                    # nesting answer `none` where six were refused (R1-8) — the
+                    # opposite polarity from this module's stated asymmetry.
+                    self._note_depth(piece.text)
                     continue
                 inner = self._analyze(piece.text, contained=True, depth=depth + 1)
                 if inner.value or inner.path:
@@ -1408,6 +1560,39 @@ class _ShellAnalyzer:
             if piece.value:
                 self._argv_taint = self._argv_taint or (piece.span or item.span, piece.name)
         return flow
+
+    def _dumped_name(self, command: str, flags: list[str], operands: list[str]) -> str:
+        """The secret an environment/variable dump would print, or "".
+
+        Each dumper's REACH is the precision here: `printenv` and bare `env` show
+        the exported namespace, `set` (bare, no flags — `set -e`/`set -x` print
+        nothing) shows the shell's variables, and `export`/`declare`/`typeset`
+        print only when bare or asked for with `-p`. An operand that names a
+        value is a printer's argument; an operand that names a *command's*
+        environment (`env V=… client`) is a consumer, and the caller has already
+        told them apart.
+        """
+        if command == "printenv":
+            if operands:
+                return operands[0] if operands[0] in self.exported_vars else ""
+            return next(iter(self.exported_vars), "")
+        if command == "env":
+            return "" if operands or flags else next(iter(self.exported_vars), "")
+        if command == "set":
+            return "" if operands or flags else next(iter(self.value_vars), "")
+        # export / declare / typeset: bare dumps the namespace, `-p` prints the
+        # named variables it is given.
+        if not operands:
+            return (
+                ""
+                if flags and not any(f in ("-p", "--print") for f in flags)
+                else (next(iter(self.exported_vars), ""))
+            )
+        if any(f in ("-p", "--print") for f in flags):
+            for name in operands:
+                if name in self.value_vars or name in self.file_vars:
+                    return self.value_vars.get(name) or self.file_vars.get(name) or name
+        return ""
 
     def _literal_path_hit(self, stage: list[_Word | _Op | _Body]) -> tuple[bool, tuple[int, int]]:
         """Does this stage name a file a secret was written into?"""
@@ -1645,14 +1830,27 @@ class _ShellAnalyzer:
             return argv
 
         # -- assignments: the value is bound, not printed -------------------
-        if command == "" and all(self._is_assignment(word) for word in words) and words:
+        plain_assignment = bool(words) and all(self._is_assignment(word) for word in words)
+        binding_prefix = command in _BINDING_PREFIXES
+        if binding_prefix:
+            # `export V` with no `=` re-exports a variable bound by an earlier
+            # statement, which is the second spelling of R1-2.
             for word in words:
+                text = self._word_text(word).strip()
+                if text in self.value_vars or text in self.file_vars:
+                    self.exported_vars.add(text)
+        if plain_assignment or (binding_prefix and any(self._is_assignment(w) for w in words)):
+            for word in words:
+                if not self._is_assignment(word):
+                    continue
                 flow = self._value_flow(word, depth=depth)
                 name = self._assignment_name(word)
                 if flow.value:
                     self.value_vars[name] = flow.name
                 elif flow.path:
                     self.file_vars[name] = flow.name
+                if binding_prefix and (flow.value or flow.path):
+                    self.exported_vars.add(name)
             # A pure assignment's stdout carries nothing; the value is in the
             # variable, which is exactly the sanctioned first half.
             return _Flow()
@@ -1676,6 +1874,41 @@ class _ShellAnalyzer:
         span = flow_in.span or (stage[0].span if stage else (0, 0))
         name = flow_in.name
         path_hit, path_span = self._literal_path_hit(stage)
+
+        # -- `read` binds through a builtin, not an `=` -----------------------
+        # `read -r l < <(lop secret get X)` puts the value in `l` with no
+        # assignment word anywhere, so `echo "$l"` looked like an ordinary
+        # consumer (R1-3).
+        if command == "read" and (flow_in.value or flow_in.path or path_hit):
+            for word in words[1:]:
+                text = self._word_text(word).strip()
+                if not text or text.startswith("-"):
+                    continue
+                if flow_in.value:
+                    self.value_vars[text] = flow_in.name
+                elif flow_in.path:
+                    self.file_vars[text] = flow_in.name
+            return _Flow()
+
+        # -- a dump of the shell's own variables or environment ---------------
+        # A value bound to a name is not out of reach just because no printer
+        # names it: `printenv V`, `env`, `set | grep V=` and `export` (bare) all
+        # print it back. Fired only when this command really did put a value in
+        # that namespace, and only for the bare/no-operand spellings — `env
+        # V=1 client` is a CONSUMER handing an environment to a child.
+        if command in _ENV_DUMPERS:
+            rest = [self._word_text(word).strip() for word in words[1:]]
+            flags = [text for text in rest if text.startswith("-")]
+            operands = [text for text in rest if text and not text.startswith("-")]
+            dumped = self._dumped_name(command, flags, operands)
+            if dumped:
+                self._add(
+                    "shell.environment-dump-of-source",
+                    span or (words[0].span if words else (0, 0)),
+                    dumped,
+                    reason=f"`{command}` prints the value back out of the shell's own variables",
+                )
+                return _Flow()
 
         # -- a length sink ends the value's journey --------------------------
         # `lop secret get NAME | wc -c | tr -d ' '` must not refuse the `tr`:
@@ -1782,7 +2015,11 @@ class _ShellAnalyzer:
         """
         stage_span = stage[0].span if stage else (0, 0)
         flags = [self._word_text(word).strip() for word in words[1:]]
-        if command in ("set", "export", "declare"):
+        # `set -x` and `set -o xtrace` are the spellings that turn tracing on.
+        # `declare -x`/`export -x` only set the export ATTRIBUTE, so counting them
+        # here refused `V=$(lop secret get X); declare -x V` — a form that prints
+        # nothing — for a mode it never entered.
+        if command == "set":
             if any(_XTRACE_RE.match(flag) for flag in flags) or "xtrace" in flags:
                 self._xtrace = self._xtrace or (stage_span, "")
         elif command in _INTERPRETERS or command in ("env", "xargs"):
@@ -1800,19 +2037,42 @@ class _ShellAnalyzer:
             self._proc_read = self._proc_read or stage_span
 
     def _heredoc_flow(self, bodies: list[_Piece], *, depth: int) -> _Flow:
-        """Taint an unquoted here-doc body carries (a quoted body is literal)."""
+        """Taint an unquoted here-doc body carries (a quoted body is literal).
+
+        A body is NOT shell text and must not be lexed as one (R1-4). It is data
+        the shell expands, so `cat <<EOF` writing a script that says `It's fine`
+        is two words and an apostrophe — lexing it as a command list raised
+        "unterminated single quote", a FALSE refusal of a call that lexes, with a
+        diagnosis describing nothing the model wrote. What an unquoted body
+        really does is exactly two things: run its `$( )`/backtick substitutions,
+        and resolve its `$VAR` references. This reads those two and nothing else.
+        """
         flow = _Flow()
         for piece in bodies:
-            if piece.kind == "literal" or depth >= _MAX_DEPTH:
+            if piece.kind == "literal":
                 continue
-            inner = self._analyze(piece.text, contained=True, depth=depth + 1)
-            if inner.value or inner.path:
-                flow = _Flow(
-                    value=flow.value or inner.value,
-                    path=flow.path or inner.path,
-                    name=flow.name or inner.name,
-                    span=flow.span if flow.span != (0, 0) else piece.span,
-                )
+            # `$VAR` references in the body, read the same way an argument's are.
+            references = self._value_flow(
+                _Word((_Piece(piece.text, "expand", piece.span),), piece.span), depth=depth
+            )
+            flow = _Flow(
+                value=flow.value or references.value,
+                path=flow.path or references.path,
+                name=flow.name or references.name,
+                span=flow.span if flow.span != (0, 0) else references.span,
+            )
+            for inner, span in _iter_expansions(piece.text):
+                if depth >= _MAX_DEPTH:
+                    self._note_depth(inner)
+                    break
+                inner_flow = self._analyze(inner, contained=True, depth=depth + 1)
+                if inner_flow.value or inner_flow.path:
+                    flow = _Flow(
+                        value=flow.value or inner_flow.value,
+                        path=flow.path or inner_flow.path,
+                        name=flow.name or inner_flow.name,
+                        span=flow.span if flow.span != (0, 0) else span,
+                    )
         return flow
 
     def _interpreter(
@@ -1895,6 +2155,10 @@ class _ShellAnalyzer:
                 reason=f"the inline program is refused by `{first.rule}`",
             )
 
+    def _note_depth(self, text: str) -> None:
+        """Record a substitution nested deeper than this walk follows (R1-8)."""
+        self._skipped_deep = self._skipped_deep or text
+
     def _after_walk(self) -> None:
         """Judge the whole-command conditions the walk recorded.
 
@@ -1910,6 +2174,16 @@ class _ShellAnalyzer:
                 reason=(
                     "the shell echoes every expansion to stderr, and stderr is "
                     "part of this result"
+                ),
+            )
+        if self._skipped_deep and (self.sources or _RAW_SOURCE_RE.search(self._skipped_deep)):
+            self._add(
+                "shell.unresolved-source-region",
+                (0, 0),
+                self.sources[0] if self.sources else "?",
+                reason=(
+                    f"a substitution nested deeper than {_MAX_DEPTH} levels was not followed, "
+                    "so whether it prints a value is unknown"
                 ),
             )
         if self._proc_read is not None and self._argv_taint is not None:
@@ -1997,28 +2271,6 @@ class _PyAnalyzer:
                         return node.args[0].value
         return None
 
-    def _is_tainted(self, node: ast.AST) -> tuple[bool, str]:
-        """Does this expression carry a value from the store?
-
-        ``len(x)`` is not: the length of a secret is not the secret, which is
-        what keeps `print(len(secrets["X"]))` on the allowed side.
-        """
-        name = self._source_name(node)
-        if name is not None:
-            self.sources.append(name)
-            return True, name
-        if isinstance(node, ast.Name) and node.id in self.tainted:
-            return True, node.id
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id in ("len", "hash", "id"):
-                return False, ""
-        for child in ast.iter_child_nodes(node):
-            found, child_name = self._is_tainted(child)
-            if found:
-                return True, child_name
-        return False, ""
-
     def _collect_paths(self, tree: ast.Module) -> None:
         """`p = Path("/tmp/t")` — remember the literal a handle stands for."""
         for node in ast.walk(tree):
@@ -2081,7 +2333,7 @@ class _PyAnalyzer:
                     continue
                 if node.value is None:
                     continue
-                found, _ = self._is_tainted(node.value)
+                found, _ = self._value_taint(node.value)
                 if not found:
                     continue
                 targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
@@ -2250,7 +2502,14 @@ class _PyAnalyzer:
                         or self._write_path(argument) is not None
                     ):
                         continue
-                    found, found_name = self._is_tainted(argument)
+                    # VALUE-based, like every other taint question here (Q1):
+                    # `resp = requests.get(url, headers={"Authorization": …token…})`
+                    # used a secret correctly, and its VALUE is a response — so
+                    # `print(resp.status)` is an observation of the response, not
+                    # a print of the value. The argument-inclusive test refused
+                    # it, and refused `print(done.returncode)` for a child's exit
+                    # code, while bash allowed printing a whole curl response.
+                    found, found_name = self._value_taint(argument)
                     if found:
                         tainted = True
                         name = name or found_name
@@ -2407,11 +2666,25 @@ def scan_python(source: str) -> ScanResult:
     )
 
 
-def _span_context(text: str, span: tuple[int, int]) -> tuple[str, str]:
-    """A bounded window on the offending span, with a caret line under it."""
+def _span_context(text: str, span: tuple[int, int], *, line_based: bool = False) -> tuple[str, str]:
+    """A bounded window on the offending span, with a caret line under it.
+
+    ``line_based`` is for the eval surface: a Python finding's span is
+    ``(lineno, col_offset)`` from the AST, not an offset into the cell, so
+    reading it as an offset showed the model line 1 of its own cell with a
+    caret in a meaningless column (QA Q2) — worse than showing nothing, because
+    the line the refusal names is then wrong.
+    """
     start, end = span
     if not isinstance(start, int) or not isinstance(end, int):
         return "", ""
+    if line_based:
+        lines = text.splitlines() or [""]
+        if start < 1 or start > len(lines):
+            return "", ""
+        line = lines[start - 1]
+        caret = " " * max(0, min(end, len(line))) + "^"
+        return line.rstrip(), caret.rstrip()
     if start < 0 or start > len(text):
         return "", ""
     line_start = text.rfind("\n", 0, start) + 1
@@ -2459,11 +2732,11 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
         else:
             lines.append(
                 f"  rule:   {finding.rule}  (span {finding.span[0]}:{finding.span[1]} of "
-                f"the command)"
+                "the command)"
             )
         if finding.secret_name and finding.secret_name != "?":
             lines.append(f"  secret: {finding.secret_name}")
-        snippet, caret = _span_context(text, finding.span)
+        snippet, caret = _span_context(text, finding.span, line_based=spec.lang == "python")
         if snippet:
             lines.append(f"  here:   {snippet}")
             lines.append(f"          {caret}")

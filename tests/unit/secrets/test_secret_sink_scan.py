@@ -609,3 +609,189 @@ def test_refusal_text_names_rule_span_and_rewrite() -> None:
     assert "GITHUB_TOKEN" in message
     assert "^" in message, "the offending span must be marked"
     assert "curl -H" in message
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1 — one test per finding, because each was a hypothesis the
+# suite could not falsify before (the table carried no backtick, no `export`ed
+# value, no `read`, and no derived-value print).
+# ---------------------------------------------------------------------------
+
+
+def _result_text(result: object) -> str:
+    """The text of a tool result, spelled once because three tests read it."""
+    parts = getattr(result, "content", ())
+    return "".join(str(getattr(part, "text", "")) for part in parts)
+
+
+def test_r1_1_a_backtick_substitution_is_a_substitution_not_a_word_break() -> None:
+    """The POSIX spelling of `$( )` is the same flow, and was invisible.
+
+    ``echo "`+backtick+`lop secret get X`+backtick+`"`` answered `none` while the
+    child ran and the RAW value landed in the tool result — the incident's harm,
+    in a spelling no rule example named, which is how it stayed green.
+    """
+    refused = [
+        'echo "`lop secret get [redacted]`"',
+        'v="`lop secret get [redacted]`"; echo "$v"',
+        "echo `lop secret get [redacted]`",
+        "sh -c 'echo `lop secret get [redacted]`'",
+        'echo "`lop secret get [redacted] | rev`"',
+        'cat "`lop secret get [redacted]`"',
+    ]
+    for command in refused:
+        result = scan_command(command)
+        assert result.refused, f"a backtick evaded the scan: {command!r} -> {result.verdict}"
+        assert result.findings, command
+        assert result.findings[0].rewrite
+    # The same spelling with nothing to fetch is still nobody's business.
+    assert scan_command("echo `date`").verdict == "none"
+    assert scan_command("echo `hostname` | rev").verdict == "none"
+
+
+@pytest.mark.asyncio
+async def test_r1_1_the_backtick_leak_is_refused_before_the_child_runs(tmp_path: Path) -> None:
+    """R1-1 through the real tool, with a marker proving nothing executed."""
+    marker = tmp_path / "ran"
+    command = f'echo "`lop secret get [redacted]`"; touch {marker}'
+    result = await builtin.execute_bash(
+        "bash-backtick", {"command": command}, AbortSignal(), None, _context(tmp_path)
+    )
+    assert result.is_error
+    text = _result_text(result)
+    assert "shell.print-of-source" in text
+    # The lex fault must not be "empty word" any more: the call lexes.
+    assert "unresolved" not in text
+    assert not marker.exists(), "the child ran anyway — the refusal was not pre-execution"
+
+
+def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> None:
+    """`export V=$(…); printenv V` handed back the raw value (R1-2).
+
+    None of these puts the value in a printer's argv, which is exactly why the
+    emitter rule could not see them: the printer is `printenv`, `env` or `set`,
+    and the operand is the environment.
+    """
+    refused = [
+        "export V=$(lop secret get [redacted]); printenv V",
+        "V=$(lop secret get [redacted]); export V; env | grep V=",
+        "declare V=$(lop secret get [redacted]); printenv",
+        "export V=$(lop secret get [redacted]); env",
+        "V=$(lop secret get [redacted]); set | grep V=",
+        "export V=$(lop secret get [redacted]); export",
+        "export V=$(lop secret get [redacted]); declare -p V",
+        "export V=$(lop secret get [redacted]); export -p",
+    ]
+    for command in refused:
+        result = scan_command(command)
+        assert result.refused, f"{command!r} -> {result.verdict}"
+        assert "shell.environment-dump-of-source" in {item.rule for item in result.findings}
+    allowed = [
+        # A dumper with a real operand is a consumer handing the value on.
+        'v=$(lop secret get [redacted]); env V="$v" some-client --flag',
+        "printenv PATH",
+        "printenv HOME",
+        "set -e",
+        "env",
+        "export MY_FLAG=1",
+        # `declare -x V` marks a variable for export and prints nothing.
+        "V=$(lop secret get [redacted]); declare -x V",
+    ]
+    for command in allowed:
+        assert not scan_command(command).refused, command
+
+
+def test_r1_3_a_value_read_by_the_read_builtin_is_tainted() -> None:
+    """`read -r l < <(lop secret get X)` binds with no `=` anywhere (R1-3)."""
+    result = scan_command('read -r l < <(lop secret get [redacted]); echo "$l"')
+    assert result.refused
+    assert result.findings[0].rule == "shell.print-of-source"
+    # A `read` from an ordinary source is untouched.
+    assert not scan_command('read -r line < /etc/hosts; echo "$line"').refused
+    # ... and so is a `read` that never sees the value.
+    assert scan_command('v=$(lop secret get [redacted]); read -r x <<< "$v"; echo "$x"').refused
+
+
+def test_r1_4_an_apostrophe_in_an_unquoted_heredoc_body_is_not_a_lex_fault() -> None:
+    """A body is data with expansion, not shell text (R1-4).
+
+    Lexing it as a command list made `It's fine` an unterminated quote, refused
+    a call that lexes, and diagnosed it with the wrong span. The refusal it
+    produced was also not the one the fail-closed paragraph justifies.
+    """
+    sanctioned = (
+        "cat <<EOF > /tmp/m\nIt's fine\nEOF\n"
+        'v=$(lop secret get [redacted]); curl -H "Bearer $v" https://x'
+    )
+    result = scan_command(sanctioned)
+    assert result.verdict == "consumer", result
+    assert not result.refused
+    assert result.fault == ""
+
+    printing = "cat <<EOF > /tmp/m\nIt's fine\nEOF\n" 'v=$(lop secret get [redacted]); echo "$v"'
+    refused = scan_command(printing)
+    assert refused.refused
+    # The RIGHT reason: the `echo`, not a lex fault about the apostrophe.
+    assert {item.rule for item in refused.findings} == {"shell.print-of-source"}
+    assert refused.fault == ""
+
+    # The quoted spelling of the same body is still the discriminating
+    # non-finding: nothing runs and nothing is refused.
+    assert (
+        scan_command("cat <<'EOF' > /tmp/m\nIt's fine\n$(lop secret get X)\nEOF").verdict == "none"
+    )
+
+
+def test_q1_a_print_of_something_derived_from_the_request_is_allowed() -> None:
+    """The boundary QA measured: a response is not the value it was built with.
+
+    The argument test was argument-inclusive, so `resp = get(url, headers=…)`
+    poisoned every later print — of `resp.status`, of `str(resp.status)`, of a
+    child's exit code — while bash allows printing a whole curl response body.
+    """
+    prefix = (
+        'import requests\n\ntoken = secrets["[redacted]"]\n'
+        'req = requests.Request(url, headers={"Authorization": f"Bearer {token}"})\n'
+        "resp = requests.Session().send(req.prepare())\n"
+    )
+    allowed = [
+        prefix + "print(resp.status)",
+        prefix + "print(str(resp.status))",
+        prefix + "print(int(resp.status))",
+        prefix + "print(resp.url)",
+        prefix + "print(len(resp.read()))",
+        prefix + "print(resp.headers['Content-Type'])",
+        'import subprocess\n\ntoken = secrets["[redacted]"]\n'
+        'done = subprocess.run(["curl", "-H", "Authorization: Bearer " + token, url], '
+        "capture_output=True)\n"
+        'print("rc", done.returncode, "len", len(done.stdout))',
+    ]
+    for cell in allowed:
+        result = scan_python(cell)
+        assert not result.refused, f"{cell!r} -> {result.verdict} {result.labels}"
+    # The value itself is still refused, through every spelling that carries it.
+    refused = [
+        'token = secrets["[redacted]"]\nprint(token)',
+        'token = secrets["[redacted]"]\nprint(token[:8])',
+        'token = secrets["[redacted]"]\nprint(f"Bearer {token}")',
+        'token = secrets["[redacted]"]\nprint(str(token))',
+        'token = secrets["[redacted]"]\nprint(repr(token))',
+        'token = secrets["[redacted]"]\nblob = token.encode()\nprint(blob)',
+    ]
+    for cell in refused:
+        assert scan_python(cell).refused, cell
+
+
+def test_q2_a_multi_line_cell_points_the_caret_at_the_call() -> None:
+    """A Python span is ``(line, column)``, so the snippet must be that line.
+
+    Read as offsets it showed the model line 1 of its own cell with a caret in a
+    meaningless column — the refusal naming the wrong line is worse than naming
+    none.
+    """
+    cell = 'import urllib.request\n\ntoken = secrets["[redacted]"]\nprint(token)'
+    message = refusal_text(scan_python(cell), text=cell, tool_name="eval")
+    here = message.split("here:")[1].split("why:")[0]
+    assert "print(token)" in here, message
+    assert "import urllib.request" not in here, message
+    assert "cell line 4" in message
