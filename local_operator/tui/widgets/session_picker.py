@@ -542,13 +542,13 @@ ATTACHED_MARKER = "○"
 #: (see ``IDLE_MARKER``), so the state needs its own SHAPE.
 #:
 #: ``⇉`` (U+21C9 RIGHTWARDS PAIR OF ARROWS) — a NEW mark in this column, so
-#: the argument for it is its idiom rather than its precedent. The picker
-#: already speaks a doubled-arrow language: the cursor is ``›`` and the row being
-#: opened is ``»``, one cell each in the same ink, and ``⇉`` is that same doubling
-#: applied to "work moved onward to children". The desktop surface names this
-#: idea separately and in its own idiom (``Share2``, the icon on the trace's own
-#: "Delegated work" label); the two are deliberately not the same codepoint,
-#: because each surface draws with its own font stack.
+#: the argument for it is its idiom rather than its precedent. The sidebar that
+#: draws this column already speaks a doubled-arrow language: the cursor is
+#: ``›`` and the row being opened is ``»``, one cell each in the same ink, and
+#: ``⇉`` is that same doubling applied to "work moved onward to children". The
+#: desktop surface names this idea separately and in its own idiom (``Share2``,
+#: the icon on the trace's own "Delegated work" label); the two are deliberately
+#: not the same codepoint, because each surface draws with its own font stack.
 #:
 #: THE SHAPE HAS TO SURVIVE THE COLUMN, which is where the crowding argument
 #: comes in: this column already carries ``◷``, ``○``, ``●``, ``!``, ``⊘``,
