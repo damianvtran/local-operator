@@ -52,6 +52,74 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.20 — on `main`, NOT submitted (as of 2026-09-22)
+
+The number moved so that the extension version pins exactly one tree again.
+**`0.1.19` named two trees, and no revision was ever created under it.**
+`97753b4c` (`feat(browser): serve downloads from the extension, behind operator
+switches`) is the commit that set the number — its parent reads `0.1.18` — and
+the tree it named is `8a49f477b0e33969524de6fdc98d19150a1f6ac1`
+(`git rev-parse 97753b4c:extension`). **Seven** commits then landed under
+`extension/` without the bump the rule requires: `97250981`, `bd74a1fc`,
+`f53cbdce`, `ab05f3da`, `594db769`, `5300a59b`, `e8ed28a1` — all file-transfer
+and consent work, and all of it now inside what ships. By 2026-09-22
+`origin/main:extension` was `270538e3dd15870212a4ef35b06b15e4e83f6f21`, a
+different tree reading the same `0.1.19`. That is the ambiguity AGENTS.md
+forbids, and the same shape as the 0.1.14 three-tree mess below. So the repair
+is the renumber the 0.1.15 entry already establishes, not a recall: `0.1.20`
+names the tree this bump lands.
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.20 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; this is a revision of it) |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | the bump commit on `chore/extension-version-0.1.20` (SHA in that PR's thread; the tree hash below is the field that pins the input) |
+| `extension/` tree hash | `c1b5780a214cb795a19bfe5b0c160ebc904e2d15` (`git rev-parse <bump commit>:extension`) |
+| Artifact SHA-256 | *not applicable — not uploaded* |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Not dispatched.** Three dispatches aimed at `0.1.19` were refused by the store before this number was taken — runs [35531388197](https://github.com/damianvtran/local-operator/actions/runs/35531388197) (2026-09-20T19:09:46Z), [35604532647](https://github.com/damianvtran/local-operator/actions/runs/35604532647) (2026-09-21T13:16:17Z) and [35734051298](https://github.com/damianvtran/local-operator/actions/runs/35734051298) (2026-09-22T13:31:44Z, `headSha=0caf7a32`), each of which built and validated `v0.1.19` and was then answered `FAILED_PRECONDITION` with `reason: NOT_UPDATEABLE` and `"You may not edit or publish an item that is in review."` — 0.1.18 holds the queue |
+| Promotion route | **Not dispatched** |
+| Store state | Not submitted. `0.1.18` is `PENDING_REVIEW`; a fresh dispatch would read the same refusal |
+| State last checked | 2026-09-22 |
+| Approval timestamp | *not applicable* |
+| Previously published | v0.1.17 (`PUBLISHED` at 100% — see that entry; confirmed on the public listing 2026-09-20) |
+
+**So nothing shipped under the ambiguous number, and that is measured, not
+assumed.** Every `chrome-web-store.yml` run for `0.1.19` failed, the store's own
+body is the reason, and the item's revision is still 0.1.18 — no user holds a
+build that reports `0.1.19`, and no revision exists that a reader could confuse
+with the other tree of that name. The seven commits' contents do reach the
+store, but as `0.1.20`, which every version site in the tree reads.
+
+**Why the bump is in this commit rather than the one that changed behaviour.**
+The rule is that a behaviour change carries its version bump in the same PR
+(AGENTS.md). The seven commits above broke it, and this is the repair: the
+version now names the tree that is actually on `main`. The runtime's
+`EXPECTED_EXTENSION_VERSION` moves with it (`extension/manifest.json` and
+`extension/package.json` are the source of truth; a unit test pins the constant
+to them), and both generated targets — `extension/src/protocol.gen.ts` and the
+`extension/ui-vendor/` bundle, whose headers carry an INPUT hash over
+`protocol.py` — are regenerated with `gen_ts`, not hand-edited.
+
+**What moved, and what deliberately did not.** Seven sites carry the tree's
+version: the two manifests, `EXPECTED_EXTENSION_VERSION`, the two generated
+targets, and the two synthetic performance fixtures that report this tree's
+version on the wire (`extension/scripts/popup-performance-live.mjs`,
+`extension/tests/fixtures/worker-performance.mjs` — both had been left at
+`0.1.17` through the 0.1.18 and 0.1.19 renumbers). `PROTO_VERSION` stays 1, and
+so does `CAPABILITY_MIN_EXTENSION_VERSION["download"] = "0.1.19"`: that table
+names the first extension **tree** that can serve a capability-gated method —
+the tree `97753b4c` introduced — so it is a statement about git history rather
+than about the name this tree carries, and moving it would change the refusal
+copy this runtime gives an older peer. A version-pin repair changes no
+behaviour, and that is checkable rather than asserted: diffing the two
+`extension/` trees (`git diff 270538e3dd15870212a4ef35b06b15e4e83f6f21
+c1b5780a214cb795a19bfe5b0c160ebc904e2d15`) yields **version literals and
+generated header stamps and nothing else** — 16 files, 38 changed lines, every
+one of them a `"version"` literal, an `EXPECTED_EXTENSION_VERSION`, or an
+`Inputs sha256:` line.
+
 ## v0.1.18 — submitted 2026-09-20, pending review as of 2026-09-20
 
 | Field | Value |
