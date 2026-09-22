@@ -424,8 +424,7 @@ def test_an_exhausted_competing_batch_scan_refuses_encoded_actions() -> None:
     current = observation()
     actions = json.loads(type_payload(current))["actions"]
     harmless = " ".join(
-        json.dumps({"unrelated": index})
-        for index in range(_MAX_TRAILING_DECODE_ATTEMPTS)
+        json.dumps({"unrelated": index}) for index in range(_MAX_TRAILING_DECODE_ATTEMPTS)
     )
     body = (
         json.dumps({"actions": json.dumps(actions)})
