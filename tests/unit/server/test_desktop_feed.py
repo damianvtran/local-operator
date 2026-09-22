@@ -3241,6 +3241,75 @@ def test_a_team_delete_publishes_one(tmp_path):
     assert len(_authoring(frames)) == 1, frames
 
 
+@pytest.mark.asyncio
+async def test_first_open_waits_for_authoring_baseline_and_keeps_no_replay(tmp_path, monkeypatch):
+    """A write during startup belongs to open, not a silent baseline gap.
+
+    Hold the real first baseline at a barrier, author a profile, and let the
+    connection try to build ``open``. The old ordering completed ``open`` before
+    the baseline adopted the new token, leaving the client with stale lists and
+    no later invalidation. The barrier makes that interleaving deterministic.
+    """
+    root = tmp_path
+    feed = _feed(root)
+    registry = AgentRegistry(root)
+    baseline_entered = threading.Event()
+    release_baseline = threading.Event()
+    baseline_finished = threading.Event()
+    snapshot_before_baseline: list[bool] = []
+    original_baseline = feed._take_baseline
+    original_snapshot = feed._snapshot
+
+    def held_baseline() -> None:
+        baseline_entered.set()
+        if not release_baseline.wait(timeout=5):
+            raise TimeoutError("test did not release the baseline barrier")
+        original_baseline()
+        baseline_finished.set()
+
+    def observed_snapshot():
+        snapshot_before_baseline.append(not baseline_finished.is_set())
+        return original_snapshot()
+
+    monkeypatch.setattr(feed, "_take_baseline", held_baseline)
+    monkeypatch.setattr(feed, "_snapshot", observed_snapshot)
+    subscription = feed.subscribe()
+    frames: list[dict[str, Any]] = []
+    opened = asyncio.Event()
+
+    async def pump() -> None:
+        async for frame in feed.events(subscription):
+            frames.append(frame)
+            if frame["type"] == "open":
+                opened.set()
+
+    reader = asyncio.create_task(pump())
+    try:
+        assert await asyncio.to_thread(baseline_entered.wait, 5), "poller never entered baseline"
+        # Let the open task run while the real baseline is deliberately held.
+        # It must remain blocked rather than build the stale pre-baseline frame.
+        await asyncio.sleep(0.05)
+        assert not opened.is_set(), "open escaped before the first baseline completed"
+        assert snapshot_before_baseline == [], snapshot_before_baseline
+        registry.create_agent(
+            _edit_fields(name="startup-role", description="authored during startup")
+        )
+        release_baseline.set()
+        await asyncio.wait_for(opened.wait(), timeout=5)
+        await asyncio.sleep(feed_module.DOORBELL_INTERVAL_S * 2)
+    finally:
+        release_baseline.set()
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        await feed.close()
+
+    assert snapshot_before_baseline == [False], snapshot_before_baseline
+    assert [frame["type"] for frame in frames] == ["open"], frames
+    assert feed._authoring_token == feed._authoring_probe()
+    assert feed._authoring_invalidated is False
+
+
 def test_an_authoring_invalidation_is_not_replayed_to_a_late_subscriber(tmp_path):
     """A reconnecting client is told the COUNTER, never the old frame.
 
