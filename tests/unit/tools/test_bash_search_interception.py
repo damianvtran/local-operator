@@ -96,16 +96,21 @@ NEVER_BLOCKED = [
     "grep -r -C3 foo src/",
     "grep -rn -B2 foo src/",
     "grep -rn -e NEEDLE -e OTHER src/",
+    # round-3 follow-up: `-T` is a grep boolean modifier, not a value-taker.
+    # (`-D`/`--devices` DOES take a value, so it stays value-taking.)
+    "grep -rnT foo src/",
+    # context flags before or after the pattern
+    "grep -rn -A3 foo src/",
+    "grep -rn -B2 foo src/",
     "rg -n -e NEEDLE src/",
     # round-2 M-a: an ATTACHED short-flag value (`-efoo`, `-fpatterns.txt`).
     "grep -rn -efoo src/",
     "grep -rn -fpatterns.txt src/",
     "rg -n -eNEEDLE src/",
-    # ring-2 M-b: `-l` scoped is fine; only the unscoped form walks.
+    # round-2 M-b: `-l` scoped is fine; only the unscoped form walks.
     "rg -l NEEDLE src/",
     # Q2: enumeration flags list rather than walk.
     "rg --type-list",
-    "rg -l NEEDLE src/",
     "rg --files-with-matches NEEDLE src/",
     # M1: a single named FILE under a heavy directory is read, not walked.
     "grep -rn foo build/notes.txt",

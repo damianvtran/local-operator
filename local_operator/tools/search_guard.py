@@ -371,10 +371,11 @@ def _search_reason(segment: str) -> str | None:
         return None
 
     if program in _IMPLICITLY_RECURSIVE or program in _ALWAYS_RECURSIVE:
-        # Enumeration flags list what WOULD be searched (or a regex-type table)
-        # rather than searching content — a cheap listing, never a walk. The set
-        # is matched as a whole token, so `--files-with-matches` (`-l`) is caught
-        # too (QA Q2). (`fd`/`locate` have no such flag; the scan is harmless.)
+        # Enumeration flags (`--files`, `--type-list`) list what WOULD be
+        # searched — a cheap listing, never a walk. `--files-with-matches`/`-l`
+        # is NOT one of them: it searches content and prints filenames, so it
+        # still walks (round 2, M-b). (`fd`/`locate` have no such flag; the scan
+        # is harmless.)
         for word in _words(rest):
             if _RG_ENUMERATION_RE.match(word):
                 return None
@@ -404,7 +405,7 @@ def _search_reason(segment: str) -> str | None:
 #: consume nothing, so listing them made `grep -rn -E 'a|b' src/` swallow the
 #: pattern and lose `src/` (review B1). The set is deliberately small and every
 #: member is a flag whose value is genuinely a separate token.
-_FLAGS_WITH_VALUE = frozenset({"e", "f", "m", "A", "B", "C", "d", "D", "t", "T"})
+_FLAGS_WITH_VALUE = frozenset({"e", "f", "m", "A", "B", "C", "d", "D", "t"})
 _LONG_FLAGS_WITH_VALUE_RE = re.compile(
     r"^--(?:include|exclude|exclude-dir|include-dir|glob|iglob|type|max-depth|maxdepth|depth|"
     r"max-count|context|after-context|before-context|regexp|file|label|encoding|color|colour)="
