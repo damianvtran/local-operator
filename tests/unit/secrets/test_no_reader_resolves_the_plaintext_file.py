@@ -22,8 +22,13 @@ point of the sweep:
   (`not result` / `result == ()` / `result == set()`), which is what the pre-fix
   base violates: it returned the file's names, or `True`.
 
-Every leg in ``_READERS`` fails on the pre-fix base and passes on the head; the
-falsification run is recorded on the PR. A leg that no callable reaches — a leg
+Every leg that a REMOVED file read was reachable from fails on the pre-fix base; the
+falsification run is recorded on the PR. One leg is deliberately a CONTROL rather
+than a removed read — ``registry.provider_secret_value`` was already store-only on
+the base (its only plaintext mention is a comment), so it passes there too; it is
+kept in ``_READERS`` to pin the store-only shape it must retain, not as
+discrimination evidence, and the docstrings and the PR body say "every removed
+leg" (16 of 17) rather than "every leg". A leg that no callable reaches — a leg
 removed from a path nothing exercises — is removal this sweep cannot see, so
 named production helpers exist for each leg it drives.
 
