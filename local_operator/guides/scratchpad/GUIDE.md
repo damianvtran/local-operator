@@ -97,6 +97,16 @@ no deliberation about where in the workspace the file "should" live. A name of
 that shape is a convention, and a file dropped into it follows the convention
 whether or not anyone decided to.
 
+**The shell channel needs the path named absolutely.** A bare `> tmp/x.md` is
+relative, and the scan has no working directory to resolve it against, so it goes
+unnoticed — while the same write through `write`/`edit` IS resolved against the
+working directory and does fire. Spell the whole path and both channels see it.
+
+A scratch-named directory inside a temp directory is not this advisory's business:
+`/tmp` and `$TMPDIR` are the system's own area, the line about them is the one that
+names the three-day clock, and anything deeper in there is a build or rig folder
+rather than scratch.
+
 Three things are wrong with it, and only the first is obvious:
 
 - **It is not session-scoped.** Nothing removes it when the session ends, and it

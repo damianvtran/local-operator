@@ -329,6 +329,9 @@ def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
     assert body.count("survives runtime restarts") == 1
     assert "deleted with the session" not in body
     assert "dies with the session" not in body
+    # The shell channel's one limit, in the copy an agent reads BEFORE choosing
+    # where to write (round 1, R4): a relative redirect is not resolved.
+    assert "needs the path named absolutely" in body
     assert "one-off script" in body
     assert "Data you are still shaping" in body
     assert "real extension" in body
