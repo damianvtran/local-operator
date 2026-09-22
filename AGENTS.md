@@ -2770,12 +2770,36 @@ Full agent-facing guidance is `guide://credentials` (packaged at
 needs to know.
 
 **Four things are called credentials and they must stay distinct.** Provider API
-keys (`credentials.py`, plaintext, read by the model layer at boot); session
-credentials (`VariableStore._credentials`, memory-only, injected into `bash`,
-never readable by the agent); ordinary variables (denylist-filtered, not
-secret); and the encrypted long-term store (`local_operator/secrets/`, on disk,
-reachable by the agent through `lop secret get` and the eval library). A change
-that blurs two of them is a defect even when every test passes.
+keys (now rows in the encrypted store under the reserved provider namespace, read
+by the model layer at boot); session credentials (`VariableStore._credentials`,
+memory-only, injected into `bash`, never readable by the agent); ordinary
+variables (denylist-filtered, not secret); and the encrypted long-term store
+(`local_operator/secrets/`, on disk, reachable by the agent through `lop secret
+get` and the eval library). A change that blurs two of them is a defect even when
+every test passes.
+
+**The plaintext `credentials.env` is RETIRED — a read-only transition leg.**
+`CredentialManager` (`credentials.py`) is kept only until PR2 deletes it: its
+`read_credentials`/`read_key_names` classmethods (non-creating) are the last
+accepted read, and NO module outside `credentials.py` may call `set_credential`
+or `write_to_file` — a test in `tests/unit/secrets/test_provider_namespace.py`
+reads the package AST and fails on any such caller. Every writer
+(`lop credential update`, `lop search setup`, the credentials route's PATCH,
+`prompt_for_credential`) files an encrypted store row instead, and
+`lop secret migrate-env` moves an operator's existing file across.
+
+**Provider keys live in a RESERVED NAMESPACE: `LOP_PROVIDER_<ENV_KEY>`.**
+Provider-owned rows (a built-in API key the harness manages) are named under the
+`LOP_PROVIDER_` prefix and carry `role="provider"`; an AGENT-class write or read
+(default everywhere else) REFUSES that prefix, and a provider-class write refuses
+a name outside it. The rule is enforced in the store on BOTH the write and the
+READ path — the read check is the half that actually contains a value, since a
+hostile caller wants a key that already exists — so an agent secret can never
+shadow a provider key. Derive the name with `provider_secret_name(env_key)` and
+never spell the prefix by hand. Resolution order for a provider key is store row,
+then `os.environ`, then the legacy file: `provider_env_key(provider_id)` /
+`provider_secret_value(env_key)` in `providers/registry.py` are the ONE readers,
+imported lazily so the CLI startup path never pulls the crypto stack.
 
 **The agent uses a secret it cannot read — preserve that inversion.** No surface
 returns a value to the model. The `secret` tool's `retrieve` verb returns a

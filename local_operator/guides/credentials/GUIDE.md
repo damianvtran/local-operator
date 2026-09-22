@@ -186,6 +186,11 @@ knows to look for it reads both and decrypts; the opt-in passphrase mode holds
 the key only in a running broker's memory, where reading it needs a macOS
 authorization prompt the user would see.
 
+A credential the user hands you (an API key for a service, a token for a
+script) is a NORMAL thing to `store`, with a good `description` so it is findable
+later — and a non-technical user hands one over through the `/credential`
+gesture rather than a shell command.
+
 **But anything running as the user that is willing to run `lop` can read these
 secrets**, exactly as you do — `lop` is on `PATH` and a script that spawns a
 session is a legitimate caller. Ancestry proves lineage, not intent. That is the

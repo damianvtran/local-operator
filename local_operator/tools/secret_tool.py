@@ -86,7 +86,9 @@ _DESCRIPTION = (
     "this conversation; that is your decision to make. retrieve NEVER returns the value: "
     "use secrets without reading them, via $(lop secret get NAME) in bash or "
     'secrets["NAME"] in eval. list before asking the user for something they already '
-    "gave you. Do not store a one-off value or provider keys the harness manages. Never "
+    "gave you. Store a credential the USER hands over, with a good description so it is "
+    "findable later; a non-technical user provides one through the /credential gesture "
+    "instead. Do not store a one-off value or provider keys the harness manages. Never "
     "echo a secret, write it to a file, or put it in a commit or PR. "
     "See guide://credentials."
 )

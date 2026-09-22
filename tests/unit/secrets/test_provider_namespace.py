@@ -294,3 +294,101 @@ def test_migrate_env_on_an_absent_file_creates_nothing(sandbox: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert b"no credentials to migrate" in result.stderr
     assert sorted(path.name for path in config.iterdir()) == []
+
+
+# --- the readers and writers that replace the plaintext file -----------------
+
+
+def test_provider_secret_value_reads_only_the_provider_namespace(sandbox: Path) -> None:
+    """The reader resolves a provider row, and never an agent secret of that name.
+
+    The namespace check is the point: a hostile or mistaken call asking for a key
+    that exists only as an AGENT secret must not be served it, because the whole
+    reserved-prefix design exists to keep provider keys from being readable by
+    the agent surfaces and vice versa.
+    """
+    from local_operator.providers.registry import provider_secret_value
+    from local_operator.secrets import access
+
+    store = access.open_store(sandbox, create=True)
+    store.set(provider_secret_name("OPENROUTER_API_KEY"), b"provider-value", role="provider")
+    # An agent secret under the same env-key spelling, which the provider reader
+    # must NOT find: it only ever looks under LOP_PROVIDER_.
+    store.set("OPENROUTER_API_KEY", b"agent-value", role="agent")
+
+    assert provider_secret_value("OPENROUTER_API_KEY", base=sandbox) == "provider-value"
+
+
+def test_store_provider_key_writes_and_remove_provider_key_deletes(sandbox: Path) -> None:
+    from local_operator.providers.registry import (
+        provider_secret_value,
+        remove_provider_key,
+        store_provider_key,
+    )
+
+    store_provider_key("ANTHROPIC_API_KEY", "first", base=sandbox)
+    assert provider_secret_value("ANTHROPIC_API_KEY", base=sandbox) == "first"
+    # A re-run updates in place rather than failing on the existing name.
+    store_provider_key("ANTHROPIC_API_KEY", "second", base=sandbox)
+    assert provider_secret_value("ANTHROPIC_API_KEY", base=sandbox) == "second"
+    assert remove_provider_key("ANTHROPIC_API_KEY", base=sandbox) is True
+    assert provider_secret_value("ANTHROPIC_API_KEY", base=sandbox) is None
+    # Deleting an absent row is the desired end state, not an error.
+    assert remove_provider_key("ANTHROPIC_API_KEY", base=sandbox) is False
+
+
+def test_provider_env_key_prefers_the_store_over_the_environment(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Store-first is the whole resolution order; a stale export must lose."""
+    from local_operator.providers.registry import provider_env_key, store_provider_key
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-the-environment")
+    assert provider_env_key("openrouter") == "from-the-environment"
+
+    store_provider_key("OPENROUTER_API_KEY", "from-the-store", base=sandbox)
+    # The store row wins even with the environment variable still set.
+    assert provider_env_key("openrouter", base=sandbox) == "from-the-store"
+
+
+def test_provider_env_key_falls_back_to_the_legacy_file_during_the_transition(
+    sandbox: Path,
+) -> None:
+    """Mid-migration installs keep resolving: the file leg is still read LAST.
+
+    It is read, not created — the non-creating reader is what lets a host that has
+    never run ``lop secret migrate-env`` keep working without the read resurrecting
+    a file it had deleted.
+    """
+    from local_operator.providers.registry import provider_env_key
+
+    (sandbox / CREDENTIALS_FILE_NAME).write_text("OPENROUTER_API_KEY=from-the-file\n")
+    assert provider_env_key("openrouter", base=sandbox) == "from-the-file"
+
+
+def test_no_plaintext_writer_outside_the_retired_manager() -> None:
+    """The plaintext file must have NO writers left outside ``credentials.py``.
+
+    ``credentials.py`` itself keeps ``set_credential``/``write_to_file`` until PR2
+    deletes the module, but every OTHER module in the package must have stopped
+    writing the file: a single surviving call re-creates the greppable plaintext
+    copy the whole consolidation exists to retire. ``prompt_for_credential`` is
+    deliberately NOT in the set — it is a UI prompt whose WRITE now goes to the
+    store, so calling it is fine; it is the file-write primitives that must have
+    no callers. Read at the AST level so a commented-out or string-literal mention
+    is not a false hit.
+    """
+    import ast
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[3] / "local_operator"
+    writers = {"set_credential", "write_to_file"}
+    offenders: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        if path.name == "credentials.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in writers:
+                offenders.append(f"{path.relative_to(package)}:{node.lineno} .{node.attr}")
+    assert offenders == [], offenders

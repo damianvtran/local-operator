@@ -1182,17 +1182,19 @@ Prerequisites: the gated inputs fetched into a durable inputs root, the
 adapter built and installed per
 [`benchmarks/osworld_v2_adapter/README.md`](../../../benchmarks/osworld_v2_adapter/README.md),
 and the one-time AWS objects (TTL role, security group) created by hand. The
-credential store (`~/.local-operator/credentials.env`, mode 600) must carry
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` — the store resolver
-deliberately does **not** fall back to the process environment or to
-`~/.aws`, so a name absent from that file is missing even if the shell
-exports it. Use a scoped key: `ec2:RunInstances, DescribeInstances,
+encrypted secret store (`~/.local-operator/secrets/store.db`, the one
+`lop secret set` writes) must carry `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` as agent secrets — the store resolver reads the
+encrypted store first and deliberately does **not** fall back to the process
+environment or to `~/.aws`, so a name absent from the store is missing even if
+the shell exports it. (A legacy `credentials.env` is still read as a transition
+fallback until it is migrated with `lop secret migrate-env`.) Use a scoped key: `ec2:RunInstances, DescribeInstances,
 DescribeImages, DescribeVolumes, TerminateInstances, CreateTags`,
 `scheduler:CreateSchedule, DeleteSchedule, ListSchedules`, and `iam:PassRole`
 on the TTL role. Presence-only check, never printing a value:
 
 ```sh
-grep -cE '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.' ~/.local-operator/credentials.env  # expect 2
+lop secret list | grep -cE '(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)'  # expect 2
 ```
 
 **1. Pre-audit — must print `[]`.**
