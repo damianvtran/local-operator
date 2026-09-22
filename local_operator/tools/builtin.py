@@ -2850,6 +2850,14 @@ def _decode_and_redact_streams(
 ) -> tuple[str, str]:
     """Decode both captured streams and redact them, in ONE off-loop call.
 
+    **The NAME is load-bearing: it is the settled bash tail's off-loop seam.**
+    ``tests/unit/tools/test_loop_liveness.py`` names this symbol in its
+    ``OffLoopSpy``, which resolves the name on the module and fails with an
+    ``AttributeError`` rather than quietly asserting nothing when it moves —
+    the shape this helper was renamed into cost one round of a red gate for
+    exactly that reason. A rename therefore has to carry that spy with it.
+    Its pair, ``_bash_oversized_streams``, is watched the same way.
+
     **Why the pass is in here rather than beside the decode.** The comment at
     the foreground call site already moved the multi-MB decode, join and elision
     into a thread because a batch of concurrent `bash` calls finishing together

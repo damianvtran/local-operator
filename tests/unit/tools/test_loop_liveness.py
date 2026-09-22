@@ -208,16 +208,22 @@ async def test_oversized_bash_output_keeps_the_loop_live(
 ) -> None:
     """A command that prints megabytes settles without freezing the frame.
 
-    The oversized tail (join, decode, spill write, elide) is the part that
-    moved into a thread, and the fixture size is what makes it expensive: 20 MB
-    costs 80 ms of CPU plus a spill write. Most of that is the write, so on
-    this path the structural assertion is the one with teeth — see the module
-    docstring on which half owns which shape.
+    The oversized tail (join, decode, credential pass, spill write, elide) is
+    the part that moved into a thread, and the fixture size is what makes it
+    expensive: 20 MB costs 80 ms of CPU plus a spill write. TWO hops carry it —
+    the decode-and-pass (``_decode_and_redact_streams``) and the spill/elide
+    (``_bash_oversized_streams``) — and the spy watches both, because the module
+    docstring's rule is every hop on the path and not just the expensive one.
+    The credential pass joined the first hop rather than getting a hop of its
+    own: it is the other multi-megabyte synchronous step, so a spy list still
+    naming only the decode would have stopped watching it. Most of the tail's
+    cost is the write, so on this path the structural assertion is the one with
+    teeth — see the module docstring on which half owns which shape.
     """
     big = tmp_path / "big.txt"
     big.write_text("x" * (20 * 1024 * 1024) + "\n")
 
-    spy = OffLoopSpy(monkeypatch, "_decode_chunks", "_bash_oversized_streams")
+    spy = OffLoopSpy(monkeypatch, "_decode_and_redact_streams", "_bash_oversized_streams")
     probe = LoopCpuProbe()
     probe.start()
     try:
