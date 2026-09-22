@@ -52,6 +52,12 @@ BEAT_INTERVAL_S = 0.05
 #: loop that fell over fails instead of blocking the worker, never to assert
 #: that a machine is fast (AGENTS.md, "Prefer a structural invariant").
 BEAT_DEADLINE_S = 45.0
+#: How long a test waits for a TRANSITION republish to land in the record, and for
+#: the one-step hop that observes it. Shorter than ``BEAT_DEADLINE_S`` on purpose:
+#: that one covers a runtime BOOTING under fleet load, while this one covers a
+#: rewrite the caller performs itself — it is a backstop for the publish having
+#: moved off the runtime's loop later, not a budget anyone expects to spend.
+TRANSITION_DEADLINE_S = 5.0
 
 
 def _stream(request: Any, signal: Any) -> Any:
@@ -120,9 +126,57 @@ async def test_the_beat_publishes_the_gap_it_measured_and_the_cpu_it_burned(
         measured = record.beat_lag_s
 
         # A TRANSITION REPUBLISH DOES NOT BLANK IT.
-        runtime.set_busy(True)
-        republished = _published(runtime._record.pid)
-        assert republished is not None and republished.busy is True
+        #
+        # DRIVEN AND READ INSIDE ONE STEP OF THE RUNTIME'S OWN LOOP, and the
+        # atomicity is the fix. ``start()`` hosts this runtime on its own thread
+        # and loop, the heartbeat is a task on that loop, and a coroutine step
+        # that never awaits cannot be interleaved by another task — so no beat can
+        # land between the transition below and the read of it.
+        #
+        # WHAT WENT WRONG WITHOUT THAT. Reading the published file ONCE from the
+        # test's thread made this cell a race against the heartbeat's liveness
+        # floor (``RuntimeServer._heartbeat_loop``), which republishes
+        # ``handle.is_conversationally_active()`` — False for an idle test
+        # session, so it reverts the injected bit, correctly. Measured on this
+        # host on 2026-09-21 at load 38-140, with the test's own
+        # ``BEAT_INTERVAL_S`` of 0.05 s: the record said ``busy=True`` for 7.7-95 ms
+        # while the read after ``set_busy`` cost 2.6-75 ms, so 2 of 20 trials read
+        # the pre-transition record, and the cell was red 1 run in 40 at this
+        # head (the reported ``assert ... False is True`` at line 125).
+        #
+        # The bit is sharper evidence in this shape, not weaker: an idle session's
+        # floor can only ever publish ``busy=False``, so a record that reads
+        # ``busy=True`` below can only have been written by the transition
+        # republish itself. Nothing in the product is pinned to make it pass — the
+        # floor keeps beating and keeps reverting the bit; the cell simply stops
+        # sampling across it.
+        assert (
+            runtime._loop is not asyncio.get_running_loop()
+        ), "the hop below must target the runtime's own loop or it deadlocks the caller"
+
+        def _transition_then_read() -> SessionRecord | None:
+            runtime.set_busy(True)
+            return _published(runtime._record.pid)
+
+        async def _one_step(body: Any) -> SessionRecord | None:
+            """Park ``body`` in a single step of the runtime's loop: no awaits inside."""
+            return body()
+
+        deadline = time.monotonic() + TRANSITION_DEADLINE_S
+        republished = None
+        while time.monotonic() < deadline:
+            hop = asyncio.run_coroutine_threadsafe(_one_step(_transition_then_read), runtime._loop)
+            republished = await asyncio.wait_for(
+                asyncio.wrap_future(hop), timeout=TRANSITION_DEADLINE_S
+            )
+            if republished is not None and republished.busy is True:
+                break
+            # A retry is here for a publish that moves off that loop later — it is
+            # not expected to be spent today, and it is not a bet on a fast host.
+            await asyncio.sleep(BEAT_INTERVAL_S)
+        assert (
+            republished is not None and republished.busy is True
+        ), "the turn-boundary republish never reached the published record"
         assert (
             republished.beat_lag_s is not None
         ), "a turn-boundary republish dropped the last measurement"
