@@ -24,7 +24,7 @@ is a fourth. Keeping them distinct is load-bearing:
 
 | Store | Lives in | Lifetime | Encrypted | Purpose |
 |---|---|---|---|---|
-| `CredentialManager` (`credentials.py:43`) | `~/.local-operator/credentials.env`, 0600, plaintext `KEY=VALUE` | forever | **no** | PROVIDER API keys (Anthropic, OpenAI…) read at boot by the model layer |
+| `CredentialManager` (`credentials.py:43`) — **RETIRED**, transition read-only | `~/.local-operator/credentials.env`, 0600, plaintext `KEY=VALUE` | read-only until PR2 deletes the module | **no** | formerly PROVIDER API keys; those are now `LOP_PROVIDER_*` rows in the encrypted store |
 | `VariableStore` session credentials (`variables.py:305-361`) | process memory only | one session | n/a | a secret the agent must USE and must never READ |
 | `VariableStore` variables (`variables.py:273-302`) | config / `.local-operator.env` / `LOCAL_OPERATOR_*` env | n/a | no | non-secret config, denylist-filtered |
 | **new: secret store** | `~/.local-operator/secrets/` | forever | **yes** | operator secrets, agent-retrievable from bash and eval |

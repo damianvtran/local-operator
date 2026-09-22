@@ -296,7 +296,7 @@ def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore
     return SecretStore(master_key_for(base, create=create), base=base)
 
 
-def retrieve_secret(name: str, base: Path | None = None) -> bytes:
+def retrieve_secret(name: str, base: Path | None = None, *, role: str = "agent") -> bytes:
     """One secret's VALUE, announced to the owning session first (design §6).
 
     **Why this exists rather than a bare ``open_store().get()`` (QA Q3).** The
@@ -310,6 +310,13 @@ def retrieve_secret(name: str, base: Path | None = None) -> bytes:
     stream, in ``jobs(op='peek')`` and in the tool result, because the notifier
     and its consumer were never connected. Every value-returning surface routes
     through HERE so there is ONE announcement path rather than one per caller.
+
+    ``role`` is the NAMESPACE this reader claims, forwarded to the store's own
+    check. Agent-context surfaces (the CLI's ``get``, the eval ``secrets``
+    mapping, the ``secret_ref`` resolver) are the default and therefore refuse a
+    ``LOP_PROVIDER_*`` name; a provider-context reader passes ``role="provider"``
+    explicitly. Defaulting to the restrictive side is deliberate — a caller that
+    forgets the argument is denied rather than served.
 
     **The fallback is the same shape, and the same trade, as
     :func:`master_key_for`'s (see below).** A retrieval must not become
@@ -373,7 +380,7 @@ def retrieve_secret(name: str, base: Path | None = None) -> bytes:
     hardened = key_mode(base) == "passphrase"
     try:
         if ensure_broker(base):
-            return retrieve(name, base)
+            return retrieve(name, base, role=role)
         # No broker could be started. In the hardened tier there is no
         # unwrapped key on disk to fall back to, so let the local path raise
         # its own accurate message rather than inventing one here.
@@ -385,7 +392,7 @@ def retrieve_secret(name: str, base: Path | None = None) -> bytes:
     except BrokerDenied:
         if hardened:
             raise
-    return open_store(base).get(name, session_id=session_id())
+    return open_store(base).get(name, role=role, session_id=session_id())
 
 
 # `BrokerIncompatible` is deliberately absent from the clauses above: it is a

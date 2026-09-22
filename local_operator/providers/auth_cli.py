@@ -639,6 +639,16 @@ def list_logins(
             print(f"  {definition.id:<14} {name}=<set>")
             found = True
     if credential_manager is not None:
+        # The provider-class store rows, keyed by env-key name, then the legacy
+        # file during the transition. Both are reported as names only.
+        try:
+            from local_operator.providers.registry import stored_provider_env_keys
+
+            for key in sorted(stored_provider_env_keys(credential_manager.config_dir)):
+                print(f"  secret store  {key}=<set>")
+                found = True
+        except Exception:
+            pass
         try:
             for key, secret in credential_manager.get_credentials().items():
                 if secret.get_secret_value():

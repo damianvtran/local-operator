@@ -72,7 +72,11 @@ def mock_requests_get():
 # ---------------------------------------------------------------------------
 
 
-def test_configure_model_deepseek(mock_credential_manager):
+def test_configure_model_deepseek(mock_credential_manager, monkeypatch):
+    # configure_model's static key now resolves through the shared store-first
+    # reader (provider store row, then env, then the legacy file), so the key the
+    # test expects is supplied as the ENV leg rather than on the manager.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test_key")
     config = configure_model("deepseek", "deepseek-chat", mock_credential_manager)
     assert config.name == "deepseek-chat"
     assert config.hosting == "deepseek"
@@ -85,7 +89,8 @@ def test_configure_model_deepseek(mock_credential_manager):
     assert config.spec.base_url == "https://api.deepseek.com/v1"
 
 
-def test_configure_model_openai(mock_credential_manager):
+def test_configure_model_openai(mock_credential_manager, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test_key")
     config = configure_model("openai", "gpt-4", mock_credential_manager)
     assert config.name == "gpt-4"
     assert config.spec.provider == "openai"

@@ -27,7 +27,9 @@ local-operator config instructions
 
 - `config.yml`: provider, model, compaction, retries, variables, TUI, and retention settings
 - `system_prompt.md`: the user's custom instructions, added to every session's system prompt
-- `credentials.env` and the credential database: secrets managed by credential/login commands
+- `secrets/store.db`: the encrypted secret store — credentials from `lop secret`,
+  the provider keys a login or `lop credential update` writes (`LOP_PROVIDER_*`
+  rows), and anything migrated out of the retired plaintext `credentials.env`
 - `mcp.json`: user-scoped MCP servers
 - `agents/<id>/agent.yml`: persistent agent profiles
 - `sessions/`: ephemeral transcripts

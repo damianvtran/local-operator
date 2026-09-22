@@ -9,6 +9,7 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import SecretStr
 
 from local_operator.clients.openrouter import OpenRouterClient
 from local_operator.clients.radient import RadientClient
@@ -351,12 +352,17 @@ async def list_models(
                         )
                     )
             elif provider_detail.id == "openrouter":
-                # Then try to get OpenRouter models if API key is configured
-                api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
-                if api_key:
+                # Then try to get OpenRouter models if API key is configured.
+                # provider_env_key is store-first, so a LOP_PROVIDER_OPENROUTER_API_KEY
+                # row saved by `lop credential update` wins over an ambient export.
+                from local_operator.providers.registry import provider_env_key
+
+                raw_key = provider_env_key("openrouter", base=credential_manager.config_dir)
+                if raw_key:
                     try:
-                        # Create the OpenRouter client
-                        client = OpenRouterClient(api_key=api_key)
+                        # Create the OpenRouter client. The client takes a
+                        # SecretStr, so the resolved plaintext is wrapped here.
+                        client = OpenRouterClient(api_key=SecretStr(raw_key))
 
                         # Get the list of models
                         openrouter_models = client.list_models()
