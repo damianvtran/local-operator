@@ -48,6 +48,7 @@ from local_operator.evaluation.runner.provider_client import (
     validation_diagnostic,
 )
 from local_operator.evaluation.runner.public_reply import (
+    _actions_from_json_string,
     decode_public_reply,
     normalise_public_reply,
 )
@@ -61,6 +62,12 @@ CORPUS_ENV = "LOCAL_OPERATOR_REJECTION_CORPUS"
 DEFAULT_CORPUS = Path.home() / "worktrees" / "osworld" / "runs"
 CORPUS_GLOB = "batch-minimax-m3-*/task_*/evidence/ep-*"
 
+#: The campaigns' OWN runs, one directory per run rather than one per task. The
+#: glob above is a frozen arm that this machine has rotated away; these are the
+#: runs whose rejections an acceptance tolerance is BUILT from, so the count it
+#: recovers is a live measurement rather than a historical one.
+CAMPAIGN_CORPUS_GLOB = "*/evidence/ep-*"
+
 #: A runner bound, so a corpus that has rotated away to a handful of bundles
 #: skips instead of asserting a distribution it can no longer see.
 _MIN_CORPUS_ARTIFACTS = 20
@@ -70,16 +77,18 @@ def _corpus_root() -> Path:
     return Path(os.environ.get(CORPUS_ENV) or DEFAULT_CORPUS)
 
 
-def _sealed_rejection_artifacts() -> list[tuple[str, str]]:
+def _sealed_rejection_artifacts(pattern: str = CORPUS_GLOB) -> list[tuple[str, str]]:
     """``(diagnostic, artifact_text)`` for every sealed ``decision-rejected``.
 
     Read from the EVENT, not from the artifact directory listing: the artifact
     a rejection points at is identified by digest in the event, and an orphan
-    file in ``artifacts/`` is not a rejection.
+    file in ``artifacts/`` is not a rejection. The pattern is a parameter
+    because the campaigns have two shapes of run directory on disk (see
+    :data:`CAMPAIGN_CORPUS_GLOB`); every reader keeps the event-driven one.
     """
 
     found: list[tuple[str, str]] = []
-    for episode in sorted(_corpus_root().glob(CORPUS_GLOB)):
+    for episode in sorted(_corpus_root().glob(pattern)):
         events = episode / "events.jsonl"
         if not events.exists():
             continue
@@ -649,6 +658,78 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
         for label, count in sorted(transitions.items()):
             print(f"  {count:4d}  {label}")
         print(f"  {recovered:4d}  recovered to the accepted shape")
+
+
+def _actions_value(reply: str) -> Any:
+    """The ``actions`` member of a sealed reply, or ``None`` when it has none.
+
+    Read through the runtime's own leading-JSON tolerance, so a reply the run
+    accepted with trailing text is read the same way here.
+    """
+
+    try:
+        value, _trailing = _decode_leading_json(reply.strip())
+    except (DecisionParseError, ValueError):
+        return None
+    return value.get("actions") if isinstance(value, dict) else None
+
+
+def test_the_sealed_string_actions_replies_are_recovered_and_nothing_else_is(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every sealed ``batch-shape`` refusal, replayed and accounted for.
+
+    `class: batch-shape` is one key over TWO different defects in the corpora:
+    an ``actions`` value that is not a non-empty array at all (``null``, an empty
+    array, two competing arrays) and the value this change exists for -- an
+    ``actions`` STRING carrying the array, because the model opened a quote at
+    the value and then wrote the rest of its own envelope inside it. The claim
+    here is the accounting, over the paid runs rather than over a sample: every
+    reply the string tolerance fires on is now ACCEPTED, every other one is
+    still refused, and at least one is actually recovered -- without which the
+    corpus has stopped exercising the path this exists for, which is a
+    measurement failure rather than a pass.
+
+    The counts are printed rather than pinned, for the reason the replay test
+    above gives: the corpus is a paid run's output that grows as canary runs
+    land, and a hard-coded number would go red on the next run and read as a
+    regression. Measured 2026-09-22 over the campaign runs on this machine: 32
+    batch-shape refusals, 30 of them string-actions, all 30 recovered -- 40% of
+    that corpus's 74 sealed refusals, against 39 more that published no reply
+    bytes at all (the empty-reply class, unaddressed here).
+    """
+
+    sealed = [
+        (artifact, episode)
+        for artifact, episode in _sealed_rejection_artifacts(CAMPAIGN_CORPUS_GLOB)
+        if _class_of(artifact) == "batch-shape" and _published_reply(artifact) is not None
+    ]
+    if len(sealed) < _MIN_CORPUS_ARTIFACTS:
+        pytest.skip(f"corpus has rotated: {len(sealed)} published batch-shape refusals left")
+
+    recovered: list[str] = []
+    still_refused: dict[str, int] = {}
+    for artifact, episode in sealed:
+        reply = (_published_reply(artifact) or "").strip()
+        decoded, coerced = _actions_from_json_string(_actions_value(reply))
+        verdict = _replay_verdict(reply)
+        if coerced:
+            assert verdict == _ACCEPTED_SHAPE, (episode, verdict)
+            # The actions that execute are the array the model stated inside the
+            # string -- never a salvage of something else.
+            assert decode_public_reply(reply)["actions"] == decoded, episode
+            recovered.append(episode)
+        else:
+            assert verdict != _ACCEPTED_SHAPE, (episode, verdict)
+            still_refused[verdict] = still_refused.get(verdict, 0) + 1
+
+    assert recovered, sorted(still_refused)
+
+    with capsys.disabled():
+        print(f"\nsealed batch-shape replay ({len(sealed)} published refusals):")
+        print(f"  {len(recovered):4d}  recovered through the string tolerance")
+        for verdict, count in sorted(still_refused.items()):
+            print(f"  {count:4d}  still refused as {verdict}")
 
 
 # --- The structured half of the taxonomy -----------------------------------

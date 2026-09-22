@@ -7,10 +7,11 @@ text path as interactive sessions; private reasoning is never an input here.
 One reply, one shape, however it was framed. The envelope a reply is validated
 against is ``{"actions": [...], "public_observations": ""}``; the
 ``action_batch`` object around the array, a ``reply_version``, a generic
-tool-call wrapper and trailing text are all FRAMING, and framing is normalised
-here rather than refused. Nothing in this module reads a model, a provider or a
-benchmark: the accepted set is a statement about our own contract and about the
-serializations any harness uses to wrap a function call.
+tool-call wrapper, trailing text, and an ``actions`` value the model sent as a
+JSON-encoded STRING rather than as the array are all FRAMING, and framing is
+normalised here rather than refused. Nothing in this module reads a model, a
+provider or a benchmark: the accepted set is a statement about our own contract
+and about the serializations any harness uses to wrap a function call.
 """
 
 from __future__ import annotations
@@ -459,6 +460,79 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
     return None
 
 
+def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
+    """The action array a JSON-encoded ``actions`` STRING evidently carries.
+
+    A model that writes its actions as a string -- ``{"actions": "[{...}]"}``
+    -- has stated a complete, executable decision in a spelling this decoder
+    used to refuse, and the refusal cost a whole paid call to repair with a
+    re-prompt that then repeated the mistake: 9 of one OSWorld episode's 120
+    calls were exactly this shape (judge5-20260921-231232, 7.5% of that
+    episode's calls), and 30 of the campaign runs' 74 sealed refusals are it
+    (counted 2026-09-22 over ``~/worktrees/osworld/runs/*/evidence/ep-*``). It
+    is a GENERAL tolerance about a spelling of our own contract, so it belongs
+    here, on the boundary every interface's reply crosses -- not at one caller.
+
+    DECODED through :func:`_decode_leading_json`, NOT ``json.loads``, because
+    in every one of those 30 the string is more than the array: it is the tail
+    of the model's OWN envelope -- the array followed by
+    ``, "public_observations": "..."}`` -- because the model double-encoded the
+    rest of the object it was writing. Reusing that decoder means the tolerance
+    keeps the one-sided rule a reply already gets: leading junk is still
+    refused, and a second batch for the same observation inside the string
+    still refuses the reply, so this can never execute a decision the model
+    superseded.
+
+    Returns ``(value, False)`` unless the leading JSON value is a NON-EMPTY
+    ARRAY OF OBJECTS -- which is what an action array is, and the entire claim
+    being made here. A string that does not decode, or decodes to a scalar, to
+    an array of scalars, or to an empty array, comes back UNCHANGED, so that
+    reply keeps the refusal it always had: the tolerance may only accept a
+    decision, never widen a refusal into one, and a string that is not an action
+    structure must stay the malformation it is.
+
+    No logging here, deliberately. This runs over candidate objects while
+    scanning untrusted trailing text (see :func:`_batch_observation_ids`) as well
+    as over the reply's own decision, and a record that means "a reply was
+    accepted this way" must not fire for text that was merely looked at. The
+    caller that accepts the reply records it.
+
+    The note inside that tail is NOT recovered on purpose: it is a JSON
+    FRAGMENT, so locating where the model's object began is the same guess
+    :func:`_decode_leading_json` refuses to make for leading noise. The decision
+    is what must not cost the turn; the note is memory, and a batch carrying no
+    note is the ordinary legacy shape this module already accepts.
+    """
+
+    if not isinstance(value, str):
+        return value, False
+    try:
+        decoded, trailing = _decode_leading_json(value)
+    except DecisionParseError:
+        return value, False
+    if not isinstance(decoded, list) or not decoded:
+        return value, False
+    if not all(isinstance(action, Mapping) for action in decoded):
+        return value, False
+    if trailing and (
+        _competing_batch_offset(
+            trailing,
+            # A batch-shaped VIEW of what was decoded, so the scan reads the
+            # observation ids the way it reads them off any other batch. Handed
+            # the bare array it would find no id and stand down, which is the
+            # one way this tolerance could execute a decision the model
+            # superseded -- the rule this module refuses to trade away. The
+            # decoder is built with the same hook as ``_decode_leading_json``'s
+            # so a candidate carrying duplicate keys is refused identically.
+            {"actions": decoded},
+            json.JSONDecoder(object_pairs_hook=_unique_object),
+        )
+        is not None
+    ):
+        return value, False
+    return decoded, True
+
+
 def _batch_observation_ids(value: Any) -> set[str]:
     """The observation ids an action-batch-shaped object binds to.
 
@@ -487,6 +561,13 @@ def _batch_observation_ids(value: Any) -> set[str]:
     if not isinstance(actions, list):
         nested = value.get("action_batch")
         actions = nested.get("actions") if isinstance(nested, Mapping) else nested
+    # The same coercion the decision itself gets, for the reason the paragraph
+    # above gives: a batch the model wrote as a JSON-encoded string competes
+    # exactly as a bare one does, and accepting that spelling without reading
+    # its ids here would have quietly disabled this rule -- a competing decision
+    # inside the string's tail, or in text after the string, would be taken as
+    # ordinary noise while the earlier batch executed.
+    actions, _coerced = _actions_from_json_string(actions)
     if not isinstance(actions, list) or not actions:
         return set()
     return {
@@ -608,12 +689,14 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
 
     What is ACCEPTED here is deliberately framing-blind: a bare action array, a
     bare array under ``action_batch``, the full envelope, any of those inside
-    one generic tool-call wrapper, and any of those with a ``reply_version`` or
-    with extra keys beside them. What is still REFUSED is what cannot be read as
-    a decision: malformed or duplicated JSON, two action arrays that could each
-    be the decision, and a batch that is not an object carrying ``actions``.
-    Those are the refusals that are doing real work, and they are the only ones
-    left in this module.
+    one generic tool-call wrapper, any of those with a ``reply_version`` or with
+    extra keys beside them, and an ``actions`` value that is a JSON-encoded
+    STRING carrying the array (see :func:`_actions_from_json_string`). What is
+    still REFUSED is what cannot be read as a decision: malformed or duplicated
+    JSON, two action arrays that could each be the decision, a batch that is not
+    an object carrying ``actions``, and a string that does not decode to a
+    non-empty array of action objects. Those are the refusals that are doing
+    real work, and they are the only ones left in this module.
     """
 
     framed = _unwrap_tool_call(value)
@@ -625,8 +708,10 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
     if not isinstance(framed, Mapping):
         raise DecisionParseError("decision must be a JSON object")
     batch = framed.get("action_batch")
-    nested_actions = batch.get("actions") if isinstance(batch, Mapping) else batch
-    top_actions = framed.get("actions")
+    nested_actions, nested_from_string = _actions_from_json_string(
+        batch.get("actions") if isinstance(batch, Mapping) else batch
+    )
+    top_actions, top_from_string = _actions_from_json_string(framed.get("actions"))
     if isinstance(top_actions, list) and isinstance(nested_actions, list):
         # Two action arrays in one reply is the SAME ambiguity as two batches in
         # one payload -- which one did the model mean? -- and it is a question
@@ -643,6 +728,20 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
         raise DecisionParseError("decision must carry a non-empty actions array")
     note = _public_note(framed, batch)
     _report_ignored_keys(framed, batch)
+    if top_from_string or nested_from_string:
+        # Tolerated, never silent -- the same rule the tool-call wrapper and the
+        # trailing-text tolerance state above, and it is the one record a
+        # campaign can count this against (a tolerance nobody can observe is
+        # indistinguishable from the harness quietly mangling a reply). Emitted
+        # only once the reply IS accepted, so the line means what it says; the
+        # count and nothing else, because the string's tail is model text and
+        # this module never renders that into a log or an artifact unscanned.
+        logger.warning(
+            "model reply carried its actions as a JSON-encoded string; the leading "
+            "JSON value was decoded and accepted as the decision it states "
+            "(%d action(s))",
+            len(actions),
+        )
     return actions, note
 
 
