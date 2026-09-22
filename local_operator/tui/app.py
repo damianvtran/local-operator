@@ -29649,6 +29649,15 @@ class OperatorApp(App[None]):
                     "info",
                 )
                 return
+            if block_type == "goal_history":
+                # The owner's answer is rows in `data`, and its `text` is the
+                # one-line count beside them: a viewer that paints only `text`
+                # would otherwise say nothing at all. Same shape as `team_list`,
+                # which is why it needed no new renderer.
+                self._append_block(self._goal_history_block(data.get("items") or []))
+                if text:
+                    self._notice(text, "info")
+                return
             if block_type == "loop":
                 self._notice(_loop_status_line(data), "info")
                 return
@@ -29691,6 +29700,27 @@ class OperatorApp(App[None]):
                 if data.get("type") == "goal_set":
                     request = arg
                 self._submit_command_prompt(request, attachments)
+
+    def _goal_history_block(self, items: list[Any]) -> RichBlock:
+        """Render ``/goal --history``'s wire rows: the objective, then its facts.
+
+        The same row layout as ``_team_listing_block``, because it is the same
+        shape of answer — a titled list of ``(subject, facts)`` rows — and a
+        second layout for it would be a second thing to keep in step. The rows
+        are CLIPPED by the owner (``goal_history_items``), not here: this half
+        paints what it was sent, so both hosts show the same bytes.
+        """
+        section = Style(color=theme_mod.semantic_color("fg"), bold=True)
+        heading = Style(color=theme_mod.semantic_color("muted"))
+        body = Style(color=theme_mod.semantic_color("dim"))
+        rows: list[Any] = [Text("settled goals", style=section)]
+        for item in items:
+            subject, facts = (list(item) + ["", ""])[:2]
+            rows.append(Padding(Text(str(subject), style=heading), (0, 0, 0, 2)))
+            if facts:
+                rows.append(Padding(Text(str(facts), style=body), (0, 0, 0, 4)))
+        rows.append(Text())
+        return RichBlock(Group(*rows))
 
     def _team_listing_block(self, items: list[Any]) -> RichBlock:
         """Rebuild the bare ``/team`` roster block from wire rows.
@@ -33712,9 +33742,14 @@ class OperatorApp(App[None]):
         never be stored as the literal goal ``--clear`` and never starts a turn.
         """
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_receipt,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
+            goal_report,
         )
 
         session = self._session
@@ -33726,18 +33761,38 @@ class OperatorApp(App[None]):
             return
         request = expand_pastes(arg, attachments or {}).strip()
         if not request:
-            current = session.goal
-            notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
+            notice(goal_report(session.goal, getattr(session, "goal_status", "")))
             return
-        if request.lower() in GOAL_CLEAR_ARGS:
+        # A FLAG is the WHOLE argument (`goal_flag_form`), in the same order and
+        # with the same rule the `--clear` branch has always used: `/goal --done
+        # the report` keeps its tail and stays an objective.
+        form = goal_flag_form(request)
+        if form == "clear":
             # Name what went. A standing goal is deliberately invisible in the UI
             # — the band does not carry it and the only echo is the one-time
             # `goal restored` notice on adopt — and there is no undo, so this
             # receipt is the user's whole chance to see what a mistaken clear
-            # took away and retype it (round 1: design D4, UX U3).
+            # took away and retype it (round 1: design D4, UX U3). A DELETE
+            # records nothing, which is the whole difference from mark-done.
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            session.delete_goal()
             notice(receipt)
+            return
+        if form == "done":
+            entry = session.mark_goal_done()
+            notice(
+                goal_done_receipt(session.goal)
+                if entry is not None
+                else "goal already done — /goal --dismiss clears it"
+            )
+            return
+        if form == "dismiss":
+            notice(goal_dismissed_receipt(session.dismiss_goal()))
+            return
+        if form == "history":
+            rows = goal_history_items(session.history_view())
+            self._append_block(self._goal_history_block(rows))
+            notice(goal_history_notice(len(rows)))
             return
         # A bare `--token` that names no flag of THIS command. The app now teaches
         # two flag vocabularies (`--clear` for the goal, `--stop` for the loop),
@@ -33751,7 +33806,10 @@ class OperatorApp(App[None]):
         if refusal is not None:
             notice(refusal, "warning")
             return
-        stored = session.set_goal(request)
+        # `arm_goal` rather than `set_goal`: the same text write plus the record's
+        # supersede/arm ordering, which is what makes `/goal B` non-destructive
+        # to `/goal A` and what arms the judge.
+        stored = session.arm_goal(request)
         # Only the standing objective is capped. The ordinary user message
         # retains the full request, and the normal submit path owns its ONE
         # transcript row, busy steering, compaction hold and attachment order.
@@ -33764,6 +33822,31 @@ class OperatorApp(App[None]):
         else:
             notice("goal set")
         self._submit_command_prompt(arg, attachments)
+
+    def _goal_argument_choices(self) -> list[ArgumentChoice]:
+        """The ``/goal`` argument rows the LIVE state allows, in a safe order.
+
+        Read off the session rather than off the command, because every one of
+        these flags is a no-op outside its own state — a row the state cannot
+        honour is a dead end taught by the palette. ``--clear`` is authoritatively
+        LAST so that a single pre-selected match on the bare command is never the
+        destructive row (see the caller's note); it is also the only row carrying
+        ``alert=True``, since it is the one acceptance that cannot be undone.
+        """
+        session = self._session
+        goal = getattr(session, "goal", "") or ""
+        status = getattr(session, "goal_status", "") or ""
+        history = getattr(session, "goal_history", None) or []
+        choices: list[ArgumentChoice] = []
+        if history:
+            choices.append(ArgumentChoice("--history", "List the settled goals"))
+        if goal and status != "done":
+            choices.append(ArgumentChoice("--done", "Mark the standing goal done"))
+        if status == "done":
+            choices.append(ArgumentChoice("--dismiss", "Clear the done goal chip"))
+        if goal:
+            choices.append(ArgumentChoice("--clear", "Clear the standing goal", alert=True))
+        return choices
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop --stop`` cancels.
@@ -36439,38 +36522,28 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "goal":
-            # ONE row, and only while there is a goal to unset. `/goal`'s
+            # A GATED ROW SET, one row per act the LIVE state allows: `/goal`'s
             # argument is free text (the objective the model is given), so this
             # list is an OFFER beside it — the shape `/rename`'s `--refresh` row
             # has: nothing here filters or constrains what may be submitted, and
-            # a typed `/goal ship it` simply does not match the row, which closes
+            # a typed `/goal ship it` simply does not match a row, which closes
             # the list and submits the goal unchanged.
             #
-            # Gated on the LIVE state, not on the command: `--clear` is a no-op
-            # with nothing to clear, and a palette that taught it anyway would be
-            # advertising a dead end. Empty rows with no notice close the list,
-            # so the ungated case shows the user nothing at all.
+            # Gated on the LIVE state, not on the command: each flag is a no-op in
+            # the state its row is missing from, and a palette that taught it
+            # anyway would be advertising a dead end. Empty rows with no notice
+            # close the list, so the ungated case shows the user nothing at all.
             #
-            # `alert=True` is the app's own gate for "accepting this row removes
-            # something" (`/logout`, `/mcp remove`, `/stop`'s targets), and it is
-            # load-bearing HERE rather than decorative: the row is pre-selected
-            # and is the only match, so without it the editor's
-            # `_picker_choice_is_unambiguous` RUNS it on one Enter — which turned
-            # `/goal ` + Enter, the keystroke that used to report the standing
-            # goal, into a clear (round 1: design D1, UX U1, reviewer MAJOR-1).
-            # With the flag set the first Enter FILLS the buffer with
-            # `/goal --clear` and the second runs it; an explicit down-arrow onto
-            # the row keeps its one press, because the editor already treats a
-            # deliberate move as unambiguous.
-            # The tint it normally paints never lands here: the row is always
-            # `selected`, and `command_picker._argument_row` skips the danger
-            # colour on the selected row by design — so this changes the gate and
-            # not one pixel.
-            picker.set_choices(
-                [ArgumentChoice("--clear", "Clear the standing goal", alert=True)]
-                if getattr(self._session, "goal", "")
-                else []
-            )
+            # ORDER: `--history` first, `--clear` last. The editor's
+            # `_picker_choice_is_unambiguous` RUNS a pre-selected single match on
+            # one Enter, so the row that removes something must never be the only
+            # offer — `/goal ` + Enter, the keystroke that reports the standing
+            # goal, turned into a clear that way (round 1: design D1, UX U1,
+            # reviewer MAJOR-1). The rows are authored so a single match is the
+            # harmless row; `alert=True` stays on `--clear` alone, the one row
+            # whose acceptance cannot be undone (the record is kept by --done and
+            # --dismiss only drops the chip).
+            picker.set_choices(self._goal_argument_choices())
             picker.set_notice("")
             return
         if message.command == "notifications":
@@ -39168,9 +39241,14 @@ class OperatorApp(App[None]):
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
-            GOAL_CLEAR_ARGS,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
+            goal_dismissed_receipt,
+            goal_done_receipt,
+            goal_flag_form,
+            goal_history_items,
+            goal_history_notice,
+            goal_report,
         )
 
         arg = arg.strip()
@@ -39178,16 +39256,47 @@ class OperatorApp(App[None]):
         if session is None or not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         if not arg:
-            current = session.goal
-            text = f"goal: {current}" if current else "no goal set — /goal <text> to set one"
-            return SlashResult(kind="notice", text=text, style="info")
-        if arg.lower() in GOAL_CLEAR_ARGS:
+            return SlashResult(
+                kind="notice",
+                text=goal_report(session.goal, getattr(session, "goal_status", "")),
+                style="info",
+            )
+        form = goal_flag_form(arg)
+        if form == "clear":
             # The receipt names what went, on this host too: a follower's
             # `/goal --clear` is rendered by ITS terminal, so a receipt that named
             # nothing would be the same silent loss one hop out (design D4/U3).
             receipt = cleared_goal_receipt(session.goal)
-            session.set_goal("")
+            session.delete_goal()
             return SlashResult(kind="notice", text=receipt, style="info")
+        if form == "done":
+            entry = session.mark_goal_done()
+            return SlashResult(
+                kind="notice",
+                text=(
+                    goal_done_receipt(session.goal)
+                    if entry is not None
+                    else "goal already done — /goal --dismiss clears it"
+                ),
+                style="info",
+            )
+        if form == "dismiss":
+            return SlashResult(
+                kind="notice",
+                text=goal_dismissed_receipt(session.dismiss_goal()),
+                style="info",
+            )
+        if form == "history":
+            rows = goal_history_items(session.history_view())
+            # Byte-for-byte the owner's answer (`serving.py::_goal_slash`): this is
+            # the product a follower paints, so the two must not differ by a row
+            # shape or a word (the host-disagreement rule at this function's
+            # refusal branch).
+            return SlashResult(
+                kind="block",
+                text=goal_history_notice(len(rows)),
+                data={"type": "goal_history", "items": rows},
+            )
         refusal = unknown_flag_refusal("goal", arg)
         if refusal is not None:
             # Same refusal, same words as the local handler: this is the bytes a
@@ -39195,7 +39304,7 @@ class OperatorApp(App[None]):
             # one that refused it is the host-disagreement class the shared
             # vocabularies in `session/goal.py` exist to remove (UX U6).
             return SlashResult(kind="notice", text=refusal, style="warning")
-        stored = session.set_goal(arg)
+        stored = session.arm_goal(arg)
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
                 kind="notice",
