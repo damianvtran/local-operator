@@ -2554,22 +2554,139 @@ def test_from_snapshot_does_not_install_when_the_bundle_build_failed(
     captured = capsys.readouterr()
     assert "FAILED (pnpm build failed: boom)" in captured.out
     assert "did not build" in captured.err
-    # The remedy for a machine already in this state, both spellings: the heal
-    # path, and the direct fetch the tree's own pin needs.
+    # The primary remedy is named unconditionally; the npx clause only where npx
+    # resolves, exactly as `_pin_mismatch` builds its own route list — so the
+    # assertion moves with the host rather than pinning a command this machine may
+    # not have (the same shape the bundle-bound suite uses for its routes).
     assert "lop mobile install" in captured.err
-    assert "npx --yes pnpm@11.22.0" in captured.err
+    assert ("npx --yes pnpm@11.22.0" in captured.err) == (install_mod._shim_argv("npx") is not None)
+    assert ("pnpm@11.22.0" in captured.err) == (install_mod._shim_argv("npx") is not None)
+
+
+def test_from_snapshot_refusal_reclaims_a_temporary_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal path must reclaim a ref snapshot's extracted tree.
+
+    ``--from-snapshot <ref>`` is the form that EXTRACTS: ``resolve_snapshot``
+    untars the archive into ``$TMPDIR/lop-snapshot-*`` and marks the source
+    ``temporary=True``, and the ``finally`` that removes it is the only thing
+    standing between repeated refused updates and a full /tmp (~95 MB per
+    extract, measured). The guard's early return used to sit ABOVE that
+    ``finally``, so every refusal leaked one — invisible to the directory-form
+    tests, where ``temporary`` is False and nothing is ever extracted.
+
+    The tree is asserted GONE, not merely "the install did not run": the leak is
+    the finding.
+    """
+    snapshot = tmp_path / "extract"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=SnapshotSource(path=snapshot, ref="main", temporary=True),
+        ),
+        patch.object(
+            install_mod, "snapshot_bundle", return_value="FAILED (pnpm build failed: boom)"
+        ),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == []
+    assert not snapshot.exists(), "a refused ref snapshot leaked its extracted tree"
+    assert "did not build" in capsys.readouterr().err
+
+
+def test_from_snapshot_refusal_survives_an_unremovable_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reclaim must not turn the refusal into a traceback.
+
+    ``_remove_tree`` is best-effort by contract, and the refusal's own exit code
+    and message are what the caller acts on — an exception out of the ``finally``
+    would replace a clear refusal with a traceback and a different exit status.
+    """
+    snapshot = tmp_path / "extract"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=SnapshotSource(path=snapshot, ref="main", temporary=True),
+        ),
+        patch.object(install_mod, "snapshot_bundle", return_value="FAILED (boom)"),
+        patch.object(update_mod, "_remove_tree", return_value=False),
+        patch.object(update_mod, "install_into_generation") as install,
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    install.assert_not_called()
+
+
+def test_from_snapshot_refuses_a_truncated_web_tree_with_no_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `web/` tree that lost its manifest is BROKEN, not UI-less.
+
+    ``_bundle_state`` answers ``missing-sources`` for any tree with neither
+    `dist/` nor `package.json`, so a tolerance keyed on that classifier alone
+    treats a shallow copy that kept ``web/src/`` and dropped the manifest as "no
+    UI either way" and installs it. It is not "no UI either way" — it is a web
+    tree that cannot build, which is the state the guard exists to refuse. The
+    `web/` DIRECTORY is what distinguishes the two, so that is what the guard
+    keys on.
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    (web / "src").mkdir(parents=True)
+    (web / "src" / "main.tsx").write_text("export {};\n", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == [], "a web tree that cannot build must not be installed"
+    assert "did not build" in capsys.readouterr().err
 
 
 def test_from_snapshot_without_web_sources_still_installs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The tolerance the guard KEEPS: a tree with no web sources installs.
+    """The tolerance the guard KEEPS: a tree with no web directory installs.
 
     ``snapshot_bundle`` says ``skipped (no web sources in snapshot)`` for such a
     tree, and there is no UI for the snapshot to be missing — so refusing it
     would break the non-web snapshots this command legitimately installs. Both
     halves are asserted, because a guard that refused everything would pass the
-    two tests above and be just as wrong.
+    tests above and be just as wrong.
+
+    The tolerance keys on ``web/`` being ABSENT rather than on ``package.json``:
+    see :func:`test_from_snapshot_refuses_a_truncated_web_tree_with_no_manifest`,
+    the shallow-copy case the classifier alone would have waved through.
     """
     snapshot = tmp_path / "snapshot"
     (snapshot / "local_operator").mkdir(parents=True)

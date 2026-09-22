@@ -823,6 +823,34 @@ def test_the_npx_arm_is_not_consulted_when_path_pnpm_is_the_pin(
     assert npx.argv_seen() == [], "nothing to fix, so nothing is fetched"
 
 
+def test_the_npx_arm_is_not_reached_for_a_range_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A range is not a pin, and this arm must not be the first route to resolve one.
+
+    ``_pinned_pnpm`` reports the ``packageManager`` version verbatim, so a tree
+    pinning ``pnpm@^11`` reaches this arm with ``^11`` in hand. Fetching
+    ``pnpm@^11`` through npx would run *whatever the registry serves today* — a
+    wider promise than any existing route makes (pnpm's own switch returns early
+    on a range, and ``_package_manager_env`` states at length that a range is not
+    a fetch), and an untestable one. The exact-version matcher the disarm gating
+    already uses is what excludes it, so the refusal below is today's behaviour.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    npx = _npx_stand_in(tools)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.setenv("PNPM_HOME", str(tmp_path / "empty-home"))
+    fake = StandIn(tmp_path / "bin", version="10.30.3", exit=1)
+    web = _web(tmp_path, pin="pnpm@^11")
+
+    error = install._build_bundle(web, fake.runner)
+
+    assert error is not None, "a range falls through to the refusal, not to a fetch"
+    assert "^11" in error
+    assert npx.argv_seen() == [], f"nothing may be fetched for a range: {npx.argv_seen()}"
+
+
 @pytest.mark.parametrize(
     ("pin", "expected"),
     [
