@@ -115,19 +115,27 @@ def main() -> None:
             report[name] = json.loads(page.js(GEOMETRY_JS))
             print(f"{name}: {json.dumps(report[name]['rows'], indent=1)}", flush=True)
 
-            # D1'S PAIR, IN THE RIG RATHER THAN IN A SCRATCH FIXTURE (design round
-            # 2). Navigate to the nested session and read the roster header it
-            # lands on: the chip on the row above counts the WHOLE TREE (the
-            # record), this header counts DIRECT children (the panel passes
-            # `parentJobId={null}` and the roster filters on it). Two numbers, two
-            # populations, one tap apart — captured together so the deferral has
-            # a frame to rest on.
-            view = f"nested-view-{width}x{height}"
-            report[view] = {"tap": json.loads(page.js(NESTED_TAP_JS))}
-            time.sleep(2.0)
-            report[view].update(json.loads(page.js(NESTED_VIEW_JS)))
-            page.shot(outdir / f"{view}.png")
-            print(f"{view}: {report[view]}", flush=True)
+            # THE TAP FRAMES. Tap a row, read the header the view lands on, go back
+            # to the list for the next one. The back step is a hash route the app
+            # itself spells (``#/``), not a bare origin — see ``_tap_js``.
+            for label, prefix in TAP_SESSIONS.items():
+                view = f"{prefix}-view-{width}x{height}"
+                report[view] = {"tap": json.loads(page.js(_tap_js(label)))}
+                time.sleep(2.0)
+                report[view].update(json.loads(page.js(ROSTER_JS)))
+                page.shot(outdir / f"{view}.png")
+                print(f"{view}: {report[view]}", flush=True)
+                # The child rows, for the two sessions whose children are NOT all
+                # running: that is where the parked child's own treatment lives.
+                if prefix in ("mixed", "parked"):
+                    expanded = f"{prefix}-roster-{width}x{height}"
+                    report[expanded] = {"tap": json.loads(page.js(EXPAND_JS))}
+                    time.sleep(1.0)
+                    report[expanded].update(json.loads(page.js(GLYPH_COUNT_JS)))
+                    page.shot(outdir / f"{expanded}.png")
+                    print(f"{expanded}: {report[expanded]}", flush=True)
+                page.goto(f"{base}/#/")
+                time.sleep(1.5)
         page.close()
     finally:
         chrome.close()
@@ -139,10 +147,11 @@ def main() -> None:
     (outdir / "delegating-mobile-geometry.json").write_text(json.dumps(report, indent=2))
     for width, height in VIEWPORTS:
         left = outdir / f"delegating-{width}x{height}.png"
-        right = outdir / f"nested-view-{width}x{height}.png"
-        if left.exists() and right.exists():
-            _compose(left, right, outdir / f"nested-list-vs-view-{width}x{height}.png")
-            print(f"composed nested-list-vs-view-{width}x{height}.png", flush=True)
+        for prefix in TAP_SESSIONS.values():
+            right = outdir / f"{prefix}-view-{width}x{height}.png"
+            if left.exists() and right.exists():
+                _compose(left, right, outdir / f"{prefix}-list-vs-view-{width}x{height}.png")
+                print(f"composed {prefix}-list-vs-view-{width}x{height}.png", flush=True)
     print("shots:", ", ".join(f"{key}.png" for key in report))
 
 
@@ -163,28 +172,80 @@ def _compose(left: Path, right: Path, out: Path) -> None:
     canvas.save(out)
 
 
-#: The roster header's own text, from the span the panel renders it in
-#: (``subagents-panel.tsx``: ``{label} {running}/{direct.length} running``).
-NESTED_VIEW_JS = r"""
+#: The sessions whose SESSION VIEW the rig taps into, keyed by the prefix used for
+#: their frames: ``{row label the list shows: frame prefix}``. Three shapes, because
+#: the view is where the two counts have to agree with the list and with each
+#: other (UX round 3): a parent with one child spending and one waiting, a parent
+#: with nothing running at all, and a parent whose children have children.
+TAP_SESSIONS: dict[str, str] = {
+    "Parent with one running, one waiting": "mixed",
+    "Parent with everything parked": "parked",
+    "Parent with nested descendants": "nested",
+}
+
+
+def _tap_js(label: str) -> str:
+    """Tap the list row for ``label`` — the REAL gesture, not a route assignment.
+
+    The route is ``#/s/<id>`` and the app owns the hash, so a ``goto`` at a URL the
+    router does not spell (``#/session/<id>``) is a same-document no-op that leaves
+    the capture sitting on the list (measured, design round 2). A click is also
+    what the finding is about: what ONE TAP changes.
+    """
+    return (
+        "(() => {"
+        " const nodes = Array.from("
+        'document.querySelectorAll(\'a,button,[role="link"],[role="button"]\'));'
+        f" const hit = nodes.find((n) => (n.textContent || '').includes({label!r}));"
+        " if (!hit) return JSON.stringify({ tapped: false });"
+        " hit.click();"
+        " return JSON.stringify({ tapped: true, tag: hit.tagName });"
+        "})()"
+    )
+
+
+#: The roster header's own numbers: the fraction span (``subagents-panel.tsx``
+#: renders ``{running}/{direct.length} running``) and the parked addend, read from
+#: the view's text so the frame's own words are recorded rather than inferred.
+ROSTER_JS = r"""
 (() => {
   const spans = Array.from(document.querySelectorAll('span'));
   const hit = spans.find((s) => /^\d+\/\d+ running$/.test((s.textContent || '').trim()));
   const header = hit && hit.parentElement ? hit.parentElement.textContent.trim() : null;
-  return JSON.stringify({ roster: hit ? hit.textContent.trim() : null, header });
+  const body = document.body.textContent || '';
+  const waiting = /(\d+) queued/.exec(body);
+  return JSON.stringify({
+    roster: hit ? hit.textContent.trim() : null,
+    header,
+    queued: waiting ? waiting[0] : null,
+  });
 })()
 """
 
-#: TAP THE ROW, do not set the hash: this app routes on a hash the router owns, so
-#: a ``goto`` to a differing-fragment URL is a same-document no-op and left the
-#: capture sitting on the list (measured). A click is also the real gesture — the
-#: finding is about what one tap changes.
-NESTED_TAP_JS = r"""
+
+#: Expand the roster whose header was just read, so the child rows themselves are in
+#: the frame: the waiting child's own treatment is half of UX round 3's finding (it
+#: must not be the spinner), and a collapsed panel never draws it.
+EXPAND_JS = r"""
 (() => {
-  const nodes = Array.from(document.querySelectorAll('a,button,[role="link"],[role="button"]'));
-  const hit = nodes.find((n) => (n.textContent || '').includes('Parent with nested descendants'));
-  if (!hit) return JSON.stringify({ tapped: false });
-  hit.click();
-  return JSON.stringify({ tapped: true, href: hit.getAttribute('href') || '', tag: hit.tagName });
+  const hit = Array.from(document.querySelectorAll('span')).find((s) =>
+    /^\d+\/\d+ running$/.test((s.textContent || '').trim()));
+  const button = hit ? hit.closest('button') : null;
+  if (!button) return JSON.stringify({ expanded: false });
+  button.click();
+  return JSON.stringify({ expanded: true });
+})()
+"""
+
+#: The two status glyphs a parked child must not be confused with, counted off the
+#: expanded roster's own text.
+GLYPH_COUNT_JS = r"""
+(() => {
+  const text = document.body.textContent || '';
+  return JSON.stringify({
+    waiting: (text.match(/…/g) || []).length,
+    spinning: (text.match(/⟳/g) || []).length,
+  });
 })()
 """
 

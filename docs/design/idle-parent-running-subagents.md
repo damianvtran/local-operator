@@ -162,16 +162,21 @@ the pair's 2×4px inside the reserved box the title's start x is untouched.
 
 **The chip sums the two counts, and that is NOT the catalogue's wording.** `delegatedChip` prints
 `N subagent(s)` from `running + queued`, where `delegating_label` prints `2 subagents running ·
-1 queued`. The reason is the tap: the session view the row opens onto prints its roster header as
-`{running}/{direct.length} running`, and both halves of that come from the folded projection, which
-draws a parked child as running (`mobile/projection.py` maps `queued` → the `running` mobile status). A
-chip that counted only the running ones therefore read `1 subagent` on a row whose session view said
-`2/2 running` one tap later (UX round 1, U2). One number for one population across the tap wins over
-spelling the split on a chip this narrow; the precise sentence stays on the catalogue, the desktop
-`title` and the TUI tooltip, where there is room for it. The chip is hidden on `null` and on 0, always
-carries the noun (a count-only chip left the reader guessing WHAT was queued, U3), and caps at `99+`
-so three digits cannot `shrink-0` the row's name away at 360px (U4) — the exact figure is one tap away
-in that same roster header.
+1 queued`. The reason is the tap: the session view the row opens onto counts its children by the SAME
+population — the roster header's denominator is `direct.length`, the parked child included — while it
+separates the two lanes in words (`1/2 running · 1 queued`). So the chip's `2 subagents` and the view's
+two children are the same two children, one tap apart. A chip that counted only the running ones
+instead read `1 subagent` on a row whose session view said `2/2 running` one tap later (UX round 1,
+U2), and keeping the two lanes apart is also what the fold had to stop conflating: `mobile/projection.py`
+used to map the runtime's `queued` onto the mobile `running` status, so the header's numerator counted a
+child that was only waiting for a slot (UX round 3). The fold now emits `queued`, the roster row draws
+that child in the dim, non-spinning gutter (`…`, never the `⟳` and its pulse) and names it in the
+drill-in (`Agent waiting for a free slot in this session's capacity.`), and `starting` deliberately
+stays in the running lane — an admitted child spinning up IS spending. The precise catalogue sentence
+stays on the catalogue, the desktop `title` and the TUI tooltip, where there is room for it. The chip is
+hidden on `null` and on 0, always carries the noun (a count-only chip left the reader guessing WHAT was
+queued, U3), and caps at `99+` so three digits cannot `shrink-0` the row's name away at 360px (U4) — the
+exact figure is one tap away in that same roster header.
 
 > **"One population" holds at DEPTH 1, and that is the whole of the claim.** The chip counts this
 > session's whole subtree; the roster header counts its direct children. Past depth 1 they diverge by
@@ -237,6 +242,13 @@ Added (the state must be falsifiable), all landed in this PR:
   `session_category`'s tier and its `rank` (adding a state must not move a row; `rank`'s docstring is
   the record of that mistake), and the absent-≠-0 case carried from the record to the row through the
   real scan.
+- `tests/unit/mobile/test_projection.py` — `a_capacity_parked_child_is_not_drawn_as_running`: the fold
+  emits `queued` for a capacity-parked child and `running` for an admitted one, and the roster header's
+  own arithmetic over those rows yields `1/2 running`, not `2/2` (UX round 3; verified to fail against
+  the previous mapping).
+- `mobile/web/src/components/subagents-panel.queued.test.tsx` — the header separates the lanes
+  (`1/2 running` + `· 1 queued`, and no invented `0 queued` on a healthy roster), and a parked child
+  renders the dim waiting glyph with no `lo-pulse` while a spending one keeps `⟳` and its pulse.
 - `mobile/web/src/session-list.delegating.test.tsx` — the slot rung and the chip against the real
   card: the pair of dots, the singular, the sum (one running + one parked reads `2 subagents`, the
   population the session view counts), the `99+` cap, `leaving` suppressing the mark, the two rungs that
@@ -270,15 +282,14 @@ because it is a change to gate lifecycle rather than to this row's vocabulary, a
 reviewed as a different change with a different blast radius. Recorded on the PR as a
 `deferred — <reason>` finding so it is not lost.
 
-A second pre-existing presentation defect is deferred for the same reason, and this change is what made
-it visible: the session view's roster folds a PARKED child into the running lane. `mobile/projection.py`
-maps the `queued` lifecycle status onto the `running` mobile status (only `paused`/`pausing` become
-`parked`), so the roster header prints `2/2 running` for a parent with one running and one waiting
-child, and draws the waiting child with the running `⟳` and its pulse. The phone's chip was moved onto
-THAT population rather than this one's (see §5) so the two surfaces agree across a tap — but the fold
-itself is a projection/presentation question with its own blast radius (every roster, every platform
-client, and the `parked` literal's meaning), not a row-vocabulary one, so it is recorded on the PR as
-`deferred — <reason>` with the anchors above rather than changed here.
+A second defect in the same neighbourhood was FIXED rather than deferred, in the round that found it
+(UX round 3): the session view's roster folded a PARKED child into the running lane. `mobile/projection.py`
+mapped the `queued` lifecycle status onto the `running` mobile status, so the header printed `2/2 running`
+for a parent with one spending child and one waiting for a slot and drew the waiting child with the
+running `⟳` and its pulse. The fold is the fix, because this field is exactly what the header COUNTS: it
+now emits `queued`, and the client gives that status its own non-spinning treatment and its own words
+(§5). The runtime already kept the two apart (`RUNNING_SUBAGENT_STATUSES` excludes `queued`) and so did
+the phone's summary; only the fold disagreed.
 
 **A third, also pre-existing, divergence is NAMED here rather than left in the code's head: the two
 numbers this change is about count two populations, and they part company past depth 1.** The chip

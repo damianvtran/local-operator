@@ -462,7 +462,7 @@ EntryKind = Literal[
 
 ToolState = Literal["composing", "queued", "running", "done", "failed", "interrupted"]
 
-SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked"]
+SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked", "queued"]
 
 TodoStatus = Literal["pending", "done", "blocked", "dropped"]
 

@@ -2148,8 +2148,22 @@ class ProjectionFold:
                 # running default, and prevents stale live rows from reopening a
                 # terminal outcome during the runner/manager settle window.
                 status = lifecycle.status
-                if status in ("running", "queued", "starting"):
+                if status in ("running", "starting"):
                     mobile_status = "running"
+                elif status == "queued":
+                    # A CAPACITY-PARKED CHILD IS NOT RUNNING, and the fold is where
+                    # that has to be true, because this field is what the session
+                    # view's roster header COUNTS: it prints
+                    # ``{running}/{direct.length} running`` over the rows this
+                    # mapping produces. Folding ``queued`` into ``running`` made the
+                    # header claim a child waiting for a slot was spending — the
+                    # same contradiction as the list chip reading ``N queued``
+                    # beside it (UX round 3). The runtime already keeps them apart
+                    # (``RUNNING_SUBAGENT_STATUSES`` excludes ``queued``) and so does
+                    # the phone's own summary, so the fold was the odd one out.
+                    # ``starting`` stays in the running lane: a child that has been
+                    # admitted and is spinning up IS spending.
+                    mobile_status = "queued"
                 elif status in ("paused", "pausing"):
                     mobile_status = "parked"
                 elif status in ("interrupted", "gone"):
