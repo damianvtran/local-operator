@@ -45,11 +45,10 @@ def credential_store_resolver(config_dir: Path | None) -> Any:
     application's configuration until a resolution is actually needed.
     """
 
-    from local_operator.credentials import CredentialManager
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
     from local_operator.paths import config_dir as default_config_dir
 
-    return CredentialStoreResolver(CredentialManager(config_dir or default_config_dir()))
+    return CredentialStoreResolver(config_dir or default_config_dir())
 
 
 def entry_json(entry: SweepEntry) -> dict[str, Any]:

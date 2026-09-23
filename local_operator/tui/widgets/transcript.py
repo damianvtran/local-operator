@@ -747,6 +747,78 @@ class TranscriptBlock(Static):
         """
         return False
 
+    # -- links -------------------------------------------------------------
+    def link_at(self, x: int, y: int) -> str | None:
+        """The URL painted at widget-relative cell ``(x, y)``, or ``None``.
+
+        Resolution goes through Textual's own ``get_style_at``, which reads the
+        style of the cell as it was COMPOSED onto the screen. That is the
+        reason this is three lines rather than a fold-aware walk over the
+        block's text: scrolling, the block's offset on the spine, a wrapped
+        URL's second row, a double-width glyph earlier on the line and the
+        widget stack above the pointer are all already accounted for by the
+        compositor. Deriving an offset from ``x`` by hand would re-implement
+        every one of them, and would have to be kept in step with the gutter
+        arithmetic :meth:`copy_gutter` exists to describe.
+
+        Textual carries rich's ``link`` through its own ``Style`` (verified:
+        ``Style(foreground=..., underline=True, link='https://…')``), so the
+        markdown renderer's link is readable here without the block recording
+        anything about where it painted URLs.
+
+        ``None`` for a cell with no link, which is most of them, and also for a
+        cell owned by a different widget — ``get_style_at`` returns a blank
+        style when the pointer is over something else, which is what keeps a
+        click on an overlapping row from opening this block's link.
+        """
+        try:
+            style = self.get_style_at(x, y)
+        except Exception:
+            # Style resolution reaches the screen and the compositor; a block
+            # that is unmounted, detached in a harness, or mid-teardown has no
+            # screen to ask. A click that cannot be resolved is not an error,
+            # it is a click on nothing.
+            return None
+        url = getattr(style, "link", None)
+        return url or None
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A click on a painted URL opens it; anything else is left alone.
+
+        WHY THE APP ANSWERS THIS AT ALL. The transcript paints OSC-8
+        hyperlinks and Ghostty honours them, but the terminal never sees the
+        click: Textual's driver claims the mouse at startup
+        (``\\x1b[?1000h`` SET_VT200_MOUSE, ``\\x1b[?1003h``
+        SET_ANY_EVENT_MOUSE in ``textual/drivers/linux_driver.py``), and a
+        terminal reporting mouse events to an application does not run its own
+        click-to-open gesture. Holding shift to bypass that is the terminal's
+        gesture and Ghostty documents it as undetectable by the program
+        (``xtshiftescape``), so it cannot be the answer either. Textual's own
+        dispatch does not close the gap: it routes ``@click`` action meta, and
+        a rich ``link=`` style carries none, so nothing in the stack turns a
+        click on a URL into an open. This handler is that step.
+
+        ``event.stop()`` is called ONLY when a link was actually hit. The
+        rule :meth:`TranscriptView.on_click` documents runs in the other
+        direction here: a click this block does not claim must keep bubbling,
+        or the container's focus rescue — and
+        :meth:`ExpandableActionBlock.on_click`'s activation on the rows that
+        override this — would stop working for every click that merely landed
+        on a row with a link somewhere else on it.
+
+        The open itself is delegated to the app, which owns the scheme guard
+        and the browser boundary; the block's whole job is to say which URL
+        the pointer was over.
+        """
+        url = self.link_at(event.x, event.y)
+        if url is None:
+            return
+        opener = getattr(self.app, "open_transcript_link", None)
+        if opener is None:
+            return
+        opener(url)
+        event.stop()
+
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The selected text, gutter-stripped and right-trimmed, or ``None``.
 
@@ -1095,6 +1167,20 @@ class ExpandableActionBlock(TranscriptBlock):
             self.screen.focus_previous()
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A URL under the pointer wins over the row's expand/collapse.
+
+        These rows carry prose that can hold a link (a peer message, a wake's
+        note), and the two gestures land on the same widget. The link is
+        checked FIRST and the ordering is deliberate: activation is available
+        on the whole row — every cell that is not a URL, plus the keyboard,
+        which is how the row is reached without a mouse at all — whereas the
+        URL is reachable only on the handful of cells it was painted on. The
+        specific target beats the general one, and neither becomes
+        unreachable.
+        """
+        if self.link_at(event.x, event.y) is not None:
+            super().on_click(event)
+            return
         if self.activate():
             event.stop()
 

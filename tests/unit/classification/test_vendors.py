@@ -514,11 +514,10 @@ async def test_a_rotated_credential_is_picked_up_after_the_ttl(bare_manager) -> 
 
 async def test_the_memo_is_per_instance_not_a_module_global(bare_manager, tmp_path) -> None:
     """Two services in one process may be signed into different accounts."""
-    from local_operator.credentials import CredentialManager
 
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    other = CredentialManager.readonly(other_dir)
+    other = other_dir
     store_row(other, "TYPESAFE_API_KEY", "other-account-key")
     store_row(bare_manager, "TYPESAFE_API_KEY", "this-account-key")
 
@@ -658,7 +657,7 @@ def store_login_key(manager, provider: str, key: str, *, replace: bool = False) 
     """
     from local_operator.providers.auth_store import AuthStore
 
-    store = AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
+    store = AuthStore(manager / "auth.db", config_dir=manager)
     try:
         if replace:
             for row in store.list_credentials():
@@ -694,11 +693,11 @@ async def test_a_leg_still_resolves_an_exported_environment_key(bare_manager, mo
     operator exported still runs the leg, with the store empty.
     """
     monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
-    assert not (bare_manager.config_dir / "auth.db").exists()
-    assert not (bare_manager.config_dir / "secrets").exists()
+    assert not (bare_manager / "auth.db").exists()
+    assert not (bare_manager / "secrets").exists()
     assert await credential_of(TypeSafeVendor(bare_manager), bare_manager) == "env-key"
     # Resolving did not create a store: the env tier needs no row.
-    assert not (bare_manager.config_dir / "secrets").exists()
+    assert not (bare_manager / "secrets").exists()
 
 
 async def test_the_login_row_wins_over_the_environment_key(bare_manager, monkeypatch) -> None:

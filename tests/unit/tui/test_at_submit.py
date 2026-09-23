@@ -316,9 +316,13 @@ async def test_expansion_is_awaited_outside_the_turn_lock(workspace) -> None:
     app = OperatorApp(lambda: _factory(session))
     observed: list[bool] = []
 
-    import local_operator.tui.app as app_mod
+    # Patched on `references`, not on `tui.app`: the app imports the resolver at
+    # its call site (it is kept off the app's import graph for launch time, see
+    # `tests/unit/test_import_graph.py`), so the module attribute IS the seam
+    # the app reads on every expansion.
+    import local_operator.references as references_mod
 
-    real_expand = app_mod.expand_references
+    real_expand = references_mod.expand_references
 
     async def _spy(text: str, cwd: str, **kwargs):
         # `_turn_lock` is the session's; record whether it is held at the moment
@@ -327,7 +331,7 @@ async def test_expansion_is_awaited_outside_the_turn_lock(workspace) -> None:
         observed.append(bool(lock.locked()) if isinstance(lock, asyncio.Lock) else False)
         return await real_expand(text, cwd, **kwargs)
 
-    app_mod.expand_references = _spy
+    references_mod.expand_references = _spy
     try:
         async with app.run_test(size=(100, 30)) as pilot:
             await _boot(pilot, app)
@@ -341,7 +345,7 @@ async def test_expansion_is_awaited_outside_the_turn_lock(workspace) -> None:
                 if session.asides:
                     break
     finally:
-        app_mod.expand_references = real_expand
+        references_mod.expand_references = real_expand
 
     assert observed, "expansion never ran on the aside path"
     assert not any(observed), "expansion awaited while the turn lock was held"

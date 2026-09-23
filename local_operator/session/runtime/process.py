@@ -74,11 +74,9 @@ from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
-    BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
-    LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
     SIGNAL_DRAIN_CAUSE,
     SIGNAL_DRAIN_S,
@@ -1075,6 +1073,11 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # ``BUILD_STAGGER_S`` slice at the exit — the exact delay
             # ``_Drain.stagger_until`` is drawn at drain start to avoid — and
             # announce ``retiring`` a second time for one departure.
+            #
+            # A drain whose bound expired stays HERE too, with its latch released
+            # (``_abandon_move``): the commitment is what is being kept, not the
+            # refusal, so the tick still retries the departure and the clean idle
+            # exit is still what ends it.
             return await _drain_for(drain, handle, runtime, stop)
         if poll.refreshable():
             return await _refresh_for(cast("BuildStamp", poll.newer), handle, runtime, stop)
@@ -1100,7 +1103,8 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # drain start at the latest, and often minutes ago), and a grace
             # window is for a runtime that might still be wanted — this one has
             # already stopped taking work.
-            if await _drain_for(drain, handle, runtime, stop):
+            retired = await _drain_for(drain, handle, runtime, stop)
+            if retired:
                 return True
             continue
         if not _should_exit(handle, runtime):
@@ -1173,9 +1177,13 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
     # same loop iteration as a drain bound skipped the whole exit block (#1250).
     #
     # NB a build rung the REAPER runs is NOT among those producers, and the
-    # distinction is worth keeping straight: ``_refresh_for``, ``_drain_for`` and
-    # ``_leave_overdue`` each run ``_clean_exit`` in the task that calls them and
-    # then return ``True``, so that rung is the exit leg, not this return.
+    # distinction is worth keeping straight: ``_refresh_for`` and ``_drain_for``
+    # run ``_clean_exit`` in the task that calls them and then return ``True``, so
+    # that rung is the exit leg, not this return. A drain that ran out
+    # ``BUILD_DRAIN_PROGRESS_S`` with work in flight used to be such a producer too,
+    # and no longer is: it ABANDONS the handover and keeps serving
+    # (``_abandon_move``), so the only build rung that reaches this return is a
+    # clean idle handover.
     return False
 
 
@@ -1513,6 +1521,34 @@ async def _pump_update_heartbeat(handle: object, *, interval: float) -> None:
         return
 
 
+async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: float) -> None:
+    """The half every arm that KEEPS the build this runtime loaded has in common.
+
+    Two steps, and they are the same two wherever a handover gives up: the messages
+    the departure queued come back IN — they run here, on the build the operator
+    still has, rather than leaving a receipt for a successor that is not coming —
+    and the failure is PUBLISHED, on the record and as an incident row carrying
+    ``types.UPDATE_FAILED_CAUSE`` (the operator's own requirement: "indicate that
+    the update failed so that it can be reported as an issue and addressed").
+
+    FACTORED OUT rather than written twice because the two callers are the two
+    shapes of the same decision — the update window that ran out of its bound
+    (:func:`_abandon_update_window`) and the build drain that could not reach idle
+    (:func:`_abandon_move`) — and a second copy of the publish step is how one of
+    them would end up reporting a failure under a token no surface renders.
+
+    The runtime is never killed here. That is the whole contract of this module's
+    give-up arms: a failed update leaves a working session on the build it loaded.
+    """
+    await _drain_inbox_into(handle)
+    note = getattr(runtime, "note_update_failed", None)
+    if callable(note):
+        try:
+            await cast("Callable[..., Awaitable[None]]", note)(pair, bound)
+        except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
+            logger.warning("could not publish the failed update", exc_info=True)
+
+
 async def _abandon_update_window(handle: object, runtime: object, pair: str, bound: float) -> None:
     """The bound expired: keep the build this runtime loaded, and say so.
 
@@ -1547,13 +1583,7 @@ async def _abandon_update_window(handle: object, runtime: object, pair: str, bou
     remember = getattr(handle, "note_update_failed", None)
     if callable(remember):
         remember(pair, bound)
-    await _drain_inbox_into(handle)
-    note = getattr(runtime, "note_update_failed", None)
-    if callable(note):
-        try:
-            await cast(Callable[..., Awaitable[None]], note)(pair, bound)
-        except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
-            logger.warning("could not publish the failed update", exc_info=True)
+    await _keep_loaded_build(handle, runtime, pair, bound)
 
 
 async def _close_update_window(handle: object, *, drain_back: bool) -> None:
@@ -1722,41 +1752,6 @@ class _Drain:
     progress: "_DrainProgress | None" = None
 
 
-#: The wire label the BACKSTOP announces when a build drain's work has stopped
-#: moving, so a frame and the record it was written with both name the bound.
-#:
-#: IT IS A PREFIX OF ``stale-build`` FOR INSURANCE, NOT FOR A PATH THIS TREE TAKES.
-#: ``types.leaving_phrase_for_frame`` matches these labels with ``startswith`` and
-#: answers the build sentence for this one, but it is reached only for a frame that
-#: carries NO ``leaving`` — and this rung always sends one, so within this tree the
-#: phrase short-circuits ahead of the label (agent review round 1, R6). What the
-#: prefix buys is the reader that has no phrase vocabulary yet: a RELEASED app, or
-#: another build of this branch, reads ``reason``/``to`` and resolves a departure it
-#: cannot place to the build sentence instead of to nothing. It stays a prefix
-#: rather than a new vocabulary word for that population, not because anything here
-#: reads it.
-_BUILD_OVERDUE_REASON = "stale-build-overdue"
-
-#: What :func:`_leave_overdue` logs this departure as, and what it hands
-#: ``_clean_exit`` as the journal's exit cause — the TOKEN
-#: (``types.BUILD_DRAIN_OVERDUE_CAUSE``), never the sentence and never
-#: ``drain.reason``: the row's cause is what a successor renders through
-#: ``incidents.CUT_OFF_CAUSES``, and free text there is unrenderable, which is how
-#: the bound stayed invisible to every durable surface (QA round 1, Q-2). The
-#: sentence a person reads is composed in :func:`_leave_overdue`'s own log line
-#: and in the ``CUT_OFF_CAUSES`` entry, in one place each.
-_BUILD_OVERDUE_EXIT_REASON = BUILD_DRAIN_OVERDUE_CAUSE
-
-
-#: What :func:`_leave_overdue` warns with — the human line, and the only place
-#: the elapsed figure is stated while the departure is happening. The token above
-#: is what is durable; this is what is readable.
-_BUILD_OVERDUE_LOG = (
-    "session runtime: %s; no movement reported from the work in flight for %.0fs "
-    "(bound %.0fs); leaving without waiting for it"
-)
-
-
 def _transcript_footprint(transcript: object) -> "tuple[Any, ...]":
     """The newest durable row of each transcript kind, or ``()`` unreadable.
 
@@ -1900,7 +1895,9 @@ def _work_motion(handle: object) -> "tuple[Any, ...]":
     job row unless it was backgrounded — is invisible here for its whole duration.
     The runtime cannot tell that step from a hung one, so the clock it feeds says
     "no movement reported", and the phrase it publishes says exactly that rather
-    than asserting a cause (``types.LEAVING_FOR_BUILD_OVERDUE``).
+    than asserting a cause (``types.LEAVING_FOR_BUILD``'s history is the same shape of
+    claim, and the overdue phrase it used to publish is no longer sent by any arm —
+    see ``process._abandon_move``).
 
     NOT A LIVENESS PROBE EITHER. The record heartbeat, the reaper's own tick, a
     viewer's repaint and ``is_streaming`` all keep reporting for a session whose
@@ -1957,13 +1954,14 @@ class _DrainProgress:
     settling or whose spool is filling keeps pushing ``moved_at`` forward, so a
     hold that is moving is never cut however long it runs.
 
-    ``overdue`` is the drain's own record that its hold was ended by the
-    backstop, and it is also the guard that keeps the rung from running twice.
+    ``abandoned`` is the drain's own record that its hold was ended by the bound —
+    the runtime kept the build it loaded rather than being cut — and it is also the
+    guard that keeps the give-up from running twice.
     """
 
     motion: "tuple[Any, ...]" = ()
     moved_at: float = 0.0
-    overdue: bool = False
+    abandoned: bool = False
 
     @classmethod
     def started(cls, handle: object, at: float) -> "_DrainProgress":
@@ -2080,6 +2078,40 @@ def _progress_probe() -> "tuple[object, bool]":
     if handle is None:
         return (), True
     return _work_motion(handle), _step_in_flight(handle)
+
+
+def _busy_probe() -> bool:
+    """The stall bound's EXIT-LEG answer: does this process hold work in flight?
+
+    ``ServingSessionHandle.is_busy`` is the runtime's one authority for it — the same
+    predicate the reaper's WORK signal and ``may_refresh`` read, so "a turn, a
+    subagent, a job or a parked gate" means one thing in this process rather than two
+    — and it is supplied here rather than imported there because ``stall_watchdog``
+    must never import this module (see :func:`_progress_probe`).
+
+    NO HANDLE YET ANSWERS ``True``: the arming happens before the session exists, and
+    a runtime still constructing itself is not idle in any sense this bound may act
+    on. That is the deliberate asymmetry with :func:`_progress_probe`, which answers
+    "judge nothing" in the same window: the progress leg decides when to STOP WAITING
+    and must not start a clock against a boot, while this decides whether the timer
+    may END THE PROCESS, and the boot is precisely the window in which nothing has
+    been reported yet — the measured shape of the failures this exit leg exists to
+    remove was a runtime killed while it was still doing its work.
+
+    A handle without the probe — an older host, a reduced test double — reads the same
+    way, and so does a probe that raises. Unknown is not an invitation to cut.
+    """
+    handle = _live_handle
+    if handle is None:
+        return True
+    busy = getattr(handle, "is_busy", None)
+    if not callable(busy):
+        return True
+    try:
+        return bool(busy())
+    except Exception:  # noqa: BLE001 — an unreadable state must not authorise a cut
+        logger.debug("stall watchdog: the busy probe failed; holding the exit leg", exc_info=True)
+        return True
 
 
 async def _begin_drain(
@@ -2336,7 +2368,7 @@ async def _drain_for(
     idle instant arrives. Nothing in flight is aborted: the wait is bounded by
     the work.
 
-    AND ONLY BY THE WORK THAT IS STILL MOVING — see :func:`_leave_overdue`, the
+    AND ONLY BY THE WORK THAT IS STILL MOVING — see :func:`_abandon_move`, the
     one rung here that draws a bound at all. It reads no clock of the drain: the
     clock it reads is reset by every observable sign that the work advanced
     (:func:`_work_motion`), so it cannot fire on a turn that is merely long, and
@@ -2344,7 +2376,10 @@ async def _drain_for(
     other exit: ``is_busy()`` counts a gate parked on a user and a lane parked
     behind a child process, both of which can hold for hours, and a drain that
     holds forever takes its session with it (measured: 2 h and still refusing,
-    ``state=wedged``, three lanes stalled behind a 23-minute bash child).
+    ``state=wedged``, three lanes stalled behind a 23-minute bash child). And a
+    stale hold that cannot be waited out is now RECORDED rather than cut: the
+    bound abandons the handover, publishes the failure, and leaves the session
+    running on the build it loaded.
 
     The viewer term of :func:`_should_exit` is deliberately absent, exactly as
     it is absent from ``may_refresh``. The ``retiring`` frame went out at drain
@@ -2380,9 +2415,8 @@ async def _drain_for(
         return False
     if not _idle_for_refresh(handle):
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
-            return await _leave_overdue(
-                drain, handle, runtime, stop, progress=drain.progress, at=at
-            )
+            await _abandon_move(drain, handle, runtime, at=at)
+            return False
         return False
     begin_retire = getattr(handle, "begin_retire", None)
     if callable(begin_retire) and not begin_retire(drain.cause, _drain_detail_at_exit(drain)):
@@ -2395,152 +2429,104 @@ async def _drain_for(
     return True
 
 
-async def _leave_overdue(
+async def _abandon_move(
     drain: _Drain,
     handle: object,
     runtime: object,
-    stop: asyncio.Event,
     *,
-    progress: _DrainProgress,
     at: float,
-) -> bool:
-    """The backstop: leave by FORCE, through the signal drain's own exit rung.
+) -> None:
+    """The drain could not reach idle: ABANDON the move and KEEP SERVING.
 
-    Reached only when :data:`types.BUILD_DRAIN_PROGRESS_S` has passed with no
-    movement in ANY of the signs :func:`_work_motion` reads — a hold whose work
-    has stopped reporting anything at all, which is the state a build drain would
-    otherwise sit in forever: ``is_busy()`` keeps answering True for a lane parked
-    behind a bash child, the drain's promise ("in-flight work finishes first") is
-    only as good as that work's willingness to finish, and nothing else in the
-    drain draws any bound. The runtime is still refusing every admission while it
-    holds, and a successor cannot be engaged while the predecessor holds the
-    transcript lease, so not firing here does not cost a slow handover — it costs
-    the session.
+    Replaces a force-cut that ended the runtime and its turn together after
+    :data:`types.BUILD_DRAIN_PROGRESS_S` of no movement from the work in flight.
+    That arm was measured against the fleet and removed on the operator's rule for
+    every build move: a runtime is replaced when its turn is COMPLETE, never on a
+    heuristic of inactivity. Three live sessions still carried its
+    ``runtime-overdue`` WHY when this arm was removed (counted 2026-09-22), which is
+    exactly the false report this replaces — the turn it "cut" was a turn the
+    operator was still running.
 
-    THE EXIT IS THE SIGNAL DRAIN'S, in all three parts, and it is deliberately not
-    a new exit path:
+    WHY THE CUT WAS WRONG EVEN WHERE IT WAS AIMED. Its argument was that a lane
+    parked behind a bash child keeps ``is_busy()`` answering True, so the drain's
+    promise ("in-flight work finishes first") is only as good as that work's
+    willingness to finish — and nothing else in the drain draws a bound, while the
+    successor that would run the newer build cannot be engaged until this runtime
+    releases the transcript lease. Every part of that is still true, and none of it
+    makes the CUT the answer: the runtime was willing to hold, the work was real,
+    and the thing the bound was really bounding is the OPERATOR's wait for a
+    successor. A runtime that cannot reach idle is a runtime someone should look
+    at — which is what it now becomes, with the failure recorded where ``lop
+    sessions`` and the incident row can both read it, and with the build it loaded
+    still serving the session in the meantime.
 
-    * the record and the frame are RE-PUBLISHED through ``announce_retiring`` — the
-      same one commit that writes ``SessionRecord.leaving`` and sends the frame —
-      so ``lop sessions`` stops advertising a wait the runtime has given up on,
-      and the label and phrase BOTH name the bound (see the constants above). The
-      frame is the ordinary ``retiring`` one a drain already sent at its start, so
-      a viewer that went cold on that first frame sees the same event again rather
-      than a new one it has to learn;
-    * the wakes this drain swallowed are handed to the successor FIRST, exactly as
-      the clean rung hands them over (:func:`_hand_wakes_to_successor`). Not an
-      extra: the wakes are the ones whose fire RETIRED their schedule, so a
-      handover skipped here does not defer the reminder, it loses it, and the
-      rung that cuts a turn is the last one that should also drop the user's
-      scheduled work;
-    * a gate still parked on a user's answer is DENIED rather than left holding a
-      process that is leaving: the turn it belongs to is being cut, and amain's own
-      direct-dispose block denies for exactly this reason before its dispose. It is
-      NOT the memo's "do not deny from the drain" case — that refusal is about a
-      drain that is still trying to preserve its turn, which is the case this rung
-      has already given up on;
-    * the exit runs ``_clean_exit``, the one convergence point every planned exit
-      already goes through, with the TOKEN ``types.BUILD_DRAIN_OVERDUE_CAUSE`` as
-      its reason — not a sentence. The row is the only account of this departure
-      that outlives the process (``lop sessions --json`` returns an empty list
-      ~97 ms after the escalation because the record goes with it), so the cause
-      has to be a token the taxonomy can RENDER: ``death_verdict`` narrates a
-      recorded non-signal cause ahead of its own inferences, and
-      ``CUT_OFF_CAUSES`` turns that token into the sentence a successor repeats
-      (agent review round 1, R3; QA round 1, Q-2). Written as free text before
-      this, it reached the row and nothing read it;
-    * the why-now the cut-off note brands the turn with is RE-READ here, and the
-      CAUSE it brands it with becomes this departure's own token, so the turn the
-      escalation cuts is narrated as a bounded handover on every surface that
-      repeats a cut-off — the live error row, the attention record and the
-      successor's incident (agent review round 1, R2/R3; QA round 1, Q-2). The
-      latch's cause is still the truth for the WAIT; it is the wrong word for the
-      CUT.
+    WHAT IT KEEPS: the message spool the drain swallowed comes back in, and the
+    failure is published under ``types.UPDATE_FAILED_CAUSE`` — both through
+    :func:`_keep_loaded_build`, the same half :func:`_abandon_update_window` uses,
+    so the two give-up arms cannot drift apart in what they report. The latch is
+    released through ``ServingSessionHandle.end_drain``: admissions resume, because
+    the alternative — refusing work for the rest of the process's life — is the
+    wedge this arm exists to end rather than to create.
 
-    WHY THE DRAIN'S CAUSE DOES NOT CHANGE, against the memo's "classified by
-    ``SIGNAL_DRAIN_CAUSE``". ``begin_drain`` is the latch that token lives on, and
-    calling it a second time is not a rename: it re-runs
-    ``Session.retire_wakes_to_inbox``, which STARTS A FRESH ``_wake_rearms`` list —
-    discarding the one-shot wakes this drain has already swallowed and would have
-    handed to its successor at the exit, so a reminder that fired between the latch
-    and this rung would be lost silently. Writing the handle's private
-    ``_retiring_cause`` instead would be the same latch minus its bookkeeping, and
-    it would ALSO make ``ServingSessionHandle._retiring_refusal`` name this
-    departure SIGNALLED ("This session was signalled to stop"), which is the only
-    token that accessor maps and maps for exactly this reason: a false sentence
-    about which trigger took a session away is the class of falsehood agent review
-    round 4 (MAJOR-2) filed in the other direction. The build drain's own
-    ``runtime-retired`` is TRUE of this exit — the runtime is leaving so the next
-    engage runs the build on disk — and that a BOUND ended the hold is carried by
-    the phrase, which is the primary carrier of which trigger committed a drain.
+    THE DRAIN OBJECT STAYS, AND THAT IS NOT AN OVERSIGHT. The reaper keeps calling
+    :func:`_drain_for` with it, so the departure is still retried on every tick and
+    still happens at the first idle instant — but the LATCH IS NOT TAKEN AGAIN, and
+    that matters more than it looks: a second ``begin_drain`` re-runs
+    ``Session.retire_wakes_to_inbox``, which STARTS A FRESH ``_wake_rearms`` list and
+    so discards the one-shot wakes this drain has already swallowed. A reminder that
+    fired before the bound would then never fire at all, which is a silent loss of
+    the operator's work in exchange for a re-announcement nobody needs — the drain
+    is already latched as a commitment (the record still says it is leaving for the
+    build on disk when its turn ends, which is still true).
+
+    THE RECORD KEEPS ``LEAVING_FOR_BUILD`` THROUGH THE ABANDON, and that is deliberate
+    rather than a leftover (agent review round 1, MINOR-2; design round 1, D4 read the
+    same pair from the rendered frame): the COMMITMENT is what survives — the drain
+    object stays latched, so this runtime still leaves at the first idle instant — and
+    the phrase is therefore true of it. A row showing it beside "update failed" tells
+    the reader two true things about one runtime, which is what the record is for;
+    clearing it would produce the one lie of the pair, a runtime that exits with no
+    departure phrase on its record, which is the silently-leaving runtime the phrase
+    exists to prevent.
+
+    ONCE PER DRAIN, and the guard is written where the drain object lives rather than
+    at the caller: the reaper ticks every ``REAP_CHECK_S`` and a released refusal
+    does not stop ``_drain_for`` being called again, so without it a runtime that
+    cannot reach idle would publish its failure four times a minute.
+
+    WHAT IS DELIBERATELY NOT UNDONE: the ``retiring`` frame the drain sent to
+    attached viewers. There is no "staying" op on the wire, and inventing one is a
+    protocol change rather than part of this decision — so a viewer that already
+    went cold has engaged a successor, which cannot take the transcript lease while
+    this runtime keeps serving and retries. The RECORD is where a reader learns the
+    truth (``update_failed`` plus the build still running), which is the same split
+    the update window's abandon already relies on.
     """
-    if progress.overdue:
-        # The drain is not exited twice: a second caller (the signal drain's own
-        # loop, in principle) gets the same answer without a second announcement
-        # or a second disposal.
-        return True
-    stalled = progress.stalled_s(at)
-    progress.overdue = True
-    logger.warning(_BUILD_OVERDUE_LOG, drain.reason, stalled, BUILD_DRAIN_PROGRESS_S)
-    announce = getattr(runtime, "announce_retiring", None)
-    if callable(announce):
+    stalled = drain.progress.stalled_s(at) if drain.progress is not None else BUILD_DRAIN_PROGRESS_S
+    if drain.progress is not None:
+        # ONCE PER DRAIN, and the flag is the guard rather than a caller's check:
+        # the reaper ticks every ``REAP_CHECK_S`` and a released latch does not
+        # stop ``_drain_for`` being called with the SAME drain object, so without
+        # this a runtime that cannot reach idle would publish its failure four
+        # times a minute.
+        if drain.progress.abandoned:
+            return
+        drain.progress.abandoned = True
+    logger.warning(
+        "session runtime: the build drain for %s held with no movement for %.0fs "
+        "(bound %.0fs); ABANDONING the handover and keeping %s",
+        drain.reason,
+        stalled,
+        BUILD_DRAIN_PROGRESS_S,
+        _loaded_build_label(runtime),
+    )
+    end = getattr(handle, "end_drain", None)
+    if callable(end):
         try:
-            await cast("Callable[..., Awaitable[None]]", announce)(
-                _BUILD_OVERDUE_REASON,
-                to=drain.to,
-                draining=True,
-                leaving=LEAVING_FOR_BUILD_OVERDUE,
-            )
-        except Exception:  # noqa: BLE001 — a viewer that misses this goes cold the slow way
-            logger.debug("overdue announcement failed", exc_info=True)
-    # THE DEPARTURE'S ATTRIBUTION IS RE-STATED HERE, and both halves matter.
-    #
-    # The WHY-NOW is RE-READ at the exit exactly as the quiet rung does it
-    # (:func:`_drain_detail_at_exit`), because this rung is only ever reached after
-    # hours of a hold: the pair the latch composed can name builds the install left
-    # long ago, and a why-now naming a build that has not been on disk for hours is
-    # its own false report. A drained runtime has NO detail at all today —
-    # ``begin_drain`` takes a ``detail`` and never stores it (only ``begin_retire``
-    # assigns ``_retiring_detail``) — so the cut-off note this feeds was branded
-    # with an empty parenthetical (agent review round 1, R2).
-    #
-    # The CAUSE becomes the token, which is what makes the CUT legible: the note is
-    # consumed by the next ``AgentEndEvent`` as ``Session._cut_off_cause`` and
-    # rendered through ``incidents.CUT_OFF_CAUSES`` on every surface that repeats a
-    # cut-off — the live "Stopped with an error" row, the attention record, and the
-    # successor's ``session_incident``. Left as the latch's ``runtime-retired``, a
-    # turn cut BY A BOUND narrated the sentence every ordinary build handover
-    # leaves, so the fact the operator needs was invisible on every durable surface
-    # (QA round 1, Q-2: the record is gone ~97 ms after the escalation, so these are
-    # the only places left to look).
-    #
-    # NOT A RE-LATCH, and NOT ``SIGNAL_DRAIN_CAUSE``. The round-1 objection stands:
-    # ``begin_drain`` re-runs ``retire_wakes_to_inbox``, whose one-shot re-arms only
-    # ``_hand_wakes_to_successor`` writes — a second call would drop a reminder this
-    # drain had already swallowed; and classifying a build departure as
-    # ``runtime-shutdown`` would make ``_retiring_refusal`` name a trigger that did
-    # not happen. This is a token of its own, which that accessor maps to NO trigger
-    # (its only named departure is the signal), so a refusal here is exactly as
-    # unnamed as it already was for a build drain, and the phrase the frame carries
-    # is what resolves the trigger on the far side. The two truthiness readers of
-    # this field (the admission gate, the spool decision) see a non-empty string
-    # either way and cannot tell the difference.
-    detail = _drain_detail_at_exit(drain)
-    try:
-        setattr(handle, "_retiring_cause", _BUILD_OVERDUE_EXIT_REASON)
-        setattr(handle, "_retiring_detail", detail)
-    except Exception:  # noqa: BLE001 — the note is evidence, never a gate on the exit
-        logger.debug("could not hand the exit attribution to the cut-off note", exc_info=True)
-    deny = getattr(handle, "_deny_pending_gates", None)
-    if callable(deny):
-        try:
-            deny()
-        except Exception:  # noqa: BLE001 — the exit must not be held by a failed denial
-            logger.debug("gate denial failed at the overdue exit", exc_info=True)
-    await _hand_wakes_to_successor(handle)
-    await _clean_exit(handle, runtime, reason=_BUILD_OVERDUE_EXIT_REASON)
-    stop.set()  # amain's wait() returns; exit code stays 0
-    return True
+            end()
+        except Exception:  # noqa: BLE001 — a failed release must not stop the report
+            logger.debug("could not release the drain latch", exc_info=True)
+    await _keep_loaded_build(handle, runtime, drain.to, BUILD_DRAIN_PROGRESS_S)
 
 
 async def _hand_wakes_to_successor(handle: object) -> int:
@@ -3578,6 +3564,19 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # ``_progress_probe``.
     global _live_handle
     _live_handle = handle
+    # AND THE BOUND MOVES WITH IT: from here the runtime is one something can judge, so
+    # the stall bound stops being the BOOT bound measured from the entry point and
+    # becomes the steady one measured from NOW, with BOTH planes stamped at this
+    # instant. The two halves are one mechanism — the boot bound above buys this line
+    # the time to arrive, and this line is what makes the steady bound mean what it was
+    # sized for — and the placement is the same boundary the lines below already draw:
+    # everything before the handle is published is boot (the probe answers "judge
+    # nothing" there), everything after it is a running runtime. It is NOT reached by the
+    # paths that return above — a lost lease, a failed construction — which is right:
+    # those never engaged, so a fire in their window still carries the boot bound, and
+    # the boot bound is the bound that covers a boot. Every in-process host reaches it
+    # too, where it is a documented no-op because ``arm`` never ran.
+    stall_watchdog.engage()
     _bind_boot_instrumentation(handle, session_id=resume or "", cwd=cwd)
 
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
@@ -4062,5 +4061,5 @@ if __name__ == "__main__":
     # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
     # both halves of that. Arming before ``main()`` also means a stall during
     # boot — the window nothing else can report — is bounded and named.
-    stall_watchdog.arm(probe=_progress_probe)
+    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe)
     sys.exit(main())

@@ -8,16 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from local_operator.credentials import CredentialManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.registry import get_provider_definition
 
 
-def _radient_api_key(manager: CredentialManager) -> SecretStr:
+def _radient_api_key(config_dir: Path | None) -> SecretStr:
     """The `RADIENT_API_KEY` value: the provider store row, then the environment.
 
     Store-first, matching every other provider-key reader. The legacy
@@ -27,7 +27,7 @@ def _radient_api_key(manager: CredentialManager) -> SecretStr:
     """
     from local_operator.providers.registry import provider_secret_value
 
-    stored = provider_secret_value("RADIENT_API_KEY", base=manager.config_dir)
+    stored = provider_secret_value("RADIENT_API_KEY", base=config_dir)
     if stored:
         return SecretStr(stored)
     return SecretStr(os.environ.get("RADIENT_API_KEY", ""))
@@ -54,16 +54,18 @@ def canonical_radient_destination(base_url: str) -> bool:
 
 
 async def resolve_radient_credential(
-    manager: CredentialManager, base_url: str, *, store: AuthStore | None = None
+    config_dir: Path | None, base_url: str, *, store: AuthStore | None = None
 ) -> SecretStr:
     if not canonical_radient_destination(base_url):
         # An explicit legacy gateway must not receive a centrally signed-in
         # account's bearer. Preserve its previous dedicated key lookup instead —
         # store-first, so a RADIENT_API_KEY saved via the store is the only value
         # this route resolves.
-        return _radient_api_key(manager)
+        return _radient_api_key(config_dir)
     owns_store = store is None
-    store = store or AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
+    store = store or AuthStore(
+        (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
+    )
     try:
         # Read-only avoids moving inference account stickiness for catalogue,
         # upload and speech helpers; a required refresh still persists centrally.
@@ -72,16 +74,16 @@ async def resolve_radient_credential(
             return SecretStr(value)
         # Preserve the per-key extension seam of older/custom credential
         # managers after all canonical tiers, never ahead of a central login.
-        return _radient_api_key(manager) or SecretStr("")
+        return _radient_api_key(config_dir) or SecretStr("")
     finally:
         if owns_store:
             store.close()
 
 
-def resolve_radient_credential_sync(manager: CredentialManager, base_url: str) -> SecretStr:
+def resolve_radient_credential_sync(config_dir: Path | None, base_url: str) -> SecretStr:
     """CLI-only bridge; async hosts must await the shared resolver directly."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(resolve_radient_credential(manager, base_url))
+        return asyncio.run(resolve_radient_credential(config_dir, base_url))
     raise RuntimeError("Await resolve_radient_credential inside an async host")

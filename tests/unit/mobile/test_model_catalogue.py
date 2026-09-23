@@ -95,20 +95,20 @@ def test_cold_radient_oauth_models_refresh_parse_and_cache_off_loop(monkeypatch,
         assert first.json() == {
             "models": [
                 {
-                    "selector": "radient/anthropic/mobile-fixture",
-                    "provider": "radient",
-                    "model_id": "anthropic/mobile-fixture",
-                    "name": "Mobile fixture",
-                    "label": "radient/anthropic/mobile-fixture",
-                    "connected": True,
-                    "aggregated": True,
-                },
-                {
                     "selector": "radient/auto",
                     "provider": "radient",
                     "model_id": "auto",
                     "name": "Automatic",
                     "label": "Auto",
+                    "connected": True,
+                    "aggregated": True,
+                },
+                {
+                    "selector": "radient/anthropic/mobile-fixture",
+                    "provider": "radient",
+                    "model_id": "anthropic/mobile-fixture",
+                    "name": "Mobile fixture",
+                    "label": "radient/anthropic/mobile-fixture",
                     "connected": True,
                     "aggregated": True,
                 },
@@ -283,13 +283,12 @@ def test_admitted_empty_set_fetches_nothing_at_all(monkeypatch):
     """
     import asyncio
 
-    from local_operator.credentials import CredentialManager
     from local_operator.providers.controller import ProviderController
 
     calls = []
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda *args: calls.append(args))
     with contextlib.closing(AuthStore()) as store:
-        controller = ProviderController(store, CredentialManager.readonly(config_dir=config_dir()))
+        controller = ProviderController(store, config_dir())
         entries, statuses = asyncio.run(controller.live_catalogue(providers=set()))
     assert entries == []
     assert statuses == {}

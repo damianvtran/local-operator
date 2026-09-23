@@ -95,6 +95,44 @@ def test_classify_cut_off_rewrites_an_involuntary_abort(tmp_path: Path) -> None:
     assert classed.cut_off == render_cut_off_reason("runtime-shutdown")
 
 
+def test_classify_cut_off_adopts_a_cause_stamped_on_the_event(tmp_path: Path) -> None:
+    """A cause only the EVENT carries is still classified as an involuntary cut-off.
+
+    RC1's loop stamps its own cause on the ``AgentEndEvent`` it emits and arms
+    nothing: no process is going away and no exit rung noted it, so the event is
+    the only record. The classifier must read it, or the stamped end keeps
+    ``aborted=True, error=None`` and reads as a DELIBERATE stop on every surface
+    — the misclassification worse than the bug.
+    """
+    # An EXISTING token, so this test's base failure is the missing adoption
+    # rather than a missing import: no citation of a cause arms the flag here.
+    cause = "runtime-shutdown"
+
+    session = _make_session(tmp_path / "sess")
+    classed = session._classify_cut_off(
+        AgentEndEvent(messages=[], aborted=True, cut_off_cause=cause)
+    )
+    assert classed.aborted is False
+    assert classed.error == format_cut_off_notice(cause)
+    assert classed.cut_off_cause == cause
+    assert classed.cut_off == render_cut_off_reason(cause)
+    # Adopted onto the flag too, so the durable reason agrees with the event.
+    assert session._cut_off_cause == cause
+
+
+def test_a_deliberate_stop_outranks_a_cause_stamped_on_the_event(tmp_path: Path) -> None:
+    """The negative arm of the adoption: positive evidence of a user's own stop wins.
+
+    ``note_deliberate_stop`` clears the armed flag precisely so a later rung
+    cannot relabel the user's cancel. An event-carried cause must not be able to
+    do what an armed one cannot.
+    """
+    session = _make_session(tmp_path / "sess")
+    session.note_deliberate_stop()
+    event = AgentEndEvent(messages=[], aborted=True, cut_off_cause="runtime-shutdown")
+    assert session._classify_cut_off(event) is event
+
+
 def test_classify_cut_off_leaves_a_normally_completed_run_alone(tmp_path: Path) -> None:
     """An armed cause cannot brand a run that says it COMPLETED.
 

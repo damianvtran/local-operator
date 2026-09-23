@@ -171,6 +171,15 @@ class SessionLine:
     #: row. A drain will not take a message; a window already has it and will run it
     #: one second later, which is the difference between "send it again" and "wait".
     updating: str = ""
+    #: The runtime SURVIVED its own stall bound: the bound fired, wrote every thread's
+    #: stack to its dump, found work in flight and did NOT end the process
+    #: (``stall_watchdog.held_pids``). The third state beside "the bound ended it" and
+    #: "no bound fired", and the ONE that needs the operator: a held runtime is stalled
+    #: with the turn still inside it, it will not resolve on its own, and the way out is
+    #: ``lop stop`` (design review round 1, D1 — before this the fact reached the JSON
+    #: row and no screen).
+    stall_held: bool = False
+
     #: A window that FAILED — the pair it could not move to (``SessionRecord.update_failed``),
     #: or ``""``. Its own field rather than a value of the one above, because the two
     #: are opposite facts about the SAME move and a reader must be able to tell

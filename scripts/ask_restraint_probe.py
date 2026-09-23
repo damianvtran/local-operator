@@ -233,12 +233,11 @@ async def main() -> int:
 
     # Auth resolves through the harness's own store, so whatever credential
     # this machine already has for the provider (OAuth included) is used.
-    from local_operator.credentials import CredentialManager
     from local_operator.model.configure import configure_model, create_stream_fn
     from local_operator.providers.auth_store import AuthStore
 
     config_root = Path(os.environ.get("LOCAL_OPERATOR_CONFIG_DIR", Path.home() / ".local-operator"))
-    credential_manager = CredentialManager(config_root)
+    credential_manager = config_root
     # NAME THE PROBE'S SPEND. Every provider call is recorded to the shared
     # analytics ledger, and ``create_stream_fn`` with no ``session_id`` records
     # them under the empty string — so this probe's runs landed in the
@@ -249,7 +248,7 @@ async def main() -> int:
     # rather than isolating the store.
     probe_session_id = "probe-ask-restraint"
     stream_fn = create_stream_fn(
-        AuthStore(credential_manager=credential_manager),
+        AuthStore(config_dir=credential_manager),
         session_id=probe_session_id,
     )
     # ...and give that id a human label, since a probe has no conversation to
@@ -260,7 +259,7 @@ async def main() -> int:
         get_recorder().note_session_name(probe_session_id, f"probe ask-restraint ({MODEL})")
     except Exception:  # noqa: BLE001 — a probe never fails on its diagnostics
         pass
-    spec = configure_model(HOSTING, MODEL, credential_manager=credential_manager).spec
+    spec = configure_model(HOSTING, MODEL, config_dir=credential_manager).spec
 
     # Sampled, not single-shot. The model is non-deterministic, so one call per
     # arm cannot tell a real behaviour change from sampling noise — an early

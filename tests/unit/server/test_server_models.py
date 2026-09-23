@@ -312,7 +312,7 @@ def test_list_models_with_openrouter(mock_list_models, client, mock_credential_m
 
     # The route resolves the key through the store-first reader; supply it as
     # that reader's return value rather than by patching the retired
-    # CredentialManager file, which is no longer on the resolution path.
+    # credentials.env file, which is no longer on the resolution path.
     with patch(
         "local_operator.providers.registry.provider_env_key",
         return_value="fake_api_key",

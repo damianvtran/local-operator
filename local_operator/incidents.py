@@ -382,9 +382,18 @@ DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE}
 
 #: The sentence for :data:`CUT_OFF_CAUSES`' ``runtime-overdue`` rung, and the one
 #: place the bound's number is spelled for a reader — RENDERED from the constant
-#: that enforces it, never typed here: this sentence is repeated by every surface
+#: that enforces it, never typed here: the sentence is repeated by every surface
 #: that repeats a cut-off (the live notice, the durable outcome, the sidebar), and a
 #: second copy of "15 min" is a copy that drifts.
+#:
+#: WHICH RUNTIMES CAN STILL RECORD THIS TOKEN: only ones that ran a build BEFORE the
+#: force-cut was removed. No arm records it any more — ``process._abandon_move``
+#: keeps the build it loaded and publishes ``UPDATE_FAILED_CAUSE`` instead — and the
+#: sentence STAYS for the reason the phrase does (see
+#: ``types.LEAVING_FOR_BUILD_OVERDUE``): a row written by an older runtime is read by
+#: this one, and ``death_verdict`` rung 2 narrates whatever token a row carries.
+#: Deleting the key would quietly demote those rows to the unknown-cause sentence,
+#: which is a worse report than a historical one.
 #:
 #: The import is FUNCTION-LOCAL, not module scope: this table is a leaf every
 #: runtime module may import, and the runtime's own vocabulary module is the wrong
@@ -425,7 +434,7 @@ def _stall_bound_cause_sentence() -> str:
 
 
 def _update_failed_cause_sentence() -> str:
-    """The sentence for the bounded UPDATE WINDOW (``types.UPDATE_FAILED_CAUSE``).
+    """The sentence for a bounded handover that gave up (``types.UPDATE_FAILED_CAUSE``).
 
     A DIFFERENT EVENT from the rung above, said in the same shape, and the difference
     is the one the operator acts on: the overdue handover LEFT (on the old build's
@@ -433,18 +442,36 @@ def _update_failed_cause_sentence() -> str:
     build it loaded, and it is the update that did not happen. Rendering the two with
     one sentence would tell a reader to go looking for a handover that never occurred.
 
-    THE BOUND IS RENDERED FROM THE CONSTANT, never typed here, for the reason
-    ``_overdue_cause_sentence`` gives: this sentence is repeated by every surface that
-    repeats a cause, and a second copy of "5s" is a copy that drifts from the bound
-    that enforces it.
+    IT NAMES NO NUMBER, and that is a correction rather than an omission (design
+    review round 1, D2). TWO arms publish this token with two different bounds — the
+    bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds) and the build DRAIN
+    (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) — so a sentence rendered from
+    the constant is wrong for one of them by construction: an update that spent a
+    quarter of an hour in the drain reported that it "did not finish within 5s". The
+    bound is known at the only place that can name it, so it rides the incident's
+    DETAIL (``RuntimeServer.note_update_failed`` renders it from the argument its
+    caller passed), and this sentence says the thing that is true of both arms.
     """
-    from local_operator import buildwatch
+    return (
+        "the update to the build on disk did not finish within its bound; the runtime "
+        "kept the build it loaded"
+    )
+
+
+def update_failed_detail(pair: str, bound: float) -> str:
+    """The detail a failed handover's incident carries: the pair, and the bound spent.
+
+    A HELPER RATHER THAN AN INLINE JOIN, because the bound is the fact that was
+    silently wrong until design review round 1 (D2): the sentence names none (two arms
+    publish this token with two different bounds), so this is the ONLY place a reader
+    can learn which bound the runtime actually ran out of — 5 s for the bounded update
+    window, fifteen minutes for the build drain. ``bound`` of 0 means the caller did
+    not say, and then no number is claimed rather than a default being invented.
+    """
     from local_operator.session.runtime.types import bound_text
 
-    return (
-        "the update to the build on disk did not finish within "
-        f"{bound_text(buildwatch.UPDATE_LOCK_S)}; the runtime kept the build it loaded"
-    )
+    parts = [part for part in (pair, bound_text(bound) if bound else "") if part]
+    return "; ".join(parts)
 
 
 #: The cause token for a runtime that vanished with its turn still in flight —
@@ -485,6 +512,18 @@ KILL_CAUSE = "runtime-killed"
 #: a wait or a spin?") is the leg, and ``stall_watchdog.fired_leg`` names it.
 STALL_BOUND_CAUSE = "runtime-stall-bound"
 
+#: The LOOP'S own bound (``harness/loop.py``, the outer-loop continuation guard).
+#: Involuntary, and NOT an error the model made: the turn had more work queued
+#: than its producer's budget allows. Named rather than left as the bare
+#: ``AgentEndEvent`` it used to be, because a bare end reads as a COMPLETED
+#: ANSWER on every surface — a child cut off mid-list arrived at its parent
+#: saying it had finished, which is the silent half of the subagent-stall
+#: report. It is a token in this table rather than a private string so
+#: :func:`is_cut_off_cause` answers True and every existing renderer (the
+#: attention outcome, the subagent panel's "cut off" row, the roster) names it
+#: without being taught a new field.
+CONTINUATION_LIMIT_CAUSE = "continuation-limit"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
@@ -493,6 +532,12 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # actor outside the victim, and a reader who found one of those would go
     # looking for a reaper or a sweep that never ran.
     STALL_BOUND_CAUSE: _stall_bound_cause_sentence(),
+    # Bounded on PURPOSE, unlike the arms above: the bound is a budget the loop
+    # chose to spend, so the sentence says what ran out rather than naming an
+    # actor — there is no reaper and no process to go looking for.
+    CONTINUATION_LIMIT_CAUSE: (
+        "the turn kept being asked to continue, so it was stopped and the pending message dropped"
+    ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     # The BOUNDED handover: a build drain that stopped waiting for its own work
@@ -688,7 +733,7 @@ def _render_cut_off_detail(detail: str) -> str:
     return f" — {text}"
 
 
-def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
+def render_cut_off_reason(cause: str, *, detail: str = "", clause: str = "") -> str:
     """One operator-facing sentence naming why a turn was cut off.
 
     This is the string the durable outcome stores as ``reason`` and every
@@ -698,9 +743,18 @@ def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     because the sidebar tooltip has one line and truncates the rest rather than
     wrapping it. The caller supplies the text of that clause and nothing else —
     its punctuation is added here (see :func:`_render_cut_off_detail`).
+
+    ``clause`` IS OUTSIDE THE PARENTHETICAL, and that placement is the whole point
+    (design review round 1, D3): a fact that belongs IN the sentence must not be
+    filed with the build/pid detail, because the LIST column that renders a reason
+    keeps only the first clause — ``outcome_summary`` splits at ``" ("`` — so a lead
+    put in there reaches no list a person reads. The held-fire lead is exactly that
+    kind of fact: it changes what the row MEANS (the runtime survived a bound and is
+    still stalled) rather than adding detail about a death it did not cause.
     """
     sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
-    return f"{sentence}{_render_cut_off_detail(detail)}"
+    lead = f"; {clause}" if clause else ""
+    return f"{sentence}{lead}{_render_cut_off_detail(detail)}"
 
 
 #: How one rung of the stop ladder reads inside a deliberate stop's detail.
@@ -851,6 +905,14 @@ def outcome_summary(reason: str) -> str:
     first clause otherwise (dropping the parenthetical, which for an
     involuntary cause is build/pid/started-at detail the JSON row carries in
     full).
+
+    WHAT THE SPLIT KEEPS IS DELIBERATE, and it is why a fact that changes what the
+    row MEANS has to live outside the parenthetical: the held-fire lead rides in the
+    first clause (``render_cut_off_reason``'s ``clause``) precisely so that this
+    function does not drop the one sentence that tells a reader a runtime survived
+    its bound and is still stalled (design review round 1, D3 — with the lead inside
+    the brackets, a held-then-killed death and a no-dump death rendered
+    byte-identical here).
     """
     phrase = stop_rung_phrase(reason)
     if phrase:
