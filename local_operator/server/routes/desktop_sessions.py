@@ -1369,13 +1369,19 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         if isinstance(error, AsideUnanswered):
             # THE REFUSAL IS THE ANSWER, exactly as it is for the three arms around
             # it: the aside ran, the provider answered, and the model would not
-            # answer in text (twice — ``Session.complete_aside`` spends its one
-            # retry first). A bare 500 would tell the app the BACKEND broke, and
-            # the generic ``RuntimeError`` arm would tell it the runtime was
-            # UNREACHABLE, whose remedy (reconcile, reconnect) cannot help; the 409
-            # named condition carries the code a renderer keys on and the sentence
-            # that says what to do (ask again). A ``ValueError`` subclass precisely
-            # so it lands in THIS arm rather than the arms below.
+            # answer in text. Three shapes reach this one arm, and the sentence in
+            # ``session/errors.py`` is worded for all of them: a bare tool call on
+            # the corrected retry (``Session.complete_aside`` spends its one retry
+            # first), nothing at all on that retry, and — as
+            # ``AsideEmptyAnswer``, which subclasses this so it needs no arm of its
+            # own — an answer that settled with no text whatsoever, which the
+            # asides route refuses rather than storing as a finished exchange. A
+            # bare 500 would tell the app the BACKEND broke, and the generic
+            # ``RuntimeError`` arm would tell it the runtime was UNREACHABLE, whose
+            # remedy (reconcile, reconnect) cannot help; the 409 named condition
+            # carries the code a renderer keys on and the sentence that says what
+            # to do (ask again). A ``ValueError`` subclass precisely so it lands in
+            # THIS arm rather than the arms below.
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,

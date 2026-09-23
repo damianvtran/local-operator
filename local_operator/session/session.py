@@ -12707,10 +12707,28 @@ class Session:
         self,
         turns: Sequence[AgentMessage],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Answer a side question against the live context WITHOUT joining it.
+
+        ``aside_instruction`` is ACCEPTED AND NOT ACTED ON, and both halves of
+        that are deliberate. This primitive never wraps: it is the shared bottom
+        of callers that own their own instruction — the TUI's ``/btw`` overlay
+        formats ``ASIDE_PROMPT`` itself, and the goal-loop judge sends
+        ``LOOP_JUDGE_PROMPT``, which must never be framed as an aside — so there
+        is nothing here for the flag to switch. It is in the signature so a
+        caller can state the same intent against whichever hop it happens to
+        hold: ``tui/app.py`` reaches this method directly when it owns the
+        session, and an ``AttachedSession`` (whose flag crosses the wire to the
+        seam that does apply the wrap) when it is only viewing one. One call site
+        that had to branch would be one call site that can get the branch wrong.
+        THE LANDMINE, documented rather than hidden: making this primitive honour
+        a True here would apply ``ASIDE_PROMPT`` to the judge's question — the
+        one request ``session/aside.py`` and both seams state must never receive
+        it — so the wrap belongs at the seams, and the flag rides the call to
+        reach them.
 
         This is ``complete_once``'s opposite number. ``complete_once`` is for
         errands that need the provider but not the conversation (auto-naming);

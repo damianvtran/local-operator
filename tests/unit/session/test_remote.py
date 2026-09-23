@@ -217,6 +217,149 @@ async def test_remote_aside_runs_on_owner_without_joining_transcript(
         registrant.close()
 
 
+class _RecordingAsideSession:
+    """An owner session that records the turns the SEAM handed the provider."""
+
+    session_id = "s1"
+    _frontend_state_store = None
+
+    def __init__(self) -> None:
+        self.turns: list[list[Any]] = []
+
+    async def complete_aside(
+        self, turns: list[Any], *, on_delta: Any = None, on_usage: Any = None
+    ) -> str:
+        self.turns.append(list(turns))
+        if on_delta is not None:
+            on_delta("aside ")
+            on_delta("answer")
+        return "aside answer"
+
+
+class _SeamAsideHandle(FakeHandle):
+    """``FakeHandle`` whose aside op runs the REAL seam (``ServingSessionHandle``).
+
+    The delegation is two lines and it is the point: everything the aside path
+    actually does — the wire field, the dispatch that reads it, the wrap, the
+    message validation — is production code, while the rest of the handle stays
+    the projection double the registrant's other tests rely on. A rebuilt handle
+    would have tested the wrap against itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        from local_operator.session.runtime.serving import ServingSessionHandle
+
+        self.session = _RecordingAsideSession()
+        self.seam = ServingSessionHandle(
+            self.session, asyncio.get_running_loop(), cwd="/tmp", install_gates=False
+        )
+
+    async def complete_aside(  # noqa: ANN001
+        self, turns, *, aside_instruction: bool = True, on_delta=None
+    ) -> str:
+        return await self.seam.complete_aside(
+            turns, aside_instruction=aside_instruction, on_delta=on_delta
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_tui_aside_and_its_judge_cross_a_real_seam_exactly_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The reviewer's gap: a real client, a real seam, the TUI's two asks.
+
+    The measured regression needed a TUI whose ``self._session`` is an
+    ``AttachedSession`` (a session alive in another process): the overlay wrapped
+    its own question and the owner's seam wrapped it again (two ``<aside>``
+    blocks, two ``Question:`` lines in one turn), and the goal-loop judge's
+    ``LOOP_JUDGE_PROMPT`` arrived framed as an off-record side question. Both
+    call sites now declare ``aside_instruction=False``, and this drives that
+    declaration through the real ``AttachedSession`` -> runtime dispatch ->
+    ``ServingSessionHandle`` path to what the owner's provider request receives.
+
+    The DEFAULT is asserted on the same connection, in the same test: a caller
+    that sends raw turns and says nothing still gets the instruction, which is
+    the fix this PR exists for (the desktop ``/asides`` route and the phone's
+    quick-ask).
+    """
+    from local_operator.session.aside import ASIDE_PROMPT
+    from local_operator.session.goal_loop import LOOP_JUDGE_PROMPT
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _SeamAsideHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await AttachedSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        # (i) The TUI's aside: pre-wrapped once, and it says so.
+        asked = ASIDE_PROMPT.format(question="why sed and not edit?")
+        assert await remote.complete_aside([Message.user(asked)], aside_instruction=False) == (
+            "aside answer"
+        )
+        sent = handle.session.turns[-1][-1]
+        assert sent.text == asked
+        assert sent.text.count("<aside>") == 1
+        assert sent.text.count("Question:") == 1
+        # (iv) The TUI's judge: no aside framing at all, on the same seam.
+        judge = LOOP_JUDGE_PROMPT.format(goal="finish the parser")
+        await remote.complete_aside([Message.user(judge)], aside_instruction=False)
+        assert [m.text for m in handle.session.turns[-1]] == [judge]
+        # The default still wraps: a caller that sent a RAW question gets the
+        # instruction, and gets it from the seam rather than from its own code.
+        await remote.complete_aside([Message.user("and the raw case?")])
+        assert handle.session.turns[-1][-1].text == ASIDE_PROMPT.format(
+            question="and the raw case?"
+        )
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pre_wrapped_client_against_an_owner_that_ignores_the_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Compatibility, both directions, on the real wire.
+
+    An owner built before the flag exists neither reads the body key nor accepts
+    the keyword — ``FakeHandle.complete_aside`` here takes ``turns`` alone, which
+    is that owner's signature. The dispatch probes for the keyword and sends the
+    narrow call, so the older owner keeps answering; and because a client that
+    pre-wraps is the shape that used to double up, the idempotency belt is what
+    actually protects the turn list. This pins the first half (the call lands and
+    is answered) — the second is pinned against the seam itself in
+    ``test_serving.py``.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await AttachedSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        answer = await remote.complete_aside(
+            [Message.user("why this approach?")], aside_instruction=False
+        )
+
+        assert answer == "aside answer"
+        assert handle.calls[-1][0] == "complete_aside"
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
 @pytest.mark.asyncio
 async def test_remote_aside_streams_the_owners_chunks_before_the_receipt(
     tmp_path: Path, monkeypatch

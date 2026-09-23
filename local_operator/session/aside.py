@@ -50,6 +50,20 @@ Question:
 {question}
 </aside>"""
 
+#: Everything in :data:`ASIDE_PROMPT` before ``{question}`` — the fixed part a
+#: wrapped turn always begins with. DERIVED from the template rather than
+#: restated, so :func:`_carries_instruction` recognises a turn wrapped by this
+#: module by construction and cannot drift when the prompt's wording changes.
+_ASIDE_PREFIX = ASIDE_PROMPT.split("{question}", 1)[0]
+
+
+def _carries_instruction(message: Message) -> bool:
+    """Whether ``message`` is already a wrapped question (see :func:`_compose`)."""
+    # Anchored at the start, ignoring the caller's own leading whitespace: the
+    # wrapper is the FIRST thing in a wrapped turn, so a question that merely
+    # mentions the marker somewhere in its body is still a question.
+    return message.text.lstrip().startswith(_ASIDE_PREFIX.lstrip())
+
 
 def wrap_aside_turns(turns: Sequence[Message]) -> list[Message]:
     """A copy of ``turns`` whose LAST user turn carries :data:`ASIDE_PROMPT`.
@@ -64,9 +78,20 @@ def wrap_aside_turns(turns: Sequence[Message]) -> list[Message]:
     user/assistant pairs are the aside's own prior exchanges, and a wrapper there
     would tell the model to answer a question it has already answered.
 
+    IDEMPOTENT, and that is the BELT under the ``aside_instruction`` flag the
+    seams carry. The flag is the caller's declaration (see
+    :meth:`ServingSessionHandle.complete_aside`); this is what makes a caller
+    that pre-wrapped its own turns harmless even when it got the flag wrong —
+    the failure mode is silent, because both parties believe they did the right
+    thing and the model simply receives the instruction twice, nested. So the
+    marker is checked as well as the flag, and the two cannot disagree without
+    the turn list showing it. An already-instructed turn is returned unchanged
+    rather than re-wrapped.
+
     Called at the REMOTE seam, once per aside — see the module docstring for why
-    the shared primitive stays out of it, and why a client must therefore send
-    RAW turns rather than a pre-wrapped request.
+    the shared primitive stays out of it, and why a client that supplies its own
+    instruction must say so with the flag (or send a turn that already carries
+    this one, which is the same statement and is honoured identically).
     """
     if not turns:
         return []
@@ -76,6 +101,8 @@ def wrap_aside_turns(turns: Sequence[Message]) -> list[Message]:
         # asking a new question). Returned unchanged rather than refused: this
         # seam must not be the thing that fails an aside the owner can still
         # answer.
+        return list(turns)
+    if _carries_instruction(last):
         return list(turns)
     # ``Message.user`` puts the text block first and attachments after it, so the
     # wrapped text replaces position 0 and any pixels ride along untouched.

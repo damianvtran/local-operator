@@ -4327,6 +4327,7 @@ class ServingSessionHandle(SessionHandle):
         self,
         turns: list[dict[str, Any]],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
     ) -> str:
         """Run an off-record provider request against this session.
@@ -4350,6 +4351,21 @@ class ServingSessionHandle(SessionHandle):
         The stored/returned aside turns stay RAW — only the provider request
         carries the wrapper, so the user never sees ``<aside>`` XML.
 
+        ``aside_instruction`` IS THE CALLER'S DECLARATION, not the seam's
+        assumption, and it defaults to True for the reporters this seam exists
+        for: a caller that sends RAW turns (the desktop ``/asides`` route, the
+        phone's quick-ask) gets the instruction applied here whether or not it
+        knows this parameter exists. A caller that supplies its OWN instruction
+        — the TUI's ``/btw`` overlay, and the goal-loop judge, whose question is
+        ``LOOP_JUDGE_PROMPT`` and not an aside at all — passes ``False``.
+        WITHOUT THE FLAG the TUI's pre-wrapped question was wrapped a second
+        time on a session it was only VIEWING (its ``self._session`` is an
+        ``AttachedSession`` there, so this handle runs in the owner), the judge
+        was framed as an aside question, and both failures were silent.
+        :func:`wrap_aside_turns` is idempotent underneath, so a caller that gets
+        the flag wrong is not doubled — the two cannot disagree without the
+        turn list showing it.
+
         ``on_delta`` forwards each streamed text chunk to the caller that asked
         for it, as it arrives. OPTIONAL, and probed by signature against the
         primitive: an older/reduced session without the parameter is answered in
@@ -4364,7 +4380,8 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.harness.types import Message
         from local_operator.session.aside import wrap_aside_turns
 
-        messages = wrap_aside_turns([Message.model_validate(turn) for turn in turns])
+        parsed = [Message.model_validate(turn) for turn in turns]
+        messages = wrap_aside_turns(parsed) if aside_instruction else parsed
         complete = self._session.complete_aside
         store = getattr(self._session, "_frontend_state_store", None)
         forwards = inspect.signature(complete).parameters

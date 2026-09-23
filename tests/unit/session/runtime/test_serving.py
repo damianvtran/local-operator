@@ -2546,6 +2546,58 @@ async def test_complete_aside_wraps_a_continuation_only_at_its_new_question() ->
 
 
 @pytest.mark.asyncio
+async def test_complete_aside_with_the_flag_off_sends_the_turns_untouched() -> None:
+    """``aside_instruction=False`` is the caller's own instruction, honoured.
+
+    This is the TUI's ``/btw`` overlay (which formats ``ASIDE_PROMPT`` itself)
+    and its goal-loop judge (whose question is ``LOOP_JUDGE_PROMPT``). Both
+    reach this handle when the TUI is merely VIEWING another owner, and the
+    judge's case is the one that must never be wrapped: the model would be told
+    to answer a question about session state briefly and off the record, from a
+    request whose whole purpose is to report a verdict about a running goal.
+    """
+    from local_operator.session.goal_loop import LOOP_JUDGE_PROMPT
+
+    session = _AsideSession()
+    asked = LOOP_JUDGE_PROMPT.format(goal="finish the report")
+
+    await _aside_handle(session).complete_aside(
+        [{"role": "user", "content": [{"type": "text", "text": asked}]}],
+        aside_instruction=False,
+    )
+
+    (sent,) = session.turns
+    assert [m.text for m in sent] == [asked]
+    assert "<aside>" not in sent[0].text
+    assert "OFF\nTHE RECORD" not in sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_does_not_double_wrap_a_pre_wrapped_turn() -> None:
+    """The BELT, exercised through the seam: the default flag cannot double it.
+
+    A caller that supplies its own instruction and forgets the flag is the
+    regression this PR fixes on the TUI-attached-to-a-remote-owner path, where
+    the measured result was two ``<aside>`` blocks and two ``Question:`` lines in
+    one turn. ``wrap_aside_turns`` being idempotent is what makes that caller
+    harmless rather than merely unlikely.
+    """
+    from local_operator.session.aside import ASIDE_PROMPT
+
+    session = _AsideSession()
+    already = ASIDE_PROMPT.format(question="why?")
+
+    await _aside_handle(session).complete_aside(
+        [{"role": "user", "content": [{"type": "text", "text": already}]}]
+    )
+
+    (sent,) = session.turns
+    assert sent[0].text == already
+    assert sent[0].text.count("<aside>") == 1
+    assert sent[0].text.count("Question:") == 1
+
+
+@pytest.mark.asyncio
 async def test_complete_aside_tolerates_a_primitive_without_on_delta() -> None:
     """A session built before the stream must still answer, in one piece.
 

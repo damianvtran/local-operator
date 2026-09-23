@@ -22,6 +22,7 @@ from local_operator.server.routes.desktop_sessions import (
     receipts,
     reply,
 )
+from local_operator.session.errors import AsideEmptyAnswer, AsideUnanswered
 from local_operator.session.variable_ops import RefusalCode, VariableType, refusal_for
 
 router = APIRouter(tags=["Desktop lifecycle"], dependencies=[Depends(require_desktop)])
@@ -77,6 +78,16 @@ class AsideInput(Input):
     request_id: RequestID
     text: str = Field(min_length=1, max_length=32768)
     aside_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+    #: The events-stream subscription this ask is made from, so its streamed
+    #: answer is delivered to THAT viewer and to nobody else. Optional, and its
+    #: ABSENCE MEANS NOTHING IS STREAMED (see the route below), never "stream to
+    #: everyone": an off-record aside broadcast to the session's other windows
+    #: is the leak this field exists to close, and the POST's ``text`` already
+    #: settles the answer for a caller that named no subscription. The pattern
+    #: is the one the ``open`` frame mints and the events route validates
+    #: (``^[a-f0-9]{32}$``, ``desktop_sessions.py``), so a malformed id is a 422
+    #: from this body rather than a silent no-op.
+    subscription_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class Adopt(Input):
@@ -500,15 +511,54 @@ async def aside(session_id: str, body: AsideInput, request: Request):
             values[body.request_id] = entry
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
-            answer = await bridge.remote.complete_aside(
-                turns,
-                on_delta=lambda delta: bridge.publish(
-                    "aside_delta",
-                    {"aside_id": body.request_id, "delta": delta},
-                    replay=False,
-                ),
-            )
-            turns.append(Message.assistant(answer))
+            # TARGETED, and the fallback is NOT a broadcast: a caller that named
+            # no subscription gets no frames AT ALL, which is the honest reading
+            # of a viewer that did not ask (see ``AsideInput.subscription_id``).
+            # ``publish`` here would have delivered a private question's answer
+            # to every other window on the session. A named function rather than
+            # a lambda because the publish reports whether the subscription was
+            # live and the sink is typed ``-> None``: the aside is answered by the
+            # POST either way, so the miss is not the sink's to report.
+            subscription_id = body.subscription_id
+            if subscription_id is not None:
+
+                def stream_delta(delta: str) -> None:
+                    bridge.publish_to_subscription(
+                        "aside_delta",
+                        {"aside_id": body.request_id, "delta": delta},
+                        subscription_id=subscription_id,
+                    )
+
+                sink = stream_delta
+            else:
+                sink = None
+            try:
+                answer = await bridge.remote.complete_aside(turns, on_delta=sink)
+                if not answer.strip():
+                    # A SETTLED ANSWER WITH NO TEXT IS NOT A FINISHED EXCHANGE,
+                    # and the refusal belongs here rather than in
+                    # ``Session.complete_aside``: the primitive's empty answer is
+                    # deliberate for the goal judge, but on this route an empty
+                    # answer would be STORED — an empty assistant turn marked
+                    # complete and adoptable, which the renderer paints as no
+                    # answer and no error, and which the panel's next "Ask again"
+                    # would then continue. Raised below the door (the runtime was
+                    # engaged and answered) and above the append, so the entry is
+                    # dropped by the same arm a tool-call refusal uses.
+                    raise AsideEmptyAnswer()
+                turns.append(Message.assistant(answer))
+            except AsideUnanswered:
+                # A HALF-EXCHANGE THAT CAN BE NEITHER CONTINUED NOR ADOPTED MUST
+                # NOT OUTLIVE THE ASK. ``turns`` is odd here (the question with no
+                # answer), and every surface that reads the store keys on an even
+                # length: ``GET`` reports ``complete: false``/``adoptable: false``
+                # and a continuation is refused with "This aside is no longer
+                # available" — while the refusal's own sentence tells the user to
+                # ask again. Left in place it also holds one of the 64 panel slots
+                # for the store's full hour. Dropped, the caller's retry starts a
+                # clean entry, which is what the copy promises.
+                values.pop(body.request_id, None)
+                raise
             return reply(
                 {"data": {"aside_id": body.request_id, "text": answer, "off_record": True}}
             )

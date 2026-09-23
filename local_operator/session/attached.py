@@ -7489,10 +7489,18 @@ class AttachedSession:
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Ask the owner for the off-record answer, STREAMING it as it arrives.
+
+        ``aside_instruction`` rides the wire with the request and the owner acts
+        on it: it is the caller's declaration that its turns still need the
+        off-record wrapper (see ``SessionProtocol.complete_aside``). False is what
+        a viewer that wrapped its own question sends — the TUI's ``/btw`` overlay
+        and its goal-loop judge — and sending it is what keeps the owner from
+        wrapping a request that already carries its own instruction.
 
         ``on_delta`` is fed each chunk the owner streams while this request is
         in flight — the same connection carries them, tagged with this request's
@@ -7515,7 +7523,7 @@ class AttachedSession:
         if on_delta is None:
             # No sink to feed, so nothing to fall back to: the settled answer is
             # the whole reply, exactly as this method behaved before the stream.
-            return await client.complete_aside(payload)
+            return await client.complete_aside(payload, aside_instruction=aside_instruction)
         streamed = False
 
         def relay(text: str) -> None:
@@ -7524,7 +7532,9 @@ class AttachedSession:
             if text:
                 on_delta(text)
 
-        answer = await client.complete_aside(payload, on_delta=relay)
+        answer = await client.complete_aside(
+            payload, aside_instruction=aside_instruction, on_delta=relay
+        )
         if answer and not streamed:
             on_delta(answer)
         return answer

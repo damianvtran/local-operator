@@ -249,15 +249,26 @@ the one the desktop client reads): nothing is rolled back, the
   at a safe boundary, not an arbitrary transcript rewrite. The parent is unchanged.
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
-- `POST /asides`: request_id, text, optional previous aside_id. Completion runs
-  on the runtime but does not enter conversation history. The model is told the
-  request is off the record and that tools are unavailable; an aside answered by a
-  bare tool call is retried ONCE with the call handed back to the model as an
-  error, and a second such answer returns **409** `aside_unanswered` rather than
-  an empty string. The answer is also streamed to the caller as live-only
-  `aside_delta` frames on the session's events stream (`{"aside_id", "delta"}`,
-  `replay: false` — never replayed, and never entering the transcript); those
-  frames are PROGRESS, and the POST response's `text` stays authoritative. GET
+- `POST /asides`: request_id, text, optional previous aside_id, optional
+  `subscription_id`. Completion runs on the runtime but does not enter
+  conversation history. The model is told the request is off the record and that
+  tools are unavailable; an aside answered by a bare tool call is retried ONCE
+  with the call handed back to the model as an error, and a second such answer —
+  or a retry that answers nothing at all — returns **409** `aside_unanswered`
+  rather than an empty string. A settled answer with no text at all is refused
+  the same way as **409** `aside_empty_answer` instead of being stored as a
+  finished exchange, because an empty assistant turn is complete, adoptable and
+  paints as no answer and no error. Either refusal DROPS the aside entry: a
+  question with no answer is neither continuable nor adoptable, so the readback
+  stays clean and the retry the sentence asks for starts fresh. The answer is
+  also streamed to the caller as live-only `aside_delta` frames (`{"aside_id",
+  "delta"}`, `replay: false` — never replayed, and never entering the
+  transcript); those frames are PROGRESS, and the POST response's `text` stays
+  authoritative. `subscription_id` is the id the session's `open` frame handed
+  the viewer, and the frames go to THAT subscription ONLY — an aside is off the
+  record, so another window on the same session sees nothing of it. Omitting it
+  streams nothing (never a broadcast): a caller that named no subscription keeps
+  today's request/response behaviour and reads the answer from `text`. GET
   `/asides/{aside_id}` recovers a response after HTTP loss; DELETE closes a settled
   panel. A continuation temporarily owns its prefix so two panels cannot adopt it
   twice.

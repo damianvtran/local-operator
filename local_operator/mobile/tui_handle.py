@@ -763,6 +763,7 @@ class TuiSessionHandle(SessionHandle):
         self,
         turns: list[dict[str, Any]],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
     ) -> str:
         """Run an off-record provider request on the authoritative session.
@@ -770,11 +771,14 @@ class TuiSessionHandle(SessionHandle):
         The TUI-hosted runtime's half of the aside seam, and the SAME two rules
         as ``ServingSessionHandle.complete_aside`` apply for the same reasons:
 
-        * the LAST user turn is wrapped in ``ASIDE_PROMPT`` HERE, so a remote
-          caller (the phone's quick-ask, the desktop app attached to this
-          session) cannot forget the instruction. The TUI's own ``/btw`` calls
-          ``Session.complete_aside`` directly and wraps for itself, so nothing
-          is wrapped twice on this handle.
+        * the LAST user turn is wrapped in ``ASIDE_PROMPT`` HERE unless the
+          caller says it supplied its own instruction (``aside_instruction=False``)
+          — so a remote caller (the phone's quick-ask, the desktop app attached
+          to this session) cannot forget the instruction. The TUI's own ``/btw``
+          OVERLAY wraps for itself, and its goal judge sends ``LOOP_JUDGE_PROMPT``;
+          both call through this handle as a viewer and pass the flag, so neither
+          is wrapped here (and the wrap is idempotent underneath, so a caller
+          that forgot the flag is not doubled).
         * ``on_delta`` is forwarded only when the running session advertises it
           — probed, not assumed: the app can host a session built before the
           parameter existed, and the thread hop below would turn the TypeError
@@ -783,7 +787,8 @@ class TuiSessionHandle(SessionHandle):
         from local_operator.harness.types import Message
         from local_operator.session.aside import wrap_aside_turns
 
-        messages = wrap_aside_turns([Message.model_validate(turn) for turn in turns])
+        parsed = [Message.model_validate(turn) for turn in turns]
+        messages = wrap_aside_turns(parsed) if aside_instruction else parsed
         session = self._session()
         owner_loop = await self._on_app(asyncio.get_running_loop)
         fields: dict[str, Any] = {}

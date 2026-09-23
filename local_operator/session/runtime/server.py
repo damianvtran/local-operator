@@ -300,7 +300,10 @@ def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
     two arrive interleaved.
 
     Everything else returns ``None`` and is left alone: a frame that must not
-    merge is never compared to its neighbour at all.
+    merge is never compared to its neighbour at all. That includes the ``op``
+    around the payload — the aside's ``aside_delta`` frame is mergeable too, but
+    its stream identity lives on the FRAME (its ``req``), so it is
+    :func:`_mergeable_frame_key` that answers for it.
     """
     kind = payload.get("type")
     if kind == "message_update":
@@ -308,6 +311,51 @@ def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
     if kind == "reasoning_delta":
         return f"reasoning_delta:{payload.get('message_id') or ''}"
     return None
+
+
+def _mergeable_frame_key(frame: Mapping[str, Any]) -> str | None:
+    """The in-flight stream a queued FRAME carries a fragment of, or ``None``.
+
+    :func:`_mergeable_delta_key` reads an event's payload; this reads the frame
+    around it, because the aside's stream identity is not in its payload. An
+    ``aside_delta`` frame is ``{op, req, data: {delta}}`` — the request that
+    asked for the aside IS the stream, and the id of the aside panel (which the
+    desktop renderer knows as ``aside_id``) never crosses this wire. Two
+    fragments fold only when the same ``req`` produced them, so two concurrent
+    asides on one connection cannot merge into one answer.
+
+    Keyed in the same namespace as :func:`_mergeable_delta_key` (the family is
+    part of the key), so an aside fragment can never fold into a
+    ``message_update`` or ``reasoning_delta`` beside it: those are the
+    conversation the viewer is reading, and this is a private question about it.
+    """
+    op = frame.get("op")
+    if op == "aside_delta":
+        req = frame.get("req")
+        # A frame with no ``req`` is not a stream this method can identify, so it
+        # is left alone rather than keyed as one nameless stream all such frames
+        # would share.
+        return None if req is None else f"aside_delta:{req}"
+    if op == "event":
+        return _mergeable_delta_key(frame.get("data") or {})
+    return None
+
+
+def _merged_frame_head(frame: Mapping[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    """The compacted head one merge leaves: ``frame``'s routing, ``data``'s text.
+
+    Built from the INCOMING frame rather than from the head it replaces, and
+    that is the whole reason this is a function rather than a literal: a frame
+    carries routing the merged text says nothing about. ``aside_delta`` is
+    addressed by its ``req`` — drop it and the viewer's pump has no stream to
+    deliver the fragment to, so a merged chunk would be discarded on arrival
+    while the frame counted as delivered. The event families describe no
+    routing beyond their payload, so their head stays the ``op``+``data`` pair
+    it always was.
+    """
+    if frame.get("op") == "aside_delta":
+        return {"op": "aside_delta", "req": frame.get("req"), "data": data}
+    return {"op": "event", "data": data}
 
 
 #: Line bytes the shedding stage deliberately leaves UNSPENT.
@@ -5624,6 +5672,20 @@ class RuntimeServer:
             fields: dict[str, Any] = {}
             if deliver is not None and _accepts_kw(complete_aside, "on_delta"):
                 fields["on_delta"] = deliver
+            # ``aside_instruction`` is forwarded ONLY as the boolean False, and
+            # only to a handle that advertises it. Two compatibility facts, one
+            # direction each, and both are the reason the field is optional:
+            # an owner built before this PR knows neither the body key nor the
+            # keyword, so it wraps the turns it is sent (which is what a caller
+            # that did not ask otherwise wants) — and a client built before this
+            # PR sends no key at all, which reads here as "wrap", exactly as it
+            # behaved then. A caller that supplied its own instruction says so,
+            # and an owner that cannot hear it is still protected by
+            # ``wrap_aside_turns`` being idempotent.
+            if frame.get("aside_instruction") is False and _accepts_kw(
+                complete_aside, "aside_instruction"
+            ):
+                fields["aside_instruction"] = False
             result = complete_aside(list(frame.get("turns") or []), **fields)
             if not inspect.isawaitable(result):
                 raise ValueError("owner complete_aside operation must be awaitable")
@@ -6206,7 +6268,13 @@ class RuntimeServer:
         * the frame goes to the CONNECTION THAT ASKED, NEVER to the fan-out.
           An aside is a private question ("explain this model"); its text is not
           the session's event stream, so ``_clients`` is not consulted and a
-          second viewer of the same conversation sees nothing of it.
+          second viewer of the same conversation sees nothing of it HERE. That
+          claim is scoped to this hop on purpose: the next one — a host
+          forwarding to its renderers — is a fan-out of its own, and it is
+          addressed for the same reason
+          (``DesktopSessionBridge.publish_to_subscription``); a reader who takes
+          this paragraph as a statement about the whole path would be reading it
+          one hop too far.
         * the callback fires on the SESSION's loop, not this one:
           ``ServingSessionHandle.complete_aside`` is marshalled there whole, so
           the ``on_delta`` calls inside ``Session.complete_aside`` run on that
@@ -6281,23 +6349,37 @@ class RuntimeServer:
     def _compact_event_queue(self, conn: _ClientConn) -> bool:
         """Fold the delta-grade and compose frame families in place.
 
-        Merges runs of same-stream ``message_update`` and ``reasoning_delta``
-        frames, and keeps only the NEWEST ``tool_call_compose`` per
-        ``tool_call_id``. Which frames belong to one stream is
-        :func:`_mergeable_delta_key`'s rule, and it is the only family-specific
-        thing here: the size accounting below is delta-sized and therefore
-        family-agnostic.
+        Merges runs of same-stream ``message_update``, ``reasoning_delta`` and
+        ``aside_delta`` frames, and keeps only the NEWEST ``tool_call_compose``
+        per ``tool_call_id``. Which frames belong to one stream is
+        :func:`_mergeable_frame_key`'s rule (it delegates to
+        :func:`_mergeable_delta_key` for the event families), and it is the only
+        family-specific thing here apart from the head it rebuilds: the size
+        accounting below is delta-sized and therefore family-agnostic.
 
-        Both are lossless by construction. For ``message_update`` the later
+        ``aside_delta`` IS A THIRD DELTA FAMILY AND THE SAME ARITHMETIC COVERS
+        IT. One ``complete_aside`` streams a fragment per token, all but the last
+        of which are pure progress — the aside's authoritative text is the POST
+        receipt — so an unmergeable aside run is the reasoning family's failure
+        mode again, on the surface whose slow reader is the phone: with
+        ``_EVENT_QUEUE_MAX`` at 64 a stalled quick-ask takes
+        ``event queue overflow`` instead of being compacted. The fold itself
+        needs no special case for it: the same ``delta`` is concatenated, in
+        arrival order, and only frames from the SAME request fold together (the
+        request id is the stream — see :func:`_mergeable_frame_key`).
+
+        All three are lossless by construction. For ``message_update`` the later
         event's ``message`` already contains the earlier one's text, and
         concatenating ``delta`` preserves the append contract UIs rely on. For
         ``reasoning_delta`` there is no accumulated payload at all — the frame
         carries one fragment, a ``message_id`` both frames agree on, and the
-        same concatenation reproduces the two fragments in arrival order. This
-        matters as much as it does for text: reasoning arrives once per token,
-        and a long-thinking turn is thousands of frames, so without the fold a
-        stalled viewer's FIFO fills with incompressible reasoning frames and is
-        dropped — the same failure the compose fold below was written for. For
+        same concatenation reproduces the two fragments in arrival order; this
+        matters as much as it does for text, because reasoning arrives once per
+        token, and a long-thinking turn is thousands of frames, so without the
+        fold a stalled viewer's FIFO fills with incompressible reasoning frames
+        and is dropped — the same failure the compose fold below was written
+        for. ``aside_delta`` is that case again, one fragment per token of an
+        answer the viewer is watching arrive. For
         ``tool_call_compose`` the argument is the one ``_fold_live_event``
         (``frontend_state.py``) already relies on for the reconnect seed: a
         compose frame is a SNAPSHOT of a call being dictated (``tool_name``,
@@ -6432,61 +6514,65 @@ class RuntimeServer:
                     # ``compose:0`` while start/end carry the provider's real
                     # id, so the pop misses and the slot stays live.
                     compose_slot.clear()
+            # A frame that must not merge is never compared to its neighbour:
+            # :func:`_mergeable_frame_key` answers only for the families whose
+            # fragments are losslessly concatenable, and the FAMILY is part of
+            # the key, so an aside fragment can never fold into a
+            # ``message_update`` or ``reasoning_delta`` beside it.
             previous = compacted[-1] if compacted else None
+            merge_key = _mergeable_frame_key(frame)
             if (
                 previous is not None
-                and frame.get("op") == "event"
-                and previous.get("op") == "event"
+                and merge_key is not None
+                and merge_key == _mergeable_frame_key(previous)
             ):
                 data = frame.get("data") or {}
                 prior = previous.get("data") or {}
-                merge_key = _mergeable_delta_key(data)
-                if merge_key is not None and merge_key == _mergeable_delta_key(prior):
-                    # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
-                    # merged frame re-serializes the unchanged accumulated
-                    # ``message`` — hundreds of KB — on every merge, which is
-                    # quadratic in queue depth: one 64-frame compaction
-                    # serialized 67.4 MB and took 152 ms on the runtime loop.
-                    # A ``reasoning_delta`` frame has no ``message`` to re-dump,
-                    # so the same arithmetic is simply cheap there; it is the
-                    # SAME arithmetic, which is what keeps the reasoning family
-                    # from needing an accounting of its own.
-                    # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
-                    # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
-                    # dropped it — manufacturing the very false disconnect this
-                    # guard exists to prevent.
-                    #
-                    # Exact, not an estimate: JSON escaping is per-character,
-                    # so the escaped length of ``a + b`` is exactly the escaped
-                    # length of ``a`` plus that of ``b``. The merged frame is
-                    # THIS frame carrying its own delta with everything already
-                    # folded into ``compacted[-1]`` prepended, so its encoded
-                    # size is this frame's size plus those accumulated escaped
-                    # bytes. Measuring ``frame`` rather than the merge result
-                    # is what makes this O(one frame) per merge — and because
-                    # it is THIS frame's own ``message``, a message that grew
-                    # between frames is sized correctly rather than estimated
-                    # from a stale one. Verified equal to a full re-dump on
-                    # adversarial payloads (quotes, backslashes, control
-                    # characters, emoji, U+2028) and thousands of random ones.
-                    prior_delta_bytes = merged_delta_bytes[-1]
-                    frame_bytes = _frame_size_without_delta(frame) + len(
-                        json.dumps(str(data.get("delta", ""))).encode()
+                # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
+                # merged frame re-serializes the unchanged accumulated
+                # ``message`` — hundreds of KB — on every merge, which is
+                # quadratic in queue depth: one 64-frame compaction
+                # serialized 67.4 MB and took 152 ms on the runtime loop.
+                # A ``reasoning_delta`` frame has no ``message`` to re-dump,
+                # so the same arithmetic is simply cheap there; it is the
+                # SAME arithmetic, which is what keeps the reasoning family
+                # from needing an accounting of its own.
+                # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
+                # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
+                # dropped it — manufacturing the very false disconnect this
+                # guard exists to prevent.
+                #
+                # Exact, not an estimate: JSON escaping is per-character,
+                # so the escaped length of ``a + b`` is exactly the escaped
+                # length of ``a`` plus that of ``b``. The merged frame is
+                # THIS frame carrying its own delta with everything already
+                # folded into ``compacted[-1]`` prepended, so its encoded
+                # size is this frame's size plus those accumulated escaped
+                # bytes. Measuring ``frame`` rather than the merge result
+                # is what makes this O(one frame) per merge — and because
+                # it is THIS frame's own ``message``, a message that grew
+                # between frames is sized correctly rather than estimated
+                # from a stale one. Verified equal to a full re-dump on
+                # adversarial payloads (quotes, backslashes, control
+                # characters, emoji, U+2028) and thousands of random ones.
+                prior_delta_bytes = merged_delta_bytes[-1]
+                frame_bytes = _frame_size_without_delta(frame) + len(
+                    json.dumps(str(data.get("delta", ""))).encode()
+                )
+                if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
+                    merged = dict(data)
+                    merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
+                    compacted[-1] = _merged_frame_head(frame, merged)
+                    # ACCUMULATES: the new head carries the prior head's
+                    # whole delta plus its own, so the next merge must be
+                    # measured against both. Overwriting this with only the
+                    # newly-folded delta under-counts every merge after the
+                    # second and emitted a 1,048,795-byte frame — over the
+                    # cap this method exists to respect.
+                    merged_delta_bytes[-1] = prior_delta_bytes + (
+                        len(json.dumps(str(data.get("delta", ""))).encode()) - 2
                     )
-                    if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
-                        merged = dict(data)
-                        merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
-                        compacted[-1] = {"op": "event", "data": merged}
-                        # ACCUMULATES: the new head carries the prior head's
-                        # whole delta plus its own, so the next merge must be
-                        # measured against both. Overwriting this with only the
-                        # newly-folded delta under-counts every merge after the
-                        # second and emitted a 1,048,795-byte frame — over the
-                        # cap this method exists to respect.
-                        merged_delta_bytes[-1] = prior_delta_bytes + (
-                            len(json.dumps(str(data.get("delta", ""))).encode()) - 2
-                        )
-                        continue
+                    continue
             compacted.append(frame)
             # Seeded with THIS frame's own delta, not zero: the running total
             # is "escaped bytes of the delta ``compacted[-1]`` currently

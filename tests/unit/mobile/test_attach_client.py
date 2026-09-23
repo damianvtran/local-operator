@@ -1080,6 +1080,35 @@ class _NullWriter:
         pass
 
 
+class _RecordingWriter:
+    """The write half, kept: the frames the client actually put on the wire."""
+
+    def __init__(self) -> None:
+        self.frames: list[dict[str, Any]] = []
+
+    def write(self, data: bytes) -> None:
+        self.frames.append(json.loads(data.decode()))
+
+    async def drain(self) -> None:
+        pass
+
+
+async def _answered_aside_frame(client: AttachClient, **kwargs: Any) -> dict[str, Any]:
+    """Send one ``complete_aside`` and return the frame that went out.
+
+        The ack is delivered by hand so the request settles: the frame's SHAPE is
+    the subject, and a task left parked on a future would fail the test's own
+    "something was written but nothing answered" rule.
+    """
+    task = asyncio.create_task(client.complete_aside([], **kwargs))
+    await _wait_until(lambda: bool(client._pending))
+    ((req, future),) = client._pending.items()
+    future.set_result({"op": "ack", "req": req, "detail": "answer."})
+    await task
+    assert isinstance(client._writer, _RecordingWriter)
+    return client._writer.frames[-1]
+
+
 def _feed(reader: asyncio.StreamReader, frame: dict[str, Any]) -> None:
     reader.feed_data(json.dumps(frame).encode() + b"\n")
 
@@ -1187,6 +1216,34 @@ async def test_an_answered_aside_deregisters_its_delta_sink() -> None:
 
     assert reply["detail"] == "answer."
     assert client._delta_sinks == {}
+
+
+@pytest.mark.asyncio
+async def test_the_aside_instruction_flag_is_omitted_unless_the_caller_supplied_it() -> None:
+    """The default body is the PRE-PR body, byte for byte; ``False`` is the addition.
+
+    Both compatibility directions live in this one assertion. An owner that
+    predates the field neither reads the key nor accepts the keyword, and it
+    reaches the wrap its caller asked for (the default) — so a body that says
+    "wrap" is a body that must not change, and the key is therefore omitted
+    rather than sent as ``True``. A client that predates it sends exactly what
+    the first case sends, so today's behaviour is what it keeps.
+    """
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._writer = cast(Any, _RecordingWriter())
+
+    default_frame = await _answered_aside_frame(client)
+    declared_frame = await _answered_aside_frame(client, aside_instruction=False)
+
+    assert set(default_frame) == {"op", "req", "turns"}
+    assert default_frame["op"] == "complete_aside"
+    assert default_frame["turns"] == []
+    assert declared_frame["aside_instruction"] is False
+    # ONLY the flag differs: everything else about the request is unchanged.
+    assert {k: v for k, v in declared_frame.items() if k not in ("req", "aside_instruction")} == {
+        k: v for k, v in default_frame.items() if k != "req"
+    }
 
 
 @pytest.mark.asyncio

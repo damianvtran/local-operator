@@ -2094,6 +2094,7 @@ class AttachClient:
         self,
         turns: list[dict[str, Any]],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
     ) -> str:
         """Ask the owner for an off-record answer, streaming its chunks.
@@ -2103,12 +2104,24 @@ class AttachClient:
         ``detail``). The two are deliberately not the same thing to a caller: a
         chunk the pump never delivered is cosmetic, a receipt the owner never
         sent is a failure.
+
+        ``aside_instruction`` IS SENT ONLY WHEN IT IS FALSE, so the frame stays
+        byte-identical for the default the owner has always applied. An owner
+        that predates the field knows neither the parameter nor this body key,
+        and that is the compatible direction: it wraps the turns, which is what
+        this seam asked for, and what a caller that wanted no wrap already
+        protects itself against by pre-wrapping its own turn (the wrap is
+        idempotent) — see ``session/aside.py``. Sending ``True``
+        explicitly would put a value on the wire that means no more than its
+        absence, so the key is omitted instead of sent as ``True``.
         """
+        fields: dict[str, Any] = {"on_delta": on_delta, "turns": turns}
+        if aside_instruction is False:
+            fields["aside_instruction"] = False
         return await self._request(
             "complete_aside",
             deadline_s=ASIDE_DEADLINE_S,
-            on_delta=on_delta,
-            turns=turns,
+            **fields,
         )
 
     async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:

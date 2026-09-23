@@ -654,3 +654,75 @@ def test_wrap_aside_turns_leaves_a_non_user_tail_alone() -> None:
 
 def test_wrap_aside_turns_handles_an_empty_list() -> None:
     assert wrap_aside_turns([]) == []
+
+
+def test_wrap_aside_turns_is_idempotent_on_an_already_wrapped_turn() -> None:
+    """The BELT under the ``aside_instruction`` flag: no silent double wrap.
+
+    The flag is the caller's declaration, and a caller that pre-wrapped its own
+    request but forgot the flag is the failure this guards — a TUI attached to a
+    remote owner wrapped twice, and the model got the instruction nested inside
+    itself with nothing anywhere saying so. Two instructions are worse than one
+    for the same reason two of anything is: the model is told the same thing
+    twice and the injected text grows on every hop.
+
+    The wrapped turn is returned UNCHANGED (not re-wrapped, not stripped): the
+    raw question is already inside it, and this seam has no way to know which
+    caller built it.
+    """
+    already = Message.user(ASIDE_PROMPT.format(question="why?"))
+
+    wrapped = wrap_aside_turns([already])
+
+    assert wrapped[0].text == ASIDE_PROMPT.format(question="why?")
+    assert wrapped[0].text.count("<aside>") == 1
+    assert wrapped[0].text.count("Question:") == 1
+
+
+@pytest.mark.parametrize("question", ["why?", "what is this?", "and now?"])
+def test_wrap_aside_turns_twice_equals_once(question: str) -> None:
+    """Wrapping the OUTPUT of a wrap changes nothing — the property, not a case.
+
+    The seam wraps first and the idempotency check is the belt under it, so the
+    one thing that must hold for every question is that the second pass is a
+    no-op. Asserted as a property because the marker it keys on is DERIVED from
+    :data:`ASIDE_PROMPT`: rewording the prompt must not be able to make a
+    pre-wrapped turn look unwrapped, which is exactly the silent-double-wrap
+    failure mode the flag and the marker exist to close between them.
+    """
+    once = wrap_aside_turns([Message.user(question)])
+
+    twice = wrap_aside_turns(once)
+
+    assert [m.text for m in twice] == [m.text for m in once]
+    assert once[0].text.count("<aside>") == 1
+
+
+def test_wrap_aside_turns_still_wraps_a_question_that_merely_mentions_the_marker() -> None:
+    """The marker check is ANCHORED, so a question about asides is still a question.
+
+    The failure a loose check would cause is the one this test exists for: a user
+    asking what the aside wrapper says would have their own question delivered to
+    the model with no instruction at all — the unanswered-aside bug, reachable
+    only through a question ABOUT the feature.
+    """
+    asked = 'what does "<aside>" mean in Question: ?'
+
+    wrapped = wrap_aside_turns([Message.user(asked)])
+
+    assert wrapped[0].text == ASIDE_PROMPT.format(question=asked)
+
+
+def test_wrap_aside_turns_wraps_a_leading_whitespace_variant_of_the_wrapper() -> None:
+    """A pre-wrapped turn is recognised through the caller's own indentation.
+
+    A surface that builds the wrapper inside a multi-line f-string leaves a
+    leading newline or spaces in front of it, and that caller believes it has
+    instructed the model. Recognising it is what keeps the belt from depending
+    on the caller's formatting.
+    """
+    already = Message.user("\n  " + ASIDE_PROMPT.format(question="why?") + "\n")
+
+    wrapped = wrap_aside_turns([already])
+
+    assert wrapped[0].text.count("<aside>") == 1

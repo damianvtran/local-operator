@@ -410,14 +410,20 @@ class ProfileRegistryUnavailable(ValueError):
 
 
 class AsideUnanswered(ValueError):
-    """An off-the-record aside produced a tool call instead of an answer, twice.
+    """An off-record aside ended without a text answer.
 
     The typed home for a failure the shared primitive
     (:meth:`Session.complete_aside`) used to swallow: a bare second tool call
     returned ``""``, which surfaced in the UI as a provider fault rather than as
     the thing that actually happened. An aside carries no tools it may run, so a
-    model that answers with a call and then repeats that answer has produced no
-    answer at all, and saying so is the honest outcome.
+    model that answers with a call and then repeats that answer — or with a call
+    and then NOTHING AT ALL on the corrected retry — has produced no answer, and
+    saying so is the honest outcome. The sentence below is worded for BOTH arms,
+    which is not a nicety: the second one is the state a real provider reached
+    when QA reproduced this (a tool call once, then silence), and the sentence it
+    used to carry — "a tool call … both times it was asked" — was false about
+    what happened. The claimed cause must be one the user can recognise in what
+    they saw, since it is the only account of the failure they get.
 
     A ``ValueError`` because that is what :func:`admission_error` decodes and
     what the desktop route ladder's named-refusal arm catches — the same shape
@@ -441,9 +447,47 @@ class AsideUnanswered(ValueError):
 
     def __init__(self) -> None:
         super().__init__(
-            "The model answered your aside with a tool call instead of text, both "
-            "times it was asked. Tool calls are not available off the record, so "
-            "no answer was produced — ask again."
+            "The model did not answer your aside in text — either a tool call, "
+            "which is not available off the record, or nothing at all. No answer "
+            "was produced: ask again."
+        )
+
+
+class AsideEmptyAnswer(AsideUnanswered):
+    """A settled aside answer carrying no text — raised at the DESKTOP ROUTE.
+
+    WHY IT IS NOT IN THE PRIMITIVE. ``Session.complete_aside`` returns ``""``
+    for a model that answers empty WITHOUT calling a tool, and that contract is
+    deliberate: a length-stop or a refusal must reach the goal-loop judge as "no
+    verdict" rather than as a fault, and the judge is the primitive's other
+    caller. The desktop route has a different obligation because IT is where the
+    durable aside entry gets written — a 200 with ``text: ""`` stores an empty
+    assistant turn marked complete and adoptable, which the renderer paints as
+    no answer and no error, and the panel's next "Ask again" then continues that
+    empty exchange instead of starting over. So the refusal belongs at the route,
+    where an empty answer can be named for what the user is looking at, and the
+    primitive is left exactly as it was.
+
+    A SUBCLASS of :class:`AsideUnanswered` for one answer path, not for the
+    sentence: the desktop ladder's named-refusal arm and the asides route's
+    drop-on-refusal both key on the base class, so a second unrelated type would
+    be a second place to remember. The sentence is restated because the base's
+    names a tool call this arm did not involve, and it keeps the same remedy.
+    The :data:`code` is its own so a renderer can tell "the model said nothing"
+    from "the model tried to use a tool".
+
+    Never crosses the attach wire (it is raised in the daemon that owns the
+    route, after the owner returned), so it has no :func:`admission_error` arm:
+    the client gets this sentence in the HTTP body, not a code to rebuild.
+    """
+
+    code = "aside_empty_answer"
+
+    def __init__(self) -> None:
+        ValueError.__init__(
+            self,
+            "The model answered your aside with no text at all, so the exchange "
+            "has no answer to keep. Ask again.",
         )
 
 

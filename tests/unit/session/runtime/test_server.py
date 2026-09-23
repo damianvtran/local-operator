@@ -3256,6 +3256,16 @@ def _text_frame(message_id: str, delta: str) -> dict[str, Any]:
     }
 
 
+def _aside_frame(req: int, delta: str) -> dict[str, Any]:
+    """One streamed chunk of an aside, exactly as ``_aside_delta_sink`` shapes it.
+
+    ``req`` is the request that asked, and it is what makes two concurrent
+    asides distinguishable here: the panel id the desktop renderer knows as
+    ``aside_id`` never crosses this wire.
+    """
+    return {"op": "aside_delta", "req": req, "data": {"delta": delta}}
+
+
 def _stalled_conn() -> Any:
     """A connection whose reader never drains, i.e. the case the bound is for."""
     from local_operator.session.runtime.server import _EVENT_QUEUE_MAX, _ClientConn
@@ -3423,6 +3433,179 @@ async def test_a_long_reasoning_stream_still_emits_a_readable_frame() -> None:
     for frame in conn.event_queue._queue:
         size = len(json.dumps(frame).encode()) + 1
         assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"
+
+
+@pytest.mark.asyncio
+async def test_a_long_aside_stream_still_emits_a_readable_frame() -> None:
+    """Delta-sized byte accounting has to hold for the aside family too."""
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    for _ in range(400):
+        server._enqueue_client_frame(conn, _aside_frame(7, "x" * 4096))
+
+    assert server.dropped == []
+    for frame in conn.event_queue._queue:
+        size = len(json.dumps(frame).encode()) + 1
+        assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"
+
+
+@pytest.mark.asyncio
+async def test_an_aside_merge_that_would_not_fit_is_refused_not_truncated() -> None:
+    """Two legal aside frames can merge into an ILLEGAL one — refuse the merge.
+
+    Each chunk passed the relay guard individually at enqueue; the merge is the
+    one operation that makes a frame bigger than anything the guard was shown,
+    which is why the size check exists at all. Truncating instead would deliver a
+    HALF answer that looks whole: the aside's text is whatever the viewer's last
+    frame said, so a cut in the middle of a sentence is not cosmetic, and the
+    POST's authoritative ``text`` would disagree with the card it painted.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    # Individually legal (each fits one line), jointly illegal.
+    chunk = "x" * (_MAX_LINE_BYTES // 2 + 1024)
+    server._enqueue_client_frame(conn, _aside_frame(7, chunk))
+    server._enqueue_client_frame(conn, _aside_frame(7, chunk))
+
+    assert server.dropped == []
+    server._compact_event_queue(cast(Any, conn))
+
+    queued = list(conn.event_queue._queue)
+    assert len(queued) == 2, "the merge must be refused, not applied"
+    assert [f["data"]["delta"] for f in queued] == [chunk, chunk]
+    assert "".join(f["data"]["delta"] for f in queued) == chunk + chunk
+    for frame in queued:
+        size = len(json.dumps(frame).encode()) + 1
+        assert size <= _MAX_LINE_BYTES, f"emitted an unreadable {size}-byte frame"
+
+
+@pytest.mark.asyncio
+async def test_two_asides_on_one_connection_never_fold_together() -> None:
+    """The aside's stream identity is the REQUEST, and the frame must keep it.
+
+    Two asides can be in flight over one connection (two desktop windows, or a
+    retry while the first is still streaming). Folding them would splice one
+    viewer's answer into another's — and a merge that dropped the ``req`` would
+    deliver the text to a pump with no stream to route it to, so the chunk would
+    be discarded on arrival while the frame counted as delivered.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    server._enqueue_client_frame(conn, _aside_frame(1, "one "))
+    server._enqueue_client_frame(conn, _aside_frame(1, "still one"))
+    server._enqueue_client_frame(conn, _aside_frame(2, "two "))
+    server._enqueue_client_frame(conn, _aside_frame(2, "still two"))
+
+    assert server.dropped == []
+    server._compact_event_queue(cast(Any, conn))
+
+    assert [(f["req"], f["data"]["delta"]) for f in conn.event_queue._queue] == [
+        (1, "one still one"),
+        (2, "two still two"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interleaved_asides_keep_their_own_chunks_in_arrival_order() -> None:
+    """Two asides streaming at once must not be spliced across each other.
+
+    Compaction folds ADJACENT frames of one stream, so two interleaved answers
+    stay interleaved: the second aside's fragment is between the first's, which
+    is exactly why the fold cannot be keyed on the family alone. A viewer paints
+    its own answer from its own frames, and a fork of one into the other would
+    show another viewer's text inside a private panel.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    server._enqueue_client_frame(conn, _aside_frame(1, "one "))
+    server._enqueue_client_frame(conn, _aside_frame(2, "two "))
+    server._enqueue_client_frame(conn, _aside_frame(1, "still one"))
+    server._enqueue_client_frame(conn, _aside_frame(2, "still two"))
+
+    assert server.dropped == []
+    server._compact_event_queue(cast(Any, conn))
+
+    assert [(f["req"], f["data"]["delta"]) for f in conn.event_queue._queue] == [
+        (1, "one "),
+        (2, "two "),
+        (1, "still one"),
+        (2, "still two"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_viewer_survives_a_long_aside_stream() -> None:
+    """An aside streams one fragment per token, so it needs the fold like text.
+
+    Before this family was merged there was nothing in the FIFO a stall could
+    compact: 300 fragments of one answer filled the 64-frame bound and the viewer
+    was dropped with ``event queue overflow`` — the same failure the reasoning
+    fold closed, on the surface whose slowest reader is a phone. The property
+    that must survive the fold is losslessness: the retained frame carries EVERY
+    fragment, in arrival order, so the viewer paints the answer the model wrote.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    fragments = [f"part-{index} " for index in range(300)]
+    for fragment in fragments:
+        server._enqueue_client_frame(conn, _aside_frame(7, fragment))
+
+    assert server.dropped == [], f"stalled viewer was dropped: {server.dropped}"
+    server._compact_event_queue(cast(Any, conn))
+
+    queued = list(conn.event_queue._queue)
+    assert len(queued) == 1, f"kept {len(queued)} aside frames, expected 1"
+    assert queued[0]["op"] == "aside_delta"
+    assert queued[0]["req"] == 7
+    assert queued[0]["data"]["delta"] == "".join(fragments)
+
+
+@pytest.mark.asyncio
+async def test_an_aside_fragment_never_folds_into_a_neighbouring_conversation_event() -> None:
+    """An aside is a private question; the conversation is not it.
+
+    The two families are adjacent in the same FIFO and both carry a ``delta``, so
+    a key that named only "a delta" would splice an off-record answer into the
+    message the user is reading — and the transcript would then differ from the
+    provider's own record of the turn. The FAMILY is part of the key, so they are
+    never compared.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    server._enqueue_client_frame(conn, _text_frame("m1", "the answer"))
+    server._enqueue_client_frame(conn, _aside_frame(7, "the aside"))
+    server._enqueue_client_frame(conn, _aside_frame(8, " another aside"))
+    server._enqueue_client_frame(conn, _text_frame("m1", " in full"))
+
+    assert server.dropped == []
+    server._compact_event_queue(cast(Any, conn))
+
+    kinds = [
+        (f["op"], (f.get("data") or {}).get("type"), (f.get("data") or {})["delta"])
+        for f in conn.event_queue._queue
+    ]
+    assert kinds == [
+        ("event", "message_update", "the answer"),
+        ("aside_delta", None, "the aside"),
+        ("aside_delta", None, " another aside"),
+        ("event", "message_update", " in full"),
+    ]
 
 
 @pytest.mark.asyncio
