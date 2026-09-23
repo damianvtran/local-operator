@@ -2226,18 +2226,6 @@ class RuntimeServer:
             # BEFORE the announce — that ordering is the window's own contract — so
             # the record is the one place both ends can read it from.
             "updating": self._record.updating,
-            # THE FAILED HALF OF A HANDOVER, additive like the three above, and the
-            # pair it completes is what a viewer needs to tell a handover that is
-            # STILL WAITING from one that was given up: the record keeps
-            # ``leaving`` at the ordinary build phrase through an abandon BY DESIGN
-            # (``process._abandon_move``), so the phrase alone tells a viewer a new
-            # message will not start a turn — false from the instant the latch is
-            # released. Read off the record for ``updating``'s own reason, and it is
-            # the only place that fact can come from: the abandon is not announced
-            # (there is no "staying" op on this wire, and ``process.py`` refuses to
-            # invent one), so a viewer learns it from the record, through the next
-            # frame that carries the record's state.
-            "update_failed": self._record.update_failed,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
@@ -3982,18 +3970,26 @@ class RuntimeServer:
         fleet row reads "update failed" about a session that is moving right now.
 
         The reason it has one of its own is that the record's OTHER half,
-        ``update_failed``, is read as a PAIR with this field by every surface that has
-        to tell a handover that is still waiting from one that was given up
-        (``tui.app.drain_notice_for``; the abandon keeps this phrase by design, see
-        ``process._abandon_move``). A stale failure left beside a freshly latched
-        drain makes that pair say "given up" about a drain that is refusing work, so
-        the pair has to mean exactly one thing: **the handover this record's phrase
-        announces, and whether it was given up**. Cleared here rather than only on a
-        change of phrase, because the second attempt at the same build announces the
-        same words — the case the pair exists for would otherwise be the one it got
-        wrong. Nothing is lost: the failure itself is an incident row
-        (``note_update_failed``'s ``UPDATE_FAILED_CAUSE``) and the handle's own memo,
-        and the field is re-published if THIS attempt fails too.
+        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
+        keeps the ordinary build phrase by design (``process._abandon_move``), so
+        that field is the only thing separating a handover still waiting from one
+        that was given up, and its readers are the fleet surfaces that print the two
+        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
+        row). A stale failure left beside a freshly latched drain makes that pair
+        report the new attempt as the abandoned one. Cleared here rather than only on
+        a change of phrase, because the second attempt at the same build announces
+        the same words — the case that matters would otherwise be the one it got
+        wrong.
+
+        WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
+        ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
+        the bound it spent on the detail), which is the account an issue report
+        cites, and the field is re-published if THIS attempt fails too. The handle's
+        own memo is NOT part of that account — it is the WINDOW rung's
+        (``serving.ServingSessionHandle.note_update_failed``, written by
+        ``_abandon_update_window`` only, so the automatic rung does not re-open a
+        window that already burned its bound) and the drain rung deliberately does
+        not write it (agent review round 1, NIT-2).
         """
         superseded = bool(phrase) and bool(self._record.update_failed)
         if superseded:

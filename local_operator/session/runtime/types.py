@@ -655,11 +655,6 @@ LEAVING_FOR_BUILD_OVERDUE = (
 #: ``tests/unit/session/runtime/test_leaving_vocabulary.py``, which walks this
 #: tuple: adding a phrase here without teaching all four consumers fails there
 #: rather than on an operator's screen.
-#: THE PIN IS BY PHRASE, AND ONE STATE IS NOT A PHRASE — the abandoned handover, whose
-#: record keeps :data:`LEAVING_FOR_BUILD` and is told apart by the SECOND half of the
-#: pair (``SessionRecord.update_failed``). No phrase is added for it, so nothing here
-#: changes; ``tui.app.DRAIN_NOTICE_ABANDONED`` is keyed on the pair beside the phrase
-#: tables rather than inside them, and its reader is ``tui.app.drain_notice_for``.
 PUBLISHED_LEAVING_PHRASES: tuple[str, ...] = (
     LEAVING_ON_SIGNAL,
     LEAVING_FOR_BUILD,

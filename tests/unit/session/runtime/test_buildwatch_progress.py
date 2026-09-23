@@ -40,15 +40,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.process import _Drain, _drain_for, _reaper
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
@@ -156,7 +158,13 @@ class FakeHandle:
         self.denials = 0
         self.drains = 0
         self.releases = 0
-        self.draining = False
+        # THE LATCH IS THE PRODUCTION HANDLE'S, under the names it writes itself
+        # (``_draining`` and the retiring cause it latches), because
+        # ``begin_drain``/``end_drain`` below call that handle's own methods.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
         self.update_failed = ""
         self.drain_cause = ""
         self.retired = False
@@ -176,23 +184,37 @@ class FakeHandle:
         return self._viewers
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
-        self.drains += 1
-        self.draining = True
-        self.drain_cause = cause
-        return True
+        """The PRODUCTION latch, called through, with this rig's own counters beside it.
+
+        ``ServingSessionHandle.begin_drain`` is what decides whether the latch closes
+        (``_disposing``, and the wake divert) and the only thing that writes the state
+        the arm consults, so it is CALLED rather than modelled: a double that
+        re-implemented it would keep these cells green while the production handle
+        stopped latching at all. ``drains`` and ``drain_cause`` are this rig's
+        bookkeeping, for cells that assert how many times the latch moved.
+        """
+        latched = ServingSessionHandle.begin_drain(
+            cast("ServingSessionHandle", self), cause, detail
+        )
+        if latched:
+            self.drains += 1
+            self.drain_cause = cause
+        return latched
 
     def end_drain(self) -> bool:
-        """The release the abandon arm calls (``serving.end_drain``).
-
-        Modelled rather than stubbed away: the assertion the pinning test makes is that
-        the latch comes OFF, and a fake that could not record it would let the arm pass
-        while the production handle kept refusing admissions.
+        """The PRODUCTION release, for :meth:`begin_drain`'s own reason — called, not
+        modelled, so ``releases`` counts productions releases rather than this
+        double's idea of one.
         """
-        if not self.draining:
-            return False
-        self.draining = False
-        self.releases += 1
-        return True
+        released = ServingSessionHandle.end_drain(cast("ServingSessionHandle", self))
+        if released:
+            self.releases += 1
+        return released
+
+    @property
+    def draining(self) -> bool:
+        """The production latch's own field, under the name this file's cells read."""
+        return self._draining
 
     def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
         self.update_failed = pair
@@ -726,12 +748,12 @@ async def test_a_lane_that_keeps_stepping_is_abandoned_at_the_dwell(
     drain, and with it the session, for as long as the lane kept stepping (measured:
     eight hours on the reporting host, until the lanes finally stopped).
 
-    What the dwell asserts is the whole arm: the latch is RELEASED (the fake exposes
-    the production ``end_drain``, so a tree that kept refusing admissions fails here),
-    the failure is PUBLISHED with the bound it actually ran out of, the turn in flight
-    is NOT cut and the process is NOT ended, and the departure still happens at the
-    first idle instant afterwards — an abandoned handover is a handover retried, never
-    one given up for good.
+    What the dwell asserts is the whole arm: the latch is RELEASED (the double CALLS
+    the production ``end_drain`` — see ``FakeHandle`` — so a tree that kept refusing
+    admissions fails here), the failure is PUBLISHED with the bound it actually ran out
+    of, the turn in flight is NOT cut and the process is NOT ended, and the departure
+    still happens at the first idle instant afterwards — an abandoned handover is a
+    handover retried, never one given up for good.
 
     The WARNING is asserted too, because it is the only account of WHICH bound fired
     that a production log carries: it has to name the dwell, the build pair, and that
@@ -793,6 +815,11 @@ async def test_a_lane_that_keeps_stepping_is_abandoned_at_the_dwell(
     ], "the abandoned handover wears a phrase for a departure it did not take"
     assert rig.handle.drains == 1, "the drain was latched a second time"
     assert "dwell bound" in caplog.text and "ABANDONING the handover" in caplog.text, caplog.text
+    assert str(os.getpid()) in caplog.text, (
+        "the dwell line has to carry the pid like every other latch and exit line in "
+        "this module: it is the line an operator greps for in a shared, rotated runtime "
+        "log, where the session id alone does not identify the process (QA round 1, Q-3)"
+    )
     assert NEW.label() in caplog.text, (
         "the warning has to name the build pair the abandoned handover was for, or a "
         "reader cannot match it to the update that did not happen"

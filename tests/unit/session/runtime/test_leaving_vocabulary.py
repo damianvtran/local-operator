@@ -34,10 +34,6 @@ from local_operator.tui.widgets.info_panel import _LEAVING_SHORT, _LEAVING_SHORT
 
 PHRASES: tuple[str, ...] = types.PUBLISHED_LEAVING_PHRASES
 
-#: A build pair as the record spells it (``SessionRecord.update_failed``), used by the
-#: one cell below that keys on the record PAIR rather than on a phrase.
-PAIR = "0.62.9 -> 0.62.12"
-
 
 def test_the_vocabulary_is_enumerable_and_has_no_duplicates() -> None:
     assert PHRASES, "the tuple a consumer pin iterates cannot be empty"
@@ -84,35 +80,6 @@ def test_the_refusal_trigger_table_knows_every_phrase(phrase: str) -> None:
         f"{phrase!r} establishes no trigger: a refusal at that instant would take the "
         f"unnamed head, which is the vaguer sentence for the more serious departure"
     )
-
-
-def test_the_abandoned_pair_is_told_apart_from_the_phrase_alone() -> None:
-    """The one sentence keyed on the RECORD PAIR rather than on a phrase.
-
-    ``process._abandon_move`` keeps :data:`LEAVING_FOR_BUILD` on the record when it gives
-    a handover up, so the phrase cannot separate the two states and :data:`DRAIN_NOTICE`
-    would promise a refusal that has just been released. The failed half of the pair is
-    what separates them (``SessionRecord.update_failed``, carried on the frame), and it
-    changes the answer for that phrase ONLY: every other phrase keeps its own sentence
-    with a failure beside it, and an unplaceable phrase keeps the neutral one — because a
-    viewer's fallback may never turn into a sentence about another trigger's departure.
-    """
-    from local_operator.tui.app import (
-        DRAIN_NOTICE,
-        DRAIN_NOTICE_ABANDONED,
-        drain_notice_for,
-    )
-
-    assert drain_notice_for(types.LEAVING_FOR_BUILD) == DRAIN_NOTICE
-    assert drain_notice_for(types.LEAVING_FOR_BUILD, PAIR) == DRAIN_NOTICE_ABANDONED
-    assert DRAIN_NOTICE_ABANDONED != DRAIN_NOTICE
-    assert "will not start a turn" not in DRAIN_NOTICE_ABANDONED, DRAIN_NOTICE_ABANDONED
-    # ...and the pair is not a licence to paint it anywhere else.
-    for phrase in PHRASES:
-        if phrase == types.LEAVING_FOR_BUILD:
-            continue
-        assert drain_notice_for(phrase, PAIR) == _DRAIN_NOTICES[phrase], phrase
-    assert drain_notice_for("a phrase from a newer runtime", PAIR) == DRAIN_NOTICE_OTHER
 
 
 def test_the_ordinary_build_phrase_still_earns_the_ordinary_sentence() -> None:

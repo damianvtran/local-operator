@@ -221,12 +221,12 @@ async def test_a_new_departure_supersedes_the_last_failure(stale) -> None:
     """A record must not describe an abandoned handover while a NEW one is running.
 
     ``note_updating``'s own rule (agent review round 1, NIT 4) one rung over, and here
-    it is load-bearing rather than tidy: ``SessionRecord.update_failed`` is read as a
-    PAIR with ``leaving`` by every surface that has to tell a handover still waiting
-    from one that was given up, and an abandon KEEPS the ordinary build phrase by design
-    (``process._abandon_move``). Left beside a freshly latched drain, a stale failure
-    makes that pair report the new attempt as the abandoned one — and the app paints
-    from exactly this pair (``tui.app.drain_notice_for``).
+    it is load-bearing rather than tidy: ``SessionRecord.update_failed`` is read beside
+    ``leaving`` by the fleet surfaces that print the two columns together
+    (``info.collect``, ``cli``'s UPDATING cell), and an abandon KEEPS the ordinary build
+    phrase by design (``process._abandon_move``). Left behind, a stale failure describes
+    an attempt that has been superseded — the same misreading the window's rule exists
+    to prevent, on a record that now has a fresh departure in force.
 
     Keyed on the DEPARTURE rather than on a change of phrase, which is the case that
     forces it: the second attempt at the same build announces the same words, so a
