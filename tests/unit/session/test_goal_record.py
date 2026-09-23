@@ -231,7 +231,8 @@ def test_entry_text_is_clipped_at_construction():
     # AT CONSTRUCTION, not at read: a later reader cannot forget the bound, and
     # every copy of the entry is already the bounded one.
     assert len(entry.text) == GOAL_HISTORY_TEXT_CHARS
-    assert len(GoalHistoryEntry(id="i", text="y" * 5, status="done", created_at="", settled_at="").text) == 5
+    short = GoalHistoryEntry(id="i", text="y" * 5, status="done", created_at="", settled_at="")
+    assert short.text == "y" * 5
 
 
 def test_a_recorded_entry_clips_the_goal_it_settles():
@@ -365,3 +366,35 @@ def test_history_entry_wire_shape_has_exactly_the_six_contract_keys():
         "settled_at",
         "reason",
     }
+
+
+def test_the_fold_reads_a_goal_with_no_status_as_active():
+    """The migration default, in the ONE place it lives.
+
+    A session restored from a build that predates the record has a goal text and
+    nothing else, and reading that as absent would silently un-set an objective
+    the user is still expecting to be pursued. The rule is implemented in the
+    frontend fold rather than in each reader, so this asserts the fold's own
+    answer for all four combinations.
+    """
+    from local_operator.session.frontend_state import _fold_goal_status
+
+    class _Session:
+        pass
+
+    inherited = _Session()
+    inherited.goal = "still going"
+    assert _fold_goal_status(inherited) == "active"
+
+    recorded_active = _Session()
+    recorded_active.goal = "still going"
+    recorded_active.goal_status = "active"
+    assert _fold_goal_status(recorded_active) == "active"
+
+    recorded_done = _Session()
+    recorded_done.goal = "finished"
+    recorded_done.goal_status = "done"
+    assert _fold_goal_status(recorded_done) == "done"
+
+    empty = _Session()
+    assert _fold_goal_status(empty) == ""
