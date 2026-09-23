@@ -949,6 +949,16 @@ GoalPanel {
     color: $lo-fg;
 }
 
+/* On a terminal too short for the card's normal two-row vertical gutter, the
+ * widget spends the decoration rather than cover the docked prompt — the same
+ * trade, set from the same kind of measurement, as the usage card below. The
+ * class is set from the SAME `_fit()` result that pins the height, so CSS and
+ * Python cannot disagree about whether those rows exist. Horizontal breathing
+ * stays. */
+GoalPanel.-squeezed {
+    padding: 0 2;
+}
+
 /* `padding: 1 2`, not `0 1`: this card floats OVER the transcript, so its
  * gutter is the only thing separating the report from the text underneath it.
  * One cell was not enough for the panel to read as lifted — the rows touched

@@ -27,8 +27,8 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.session.goal import (
-    CLEARED_GOAL_ECHO_CHARS,
     GOAL_CLEAR_ARGS,
+    MAX_GOAL_CHARS,
     cleared_goal_receipt,
 )
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
@@ -746,9 +746,13 @@ def test_the_clear_vocabularies_hold_the_flag_and_the_legacy_words() -> None:
 def test_the_clear_receipt_names_what_it_removed() -> None:
     """The receipt is the only place a cleared goal is still readable.
 
-    A standing goal is invisible in the UI and there is no undo, so the echo is
-    the user's whole chance to retype what a mistaken clear took away (design
-    D4 / UX U3). One line, because a receipt is a single terminal row.
+    A standing goal is invisible in the UI and there is no undo on this surface,
+    so the echo is the user's whole chance to retype what a mistaken clear took
+    away — and it must be able to carry a goal the user could actually have SET.
+    Clipped at 96 characters it could not: a 152-character goal came back as 96
+    and an ellipsis, which cannot be retyped from (design D4 / UX U2). The bound
+    is the goal's own `MAX_GOAL_CHARS` now, so the artifact is complete up to the
+    cap the user typed against.
     """
     assert cleared_goal_receipt("land the OAuth refresh fix") == (
         "goal cleared: land the OAuth refresh fix"
@@ -756,8 +760,14 @@ def test_the_clear_receipt_names_what_it_removed() -> None:
     assert cleared_goal_receipt("") == "goal cleared"
     multi = cleared_goal_receipt("first line\n\nsecond line")
     assert multi == "goal cleared: first line second line"
-    long = cleared_goal_receipt("x" * 400)
-    assert long == "goal cleared: " + "x" * CLEARED_GOAL_ECHO_CHARS + "…"
+    # A goal well past the OLD 96-character clip, and one past the CAP: the first
+    # comes back whole (retypable by eye), the second at exactly the cap plus the
+    # ellipsis that says it was clipped.
+    retypable = " ".join(["objective"] * 16)
+    assert len(retypable) == 159, "past the 96 the receipt used to stop at"
+    assert cleared_goal_receipt(retypable) == f"goal cleared: {retypable}"
+    long = cleared_goal_receipt("x" * (MAX_GOAL_CHARS + 400))
+    assert long == "goal cleared: " + "x" * MAX_GOAL_CHARS + "…"
 
 
 def test_the_name_slot_flag_is_only_on_the_roster_commands() -> None:

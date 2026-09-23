@@ -34139,6 +34139,13 @@ class OperatorApp(App[None]):
         record = self._goal_record()
         if panel is None or session is None:
             return
+        # The WIRE's own truncation flag, read the way the footer reads the
+        # catalogue's sibling clause: a clipped record must not render like a
+        # complete one, and the flag is absent on a facade with no frontend state
+        # (a `getattr` default), which is the overwhelmingly common case. Without
+        # this the flag had no consumer anywhere under ``local_operator/tui/``
+        # (design D1 / UX U1).
+        state = getattr(session, "frontend_state", None)
         panel.show(
             goal=getattr(session, "goal", "") or "",
             status=getattr(record, "goal_status", "") or "",
@@ -34146,6 +34153,7 @@ class OperatorApp(App[None]):
             history=list(getattr(record, "goal_history", []) or []),
             cap=MAX_GOAL_CONTINUATIONS,
             actions=owns_the_session(session),
+            history_truncated=bool(getattr(state, "goal_history_truncated", False)),
         )
 
     def on_goal_dismissed(self, message: GoalDismissed) -> None:
@@ -34171,18 +34179,27 @@ class OperatorApp(App[None]):
         self._refresh_goal_panel()
 
     def on_goal_delete(self, message: GoalDelete) -> None:
-        """`c` in the card — DELETE, which records nothing (the other key's half)."""
-        from local_operator.session.goal import cleared_goal_receipt
+        """`c` in the card — the ERASE, or the done chip's dismissal.
+
+        One key, two acts, told apart by the record's own status (design D8/U4):
+        on a live goal it erases (the panel armed it, and this is the second
+        press), and on a DONE card it drops the chip — the act the palette
+        already names `--dismiss`, which is the benign one and needs no arming.
+        """
+        from local_operator.session.goal import cleared_goal_receipt, goal_dismissed_receipt
 
         message.stop()
         record = self._goal_record()
         if record is None:
             return
-        receipt = cleared_goal_receipt(getattr(self._session, "goal", ""))
-        record.delete_goal()
-        # The receipt names what went, and it is the user's whole chance to see
-        # it: a delete has no undo and records no history entry.
-        self._system_notice(receipt)
+        if record.goal_status == "done":
+            self._system_notice(goal_dismissed_receipt(record.dismiss_goal()))
+        else:
+            receipt = cleared_goal_receipt(getattr(self._session, "goal", ""))
+            record.delete_goal()
+            # The receipt names what went, and it is the user's whole chance to
+            # see it: a delete has no undo and records no history entry.
+            self._system_notice(receipt)
         self._refresh_goal_panel()
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
