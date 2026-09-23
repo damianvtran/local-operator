@@ -2285,6 +2285,94 @@ async def test_the_reaper_still_sees_no_viewer_without_a_visible_panel() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_presence_record_that_cannot_name_a_session_falls_back_to_the_connection(
+    monkeypatch, tmp_path
+) -> None:
+    """ABSENCE OF EVIDENCE IS NOT EVIDENCE AGAINST (§2.3).
+
+    The publisher blanks ``session_id`` whenever it cannot vouch for it, so an
+    empty field says nothing about which conversation is on screen. The
+    per-connection flag is the per-session answer, and falling through to it is
+    the pre-presence behaviour the reader's docstring promises an older app.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is True
+            assert runtime.watching_surfaces() == frozenset({"desktop"})
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_naming_another_session_still_denies(monkeypatch, tmp_path) -> None:
+    """The denied direction is preserved where the record IS evidence.
+
+    An app that names a DIFFERENT conversation must not suppress this session's
+    background banner: that is exactly the case the record exists to catch.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id="some-other-session"):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is False
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_that_cannot_name_a_session_does_not_suppress_an_unfocused_banner(
+    monkeypatch, tmp_path
+) -> None:
+    """The fallback is SCOPED: an unfocused window still banners (§2.3).
+
+    Falling through to ``conn.desktop_visible`` only grants when the pane really
+    is visible, so a window behind another app keeps raising the OS banner —
+    otherwise the empty field would silence every surface for a conversation
+    nobody is looking at, which is the defect the record was built to stop.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=False, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is False
+            assert runtime.watching_surfaces() == frozenset()
+            # ...and the app is still reachable for the out-of-band toast.
+            assert runtime.notification_surfaces() == frozenset({"desktop"})
+            # Attached all the same: the pane is mounted, so a question is
+            # presentable the moment the operator returns to it.
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_desktop_attach_refuses_old_runtime_before_becoming_a_false_terminal() -> None:
     from dataclasses import replace
 
