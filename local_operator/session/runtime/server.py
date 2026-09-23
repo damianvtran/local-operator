@@ -3915,6 +3915,14 @@ class RuntimeServer:
             return
         self._detached = detached
         self._desktop_delivery = delivery
+        # WHEN the last viewer left, which is a different fact from THAT it did:
+        # the residency policy bounds how long (and how many) detached runtimes
+        # stay warm by evicting the least recently detached, and this is the one
+        # stamp that carries an order (``process._detached_at``,
+        # ``SessionRecord.detached_at``). Cleared on the 0->1 transition so a
+        # runtime being watched is not a keep-alive candidate — the reaper's own
+        # record read is the inverse of this field.
+        self._record.detached_at = time.time() if detached else None
         self._republish()
         if detached and self._pending:
             # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
@@ -4123,6 +4131,11 @@ class RuntimeServer:
                 leaving=self._leaving,
                 started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
+                # ATTACHMENT, not visibility: the reaper's own term 3, and the
+                # fact the keep-alive cap charges a slot on. Published from the
+                # same read as ``detached`` because the two answers come from one
+                # snapshot of ``_clients`` (see ``_visible_attach_surfaces``).
+                watching=bool(self.attach_clients()),
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,
             )

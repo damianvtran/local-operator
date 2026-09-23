@@ -15050,6 +15050,14 @@ class OperatorApp(App[None]):
         ``Editor.DESTRUCTIVE_COMMANDS`` and the single ``alert`` row that fills
         the word — but the authority to delete is the submission carrying `yes`,
         not a keystroke on a row.
+
+        THE REMOVAL RUNS OFF THE UI THREAD (review round 2, R2-3). A confirmed
+        delete can now ASK a warm runtime to leave and wait up to
+        ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` for it, so calling it inline froze
+        the interface for ~2.4 s on a keypress — the one shape a delete must not
+        have. It goes through a worker exactly as the slash host below does
+        (``asyncio.to_thread``), which is also why the outcome handling lives in
+        here rather than after the dispatch: the notices are the caller's.
         """
         from local_operator.paths import config_dir
         from local_operator.session.cleanup import delete_session
@@ -15061,48 +15069,63 @@ class OperatorApp(App[None]):
             )
             return
         confirmed = arg.strip().casefold() == "yes"
-        outcome = delete_session(config_dir(), session_id, actor="tui", dry_run=not confirmed)
-        if not outcome.found:
-            # Reachable when the directory is already gone (another window
-            # deleted it, or the id came from a stopped session's record).
-            notice(f"{session_id} is not on disk — nothing to delete", "warning")
-            return
-        if outcome.refusal:
-            notice(outcome.refusal, "warning")
-            return
-        if not confirmed:
-            # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on the
-            # outcome, so this host, the attached/slash host below and the
-            # detached runtime cannot drift apart on the wording of a
-            # confirmation for an irreversible act. The target is named the way
-            # the lists name it (design round 1, D2) for the same reason.
-            notice(outcome.rehearsal(), "warning")
-            return
-        # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the session
-        # it was standing in no longer exists, so leaving the user on it strands
-        # them on a dead conversation. It runs only AFTER the removal is
-        # confirmed, so a refused or rehearsed delete never moves them off their
-        # work.
-        #
-        # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
-        # ledger from the session that boots — an empty screen for a fresh
-        # conversation — so a notice written before it is erased with the
-        # outgoing one. ``_pending_fork_outcome`` is that mechanism (the fork's
-        # own receipts publish through it for the same reason), and it is used
-        # directly rather than re-spelled. A host that cannot start a new
-        # session at all never runs the transition, so there is no reset for the
-        # notice to survive and it is emitted directly after the refusal it
-        # accompanies.
-        if self._resume_factory is not None:
-            kept_clause = (
-                f"; {outcome.children} subagent run(s) it started were kept"
-                if outcome.children
-                else ""
-            )
-            self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
-        else:
-            notice(f"deleted {session_id}", "info")
-        self._cmd_new(notice)
+
+        async def delete() -> None:
+            try:
+                outcome = await asyncio.to_thread(
+                    delete_session, config_dir(), session_id, actor="tui", dry_run=not confirmed
+                )
+            except Exception:
+                # A DELETED COMMAND MUST NOT TAKE THE APP DOWN, and a silent one
+                # must not let the user believe it happened: the worker is
+                # dispatched with ``exit_on_error=False`` and this is the notice
+                # that stands in for the receipt.
+                logger.debug("delete failed", exc_info=True)
+                notice("that conversation could not be deleted", "warning")
+                return
+            if not outcome.found:
+                # Reachable when the directory is already gone (another window
+                # deleted it, or the id came from a stopped session's record).
+                notice(f"{session_id} is not on disk — nothing to delete", "warning")
+                return
+            if outcome.refusal:
+                notice(outcome.refusal, "warning")
+                return
+            if not confirmed:
+                # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on
+                # the outcome, so this host, the attached/slash host below and
+                # the detached runtime cannot drift apart on the wording of a
+                # confirmation for an irreversible act. The target is named the
+                # way the lists name it (design round 1, D2) for the same reason.
+                notice(outcome.rehearsal(), "warning")
+                return
+            # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the
+            # session it was standing in no longer exists, so leaving the user on
+            # it strands them on a dead conversation. It runs only AFTER the
+            # removal is confirmed, so a refused or rehearsed delete never moves
+            # them off their work.
+            #
+            # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
+            # ledger from the session that boots — an empty screen for a fresh
+            # conversation — so a notice written before it is erased with the
+            # outgoing one. ``_pending_fork_outcome`` is that mechanism (the
+            # fork's own receipts publish through it for the same reason), and it
+            # is used directly rather than re-spelled. A host that cannot start a
+            # new session at all never runs the transition, so there is no reset
+            # for the notice to survive and it is emitted directly after the
+            # refusal it accompanies.
+            if self._resume_factory is not None:
+                kept_clause = (
+                    f"; {outcome.children} subagent run(s) it started were kept"
+                    if outcome.children
+                    else ""
+                )
+                self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
+            else:
+                notice(f"deleted {session_id}", "info")
+            self._cmd_new(notice)
+
+        self.run_worker(delete(), group="session-delete", exit_on_error=False)
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.

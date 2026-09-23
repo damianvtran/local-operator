@@ -1073,6 +1073,44 @@ class SessionRecord:
     #: No front end is attached. A working session with nobody watching is
     #: exactly what this release makes possible, so it is worth naming.
     detached: bool = False
+    #: WHEN this session's last viewer left (``time.time()``), or ``None`` if no
+    #: viewer has ever been attached. Cleared back to ``None`` when one attaches.
+    #:
+    #: WHICH MOMENT, not merely that. The residency policy keeps a runtime a
+    #: viewer has left warm for ``runtime.keep_alive_seconds``, and bounds how
+    #: many such runtimes one machine holds by evicting the least recently
+    #: detached (``process._keep_alive_victim``). That bound needs an ORDER, and
+    #: this is the only field that carries one: ``heartbeat_at`` cannot, because
+    #: a detached idle runtime keeps beating, and ``detached`` is a boolean.
+    #: ``None`` is load-bearing rather than a missing value — it is what tells
+    #: the keep-alive that this runtime is one nobody has looked at, which is the
+    #: population the ordinary 3 s drain was written for.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, exactly like the block above:
+    #: ``from_json`` drops unknown keys, so a mixed-version fleet reads and
+    #: writes records with and without this field interchangeably, and
+    #: ``PROTOCOL_VERSION`` deliberately does not move for it. Nothing is
+    #: required to read it: a runtime without it keeps today's residency.
+    detached_at: float | None = None
+    #: At least one attach CLIENT is connected — the reaper's own term 3
+    #: (``RuntimeServer.attach_clients``), which is NOT the same fact as
+    #: ``detached`` directly above.
+    #:
+    #: WHY BOTH EXIST, because two fields that look alike invite exactly one
+    #: mistake (review round 1, F1). ``detached`` is VISIBILITY: it is true while
+    #: a multiplexing TUI has switched to another session and left this one's
+    #: terminal attached but not on screen (``viewer_watch displaying=False``),
+    #: and it is what a picker paints a row from. This one is ATTACHMENT, which
+    #: is what forbids an exit. A caller asking "may this runtime go?" needs
+    #: this one; a caller painting "nobody is watching" needs the other. The
+    #: keep-alive cap charged itself on ``detached`` until this field existed, so
+    #: a switched-away TUI's runtime — which can never enter a drain while its
+    #: viewer holds it — sat in a cap slot that could never be given back.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, like ``detached_at`` above:
+    #: ``from_json`` drops unknown keys, an older runtime's record defaults to
+    #: False, and ``PROTOCOL_VERSION`` deliberately does not move for it.
+    watching: bool = False
     #: This session is WAITING FOR A PERSON: ``"approval"``, ``"ask"``, or
     #: None. A parked gate holds the runtime resident for up to a day, so the
     #: cost has to be findable — this field is what puts it in `lop sessions`
