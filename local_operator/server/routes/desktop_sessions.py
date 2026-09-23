@@ -79,6 +79,7 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
+from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import (
@@ -140,6 +141,26 @@ RUNTIME_UNREACHABLE = "runtime_unreachable"
 RUNTIME_UNREACHABLE_MESSAGE = (
     "Session owner is unavailable. Reconnect and reconcile before retrying."
 )
+
+#: The machine code for a control call whose runtime IS alive and reachable but
+#: did not answer inside the desktop control envelope
+#: (``session/attached.py::DESKTOP_CONTROL_ATTACH_S``) — a loop busy mid-turn, a
+#: long synchronous step. Split from :data:`RUNTIME_UNREACHABLE` because the two
+#: call for different client behaviour: unreachable means reconcile, busy means
+#: the same request will very likely succeed shortly and is safe to resend (the
+#: receipt journal makes an admission at-most-once per request id).
+#:
+#: The MESSAGE is deliberately the unchanged :data:`RUNTIME_UNREACHABLE_MESSAGE`:
+#: a shipped app that predates this code matches that prefix for its copy, and a
+#: backend fix must not move user-visible text on machines whose app has not
+#: updated. ``retryable``/``retry_after_ms`` and a ``Retry-After`` header are
+#: additive fields a newer renderer keys on.
+RUNTIME_BUSY = "runtime_busy"
+
+#: How soon a client may usefully resend a ``runtime_busy`` request. Short
+#: because the refusal is produced in ``DESKTOP_CONTROL_ATTACH_S`` rather than
+#: 15 s, so two retries still fit well inside the renderer's 20 s deadline.
+RUNTIME_BUSY_RETRY_AFTER_MS = 2000
 
 #: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is
 #: the ONE-WORD answer to "did the owner take this text", which is why a false
@@ -1370,6 +1391,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # classifier's (QA round 2, Q1).
         raise _store_refusal(
             request, sqlite_store_failure(error, store_root(request)), error, copy
+        ) from None
+    except RuntimeUnresponsiveError:
+        # BEFORE the generic ConnectionError arm (it subclasses it). The runtime
+        # is alive and this host reached it; it did not answer inside the desktop
+        # control envelope. Answered fast and typed so the renderer can retry
+        # instead of reporting a lost session at its 20 s deadline.
+        raise HTTPException(
+            503,
+            {
+                "code": RUNTIME_BUSY,
+                "message": RUNTIME_UNREACHABLE_MESSAGE,
+                "retryable": True,
+                "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
+            },
+            headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
