@@ -142,6 +142,28 @@ def _never() -> bool:
     return False
 
 
+def owns_the_session(session: Any) -> bool:
+    """Whether the loop that runs this session's turns is on THIS event loop.
+
+    ONE predicate, and it is already in the protocol: ``Session.runtime_locality``
+    is ``"this-process"`` always, while ``AttachedSession``'s is
+    ``"this-machine"`` — attached or cold. So the host that OWNS the session
+    answers ``"this-process"`` and a FOLLOWER does not: every attached TUI, the
+    phone, and a cold viewer must never judge, because the judge spends tokens and
+    writes the goal record, and neither is a bystander's business. Without this
+    the person watching a session on their laptop would mint a second verdict
+    against a conversation the runtime is still writing.
+
+    Read the same way ``tui/app.py``'s ``_session_runs_elsewhere`` reads it for the
+    same question about config: the session is asked where it is BOUND rather than
+    inferred from whether a socket exists.
+
+    ``"unknown"`` (a host that does not implement the property at all) is treated
+    as NOT ours: the safe direction is the one that does not spend.
+    """
+    return getattr(session, "runtime_locality", "unknown") == "this-process"
+
+
 class GoalJudge:
     """One edge-triggered judge per OWNER of a session. Holds no long-lived task.
 

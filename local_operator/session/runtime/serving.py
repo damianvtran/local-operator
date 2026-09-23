@@ -60,7 +60,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
-from local_operator.harness.types import AgentEvent, ModelChangeEvent
+from local_operator.harness.types import AgentEndEvent, AgentEvent, ModelChangeEvent
 from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
@@ -532,6 +532,16 @@ class ServingSessionHandle(SessionHandle):
         self._session = session
         self._goal_loop: Any = None
         self._loop_command_id: str | None = None
+        #: The edge-triggered goal judge (see ``_goal_judge_driver``), built on
+        #: first use. Typed ``Any`` for the same reason ``_goal_loop`` is: the
+        #: driver's module is imported lazily so this module stays importable
+        #: without the session goal machinery.
+        self._goal_judge: Any = None
+        #: The command id of the judge's own admitted continuation, while one is
+        #: in flight. Kept so a future reader can tell the judge's turn from a
+        #: user's without guessing, and so an aborted-continuation probe has an
+        #: identity to name rather than a text to match.
+        self._goal_judge_command_id: str | None = None
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -2455,6 +2465,18 @@ class ServingSessionHandle(SessionHandle):
             if isinstance(event, ModelChangeEvent):
                 self._retry_naming_after_route_change()
             self._notify()
+            # LAST, and guarded inside, because it is additive: the goal judge
+            # reacts to the turn's END and nothing on this path may depend on it.
+            #
+            # THIS subscription, and not the prompt drain, is where the turn end
+            # is observed — the drain documents its own gap at the top of
+            # ``_drain_prompt_queue``: it sees the turns ITS queue runs, while a
+            # turn opened by a wake or a resume catch-up runs through the
+            # session's own pipeline and never enters it. The judge must see
+            # every turn end, and this subscription is installed at boot, before
+            # the first heartbeat and with no client attached.
+            if isinstance(event, AgentEndEvent):
+                self._maybe_judge_goal(event)
 
         unsubscribe = self._session.subscribe(handler)
         try:
@@ -2732,6 +2754,152 @@ class ServingSessionHandle(SessionHandle):
             if store is not None and store.state.loop:
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
+
+    def _goal_judge_driver(self):
+        """The standing goal's judge — the sibling of :meth:`_loop_driver`.
+
+        Built lazily and kept on the handle, because unlike a loop there is no
+        TASK here to own: ``GoalJudge`` holds no long-lived work, so this object
+        is only the policy's collaborator bundle and a restart has nothing to
+        lose (read ``session/goal_judge.py``'s module docstring for why that is
+        the design rather than an implementation detail).
+        """
+        from local_operator.session.goal_judge import GoalJudge
+
+        if self._goal_judge is None:
+
+            async def judge(text: str) -> str:
+                from local_operator.harness.types import Message
+
+                # ``complete_aside``: the off-the-record fork the TUI's own
+                # ``_judge_goal`` uses. It reads the live conversation, writes
+                # nothing to the transcript, runs no tools, and bills as an
+                # aside — the judged goal must not enter the conversation it is
+                # judging.
+                return await self._session.complete_aside([Message.user(text)])
+
+            async def prompt(text: str) -> None:
+                # The continuation goes through the ORDINARY prompt queue, as a
+                # task, so it is drained exactly like a user prompt, one turn at
+                # a time. Nothing here opens a second concurrency path.
+                #
+                # ``wait_complete`` is what lets the judge await its own turn and
+                # then judge it, and it must NOT be awaited from inside the drain:
+                # the completion future is only resolved by that same drain, so
+                # awaiting it there would deadlock. ``harness_injected`` is the
+                # structural stamp that tells every front end this row is
+                # harness chrome — the row is still persisted, and still
+                # announced, but no surface paints it as the user's words.
+                self._goal_judge_command_id = str(uuid.uuid4())
+                try:
+                    await self.prompt(
+                        text,
+                        command_id=self._goal_judge_command_id,
+                        wait_complete=True,
+                        harness_injected=True,
+                    )
+                finally:
+                    self._goal_judge_command_id = None
+
+            def changed(fields: dict[str, Any]) -> None:
+                # One writer for the judge's fields, so the journal and the frame
+                # cannot disagree: ``note_goal_judge`` persists on TRANSITION and
+                # republishes, and the driver only hands it what moved.
+                self._session.note_goal_judge(**fields)
+                self._notify()
+
+            def settled(reason: str) -> None:
+                # The SAME call the user's own ``/goal --done`` makes: an ACHIEVED
+                # verdict and a typed mark-done are one settle, and the only
+                # difference is whose words the entry's reason carries.
+                self._session.mark_goal_done(reason)
+                self._notify()
+
+            self._goal_judge = GoalJudge(
+                judge=judge,
+                prompt=prompt,
+                changed=changed,
+                settled=settled,
+                goal=lambda: self._session.goal,
+                status=lambda: self._session.goal_status,
+                token=lambda: self._session.goal_token,
+                serial=lambda: self._session.goal_turn_serial,
+                judge_state=lambda: self._session.goal_judge_state,
+                loop_running=self._loop_owns_the_verdict,
+            )
+        return self._goal_judge
+
+    def _loop_owns_the_verdict(self) -> bool:
+        """Whether a ``/loop`` driver owns this session's verdicts right now.
+
+        The mutual exclusion the judge must never violate, answered as a PROBE
+        rather than a latch: a loop that ends re-enables the goal judge with no
+        bookkeeping, which a flag set at loop start could not promise.
+
+        TWO signals, because a restart splits them. The live ``GoalLoop`` is
+        authoritative while this process runs it; a session whose checkpoint
+        says ``running``/``judging`` is one whose owner was REPLACED, and the
+        relabel to ``interrupted`` at construction (below) is what makes that
+        state readable as "not running" — a retained snapshot that still said
+        ``running`` would otherwise suppress the judge on a goal nobody is
+        driving.
+        """
+        driver = self._goal_loop
+        if driver is not None and driver.running:
+            return True
+        store = getattr(self._session, "_frontend_state_store", None)
+        state = getattr(store, "state", None)
+        loop = getattr(state, "loop", None)
+        if not isinstance(loop, dict):
+            return False
+        return loop.get("status") in {"running", "judging"}
+
+    def _maybe_judge_goal(self, event: AgentEvent) -> None:
+        """Judge the standing goal off a turn's end — triggers 1 and 2.
+
+        SYNCHRONOUS, and every refusal inside it is a silent return: this runs on
+        the event path, the judge is additive to it, and an instrument must never
+        fail the thing it instruments. The whole decision (is there an active
+        goal, is a loop running, is a judge already in flight) lives in the
+        driver, so it cannot be applied here and forgotten on the other host.
+
+        The one check that lives HERE is ownership, because it is about the
+        session rather than about the goal: a handle wrapping a session whose loop
+        runs somewhere else (a follower) must never judge (§3.2). A runtime handle
+        normally owns a real ``Session`` and answers ``"this-process"``, so this
+        is defensive rather than load-bearing on the shipped path — and it is one
+        line rather than a comment precisely so that a host that ever wraps an
+        attached session cannot silently start spending in it.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        try:
+            if not owns_the_session(self._session):
+                return
+            self._goal_judge_driver().start_turn_end(
+                error=bool(event.error),
+                aborted=bool(event.aborted),
+                serial=int(event.generation or 0),
+            )
+        except Exception:  # noqa: BLE001 — the event path never fails on the judge
+            logger.debug("goal judge trigger failed", exc_info=True)
+
+    def rearm_goal_judge(self) -> None:
+        """Trigger 3, once per boot: re-engage a goal whose judge was in flight.
+
+        Called through ``server._handle_call_on_session_loop`` immediately after
+        the fold subscription is installed, so this runs once per OWNED session,
+        on that session's loop, after the restored record is readable. The rule
+        of who re-arms lives in the driver (RULINGS R3): a ``waiting``/``stalled``
+        goal is NOT re-armed by a restart, because nothing was in flight and
+        *checkpoint state is not an instruction to spend more tokens*.
+
+        Synchronous by design: the plan that holds it cannot await, so it
+        schedules the probe as a background task on this loop.
+        """
+        task = asyncio.ensure_future(self._goal_judge_driver().rearm_on_resume())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @_on_session_loop
     async def run_headless_prompt(self, text: str) -> bool:
