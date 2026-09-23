@@ -115,11 +115,22 @@ def last_user_text(request: ChatRequest) -> str:
     one of the two loop prompts for a self-continuation. Reading the WHOLE
     message list instead would match the goal transcript every time and label
     every call the same.
+
+    Only TEXT blocks are read, and the two skips are separate facts. ``Content``
+    is ``TextContent | ImageContent`` and an image block carries no ``text`` at
+    all, so a user row holding a pasted attachment is skipped by SHAPE — asked of
+    the type rather than probed for the attribute, because a text-free block is
+    the expected case and not a malformed one. A ``TextContent`` whose ``text``
+    is empty is then skipped by VALUE: it would contribute no words while still
+    costing a separator. Both are load-bearing for the census that labels calls
+    by their question, so neither may be folded into the other.
     """
     users = [message for message in request.messages if message.role == "user"]
     if not users:
         return ""
-    return " ".join(block.text for block in users[-1].content if getattr(block, "text", None))
+    return " ".join(
+        block.text for block in users[-1].content if isinstance(block, TextContent) and block.text
+    )
 
 
 def provider_call_kinds(
