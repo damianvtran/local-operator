@@ -30,7 +30,7 @@ over those exact transcripts costs 1.75-2.07 s for 1.16-1.45 MB. The scan was
 not converging, and **nothing in the process could say which line it was on**,
 because the one instrument that would have answered (`LOP_RUNTIME_DEBUG_STACKS`,
 the SIGUSR1 asyncio dump) was not set on the launcher. That is the defect this
-change fixes first: a wedged runtime now names itself for operator investigation.
+change fixes first: a wedged runtime now records its stacks for operator investigation.
 
 ## No caller is named, and this note does not pretend otherwise
 
@@ -98,8 +98,9 @@ the same rig leaves at the bound (`rc=1`) with every thread's stack.
 
 **What it is stricter than, stated plainly.** A synchronous step is
 indistinguishable from a wedge from outside the process, so the bound is also a
-ceiling on ONE SILENT SYNCHRONOUS STEP: a step that takes tens of seconds passes,
-one that never returns is cut. What the bound measures is the
+diagnostic ceiling on ONE SILENT SYNCHRONOUS STEP: a step that takes tens of
+seconds may produce a dump; one that never returns remains for operator action.
+What the bound measures is the
 loops RUNNING, never the work advancing — a plane that keeps ticking while its
 work stands still is outside this design (nothing here can see that; inventing a
 second, footprint-based clock is what `process._work_motion` already does for the
@@ -120,32 +121,32 @@ provably dead at the **next `lop` startup**, so a child orphaned here is bounded
 by the next session start rather than by this process's death — the same
 guarantee today's only recovery (SIGKILL) already relies on.
 
-**Why the exit is the blunt one.** Past the bound the process must stop being a
-multi-hour freeze, and the graceful rungs cannot be reached from the state being
-detected: `_drain_for_signal` and `_commit_to_leaving` are coroutines on the loop
-that is blocked, and the `SIGTERM` handler that reaches them needs bytecodes the
-stuck thread never executes — the same fact that makes `lop stop` refuse a
-silent-socket runtime. The timer therefore dumps every thread from its own C
-thread, which is structural rather than sequenced, and THEN decides what to do
-with the process: `exit=not held` is re-decided at every re-arm from the same
-work probe the reaper's WORK signal reads, so a runtime with nothing in flight
-`_exit(1)`s exactly as before, while a runtime with a turn, a subagent or a job in
-flight keeps the dump, records the held state (``stall_watchdog.HELD_MARKER``) and
-stays ALIVE — stalled, marked, and ended by a person (`lop stop`, whose SIGKILL
-rung is the only one that reaches a wedge; see `control.py`). Evidence is never
-withheld either way: the bound still fires, still writes the dump and still records
-its class; only `_exit` is refused.
+**Production expiry is dump-only.** The previous implementation used
+`exit=not held` to let the native timer terminate a runtime after a Python sample
+said no work was in flight. That sample was outside the work-admission lock; a
+new turn, job or subagent could be admitted before the C timer expired. Since the
+native callback cannot re-check Python state or participate in every admission
+path, the sample was not a safe retirement barrier. The shared timer wrapper now
+always uses `exit=False`, including fires whose latest sample said idle.
 
-**What is lost, what survives.** On the fatal arm (nothing in flight) the
-in-flight turn's uncommitted step is lost — the same loss a SIGKILL inflicts,
-because a turn commits its transcript at each step and the step in flight has not
-committed. On the HELD arm nothing is lost and nothing is cut: the runtime keeps
-serving on the build it loaded, the turn inside it is still running, and the row
-plus the dump say so. Everything already committed survives on both arms, i.e. the
-conversation, which a successor can be engaged on. The record is left behind with
-a dead pid on the fatal arm, which `registry.classify` already reads as `stale`
-and `reclaim` already sweeps: no new vocabulary, and `live`/`wedged`/`stale` is
-untouched.
+The watchdog still writes every thread's stack and a fired marker. The sampler
+may append `stall_watchdog.HELD_MARKER` after observing a surviving fire, but that
+marker now describes a process that survived a diagnostic-only timer, not a fatal
+vs held decision. If the runtime remains stuck, the operator must inspect the dump
+and explicitly stop it (`lop stop --force` when graceful stop cannot reach the
+blocked loop). Idle frozen runtimes no longer receive automatic stale-idle
+termination or successor/reclaim handling; that is the fail-closed cost until all
+admissions and retirement share a native linearization barrier.
+
+**Cooperative update retirement is unchanged.** The reaper/viewer update path
+still checks the runtime's work-aware idle predicate and latches retirement
+against new admission. Disabling the watchdog's native exit does not weaken that
+separate gate; it only removes the unsafe asynchronous C-timer kill decision.
+
+**What survives a watchdog fire.** Previously committed conversation state and
+in-flight work remain in the process because the watchdog cannot end it. An
+operator's later explicit stop can interrupt an uncommitted step. Until then, the
+fired dump remains the investigation record beside the live runtime.
 
 **The file's content is the evidence, not its existence.**
 `<log dir>/runtime-stall-<pid>.log`, beside `runtime.log`. Only a file carrying
@@ -242,12 +243,10 @@ with green tests would make the fleet *look* protected, which is the failure thi
 whole design exists to avoid.
 
 **The firing path names its class.** `faulthandler` reaches its timer from a C thread
-and calls `_exit(1)` there, so no exit hook, no journal row and no reaper runs after a
-fire — the dump is the only place a class can be written, which is why the header and
-the progress line carry `incidents.STALL_BOUND_CAUSE` and `fired_leg()` reads the leg
-back out of the file. Without that token the loudest ending in the fleet — a runtime
-that dumped every thread and killed itself — was narrated as `unattributed`, i.e. "no
-act was recorded", which is the one reading that is worse than not knowing.
+and writes the fired marker and stacks without the GIL. Production configures it with
+`exit=False`, so the marker proves timer expiry but not process death. `fired_leg()`
+reads the diagnostic leg from the file, while pid liveness remains a separate fact;
+no journal or reaper is assumed to have run at the instant of a watchdog fire.
 
 ## Not in this change
 

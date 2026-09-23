@@ -337,16 +337,10 @@ def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Pa
     the claim is about, not a header-only file), and asserts the verdict's wording
     gone, because that sentence is the reading that shipped.
 
-    AND THE SAME CELL PINS THE OTHER HALF OF THAT CLAIM, because the wording that
-    replaced the verdict carried a false one of its own: it ended *"(this timer is
-    armed with `exit=True`)"*, which was the arm's behaviour before #1439 and is now
-    true of the IDLE arm only -- the header is also written for a runtime HOLDING
-    WORK, whose every arm is ``exit=False``. It is written at ARM time and the leg is
-    re-decided at every re-arm, so it cannot name the leg it will fire under; what it
-    may say is that the leg is answered per re-arm, which is what the assertion below
-    requires, and it may never claim a single arm's flag, which is what the absent-
-    text assertion requires. Measured on this rig rather than assumed: the same
-    sentence is rendered for the held arm and the idle arm (Q-4 follow-up, PR body).
+    AND THE SAME CELL PINS THE TIMER POLICY: every runtime dump is an observation,
+    not a verdict, and production uses ``exit=False``. The header is written before
+    any fire; it cannot promise process death or that a prior Python sample still
+    matches work admission when the native timer expires.
 
     THE MUTATION THIS CELL EXISTS TO CATCH, and it is the reason a presence assert
     is not enough on its own: drop ``{OBSERVATION_NOT_VERDICT}`` from the header in
@@ -372,14 +366,9 @@ def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Pa
         "the header asserts the verdict a fire never computes; a fire can precede a process "
         f"that carries on, which is the incident this wording caused: {text[:400]!r}"
     )
-    assert "exit=True" not in text, (
-        "the header claims a leg it cannot know at arm time -- the leg is answered at every "
-        "re-arm, and a held runtime's arms are exit=False, so this sentence is false for a "
-        f"fire the file itself precedes: {text[:400]!r}"
-    )
-    assert "ANSWERED AT EVERY RE-ARM" in text, (
-        "the header does not say how a reader can tell what the exit leg will be, so a fire "
-        f"on a held runtime is still read as fatal: {text[:400]!r}"
+    assert "exit=False" in text, (
+        "the runtime dump must state that production expiry is diagnostic-only, "
+        f"rather than imply native termination: {text[:400]!r}"
     )
 
 
@@ -420,8 +409,8 @@ assert stall_watchdog.arm(seconds=float(sys.argv[2])), "the child could not arm 
 print(f"armed:{os.getpid()}", flush=True)
 
 #: The serving plane's beat period, and therefore its stamp period. IT IS PART OF
-#: THE CONTRACT WITH THE PARENT, not a decoration: a stamp has to land STRICTLY
-#: inside the bound, because the bound is what `_exit(1)`s this process.
+#: THE CONTRACT WITH THE PARENT, not a decoration: a stamp has to land strictly
+#: inside the diagnostic window so the parent can prove the serving ticker ran.
 SERVING_BEAT_S = 0.2
 first_stamp = threading.Event()
 
@@ -448,11 +437,10 @@ def serving_plane() -> None:
 threading.Thread(target=serving_plane, daemon=True).start()
 # HAPPENS-BEFORE, NOT A RACE. The workload plane does not start parking until the
 # serving plane has already put a stamp on the parent's pipe, so the evidence the
-# parent asserts on cannot be scheduled into the exit. The wait carries no timeout
-# of its own and needs none: the bound armed above is this child's backstop, so a
-# serving thread that somehow never ran ends the process with the very `_exit(1)`
-# the parent's first assertion reads anyway (AGENTS.md, "Wait on the event, never
-# on the clock" — this is that rule inside the child, where the event exists).
+# parent asserts on cannot be confused with a ticker that never ran. The wait
+# carries no timeout of its own and needs none: the event is its completion
+# condition (AGENTS.md, "Wait on the event, never on the clock" — this is that
+# rule inside the child, where the event exists).
 first_stamp.wait()
 
 # The workload plane: busy in the matcher, and it never reports its progress.
@@ -739,7 +727,7 @@ def test_a_beat_whose_rearm_failed_says_the_sibling_is_behind_the_last_beat(
         """The re-arm RAISES, and the cancel still reaches the real C timer.
 
         The cancel is delegated rather than stubbed because this cell arms the REAL
-        timer before patching this in: a stub would leave a 30 s ``exit=True`` timer
+        timer before patching this in: a stub would leave a 30 s timer armed
         live past the cell and take a passing pytest worker with it, which is the
         failure mode the whole module is written against.
         """
@@ -3916,15 +3904,12 @@ os._exit(0)
 
 
 def test_an_executing_loop_with_a_step_in_flight_is_not_cut(tmp_path: Path) -> None:
-    """THE FAIRNESS CASE: a loop past the bound, executing, and spared.
+    """THE FAIRNESS CASE: executing work survives the watchdog's diagnostic fire.
 
-    The shape the 2026-09-22 dumps caught: the workload loop inside its own code for
-    longer than the bound, so its tick cannot run and no stamp arrives, while the
-    work is legitimate — a step of this process's own is executing, which is the
-    progress leg's second clause and the reason both legs abstain here. Before the
-    fix this child is ``_exit(1)``d at the bound; the sentinel is what says it lived,
-    and the absence of a fired marker is what says WHY it lived rather than being a
-    stopwatch that happened to be generous.
+    The workload loop stays inside its own code beyond the bound, so its tick cannot
+    run and no stamp arrives, while a legitimate step is in flight. The real C timer
+    still writes a dump, but ``exit=False`` keeps this child alive long enough to
+    complete the step and publish the sentinel.
     """
     sentinel = tmp_path / "returned.txt"
     result = _run_script(
@@ -4237,9 +4222,9 @@ def test_a_blocked_probe_does_not_hold_the_lock_a_beat_needs(tmp_path: Path) -> 
 # dumps on this host 37 carry the fired marker, and the event-loop thread's own
 # stack in those fires is a runtime DOING WORK (``session._run_turn`` ->
 # ``_emit`` -> ``serving._refresh_state``) more often than a runtime that
-# stopped. Keeping the dump and deciding the exit per re-arm is the change those
-# cells pin; the wedge recovery for an IDLE runtime is asserted beside it, since
-# it is the property this must not cost.
+# stopped. Production always keeps the diagnostic dump and the runtime alive,
+# regardless of its sampled work state; the idle and post-clear controls below pin
+# that fail-closed contract rather than expecting the old fatal exit.
 
 #: The child that arms with an EXIT LEG the way the runtime's entry point does —
 #: a probe injected from outside the module — and then parks in a GIL-RELEASING
@@ -4466,50 +4451,38 @@ def test_an_UNREADABLE_work_report_still_fires_and_holds(tmp_path: Path) -> None
     assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
 
 
-def test_the_same_child_with_NO_work_in_flight_is_still_ended(tmp_path: Path) -> None:
-    """THE WEDGE RECOVERY, and the CONTROL that makes the cell above mean something.
-
-    Same rig, same bound, same park: the only difference is what the exit leg was
-    told. An idle runtime keeps today's behaviour — the bound ends it — and a
-    control that also survived would show the cell above was measuring the rig
-    rather than the decision.
-    """
+def test_the_same_child_with_NO_work_in_flight_is_dumped_and_survives(
+    tmp_path: Path,
+) -> None:
+    """An idle-looking fire is diagnostic only; the live pid is not retired."""
     sentinel = tmp_path / "sentinel.txt"
     flag = tmp_path / "busy.flag"  # never created: the probe answers False
 
     result = _run_script(
         _EXIT_LEG_CHILD,
         tmp_path,
-        args=(str(sentinel), str(SHORT_BOUND_S), str(flag), "idle"),
+        args=(str(sentinel), str(SHORT_BOUND_S), str(flag), "idle", "0", "4"),
         timeout=60.0,
     )
 
-    assert result.returncode == 1, (
-        f"an idle runtime was not ended by its own bound: rc={result.returncode} "
+    assert result.returncode == 0, (
+        f"the native timer ended an apparently idle runtime: rc={result.returncode} "
         f"{result.stdout!r} {result.stderr!r}"
     )
-    assert not sentinel.exists(), "the child reached its own exit; the bound did not end it"
+    assert sentinel.read_text(encoding="utf-8") == "stopped on its own terms"
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
-    assert text.count(stall_watchdog.FIRED_MARKER) >= 1, text[:600]
-    assert not any(
-        line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
-    ), "a fatal fire wrote the held marker, so a reader would call an ended runtime stalled"
-    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is False
+    assert stall_watchdog.FIRED_MARKER in text, "the child survived without a real timer dump"
+    assert any(line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()), text
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
 
 
 def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path) -> None:
-    """The exit leg is a STATE, not a decision taken once at arm time.
+    """A cleared sampled hold does not turn a later production fire fatal.
 
-    The child reports work in flight, survives its bound, and then CLEARS its flag
-    — the work finished — with no re-arm of its own. The sampler re-reads the leg,
-    and the next fire must be fatal: the runtime that has nothing in flight is
-    exactly the runtime the bound exists to reap, so a hold that could not be
-    lifted would trade a silent cut for a runtime nothing can reclaim.
-
-    Both readings are asserted on ONE dump, which is why this cell is worth its
-    seconds: the held marker is there (the first fire was held) and the process
-    still died (the second was not).
+    The child starts with work in flight, survives the first fire, then clears its
+    flag. The sampler observes the new state and later fires remain diagnostic-only;
+    the child exits on its own after publishing its completion sentinel.
     """
     sentinel = tmp_path / "sentinel.txt"
     flag = tmp_path / "busy.flag"
@@ -4518,37 +4491,35 @@ def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path)
     result = _run_script(
         _EXIT_LEG_CHILD,
         tmp_path,
-        # Work clears at 2.5s; the bound is 1s, so the first fire is held and the
-        # next one — after the leg flips — is not.
-        args=(str(sentinel), str(SHORT_BOUND_S), str(flag), "busy", "2.5", "0"),
+        # Work clears after the first fire; the child is still responsible for
+        # stopping itself later, since neither timer fire may terminate it.
+        args=(str(sentinel), str(SHORT_BOUND_S), str(flag), "busy", "1.5", "4"),
         timeout=60.0,
     )
 
-    assert result.returncode == 1, (
-        f"the runtime was never ended after its work finished: rc={result.returncode} "
+    assert result.returncode == 0, (
+        f"a later timer fire ended the child after work cleared: rc={result.returncode} "
         f"{result.stdout!r} {result.stderr!r}"
     )
+    assert sentinel.read_text(encoding="utf-8") == "stopped on its own terms"
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
-    assert any(line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()), (
-        f"no held fire was recorded before the work cleared, so this cell cannot show a "
-        f"flip: {text[:900]!r}"
-    )
+    assert any(
+        line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+    ), f"no surviving fire was recorded while work was in flight: {text[:900]!r}"
     assert (
         text.count(stall_watchdog.FIRED_MARKER) >= 2
-    ), f"the timer fired once, so there was no second episode to be fatal: {text[:600]!r}"
+    ), f"no later dump was recorded after work cleared: {text[:600]!r}"
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
 
 
 def test_a_caller_with_no_busy_probe_keeps_the_old_exit_leg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """NO PROBE IS NOT "UNKNOWN": it is a caller with nothing to report.
+    """An absent probe does not turn diagnostic expiry into process termination.
 
-    The distinction is the whole reason this is a cell. A probe that RAISES holds
-    the exit leg (the runtime said it could report and the report failed), while a
-    caller that supplied no probe at all keeps the bound's documented behaviour —
-    the one production arm site always supplies one, so holding on absence would
-    only disarm the bound for the rigs and reduced hosts that cannot speak.
+    Reduced callers without a probe still receive all-thread dumps; no Python
+    sample can authorize native termination in production.
     """
     fake = _FakeFaulthandler()
     monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
@@ -4723,7 +4694,7 @@ def test_the_backoff_counter_is_per_EPISODE_not_per_process(
 
     A lifetime counter meant a runtime that survived a fire, cleared its work and wedged
     AGAIN later re-armed at the backed-off interval — up to twelve times the configured
-    bound — and on the fatal arm that is the wedge recovery itself being delayed by the
+    bound — and a diagnostic-only arm would delay the next dump after recovery by the
     same factor. ``_apply_exit_leg`` is the flip the sampler makes when the work clears
     with no fire pending, so that is where the episode ends.
     """
@@ -4795,21 +4766,10 @@ def test_a_marker_that_landed_MID_LINE_still_reads_as_held(tmp_path: Path) -> No
 def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """BLOCKER (round 3, found by the fold because it needs both parents): the FOURTH
-    arm site hard-coded ``exit=True``.
+    """The executing-loop extension also goes through the dump-only wrapper.
 
-    ``_arm_timer`` is the one spelling for the four sites that reach
-    ``dump_traceback_later``, and its docstring forbids spelling the flag anywhere else —
-    because the whole change is that the exit leg is answered PER RE-ARM. The extension
-    for an executing loop bypassed it, and the case it is reached in is the one this
-    change exists for: the loop is executing while its tick is starved, which means work
-    is in flight, so a fatal arm there ends the very runtime the bound must leave alive.
-    The reviewer's real-child counterfactual: nine fatal arms, rc=1 with fires=1 and
-    markers=0 (killed — so ``held_fire`` False and the verdict narrates "ended ITSELF");
-    with the flag taken from the arm, rc=0 with fires=9 and markers=9.
-
-    The ARMED FLAG is what this cell reads, which is why it is cheap and exact: an
-    integration run of the same shape is the counterfactual above, not a unit cell.
+    The spy checks the real faulthandler call so this exceptional deadline-extension
+    path cannot bypass production's unconditional ``exit=False`` policy.
     """
     captured: list[bool] = []
     monkeypatch.setattr(
