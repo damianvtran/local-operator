@@ -43,6 +43,7 @@ from local_operator.evaluation.runner.provider_client import (
 from local_operator.evaluation.runner.public_reply import (
     _MAX_EXTRA_KEY_CHARS,
     _MAX_EXTRA_KEYS_SHOWN,
+    _MAX_TRAILING_DECODE_ATTEMPTS,
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
     REJECTED_REPLY_WITHHELD,
@@ -256,6 +257,250 @@ def test_a_generic_tool_call_serialization_is_unwrapped_and_decoded(variant: str
     assert decode_public_reply(wrapped.public_reply or "")["public_observations"] == (
         "Visible status: ready"
     )
+
+
+#: One rejected reply VERBATIM from the OSWorld episode this tolerance was built
+#: from -- the run ``judge5-20260921-231232``, episode ``ep-3f6be3110883``, the
+#: refusal the run recorded as ``class: batch-shape`` at event sequence 94. Its
+#: ``actions`` member is a STRING: the model opened a quote at the value and then
+#: wrote the rest of its own envelope INSIDE it, so the string carries the array
+#: followed by ``, "public_observations": "..."}``. Pinned byte for byte because
+#: the shape IS the measurement -- 9 of that episode's 120 calls (7.5%) and 30 of
+#: the campaign runs' 74 sealed refusals arrived this way, and each one cost a
+#: whole paid call to repair with a re-prompt that repeated the mistake.
+_MEASURED_STRING_ACTIONS_REPLY = '{"actions": "[{\\"kind\\": \\"type\\", \\"observation_id\\": \\"1da088ef2d7a5f6e3d811be671d17b792da92de57aeebce7de7d25e9dfc3321c\\", \\"text\\": \\"ls -la; ls city; ls filter\\"}, {\\"keys\\": [\\"enter\\"], \\"kind\\": \\"key\\", \\"observation_id\\": \\"1da088ef2d7a5f6e3d811be671d17b792da92de57aeebce7de7d25e9dfc3321c\\"}], \\"public_observations\\": \\"Verifying current terminal state and directory contents after ambiguous error output.\\"}"}'  # noqa: E501
+
+
+def _string_actions_body(actions: Any, *, note: str | None = None) -> str:
+    """The measured double-encoding, rebuilt around any action array.
+
+    ``{"actions": [...], "public_observations": "..."}`` written as a STRING:
+    the array with the envelope's own remaining member inside it, which is what
+    all 30 of the campaign's sealed replies of this class do. Rebuilt rather
+    than pasted so a case can vary the array while the spelling under test stays
+    the measured one; the verbatim body above is pinned separately.
+    """
+
+    inner = json.dumps(actions)
+    if note is not None:
+        inner += f', "public_observations": {json.dumps(note)}' + "}"
+    return json.dumps({"actions": inner})
+
+
+def test_the_measured_string_actions_reply_is_decoded_and_accepted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The verbatim reply the tolerance exists for, DECIDED instead of refused.
+
+    Its actions are asserted one by one rather than counted, because the batch
+    that executes has to be the batch the model stated inside the string -- a
+    tolerance that salvaged the turn by running something else would be worse
+    than the refusal it replaced. The note inside the tail is deliberately NOT
+    recovered (see ``_actions_from_json_string``), which is why the reply
+    publishes an empty one: the string is a JSON FRAGMENT, and finding where the
+    model's object began is the guess the decoder refuses to make elsewhere.
+    """
+
+    with caplog.at_level(logging.WARNING):
+        decoded = decode_public_reply(_MEASURED_STRING_ACTIONS_REPLY)
+
+    assert decoded["actions"] == [
+        {
+            "kind": "type",
+            "observation_id": "1da088ef2d7a5f6e3d811be671d17b792da92de57aeebce7de7d25e9dfc3321c",
+            "text": "ls -la; ls city; ls filter",
+        },
+        {
+            "kind": "key",
+            "observation_id": "1da088ef2d7a5f6e3d811be671d17b792da92de57aeebce7de7d25e9dfc3321c",
+            "keys": ["enter"],
+        },
+    ]
+    assert decoded["public_observations"] == ""
+    # The record a campaign counts this tolerance against. It is written when the
+    # reply is ACCEPTED, so the line means what it says.
+    assert "JSON-encoded string" in caplog.text
+
+
+_STRING_ACTIONS_SPELLINGS = (
+    "array-only",
+    "array-and-envelope-tail",
+    "single-action-array",
+    "inside-action_batch",
+    "action_batch-as-string",
+    "inside-tool-call-wrapper",
+)
+
+
+@pytest.mark.parametrize("spelling", _STRING_ACTIONS_SPELLINGS)
+def test_a_json_encoded_actions_string_is_the_same_decision(spelling: str) -> None:
+    """One decision per spelling of "the array, written as a string".
+
+    The DECISION must be the legacy batch byte for byte: this tolerance changes
+    what the decoder can READ and never what executes. ``array-only`` is the
+    clean case and ``array-and-envelope-tail`` is the shape the bundle actually
+    carries; the last three pin that the string spelling follows the SAME keys
+    and wrappers the array itself already may arrive under, instead of becoming
+    a framing-dependent exception -- inside ``action_batch`` it is the same key,
+    as a string in ``action_batch``'s own position it is the spelling this module
+    already accepts for the array, and inside a generic tool call it is one
+    decision behind two framing layers.
+    """
+
+    current = observation()
+    actions = json.loads(type_payload(current))["actions"]
+    if spelling == "single-action-array":
+        actions = actions[:1]
+
+    if spelling == "array-only":
+        body = json.dumps({"actions": json.dumps(actions)})
+    elif spelling == "array-and-envelope-tail":
+        body = _string_actions_body(actions, note="Recovered from the string.")
+    elif spelling == "single-action-array":
+        body = _string_actions_body(actions, note="One action.")
+    elif spelling == "inside-action_batch":
+        body = json.dumps({"action_batch": {"actions": json.dumps(actions)}})
+    elif spelling == "action_batch-as-string":
+        # ``{"action_batch": [...]}`` is already an accepted spelling of the
+        # array, so the string form of it is the same defect at the same place.
+        # Refusing it here would make the tolerance depend on WHICH key the
+        # array was framed under, which is the split this module refuses.
+        body = json.dumps({"action_batch": json.dumps(actions)})
+    else:
+        body = _wrapped("tool_name-parameters", _string_actions_body(actions, note="Wrapped."))
+
+    legacy = parse_decision(type_payload(current), current, route=ROUTE)
+    decision = parse_decision(body, current, route=ROUTE)
+
+    assert decision.action_batch.to_canonical_json() == legacy.action_batch.to_canonical_json()
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["not-json", "scalar", "list-of-scalars", "single-action-object", "empty", "empty-array"],
+)
+def test_a_string_that_is_not_an_action_array_keeps_its_refusal(spelling: str) -> None:
+    """The tolerance may only ACCEPT a decision; it may never widen a refusal.
+
+    Each of these is a string in the ``actions`` position that is not a
+    non-empty array of action objects, so it keeps the refusal -- and the exact
+    message -- it had before this change. ``single-action-object`` is here on
+    purpose: a string holding ONE action object does not occur in any of the 29,
+    and a second tolerance for a shape nobody has been observed to send is how a
+    decoder stops being readable.
+    """
+
+    action = json.loads(type_payload(observation()))["actions"][0]
+    spellings = {
+        "not-json": "Sure, here is my batch",
+        "scalar": "42",
+        "list-of-scalars": json.dumps([1, 2]),
+        "single-action-object": json.dumps(action),
+        "empty": "",
+        "empty-array": "[]",
+    }
+    body = json.dumps({"actions": spellings[spelling]})
+
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(body, observation(), route=ROUTE)
+
+    assert "decision must carry a non-empty actions array" in str(info.value)
+
+
+def test_a_top_level_encoded_actions_batch_still_refuses_a_competing_batch() -> None:
+    """The outer ambiguity scan must see IDs through the accepted string spelling."""
+
+    current = observation()
+    actions = json.loads(type_payload(current))["actions"]
+    body = json.dumps({"actions": json.dumps(actions)}) + " " + finish_payload(current)
+
+    with pytest.raises(DecisionParseError, match="second action batch"):
+        parse_decision(body, current, route=ROUTE)
+
+
+def test_an_exhausted_competing_batch_scan_refuses_encoded_actions() -> None:
+    """A bounded scan cannot treat unchecked trailing candidates as safe."""
+
+    current = observation()
+    actions = json.loads(type_payload(current))["actions"]
+    harmless = " ".join(
+        json.dumps({"unrelated": index}) for index in range(_MAX_TRAILING_DECODE_ATTEMPTS)
+    )
+    body = (
+        json.dumps({"actions": json.dumps(actions)})
+        + " "
+        + harmless
+        + " "
+        + finish_payload(current)
+    )
+
+    with pytest.raises(DecisionParseError, match="second action batch"):
+        parse_decision(body, current, route=ROUTE)
+
+
+def test_a_competing_batch_hidden_in_the_string_still_refuses_the_turn() -> None:
+    """The one invariant the tolerance is not allowed to trade away.
+
+    That string is a JSON FRAGMENT -- the array, then the envelope's own tail --
+    so the normaliser now reads text it used to refuse outright. A SECOND batch
+    for this same observation inside that tail is the ambiguity
+    ``_decode_leading_json`` refuses everywhere else: executing the first would
+    run a decision the model superseded. Handed the bare array the scan behind
+    that rule finds no observation id and stands down, which is why the coercion
+    hands it a batch-shaped view of what it decoded.
+    """
+
+    current = observation()
+    inner = json.dumps(json.loads(type_payload(current))["actions"])
+    inner += f', "public_observations": {json.dumps("notes")}' + "}"
+    inner += " " + finish_payload(current)
+    body = json.dumps({"actions": inner})
+
+    with pytest.raises(DecisionParseError):
+        parse_decision(body, current, route=ROUTE)
+
+
+def test_a_string_actions_reply_still_binds_to_this_observation() -> None:
+    """The tolerance reads a SPELLING; it does not relax the binding rule.
+
+    A batch naming another observation is the one failure worse than losing the
+    turn, and it is refused here exactly as it is when the array arrives as an
+    array: the coercion is applied before binding is ever considered, so the
+    string spelling cannot become a way around it. The refusal is the action
+    protocol's own class, not the framing decoder's -- which is the same
+    layering the identical objects get without the string.
+    """
+
+    current = observation()
+    stale = json.loads(type_payload(observation(1)))["actions"]
+
+    with pytest.raises(DecisionParseError):
+        parse_decision(_string_actions_body(stale, note="stale"), current, route=ROUTE)
+
+
+def test_the_string_tolerance_adds_nothing_to_an_already_well_formed_reply(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reply that is already an array pays nothing: same bytes, no record.
+
+    The tolerance may not add a log line, an extra parse or a branch's worth of
+    behaviour to the ordinary reply. The count it writes is the measure of a
+    DEFECT, so a run of zeros has to keep meaning "the models stopped sending
+    this" -- which is only true if nothing writes it on the healthy path.
+    """
+
+    current = observation()
+    legacy = parse_decision(type_payload(current), current, route=ROUTE)
+    with caplog.at_level(logging.WARNING):
+        visible = parse_decision(
+            _full_envelope(current, "Visible status: ready"), current, route=ROUTE
+        )
+
+    assert visible.action_batch.to_canonical_json() == legacy.action_batch.to_canonical_json()
+    assert decode_public_reply(visible.public_reply or "")["public_observations"] == (
+        "Visible status: ready"
+    )
+    assert "JSON-encoded string" not in caplog.text
 
 
 @pytest.mark.parametrize(
