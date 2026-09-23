@@ -159,3 +159,37 @@ addressed:
   `retainProjectionStream` stubs in these same files do the same, and deepening
   only this one would make the two stream mocks inconsistent for a nit. A
   comment now records the choice at each stub.
+
+## Design review
+
+Design review ran to **round 4, TERMINAL**, on the mobile UI itself (the real
+built bundle, driven in a browser at phone viewport):
+
+- **D1 (MAJOR)** — an empty `Active Sessions` / `Previous Sessions` heading,
+  newly reachable because a pin LIFTS a row out of its ranked section. All three
+  sections are now conditional (the sidebar's own rule) with a
+  `no matching conversations` line when everything is empty —
+  `after-all-pinned.png`.
+- **D2** — no discoverer for the list's own gesture. The list now teaches it
+  with `touch and hold a row to pin it`, shown only while nothing is pinned —
+  `after-pin-hint.png`.
+- **D3** — the 32px header controls now share a `HEADER_CONTROL` class with a hit
+  slop; measured ~40px horizontal (the 4px slop overlap is stated, not hidden).
+- **D5 (MAJOR)** / **D6** — the hint appeared above an empty list and returned
+  when a search hid the pins. Gated on what is visible and on the store's pins —
+  `after-no-match.png`.
+- **D8** — the hint collapsed via a fixed `max-height` sized for one line, which
+  **clipped a wrapped caption**. Replaced with a `0fr`/`1fr` grid collapse that
+  measures its content; verified at a forced two-line wrap.
+- **D11 (recorded)** — grid-track interpolation needs Safari 16+; the end state
+  still applies on older engines, so only the ease degrades, same as the
+  reduced-motion fallback.
+
+## Code review
+
+Code review ran to **round 5, TERMINAL**: round 1 (2 MAJOR + 3 MINOR + 1 NIT),
+round 2 (4 MINOR + 1 NIT), round 3 (clean; 1 MINOR + 1 NIT), round 4 (clean;
+1 MINOR + 2 NIT), round 5 (clean; whitespace NITs). Each round's remediation is
+recorded as a comment on the PR. Notably, round 1's MAJORs caught a woken
+session flashing under Previous and a cross-thread SSE wake; round 3 caught a
+parity fixture that could not fail on a wrong ranking input.
