@@ -4507,6 +4507,36 @@ class Session:
         return self._goal_state.text
 
     @property
+    def interactivity_probe(self) -> Callable[[], bool] | None:
+        """The live probe answering "can a question be PRESENTED to anyone".
+
+        Read-only view onto the same holder the prompt closure reads, exposed
+        because a SUBAGENT cannot answer this question itself: a child Session is
+        constructed in-process, holds no control socket and has no registrant, so
+        its only source is the parent's runtime. ``_build_child_session`` installs
+        this probe OBJECT on the child's holder rather than copying its value,
+        which keeps the child's answer live per turn exactly as ``goal=`` does —
+        and the holder itself is deliberately not shared, because it also carries
+        the team and agent briefs.
+
+        ``None`` for every host that never installed one (a plain CLI, a test),
+        which reads as attached: a person is in front of those by construction.
+        The runtime is the only writer, through
+        ``serving._install_interactivity_probe``.
+        """
+        return self._goal_state.interactive_probe
+
+    def is_interactive(self) -> bool:
+        """Whether a question can be PRESENTED to anyone (default True).
+
+        Tier A as a plain answer, for callers that want the fact rather than the
+        probe — ``_build_child_session`` asks its PARENT this, because a child has
+        no control socket and cannot answer it. Live per call: it forwards to the
+        holder, so two calls across an attach/detach get the two answers.
+        """
+        return self._goal_state.is_interactive()
+
+    @property
     def agent_brief(self) -> str:
         """The instructions ``/agent`` last stamped on the tail ("" when none).
 
@@ -9443,6 +9473,11 @@ class Session:
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
+            # The BOUND METHOD, not its value: this context is a snapshot taken
+            # once per turn, so a stored boolean would freeze the answer for the
+            # whole turn and a re-read per call is what the browser flow needs
+            # (``_bridge_access`` asks at result-render time, after a wait).
+            attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,

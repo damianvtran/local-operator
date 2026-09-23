@@ -525,8 +525,11 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     assert "Darwin" in env_block
     assert "demo" not in env_block
 
-    # last block: the skills listing verbatim
-    assert skills == SKILLS
+    # last block: the skills listing verbatim, and then the interactivity block
+    # — which now rides the tail for an ATTACHED session too, so this pins both
+    # the verbatim listing and the order they appear in.
+    assert skills.startswith(SKILLS)
+    assert skills == f"{SKILLS}\n\n{ATTACHED_INTERACTIVITY}"
 
 
 def test_model_label_rides_the_env_block_not_the_stable_head() -> None:
@@ -569,7 +572,7 @@ def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
     assert len(blocks) == 4
     assert "- bash" in blocks[1]
     assert blocks[2].startswith(f"Today is {DATE}.")
-    assert blocks[3] == "<skills/>"
+    assert blocks[3] == f"<skills/>\n\n{ATTACHED_INTERACTIVITY}"
 
 
 def test_block_zero_and_one_are_byte_stable_across_turns() -> None:
@@ -993,20 +996,79 @@ def test_team_brief_rides_the_volatile_tail() -> None:
     assert blocks[1] == again[1]
 
 
-def test_a_detached_session_tells_the_model_nobody_can_answer() -> None:
-    """The model must know it has no interactive surface BEFORE it decides to
-    ask a question.
+#: The two `<interactivity>` bodies, VERBATIM. Asserting the WHOLE text rather
+#: than a substring is deliberate: these blocks are constants that ride the
+#: persisted system-prompt tail, and a future edit that reintroduces a claim
+#: about who is looking has to change one of these literals and say why
+#: (design: docs/design/attached-interface-signal.md §3.2, "Exact bytes").
+ATTACHED_INTERACTIVITY = """<interactivity>
+An interface is attached to this session, so a question you ask WILL be
+presented to the operator: `ask` puts it on that surface and waits for the
+answer, parked for hours if necessary.
 
-    A detached session's ``ask`` costs a parked gate — which holds the runtime
-    resident for up to a day — and gets no answer. Saying so once, in the
-    volatile tail, is what lets the model proceed or finish instead.
+- Ask when the answer is genuinely the operator's to give, and not otherwise.
+- The question is presented even if nobody is looking at this exact moment. It
+  waits; it is not lost. A slow answer is not a refusal, and it is not a reason
+  to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+UNATTACHED_INTERACTIVITY = """<interactivity>
+No interface is attached to this session right now, so a question you ask cannot
+be presented to anyone until a surface attaches: it waits, unread, and the turn
+may block for hours.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over calling `ask`.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+
+def test_a_detached_session_is_not_told_the_operator_is_unavailable() -> None:
+    """The negative block states what was MEASURED and nothing more.
+
+    It is the model's foreknowledge that a question cannot be presented, which
+    is why it is emitted before a question is asked rather than after a gate
+    expires. What it must NOT do is claim a person's absence: the retired
+    wording said a screen had nobody watching it, and that is the sentence the
+    incident turned on — a focused, visible app whose machine-wide record could
+    not NAME the conversation was reported as unattended — and the sentence
+    models repeated into ``hub`` messages.
     """
     detached = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+
+    assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY)
+    # Belt and braces on the two claims this block may never make again, in
+    # either casing: a reader of this file should not have to diff literals to
+    # find out that the text says nothing about a screen.
+    lowered = detached[-1].lower()
+    assert "nobody is watching a screen" not in lowered
+    assert "nobody is at a screen" not in lowered
+    assert "screen" not in lowered
+
+
+def test_an_attached_session_is_told_a_question_will_be_presented() -> None:
+    """Silence was read as the opposite of what it meant.
+
+    An attached session used to emit no block at all, so a model with a mounted
+    pane in front of it had only the negative text's vocabulary to reason from
+    and reasoned its way to "probably nobody is attached". The positive body is
+    a deliberate, permanent cost on every request of an attached session; it is
+    the counterweight that makes "is an interface attached" answerable at all.
+    """
     attached = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
 
-    assert "<interactivity>" in detached[-1]
-    assert "cannot be answered" in detached[-1]
-    assert "<interactivity>" not in attached[-1]
+    assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+    # The positive text says the question WAITS; it never claims the operator is
+    # looking at this moment, which is the fact the block cannot know.
+    assert "screen" not in attached[-1].lower()
 
 
 def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
@@ -1026,3 +1088,15 @@ def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
 
     assert last == first
     assert len(last[-1]) == len(first[-1])
+
+    # The ATTACHED body churns the same way, and it is the one that now rides
+    # every request of an attached session: the probe re-reads per turn, so
+    # focus changes and reattaches that leave Tier A unchanged must cost the
+    # same bytes, and therefore write no ``session-state`` row.
+    attached_first = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+    for _ in range(100):
+        build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+    attached_last = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+
+    assert attached_last == attached_first
+    assert attached_last[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)

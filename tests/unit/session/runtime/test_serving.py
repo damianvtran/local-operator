@@ -86,6 +86,13 @@ class FakeSession:
         #: MCP grant through it, since the grant outlives the request that
         #: started it. Tests replace it to capture what viewers would see.
         self._emit: Any = None
+        #: The holder ``_install_interactivity_probe`` installs the model-facing
+        #: probe onto. ``None`` matches a host that never grew one — an absent
+        #: attribute reads the same way — and a test that pins the install puts a
+        #: real :class:`GoalState` here. Declared for the same reason as
+        #: ``mcp_manager``: an undeclared attribute is invisible to the type
+        #: checker every gate runs.
+        self._goal_state: Any = None
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"

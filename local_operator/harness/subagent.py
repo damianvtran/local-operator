@@ -2070,6 +2070,15 @@ async def _construct_child_session(
             repo_guidance=repo_guidance,
             credentials=names,
             model_label=model_label,
+            # THE PARENT'S ANSWER, read live off the parent's holder for the same
+            # reason ``goal=`` above is: a child cannot answer this itself (no
+            # control socket, no registrant), and whether an interface is attached
+            # is a fact about the PARENT's session — the surface the operator is
+            # attached to. Passing nothing here left the child on the ``True``
+            # default unconditionally, which is the same defect from the other
+            # side: a child silently told a question can be presented, or silently
+            # told the operator is unavailable, with no view of the truth.
+            interactive=parent_session.is_interactive(),
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )
@@ -2160,6 +2169,21 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # THE CHILD CANNOT ANSWER THIS ITSELF, so its own holder gets the PROBE
+    # OBJECT rather than a copied value: the child holds no control socket and no
+    # registrant, and its only channel to a human is ``hub`` -> parent, so "is an
+    # interface attached" is a fact about the PARENT's session. Installing the
+    # object (exactly as ``goal=`` reads the parent live) keeps the child's answer
+    # live per turn, and keeps it in agreement with the browser text the child
+    # renders (``ToolContext.attached_probe`` reads the same holder).
+    #
+    # The parent's HOLDER is deliberately NOT shared. ``GoalState`` also carries
+    # ``team_brief`` and ``agent_brief``; a child that inherited those through the
+    # holder would silently start rendering the parent's ``<team>`` block, which
+    # is an instruction-precedence bug rather than an inheritance.
+    parent_probe = parent_session.interactivity_probe
+    if parent_probe is not None:
+        child._goal_state.interactive_probe = parent_probe
     if child_stream is not parent_stream:
         child.add_dispose_hook(child_stream.close)
     # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is
