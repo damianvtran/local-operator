@@ -204,6 +204,16 @@ async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["I
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
 
+#: How long the per-connection sync task waits for the ON-LOOP frontend bind
+#: before falling back to the off-loop one (``_serve_frontend_sync``).
+#:
+#: 100 ms, from the healthy owner's own distribution rather than a guess: a
+#: healthy owner binds in 4.7-5.0 ms p50 and at most ~15 ms p95, so a healthy attach
+#: never reaches this grace and its bytes on the wire are unchanged. An owner
+#: busy inside a synchronous step of a turn is the case it exists for, and there
+#: the wait has no ceiling of its own — the parked hop is what measured 15.0 s.
+_ONLOOP_BIND_GRACE_S = 0.1
+
 
 def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
     """Encoded bytes this frame occupies on the wire, with the delimiter counted.
@@ -1206,6 +1216,19 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    #: This connection's CURRENT bind generation, and the mechanism that keeps a
+    #: late on-loop bind from relaying into a connection the off-loop fallback
+    #: already bound (``_serve_frontend_sync``).
+    #:
+    #: An attach that outlasts ``_ONLOOP_BIND_GRACE_S`` is served off-loop, but
+    #: the on-loop bind it abandoned is SHIELDED and cannot be cancelled — it
+    #: still lands in the store and still calls the relay. Without a stamp the
+    #: same connection would see every delta twice, which is not a slow frame but
+    #: a wrong one: the client's exact-``+1`` check reads the duplicate as a gap
+    #: and redials. The generated callback compares the token it was stamped with
+    #: against this field, so bumping it retires every callback created before the
+    #: bump — the fallback's own included, if a THIRD attempt ever supersedes it.
+    bind_token: int = 0
     #: The chain of ops this connection has ADMITTED: each waits for the one
     #: before it, so ordering is preserved, and none of them parks the reader —
     #: which is what lets a ``ping`` be answered while a mutation is still in
@@ -1502,6 +1525,13 @@ class RuntimeServer:
         #: for tests and for the "did a headless runtime pay for a fold?"
         #: question; 0 after a lifetime with no daemon client is the claim.
         self.projection_sinks_built: int = 0
+        #: How many viewers this runtime attached by binding OFF the session's
+        #: loop because the on-loop bind missed ``_ONLOOP_BIND_GRACE_S``.
+        #: Observable for the same reason ``projection_sinks_built`` is: it is
+        #: the term that says whether the grace is mistuned for a given host. A
+        #: healthy owner answers in one digit of milliseconds, so a nonzero count
+        #: on an idle session is the signal that the grace (or the host) moved.
+        self.frontend_off_loop_binds: int = 0
         # What build this runtime is running, stamped once at construction:
         # the answer cannot change while the process lives, and the record is
         # the channel an attach client reads it from before it dials.
@@ -2907,6 +2937,54 @@ class RuntimeServer:
 
     # -- connections -----------------------------------------------------------
 
+    def _frontend_relay(self, conn: _ClientConn, token: int) -> Callable[[Any], None]:
+        """A canonical-delta relay STAMPED with the bind generation it belongs to.
+
+        One factory for both bind attempts (on-loop and off-loop) so the two
+        cannot drift in what they put on the wire — the frame is built here, in
+        the only place that builds it.
+
+        The stamp is the whole mechanism behind ``_ClientConn.bind_token``: an
+        attach that outlives the grace is served off-loop, but the shielded
+        on-loop bind it abandoned still lands in the store and still calls this
+        callback. Its token is stale by then, so it returns early — without the
+        check the SAME connection would receive every delta twice, and a client
+        reading an exact-``+1`` stream treats a duplicate as a gap and redials.
+        """
+
+        def on_update(update: Any) -> None:
+            if conn.bind_token != token:
+                return
+            payload = update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+            self._relay_frontend_to(conn, payload)
+
+        return on_update
+
+    async def _bind_with_grace(self, bind_task: asyncio.Task[Any]) -> Any | None:
+        """The on-loop bind's subscription if it answers inside the grace, else ``None``.
+
+        ``None`` means HAND OFF, never "failed": the caller binds off-loop
+        instead (``_serve_frontend_sync``), which is the whole point of the grace.
+        A genuine bind failure is NOT swallowed here — it is re-raised out of
+        ``bind_task.result()`` so the caller drops the connection exactly as it
+        always did.
+
+        A METHOD RATHER THAN AN INLINE ``wait_for`` because of the second exit.
+        ``wait_for`` expiring cancels the SHIELD it created, not the task it
+        shielded, so when the timeout's own callback runs before the shield's
+        completion callback the awaiting task is told the grace expired while
+        ``bind_task`` is ALREADY DONE and holding a live subscription. Handing off
+        there would bind this connection twice and then release the landed one,
+        and it would mark a HEALTHY owner window-less — the display window being
+        the one thing the on-loop path carries that the off-loop one cannot.
+        """
+        try:
+            return await asyncio.wait_for(asyncio.shield(bind_task), _ONLOOP_BIND_GRACE_S)
+        except TimeoutError:
+            if bind_task.done() and not bind_task.cancelled():
+                return bind_task.result()
+            return None
+
     async def _serve_frontend_sync(
         self,
         conn: _ClientConn,
@@ -2916,7 +2994,7 @@ class RuntimeServer:
         """Bind one viewer and queue its canonical ``frontend_sync`` frame.
 
         A per-connection task rather than inline work in ``_on_connection``; the
-        reason it is deferred at all is at its creation site. It owns two
+        reason it is deferred at all is at its creation site. It owns three
         invariants:
 
         * **The frame order is the frame order it always was.** Registration and
@@ -2932,23 +3010,25 @@ class RuntimeServer:
           exception in the callback while the connection stayed registered, never
           read and never dropped. As a task it has an owner: the failure drops the
           connection and releases its subscription.
+        * **A busy owner does not hold the bind.** The on-loop bind is given
+          ``_ONLOOP_BIND_GRACE_S``; past it this task binds OFF-LOOP through
+          ``subscribe_frontend_nowait`` and queues the sync without a display
+          window. What that buys is the whole point of the path — measured 15.0 s
+          of control attach against a blocked owner, for a bind whose register
+          half never needed that loop at all.
 
         ``subscribe_frontend`` arrives as a PARAMETER, resolved and
         capability-checked at the creation site: dropping a connection whose
         handle cannot bind belongs on the connection path, where the socket still
-        exists to be closed, not inside a task.
+        exists to be closed, not inside a task. The off-loop capability is read
+        here instead, and its ABSENCE is not a refusal: a single-plane handle (the
+        TUI kind) simply keeps today's behaviour and waits the hop out.
         """
         # Declared before the ``try`` so the failure path can hand the bind task
         # to ``_release_when_landed`` even when the raise happened before it was
         # created (a capability check, a sync-payload build).
         bind_task: asyncio.Task[Any] | None = None
         try:
-
-            def on_update(update: Any) -> None:
-                payload = (
-                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-                )
-                self._relay_frontend_to(conn, payload)
 
             from local_operator.session.frontend_state import (
                 FrontendSubscription,
@@ -2989,16 +3069,19 @@ class RuntimeServer:
             # other connection keep flowing for the same reason, because the
             # wait is on this task rather than on the runtime's loop.
             #
-            # AND THE HOP IS DELIBERATELY LEFT UNBOUNDED, which reads at first
-            # like the opposite of a fix. A budget belongs to a CALLER that is
-            # waiting for an answer; the only caller here is a task nothing
-            # awaits, so a budget buys it nothing and costs a live viewer its
-            # connection (``mobile/tui_handle._on_app``'s unbounded branch
-            # carries that measurement: a viewer dialled into a busy terminal
-            # was welcomed and then killed at 10.01 s with ``owner exited``
-            # while the app was merely busy). The bind therefore lands late
-            # instead, and the interactive budget stays where a caller is
-            # actually waiting.
+            # THE HOP IS BOUNDED NOW, BUT BY A FALLBACK TRIGGER RATHER THAN BY A
+            # FAILURE BUDGET, and the difference is what keeps the old reasoning
+            # intact. A budget belongs to a CALLER waiting for an answer; the only
+            # caller here is a task nothing awaits, so letting the bind FAIL at a
+            # deadline buys nothing and costs a live viewer its connection
+            # (``mobile/tui_handle._on_app``'s unbounded branch carries that
+            # measurement: a viewer dialled into a busy terminal was welcomed and
+            # then killed at 10.01 s with ``owner exited`` while the app was
+            # merely busy). Exceeding ``_ONLOOP_BIND_GRACE_S`` therefore changes
+            # WHO binds, never whether: past the grace this task binds off-loop
+            # and the abandoned hop is released as it lands (``bind_token``, then
+            # ``_release_when_landed``). A healthy owner answers in 4.7-5.0 ms
+            # p50, far inside the grace, so the path taken there is unchanged.
             #
             # The seam is SINGLE for both handle shapes, and that is why no hop
             # is added here: ``ServingSessionHandle.subscribe_frontend`` carries
@@ -3007,7 +3090,7 @@ class RuntimeServer:
             # ``session_loop`` is served inline by
             # ``_handle_call_on_session_loop``, so the TUI kind keeps the hop it
             # already had rather than gaining a second.
-            async def bind() -> Any:
+            async def bind(on_update: Callable[[Any], None]) -> Any:
                 outcome = (
                     subscribe_frontend(on_update, display_window=True)
                     if window_requested
@@ -3026,12 +3109,72 @@ class RuntimeServer:
             # subscriber the session keeps for the life of the process. That is
             # also what makes ``_drop_client``'s ordering — cancel this task, then
             # release the recorded subscription — safe rather than lucky.
-            bind_task = asyncio.ensure_future(bind())
+            bind_task = asyncio.ensure_future(bind(self._frontend_relay(conn, conn.bind_token)))
+            subscription: FrontendSubscription | None
+            bind_started = time.perf_counter()
             try:
-                subscription = cast(FrontendSubscription, await asyncio.shield(bind_task))
+                subscription = await self._bind_with_grace(bind_task)
             except asyncio.CancelledError:
                 self._release_when_landed(bind_task)
                 raise
+            # The grace's own measurement, logged on both hand-off branches
+            # below. It is what answers the design's rollout question — "is the
+            # fallback firing on healthy owners?" — from a production log, since
+            # a healthy owner answers in one digit of milliseconds (p50 4.7-5.0 ms
+            # measured) and would never appear here at all.
+            waited_ms = (time.perf_counter() - bind_started) * 1000.0
+            if subscription is None:
+                bind_off_loop = getattr(self._handle, "subscribe_frontend_nowait", None)
+                if not callable(bind_off_loop):
+                    # A single-plane handle keeps today's behaviour: wait the hop
+                    # out. The grace is then a delay and nothing else, which is
+                    # the honest cost of the only handle that cannot be served
+                    # this way (the TUI kind, whose subscribe goes through the
+                    # app's own loop).
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) and this handle has no "
+                        "off-loop bind — waiting it out",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
+                    subscription = await asyncio.shield(bind_task)
+                else:
+                    #: Counted as well as logged: the counter is the cheap signal
+                    #: a status host can read, the line is the one a human greps.
+                    self.frontend_off_loop_binds += 1
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) — binding off the session "
+                        "loop",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
+                    # RETIRE THE ABANDONED ATTEMPT BEFORE IT REGISTERS. The bump
+                    # makes every callback stamped before it (the parked on-loop
+                    # bind's, when it lands) return early instead of relaying a
+                    # second copy of every delta into this connection.
+                    conn.bind_token += 1
+                    # ...and its subscription is released as it lands. Registered
+                    # BEFORE the off-loop call, not after: the released callback is
+                    # attached to ``bind_task`` either way, and doing it first means
+                    # a raise or a cancellation anywhere below cannot leave a
+                    # subscription nobody will receive.
+                    self._release_when_landed(bind_task)
+                    # A SECOND ``frontend_sync`` MAY ARRIVE ON THIS CONNECTION
+                    # LATER, and it is not this hand-off binding twice: a viewer
+                    # rehydrates itself at turn end through its own
+                    # ``frontend_sync`` RPC. What the token guard above rules out is
+                    # a DUPLICATE DELTA STREAM, which is what the client's
+                    # exact-``+1`` check reads as a gap (measured on the desk rig:
+                    # ``sync_seqs`` 5 then 46 on one attach, contiguous throughout).
+                    outcome = bind_off_loop(self._frontend_relay(conn, conn.bind_token))
+                    if inspect.isawaitable(outcome):
+                        outcome = await outcome
+                    subscription = cast(FrontendSubscription, outcome)
+            assert subscription is not None, "neither bind path produced a subscription"
             sync = subscription.sync
             # Trajectories are stripped here and re-fetched per job through
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
@@ -3170,15 +3313,17 @@ class RuntimeServer:
             logger.debug("bind-failure announcement write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
-        """Release a viewer subscription whose connection died MID-BIND.
+        """Release a bind's eventual subscription once nothing will receive it.
 
-        ``_drop_client`` cancels this connection's bind task, and the reason a
-        cancelled bind cannot leave a live subscriber is STRUCTURAL rather than
-        argued: the bind is shielded, so the cancel cannot abort it
-        half-registered (``_serve_frontend_sync``), and this runs on the
-        cancellation path to release whatever did register. ``_drop_client``'s
-        ordering follows from it — cancel first, then release the recorded
-        subscription, so nothing is released twice.
+        Two callers, one contract. ``_drop_client`` cancels this connection's
+        bind task, and the reason a cancelled bind cannot leave a live subscriber
+        is STRUCTURAL rather than argued: the bind is shielded, so the cancel
+        cannot abort it half-registered (``_serve_frontend_sync``), and this runs
+        on the cancellation path to release whatever did register. The off-loop
+        fallback reaches here having SUPERSEDED the same bind (``conn.bind_token``)
+        — the shielded attempt still lands, and its subscription is just as
+        unreachable. ``_drop_client``'s ordering follows from it — cancel first,
+        then release the recorded subscription, so nothing is released twice.
 
         A DONE-CALLBACK rather than an await, and the difference matters twice
         over. ``_drop_client`` runs from the reader loop and from shutdown, so
@@ -6422,7 +6567,7 @@ class RuntimeServer:
         return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
-        """The welcome form of a push: one full projection to one connection.
+        """The welcome form of a push: one frame to one connection.
 
         The ONE frame that may also carry the operator capability's handshake
         proof (issue #1310) — deliberately here and not in ``_projection_frame``,
@@ -6431,10 +6576,15 @@ class RuntimeServer:
         all. A client that sees no proof (this runtime holds no capability, or
         the client offered no nonce) presents nothing, which is the fail-closed
         reading of a runtime nobody handed one to.
+
+        WHICH frame is the welcome is ``_welcome_frame``'s decision, not this
+        method's: a full-TUI/desktop attach reads the projection for its
+        identity and discards the payload, and that payload is built and capped
+        inline on the serving loop.
         """
         conn.sending_welcome = True
         try:
-            frame = self._projection_frame(conn, self._projection_payload())
+            frame = self._welcome_frame(conn)
             proof = self._welcome_operator_proof(conn)
             if proof is not None:
                 # Salt alongside the proof, because the client needs both
@@ -6446,6 +6596,54 @@ class RuntimeServer:
             await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
+
+    def _welcome_frame(self, conn: _ClientConn) -> dict[str, Any]:
+        """The welcome for THIS connection: identity-only, or the full projection.
+
+        The split is by who READS the payload, which is a property of the client
+        rather than of the daemon. A connection that asked for the canonical
+        frontend AND the raw event stream is a full terminal or the desktop, and
+        the only client of that shape builds ``AttachClient`` with
+        ``on_projection = lambda _projection: None`` — it consumes the welcome
+        for identity and nothing else. Phone and daemon connections asked for
+        no canonical frontend, are the clients that render the projection, and
+        keep their welcome byte-identical.
+
+        ``None`` from ``_slim_welcome_frame`` (a reduced handle with no seed)
+        falls back to the full projection rather than guessing at identity.
+        """
+        if conn.wants_events and conn.wants_frontend:
+            slim = self._slim_welcome_frame()
+            if slim is not None:
+                return slim
+        return self._projection_frame(conn, self._projection_payload())
+
+    def _slim_welcome_frame(self) -> dict[str, Any] | None:
+        """The identity-only welcome, or ``None`` when the handle has no seed.
+
+        WHY IT EXISTS. ``_projection_payload`` builds and CAPS a whole projection
+        for the welcome, and the attach clients above read none of it — every byte
+        past the identity is serialized, walked by the cap tiers and discarded.
+        On the fixtures that is 0.7 ms of CPU, which is NOT why this exists: it
+        exists because ``_push_to`` calls it INLINE on the serving loop, once per
+        connection, and a field dump has caught ``cap_projection_frame`` on that
+        thread's stack (``lop-mobile-registrant`` ← ``_push_to`` ←
+        ``_on_connection``, runtime-stall-42983.log). A frame nobody reads is not
+        worth any chance of that.
+
+        THE PAYLOAD IS ``_identity_projection()``, the SAME object the send
+        ceiling substitutes when a projection cannot be written at all — one
+        notion of "identity only" rather than two that drift, and it keeps the
+        empty collections that make the frame a valid projection of its own op
+        for a client rebuilding it field by field.
+
+        The client accepts this op (``attach_client`` treats ``welcome`` exactly
+        as it treats ``projection``); an older client that only knew the
+        projection op never reaches here.
+        """
+        if getattr(self._handle, "session_projection_seed", None) is None:
+            return None
+        return {"op": "welcome", "data": self._identity_projection()}
 
     def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
         """This connection's handshake proof, or ``None`` when there is none to give.

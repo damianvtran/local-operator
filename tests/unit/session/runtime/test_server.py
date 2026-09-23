@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import statistics
 import threading
 import time
@@ -289,6 +290,16 @@ async def _on_runtime_loop(runtime: RuntimeServer, coro: Coroutine[Any, Any, Any
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
 
 
+#: The ops a WELCOME may arrive as, for assertions that are not about the
+#: welcome itself. A connection asking for BOTH the canonical frontend and the
+#: raw event stream is welcomed with the identity-only ``welcome`` frame
+#: (``RuntimeServer._slim_welcome_frame``) instead of a full capped projection,
+#: because that client shape reads the welcome for identity alone; every other
+#: shape keeps the projection. A test whose subject IS the welcome asserts the
+#: exact op rather than this set.
+_WELCOME_OPS = ("projection", "welcome")
+
+
 async def _dial(
     record: registry.SessionRecord,
     *,
@@ -410,7 +421,7 @@ async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() 
             + b"\n"
         )
         await attach_writer.drain()
-        assert json.loads(await attach_reader.readline())["op"] == "projection"
+        assert json.loads(await attach_reader.readline())["op"] in _WELCOME_OPS
         seed = json.loads(await attach_reader.readline())
         assert seed["op"] == "frontend_sync"
         assert seed["data"]["snapshot"]["streaming"] is False
@@ -461,7 +472,15 @@ async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> No
         await attach_writer.drain()
         follower = json.loads(await attach_reader.readline())
         sync = json.loads(await attach_reader.readline())
-        assert follower["data"]["pending"] is None
+        # The ATTACH welcome is identity-only (``_slim_welcome_frame``): a full-TUI
+        # client discards the projection, so what it carries is the identity with
+        # EMPTY collections — no gate overlay to render, and no roster to walk.
+        # What the follower actually reads is the canonical snapshot below, which
+        # is the assertion this test is about; the daemon's projection overlay is
+        # checked at the end of the walk.
+        assert follower["op"] == "welcome", follower
+        assert follower["data"]["pending"] is None, follower
+        assert follower["data"]["subagents"] == [], follower
         assert sync["data"]["snapshot"]["pending_gate"] is None
 
         handle._frontend.mutate(
@@ -507,7 +526,7 @@ async def test_event_seed_covers_events_before_client_is_ready() -> None:
             + b"\n"
         )
         await writer.drain()
-        assert json.loads(await reader.readline())["op"] == "projection"
+        assert json.loads(await reader.readline())["op"] in _WELCOME_OPS
         seed = json.loads(await reader.readline())
         assert seed["op"] == "frontend_sync"
         assert seed["data"]["snapshot"]["streaming"] is True
@@ -1037,7 +1056,7 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
             + b"\n"
         )
         await slow_writer.drain()
-        assert json.loads(await slow_reader.readline())["op"] == "projection"
+        assert json.loads(await slow_reader.readline())["op"] in _WELCOME_OPS
         assert json.loads(await slow_reader.readline())["op"] == "frontend_sync"
         assert len(runtime._clients) == 1
         slow_conn = next(iter(runtime._clients.values()))
@@ -1057,7 +1076,7 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
             + b"\n"
         )
         await healthy_writer.drain()
-        assert json.loads(await healthy_reader.readline())["op"] == "projection"
+        assert json.loads(await healthy_reader.readline())["op"] in _WELCOME_OPS
         assert json.loads(await healthy_reader.readline())["op"] == "frontend_sync"
 
         async def block_only_slow(conn, frame):  # noqa: ANN001, ANN202
@@ -2862,9 +2881,14 @@ async def test_push_builds_no_payload_without_projection_recipients() -> None:
                 + b"\n"
             )
             await writer.drain()
-            assert json.loads(await reader.readline())["op"] == "projection"
+            assert json.loads(await reader.readline())["op"] in _WELCOME_OPS
             assert json.loads(await reader.readline())["op"] == "frontend_sync"
-            payload.assert_called_once()  # Identity welcome is never suppressed.
+            # A full-TUI attach RENDERS nothing from the projection, so its welcome
+            # no longer builds one at all (``_slim_welcome_frame``). The next two
+            # assertions are the half that must not regress: the daemon, which
+            # does render it, still gets a built payload — and ``_push`` still
+            # skips the attach without building anything.
+            payload.assert_not_called()
             payload.reset_mock()
             for _ in range(20):
                 await runtime._push()
@@ -2924,7 +2948,7 @@ async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> Non
             + b"\n"
         )
         await tui_writer.drain()
-        assert json.loads(await tui_reader.readline())["op"] == "projection"
+        assert json.loads(await tui_reader.readline())["op"] in _WELCOME_OPS
         seed = json.loads(await tui_reader.readline())
         assert seed["op"] == "frontend_sync"
 
@@ -4018,7 +4042,7 @@ async def _dial_frontend(
         + b"\n"
     )
     await writer.drain()
-    assert json.loads(await asyncio.wait_for(reader.readline(), timeout=5))["op"] == "projection"
+    assert json.loads(await asyncio.wait_for(reader.readline(), timeout=5))["op"] in _WELCOME_OPS
     return reader, writer
 
 
@@ -4365,3 +4389,368 @@ async def test_a_viewer_that_dies_mid_bind_leaves_no_subscription_behind() -> No
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+class _OffLoopCapableHeldBindHandle(_HeldBindHandle):
+    """A PARKED on-loop bind plus a working off-loop one — the busy-owner shape.
+
+    ``_HeldBindHandle`` covers the case where the grace expires and there is
+    nothing to fall back to, so the wait simply continues (a single-plane handle,
+    the TUI kind). This is the daemon/exec handle the grace exists for: the
+    on-loop bind stays parked for the whole test, so the ONLY way this connection
+    can be given a canonical state is the off-loop path, and the park is then
+    released to model the shielded bind landing late.
+
+    ``release_gate`` is a SECOND gate, and deliberately: it holds the handle call
+    open AFTER the subscription has been registered, which is the only window in
+    which a stale relay callback can be observed at all. Modelling "the bind
+    lands late" without that window would test ``_release_when_landed`` and never
+    the token.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_gate = threading.Event()
+        self.late_registered = threading.Event()
+        self.off_loop_binds = 0
+
+    async def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001
+        subscription = await super().subscribe_frontend(on_update, display_window=display_window)
+        # REGISTERED, and the call has not returned: the abandoned on-loop bind
+        # now holds a live subscription whose relay callback is stamped stale.
+        self.late_registered.set()
+        await asyncio.to_thread(self.release_gate.wait, 10.0)
+        return subscription
+
+    def subscribe_frontend_nowait(self, on_update):  # noqa: ANN001
+        self.off_loop_binds += 1
+        # The REAL store call the production handle makes, so the ordering these
+        # tests assert is the store's own rather than a double's idea of it.
+        return self._frontend.subscribe_threadsafe(on_update)
+
+
+class _CountingBindHandle(FakeHandle):
+    """A HEALTHY handle: binds at once, and records if the fallback was used.
+
+    ``FakeHandle.subscribe_frontend`` returns immediately, so this is the owner
+    shape ``_ONLOOP_BIND_GRACE_S`` is sized for (a real one answers in 4.7-5.0 ms
+    p50). The off-loop entry point exists and is countable, which is the point:
+    "the grace never fires on a healthy owner" is otherwise asserted only by the
+    absence of a symptom, and the symptom it would have (no display window on
+    every viewer) is invisible while the attach still looks fast and green.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.off_loop_calls = 0
+
+    def subscribe_frontend_nowait(self, on_update):  # noqa: ANN001
+        self.off_loop_calls += 1
+        return self._frontend.subscribe_threadsafe(on_update)
+
+
+async def _frontend_delta_sequences(reader: asyncio.StreamReader, count: int) -> list[int]:
+    """Read exactly ``count`` canonical deltas and return their sequences.
+
+    Other frames are skipped rather than assumed absent (a repaint, an event
+    frame): what is under test is the ORDER of the deltas, and a helper that
+    tripped over an unrelated frame would fail for the wrong reason.
+    """
+    sequences: list[int] = []
+    for _ in range(80):
+        if len(sequences) == count:
+            return sequences
+        raw = await asyncio.wait_for(reader.readline(), timeout=5)
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        frame = json.loads(text)
+        if frame.get("op") == "frontend_update":
+            sequences.append(frame["data"]["sequence"])
+    raise AssertionError(f"only {sequences} of {count} deltas arrived")
+
+
+async def _subscribers_become(handle: FakeHandle, want: int) -> None:
+    """Wait on an EVENT (the store's own roster), never on a clock."""
+    for _ in range(200):
+        if len(handle._frontend._subscribers) == want:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"the store holds {len(handle._frontend._subscribers)} subscribers, wanted {want}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_relays(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The grace, the fallback and the bind token, on a real socket.
+
+    WHAT THIS PINS. The on-loop bind is shielded and cannot be cancelled, so an
+    attach that outlives the grace is served off-loop while the parked bind is
+    STILL going to land — and when it lands it registers a SECOND subscriber on
+    the same store. The assertion is on the sequences that reach the socket, not
+    on the subscriber count alone: if the late callback relayed, this connection
+    would receive every delta twice, and a client reading an exact-``+1`` stream
+    reads a duplicate as a gap and redials.
+
+    The whole test is event-driven (the handle's own gates, the store's own
+    roster) because a schedule this subtle held together by sleeps would be a bet
+    on the host.
+    """
+    handle = _OffLoopCapableHeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        with caplog.at_level(logging.INFO, logger="local_operator.session.runtime.server"):
+            sync = await _until(reader, "frontend_sync")
+        assert handle.off_loop_binds == 1, (
+            "the sync arrived off-loop, but the recorded fallback count says the "
+            "grace did not hand the bind over"
+        )
+        # AND THE HAND-OFF IS OBSERVABLE FROM OUTSIDE THE HANDLE. The runtime's
+        # own counter and line are what answer the design's rollout question
+        # ("is the fallback firing on healthy owners?") in a production log —
+        # pinned HERE because this is the only attach in the file that takes the
+        # fallback, and a counter nothing asserts is a number nobody can trust.
+        assert runtime.frontend_off_loop_binds == 1
+        assert "missed the 100 ms on-loop grace" in caplog.text
+        assert sync["data"].get("display_history") is None, (
+            "the off-loop path has no display window: it reads the loop-owned "
+            "transcript, which is the loop this path exists to avoid"
+        )
+        base = sync["data"]["sequence"]
+
+        # BEFORE the late bind lands, so these ride the off-loop registration.
+        handle._frontend.mutate(goal="before the late bind")
+        assert await _frontend_delta_sequences(reader, 1) == [base + 1]
+
+        # RELEASE THE PARK: the abandoned on-loop bind registers its own
+        # subscriber, whose callback was stamped before the fallback bumped the
+        # token. Both subscribers exist NOW, which is the window this test is for.
+        handle.bind_gate.set()
+        assert await asyncio.to_thread(handle.late_registered.wait, 5), "the late bind never landed"
+        await _subscribers_become(handle, 2)
+        handle._frontend.mutate(goal="while both are registered")
+        assert await _frontend_delta_sequences(reader, 1) == [base + 2]
+
+        # AND THE STALE SUBSCRIBER IS RECLAIMED, not merely muted: the release
+        # the cancellation path already uses runs when the bind lands.
+        handle.release_gate.set()
+        await _subscribers_become(handle, 1)
+        handle._frontend.mutate(goal="after the release")
+        assert await _frontend_delta_sequences(reader, 1) == [base + 3]
+
+        # NOTHING ELSE IS ON THE WIRE. A duplicate would sit BEHIND the last
+        # assertion above, so a stream that ended here is the claim.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.readline(), timeout=0.3)
+    finally:
+        handle.bind_gate.set()
+        handle.release_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_owner_never_reaches_the_off_loop_fallback() -> None:
+    """The other half of the grace, on a real socket.
+
+    THE GRACE IS A BET THAT IS WORTHLESS IF IT FIRES ON EVERYONE. The off-loop
+    path has no display window, so a grace that misfires on healthy owners takes
+    the window away from every viewer while the attach still looks fast and every
+    other test stays green. This drives the healthy shape end to end: a handle
+    that binds on the session loop at once, its off-loop entry point present and
+    countable, and the ``frontend_sync`` read off the wire.
+    """
+    handle = _CountingBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        sync = await _until(reader, "frontend_sync")
+        assert sync["data"]["sequence"] >= 0
+        assert handle.off_loop_calls == 0, (
+            "a handle that answers in microseconds was served off-loop: the "
+            "grace is mistuned for healthy owners"
+        )
+        assert runtime.frontend_off_loop_binds == 0
+        await _subscribers_become(handle, 1)
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+def test_the_on_loop_grace_keeps_its_headroom_over_a_healthy_owners_bind() -> None:
+    """The constant is pinned to the distribution that sized it, as a RATIO.
+
+    ``_ONLOOP_BIND_GRACE_S`` is justified by measured healthy binds (p50
+    4.7-5.0 ms, p95 <= 15 ms for a whole sync) and nothing else in the tree ties
+    the two together: a later change that lowered the grace to 20 ms would leave
+    every test green while pushing healthy owners onto the fallback, whose only
+    trace is the log line this change adds. A ratio rather than a duration, so
+    the assertion states the HEADROOM that was chosen and does not pin a
+    host-speed number into the suite.
+    """
+    from local_operator.session.runtime import server as server_module
+
+    healthy_bind_p95_s = 0.015
+    assert server_module._ONLOOP_BIND_GRACE_S >= 6 * healthy_bind_p95_s, (
+        f"the on-loop grace is {server_module._ONLOOP_BIND_GRACE_S * 1000:.0f} ms, "
+        "which is no longer an order of magnitude over a healthy owner's p95 bind "
+        "(15 ms) — healthy owners would take the off-loop fallback and lose their "
+        "display window"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_attach_is_welcomed_with_identity_alone_while_a_daemon_keeps_its_projection() -> (
+    None
+):
+    """The slim welcome, on the wire, for the client shape it is for.
+
+    A connection asking for the canonical frontend AND the event stream is a full
+    terminal or the desktop, and that client DISCARDS the projection
+    (``session/attached.py`` builds it with an ``on_projection`` that ignores its
+    argument), so the runtime no longer builds and caps a whole projection for it
+    inline on the serving loop. The daemon is the client that DOES render a
+    projection, and its welcome is untouched — the two halves are asserted
+    together so a change that slimmed both would fail here.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.types import _projection_from_json
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = daemon_writer = None
+    client = None
+    try:
+        record = await _wait_record()
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        welcome = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+        assert welcome["op"] == "welcome", welcome
+        data = welcome["data"]
+        # THE IDENTITY IS ALL THAT SURVIVES, and it must: the client checks the
+        # conversation it landed on against this field before anything else.
+        assert data["session_id"] == "s1"
+        assert data["conversation_name"] == "fake"
+        # THE PAYLOAD IS EMPTY, NOT MERELY SMALL: the collections are present and
+        # empty, which is what keeps the frame a valid projection of its own op
+        # for a client that rebuilds it field by field — and it is the same object
+        # the send ceiling substitutes, so "identity only" has one definition.
+        assert data["transcript"] == [], data
+        assert data["subagents"] == [], data
+        assert data["todos"] == [], data
+        assert data["pending"] is None, data
+        # THE COMPATIBILITY CLAIM, TESTED RATHER THAN ASSUMED: the client's own
+        # parser rebuilds a projection from this payload.
+        assert _projection_from_json(data, record).session_id == "s1"
+
+        # ...and a live connection of the real client shape attaches from it.
+        client = AttachClient(
+            lambda _projection: None,
+            lambda _reason: None,
+            events=True,
+            frontend_state=True,
+        )
+        await client.connect(record, "s1")
+
+        # THE OTHER HALF: a daemon renders the projection, so it still gets one.
+        daemon_reader, daemon_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        daemon_writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
+        await daemon_writer.drain()
+        daemon_welcome = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=5))
+        assert daemon_welcome["op"] == "projection", daemon_welcome
+        assert (
+            "transcript" in daemon_welcome["data"]
+        ), "the daemon renders the projection; slimming it would blank the phone"
+    finally:
+        if client is not None:
+            await client.detach()
+        if writer is not None:
+            writer.close()
+        if daemon_writer is not None:
+            daemon_writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_that_landed_as_the_grace_fired_is_used_rather_than_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same-turn race ``_bind_with_grace``'s second exit exists for.
+
+    FORCED rather than raced. The wrapper below lets the shielded task land and
+    THEN reports the grace as expired, which is the schedule in which ``wait_for``
+    cancels the shield while the task that shield covered is already done.
+    Handing off there would bind the connection twice, release the landed
+    subscription a moment later, and mark a HEALTHY owner as window-less — the
+    display window being the one thing the on-loop path carries that the off-loop
+    path cannot. So the assertion is that the LANDED subscription is returned.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    real_wait_for = asyncio.wait_for
+
+    async def grace_expires_after_the_bind_landed(fut, timeout, **kwargs):  # noqa: ANN001
+        await real_wait_for(fut, timeout, **kwargs)
+        raise TimeoutError
+
+    async def bind() -> str:
+        return "the on-loop subscription"
+
+    bind_task = asyncio.ensure_future(bind())
+    monkeypatch.setattr(asyncio, "wait_for", grace_expires_after_the_bind_landed)
+    assert await runtime._bind_with_grace(bind_task) == "the on-loop subscription"
+    assert bind_task.done() and not bind_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_still_parked_past_the_grace_hands_off_and_leaves_the_task_running() -> None:
+    """``None`` means HAND OFF, and the shielded task survives to land later.
+
+    The second half is the premise the fallback rests on: if the grace cancelled
+    the task there would be nothing for ``_release_when_landed`` to release when
+    it lands, and the bind token's job — retiring a relay callback that arrives
+    after the fallback has already bound the connection — would have nothing to
+    retire.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+
+    async def bind() -> str:
+        await asyncio.sleep(30)
+        return "the on-loop subscription"
+
+    bind_task = asyncio.ensure_future(bind())
+    try:
+        assert await runtime._bind_with_grace(bind_task) is None
+        assert not bind_task.done(), "the grace cancelled the task it exists to shield"
+        assert not bind_task.cancelled()
+    finally:
+        bind_task.cancel()
