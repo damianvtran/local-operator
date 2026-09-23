@@ -4203,7 +4203,9 @@ def test_store_maintenance_malformed_stamp_is_retried(
     stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
     stamp.write_text("{ incomplete", encoding="utf-8")
 
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
 
     assert len(calls) == 6
     assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
@@ -4222,7 +4224,9 @@ def test_store_maintenance_lock_errors_fail_closed(
         raise OSError("lock storage unavailable")
 
     monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", unavailable)
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
 
     assert calls == [], "maintenance ran without its config-root lock"
     assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
@@ -4244,7 +4248,9 @@ def test_store_maintenance_stamp_read_error_fails_closed(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", unreadable_stamp)
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
 
     assert calls == [], "a stamp I/O error ran the passes without proving completion state"
 
@@ -4256,12 +4262,16 @@ def test_store_maintenance_failed_pass_retries_without_completion_stamp(
     _patch_store_maintenance_passes(monkeypatch, calls, fail_once="titles")
     monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
 
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
     stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
     assert not stamp.exists(), "a failed pass published a completion stamp"
     first_run = list(calls)
 
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
     assert calls[: len(first_run)] == first_run
     assert calls[len(first_run) :] == [
         "cleanup",
@@ -4285,7 +4295,9 @@ def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
     calls: list[str] = []
     _patch_store_maintenance_passes(monkeypatch, calls)
     monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
     stamp_path = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
     payload = json.loads(stamp_path.read_text(encoding="utf-8"))
     if invalid_stamp == "expired":
@@ -4307,7 +4319,9 @@ def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
         )
 
     first_count = len(calls)
-    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
     assert len(calls) == first_count * 2, f"{invalid_stamp} stamp incorrectly suppressed work"
 
 
