@@ -69,6 +69,19 @@ from typing import Sequence
 #: the word already sorts in the right place.
 EFFORT_ORDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+#: The fallback-chain hop vocabulary — narrower than :data:`EFFORT_ORDER`
+#: because a chain hop's ``effort`` is a real routing decision written into
+#: config, not a per-model ladder rung, and ``none`` is not an option there
+#: (see ``providers.failover.CHAIN_EFFORT_LADDER`` for what that costs).
+#: Lives here rather than in ``providers.failover`` — a leaf module three
+#: subsystems already share — because ``settings_io`` (the TUI startup path)
+#: needs to validate a hop's effort at config-write time and must not pull in
+#: ``providers.failover``'s module-level ``httpx`` import to do it
+#: (``test_import_graph.py`` pins the TUI's first paint against exactly that).
+#: ``providers.failover`` re-exports this name so its own callers are
+#: unaffected by the move.
+SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+
 
 def is_effort_sentinel(level: str) -> bool:
     """Whether ``level`` is a sentinel rather than a rankable rung.

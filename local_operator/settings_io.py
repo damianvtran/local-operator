@@ -59,8 +59,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
-from local_operator.model.effort import EFFORT_ORDER
-from local_operator.providers.failover import SUPPORTED_EFFORTS
+from local_operator.model.effort import EFFORT_ORDER, SUPPORTED_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
