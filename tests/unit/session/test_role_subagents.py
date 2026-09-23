@@ -244,6 +244,7 @@ async def test_restricted_role_constructs_only_its_effective_builtin_tools(
 
     monkeypatch.setattr(tool_registry, "create_tools", recording_create_tools)
     for name, builder in tuple(tool_registry.TOOL_BUILDERS.items()):
+
         def recording_builder(context, *, _name=name, _builder=builder):
             constructed.append(_name)
             return _builder(context)
@@ -274,16 +275,18 @@ async def test_restricted_role_constructs_only_its_effective_builtin_tools(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("agent_name", "custom_tools"),
+    ("agent_name", "custom_tools", "sticky_denial"),
     [
-        ("reviewer", None),
-        ("web-only", ("web_search",)),
-        ("scout", None),
-        ("task", None),
+        ("reviewer", None, False),
+        ("web-only", ("web_search",), False),
+        ("manager", None, False),
+        ("scout", None, False),
+        ("task", None, False),
+        ("task", None, True),
     ],
 )
 async def test_restricted_tool_construction_matches_legacy_inventory(
-    tmp_path, monkeypatch, agent_name, custom_tools
+    tmp_path, monkeypatch, agent_name, custom_tools, sticky_denial
 ) -> None:
     """Preselection preserves exact final tools and provider schemas."""
     from local_operator.agent_profiles import READ_ONLY_TOOLS
@@ -319,11 +322,14 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
 
     stream = RecordingStream()
     parent = make_parent(tmp_path, stream, agent_registry=registry)
+    if sticky_denial:
+        setattr(parent, subagent_mod.MCP_DENIED_ATTR, True)
     if agent_name == "scout":
         # Exercise the no-profile fallback even if a packaged scout seed exists.
         monkeypatch.setattr(subagent_mod, "_resolve_role", lambda *_: None)
 
     contexts = []
+    factory_calls = []
     child_sessions = []
     from local_operator.session.session import Session as SessionClass
 
@@ -338,9 +344,11 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
     original_create_tools = create_tools
 
     def capture_child_context(context, enabled=None):
+        tools = original_create_tools(context, enabled=enabled)
         if context.job_id:
             contexts.append(context)
-        return original_create_tools(context, enabled=enabled)
+            factory_calls.append((enabled, [tool.name for tool in tools]))
+        return tools
 
     monkeypatch.setattr("local_operator.tools.registry.create_tools", capture_child_context)
     await run_role(parent, agent_name)
@@ -349,11 +357,24 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
     assert len(child_sessions) == 1
     tool_context = contexts[0]
     profile = None if agent_name == "scout" else subagent_mod._resolve_role(agent_name, parent)
-    restricted = (profile is not None and bool(profile.tools)) or agent_name == "scout"
+    restricted = (
+        sticky_denial or (profile is not None and bool(profile.tools)) or agent_name == "scout"
+    )
 
     # Verbatim pre-optimization oracle: mint the whole registry first, then
     # apply the allowlist/network floor, scout fallback and child messaging.
+    # Sticky MCP denial removes activation capability but is not a role
+    # allowlist: a plain task must still use the full initial builtin inventory.
+    expected_denial = (
+        sticky_denial or (profile is not None and bool(profile.tools)) or agent_name == "scout"
+    )
+    assert getattr(child_sessions[0], subagent_mod.MCP_DENIED_ATTR, False) is expected_denial
     legacy_inventory = original_create_tools(tool_context)
+    if sticky_denial:
+        assert profile is None
+        initial_enabled, initial_names = factory_calls[0]
+        assert initial_enabled is None, "MCP denial is not an allowlist; build full defaults"
+        assert initial_names == [tool.name for tool in legacy_inventory]
     hub_tool = next((tool for tool in legacy_inventory if tool.name == "hub"), None)
     if profile is not None and profile.tools:
         allowed_names = set(profile.tools)
@@ -375,15 +396,11 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
     # those original builders, replace duplicate names and preserve their append
     # order, then mirror the child's existing descendant-boundary pruning.
     lifecycle_context = child_sessions[0]._build_tool_context()
-    lifecycle_tools = original_create_tools(
-        lifecycle_context, enabled=SESSION_CAPABILITY_TOOLS
-    )
+    lifecycle_tools = original_create_tools(lifecycle_context, enabled=SESSION_CAPABILITY_TOOLS)
     merged = list(legacy_tools)
     for capability in lifecycle_tools:
         if any(tool.name == capability.name for tool in merged):
-            merged = [
-                capability if tool.name == capability.name else tool for tool in merged
-            ]
+            merged = [capability if tool.name == capability.name else tool for tool in merged]
         else:
             merged.append(capability)
     merged_in = {tool.name for tool in merged} - {tool.name for tool in legacy_tools}
@@ -400,9 +417,9 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
         drop = drop - {"jobs"}
     expected_names = [tool.name for tool in merged if tool.name not in drop]
     actual_names = [tool.name for tool in child_sessions[0]._tools]
-    assert actual_names == expected_names, (
-        f"{agent_name}: actual={actual_names!r}, expected={expected_names!r}"
-    )
+    assert (
+        actual_names == expected_names
+    ), f"{agent_name}: actual={actual_names!r}, expected={expected_names!r}"
     assert [tool.name for tool in stream.requests[0].tools] == expected_names
     assert set(TOOL_BUILDERS) >= set(expected_names)
     await parent.dispose()

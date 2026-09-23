@@ -1942,6 +1942,10 @@ async def _construct_child_session(
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
         web_fetch_settings=ConfigManager(config_dir()).get_config_value("web_fetch", None),
     )
+    # ``restricted`` also carries a sticky MCP-activation denial inherited by
+    # plain descendants; that is not a role allowlist and must not shrink their
+    # ordinary builtin inventory. Keep tool construction keyed to actual role
+    # policy (plus scout's explicit read-only fallback), not the MCP boundary.
     role_limited = (profile is not None and bool(profile.tools)) or agent == "scout"
     if role_limited:
         # The prior full-inventory-then-filter path exposed tools in registry
