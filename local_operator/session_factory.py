@@ -3148,7 +3148,7 @@ def _store_maintenance_stamp_is_fresh(config_dir: Path, pass_names: list[str]) -
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         # A malformed record cannot prove completion; because the caller holds
         # the exclusive root lock, a conservative rerun is safe.
         return False

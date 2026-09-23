@@ -4274,7 +4274,9 @@ def test_store_maintenance_failed_pass_retries_without_completion_stamp(
     assert stamp.exists(), "successful retry did not publish completion"
 
 
-@pytest.mark.parametrize("invalid_stamp", ["expired", "version", "oversized_timestamp"])
+@pytest.mark.parametrize(
+    "invalid_stamp", ["expired", "version", "oversized_timestamp", "integer_digit_limit"]
+)
 def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4292,11 +4294,17 @@ def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
     elif invalid_stamp == "version":
         payload["version"] += 1
         stamp_path.write_text(json.dumps(payload), encoding="utf-8")
-    else:
+    elif invalid_stamp == "oversized_timestamp":
         # Python's JSON decoder accepts arbitrary-size integers; a valid JSON
         # stamp outside float range is invalid metadata, not a worker crash.
         payload["completed_at"] = 10**400
         stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        # Python 3.11+ can reject integer literals above its digit limit during
+        # JSON decoding; that is malformed stamp data and must trigger a rerun.
+        stamp_path.write_text(
+            '{"completed_at":' + "9" * 5000 + "}", encoding="utf-8"
+        )
 
     first_count = len(calls)
     session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
