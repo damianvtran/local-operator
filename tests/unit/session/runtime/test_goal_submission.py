@@ -7,6 +7,7 @@ claim goal_set and own the ordinary submit, so the owner must not also send.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -27,6 +28,43 @@ class GoalSession(FakeSession):
 
     def set_goal(self, text: str) -> str:
         return self.goal_state.set(text)
+
+    # The judged-goal record's surface, delegated to a REAL holder so the flag
+    # forms are asserted against state that actually moves (`/goal --done` from
+    # `/goal <text>` is a state difference, not a string difference).
+    def arm_goal(self, text: str) -> str:
+        return self.goal_state.arm(text)
+
+    @property
+    def goal_status(self) -> str:
+        return self.goal_state.status
+
+    @property
+    def goal_judge(self) -> dict[str, Any] | None:
+        if not self.goal_state.text:
+            return None
+        return self.goal_state.judge.to_wire()
+
+    @property
+    def goal_history(self) -> list[dict[str, Any]]:
+        return self.goal_state.history_view()
+
+    def history_view(self, limit: int | None = None) -> list[dict[str, Any]]:
+        return self.goal_state.history_view(limit)
+
+    def mark_goal_done(self, reason: str = "") -> Any:
+        return self.goal_state.mark_done(reason)
+
+    def delete_goal(self) -> str:
+        return self.goal_state.delete()
+
+    def dismiss_goal(self) -> bool:
+        return self.goal_state.dismiss()
+
+    def note_goal_judge(self, **changes: Any) -> None:
+        judge = self.goal_state.judge
+        for name, value in changes.items():
+            setattr(judge, name, value)
 
 
 @pytest.mark.asyncio
@@ -163,5 +201,165 @@ async def test_a_bare_unknown_flag_is_refused_instead_of_becoming_the_goal(entry
         assert session.goal == "existing goal"
         assert session.prompt_calls == []
         assert session.steer_calls == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
+async def test_done_marks_the_goal_and_admits_no_turn(entry):
+    """``/goal --done`` settles the ACTIVE goal: struck, recorded, no turn.
+
+    The record is what makes completion a state rather than a deletion, so the
+    assertions are on the STATE (status, the entry, the text that stays) and on
+    the absence of a provider request — a mark-done that also submitted a turn
+    would spend tokens on a goal the user just finished.
+    """
+    session = GoalSession()
+    session.arm_goal("ship it")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        if entry == "authoritative":
+            result = await handle.run_slash_authoritative("goal", "--done", None)
+            receipt = result["text"]
+            assert result["kind"] == "notice"
+            assert not result.get("data")
+        else:
+            receipt = await getattr(handle, entry)("goal", "--done")
+        await asyncio.sleep(0)
+        assert receipt == "goal done: ship it"
+        assert session.goal == "ship it", "the text stays until the chip is dismissed"
+        assert session.goal_status == "done"
+        assert [(row["text"], row["status"]) for row in session.history_view()] == [
+            ("ship it", "done")
+        ]
+        assert session.history_view()[0]["reason"] == "", "a person's mark-done has no verdict"
+        assert session.prompt_calls == []
+        assert session.steer_calls == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
+async def test_history_answers_rows_in_data_and_a_count_in_the_notice(entry):
+    """The one new form whose answer is a LIST, in the ``team_list`` shape.
+
+    The rows ride ``data`` because the TUI and the desktop both already render a
+    block of wire rows; the NOTICE stays one line, because a multi-row payload
+    dump in a transcript is what the receipt discipline exists to prevent.
+    """
+    session = GoalSession()
+    session.arm_goal("first thing")
+    session.mark_goal_done("the judge said so")
+    session.dismiss_goal()
+    session.arm_goal("second thing")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        if entry == "authoritative":
+            result = await handle.run_slash_authoritative("goal", "--history", None)
+        else:
+            receipt = await getattr(handle, entry)("goal", "--history")
+            result = {"text": receipt}
+        # Newest first, and no turn for any of it.
+        assert result["text"] == "1 settled goal — newest first"
+        if entry == "authoritative":
+            assert result["kind"] == "block"
+            assert result["data"]["type"] == "goal_history"
+            assert result["data"]["items"] == [
+                ["first thing", "done · " + session.history_view()[0]["settled_at"] + " · the judge said so"]
+            ]
+        assert session.prompt_calls == []
+        assert session.steer_calls == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dismiss_drops_the_done_chip_and_says_when_there_is_none():
+    session = GoalSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        # Nothing to dismiss: the flag is a no-op unless the chip is up, and the
+        # receipt must not report a change that did not happen.
+        first = await handle.run_slash_authoritative("goal", "--dismiss", None)
+        assert first["text"] == "nothing to dismiss"
+        session.arm_goal("ship it")
+        session.mark_goal_done("done")
+        second = await handle.run_slash_authoritative("goal", "--dismiss", None)
+        assert second["text"] == "goal dismissed"
+        await asyncio.sleep(0)
+        assert session.goal == ""
+        assert session.goal_status == ""
+        # The settled row is NOT the chip's: dismissing keeps the record.
+        assert len(session.history_view()) == 1
+        assert session.prompt_calls == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
+async def test_delete_is_a_bare_alias_of_clear_and_records_nothing(entry):
+    """``delete`` joins the clear set: a DELETE records nothing, unlike --done."""
+    session = GoalSession()
+    session.arm_goal("ship it")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        if entry == "authoritative":
+            result = await handle.run_slash_authoritative("goal", "delete", None)
+            receipt = result["text"]
+        else:
+            receipt = await getattr(handle, entry)("goal", "delete")
+        await asyncio.sleep(0)
+        assert receipt == "goal cleared: ship it"
+        assert session.goal == ""
+        assert session.goal_status == ""
+        assert session.history_view() == [], "a delete is not a settle"
+        assert session.prompt_calls == []
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arg", ["--done the report", "done the report", "--history of it"])
+async def test_a_new_flag_with_a_tail_stays_a_goal_body(arg):
+    """The whole-argument rule holds for the new flags too.
+
+    Anything else would eat the tail of a real objective, which is silent data
+    loss in the one command whose argument the MODEL is told.
+    """
+    session = GoalSession()
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        result = await handle.run_slash_authoritative("goal", arg, None)
+        await asyncio.sleep(0.05)
+        assert result["data"]["type"] == "goal_set"
+        assert session.goal == arg
+        assert session.prompt_calls == [arg]
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arg", ["--donex", "--historyx", "--dismissx"])
+async def test_a_flag_of_this_command_that_does_not_exist_is_refused(arg):
+    """The known map must stay honest: a token it does not know is an unknown flag.
+
+    Without the new flags in that map each of these would be STORED as the
+    standing objective, which is the failure the refusal exists to prevent.
+    """
+    session = GoalSession()
+    session.arm_goal("existing goal")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        result = await handle.run_slash_authoritative("goal", arg, None)
+        assert result["kind"] == "notice"
+        assert result["style"] == "warning"
+        assert f"unknown flag {arg}" in result["text"]
+        assert result["text"].endswith("--clear/--done/--history")
+        await asyncio.sleep(0)
+        assert session.goal == "existing goal"
+        assert session.prompt_calls == []
     finally:
         await handle.dispose()

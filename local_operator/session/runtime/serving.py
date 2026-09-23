@@ -4852,7 +4852,7 @@ class ServingSessionHandle(SessionHandle):
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
             goal_dismissed_receipt,
-            goal_done_receipt,
+            goal_done_answer,
             goal_flag_form,
             goal_history_items,
             goal_history_notice,
@@ -4890,11 +4890,7 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice",
                 # `None` means there was nothing to settle OR it was already
                 # settled; both must say so rather than print a second "goal done".
-                text=(
-                    goal_done_receipt(session.goal)
-                    if entry is not None
-                    else "goal already done — /goal --dismiss clears it"
-                ),
+                text=goal_done_answer(session.goal, entry),
                 style="info",
             )
         if form == "dismiss":

@@ -89,6 +89,10 @@ from local_operator.session.frontend_state import (
     oversized_frame_report,
     sync_wire_payload,
 )
+from local_operator.session.goal import (
+    GOAL_HISTORY_MAX,
+    GOAL_HISTORY_TEXT_CHARS,
+)
 from local_operator.session.goal_loop import (
     LOOP_GOAL_CHARS,
     LOOP_REASON_CHARS,
@@ -184,6 +188,25 @@ def _catalogue_row(index: int) -> dict[str, Any]:
         "connected": True,
         "aggregated": True,
         "routed": False,
+    }
+
+
+def _goal_history_row(index: int) -> dict[str, Any]:
+    """One settled goal at the WIDEST shape the record can hold.
+
+    Built from the record's own bounds rather than from numbers typed here, so a
+    later change to ``GOAL_HISTORY_TEXT_CHARS`` or to the reason clip moves this
+    fixture with it: the point of the row is that the entry cap alone does not
+    bound the frame, and a row authored at a comfortable width would prove
+    nothing about the bound that does.
+    """
+    return {
+        "id": f"{index:032x}",
+        "text": "g" * GOAL_HISTORY_TEXT_CHARS,
+        "status": "done",
+        "created_at": "2026-09-22T00:00:00Z",
+        "settled_at": "2026-09-22T00:00:01Z",
+        "reason": "r" * LOOP_REASON_CHARS,
     }
 
 
@@ -466,6 +489,14 @@ _BOUNDED_COLLECTION_FIELDS = {
     # wire by a RESIDUAL budget, with `model_catalogue_truncated` telling the
     # reader when the list it received is a prefix.
     "model_catalogue": "clipped at the wire to the frame's remaining bytes; truncation flagged",
+    # A FIXED four-key mapping (state/run/verdict/reason), REPLACED on every
+    # judge transition rather than appended to: a hundred-turn goal and a
+    # one-turn goal serialize the same shape. Its one free-text value is clipped
+    # where the model's answer enters the state (LOOP_REASON_CHARS, at the
+    # parse) and clipped AGAIN to GOAL_REASON_WIRE_CHARS at the wire when the
+    # frame is over the line. Typed `dict[str, Any] | None` on the model ON
+    # PURPOSE, because the annotation is what makes the class guard see it.
+    "goal_judge": "fixed four-key judge state; reason clipped at the parse and again at the wire",
     # One startup report from the MCP wiring pass, not an accumulator: it is
     # REPLACED on each wiring round rather than appended to, and its size is a
     # function of how many servers are configured.
@@ -485,6 +516,12 @@ _BOUNDED_COLLECTION_FIELDS = {
 _CAPPED_COLLECTION_FIELDS = {
     "usage_components": "capped at accumulation (USAGE_COMPONENT_CAP)",
     "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
+    # Swept at the RECORD (GOAL_HISTORY_MAX, newest-first) and yielded at the
+    # WIRE: the whole list is dropped and `goal_history_truncated` set when the
+    # frame it would ride is over the line. An entry cap alone is not a wire
+    # bound — the mistake `model_catalogue`'s entry records — because the frame
+    # this field rides is the socket's, not the record's.
+    "goal_history": "capped at the record (GOAL_HISTORY_MAX) and yielded at the wire",
 }
 
 
@@ -944,6 +981,22 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             "goal": "g" * LOOP_GOAL_CHARS,
             "reason": "r" * LOOP_REASON_CHARS,
         },
+        # The judged-goal record, populated PAST what a frame can carry. The
+        # entry cap alone does not bound these bytes, which is why the wire bound
+        # exists and why this fixture is what proves it actually runs — the
+        # `model_catalogue` precedent above: "longer than the budget can hold
+        # rather than tuned to sit under it". `goal_status` is a closed scalar
+        # and `run` is a two-digit counter, so what rides here is the widest
+        # each can be rather than a comfortable sample.
+        "goal_status": "done",
+        "goal_judge": {
+            "state": "continuing",
+            "run": 99,
+            "verdict": "continue",
+            "reason": "r" * LOOP_REASON_CHARS,
+        },
+        "goal_history": [_goal_history_row(index) for index in range(GOAL_HISTORY_MAX)],
+        "goal_history_truncated": True,
         "slash_capabilities": [],
         # PRODUCTION-SHAPED rows, and far more of them than any provider lists.
         # The old fixture used a 3-key, 63 B row while `refresh_model_catalogue`
