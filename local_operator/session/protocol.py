@@ -40,6 +40,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # annotations`` above makes every annotation in this file a string, and a
     # Protocol member's type is never evaluated at runtime.
     from local_operator.session.frontend_state import FrontendSessionState
+
     # Same shape, same reason: ``mark_goal_done`` returns the settled entry, and
     # naming the real type keeps the caller's ``entry`` from degrading to ``Any``
     # (``tui/app.py`` passes it straight into ``goal_done_answer``).

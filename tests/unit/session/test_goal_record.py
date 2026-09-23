@@ -354,9 +354,7 @@ def test_from_payload_maps_an_unknown_status_member_to_active():
 
 
 def test_history_entry_wire_shape_has_exactly_the_six_contract_keys():
-    entry = GoalHistoryEntry(
-        id="i", text="t", status="superseded", created_at="c", settled_at="s"
-    )
+    entry = GoalHistoryEntry(id="i", text="t", status="superseded", created_at="c", settled_at="s")
 
     assert set(entry.to_wire()) == {
         "id",
