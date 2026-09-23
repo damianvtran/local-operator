@@ -16,6 +16,7 @@ import pytest
 
 from local_operator.session.goal import CLEARED_GOAL_ECHO_CHARS
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.goal_panel import GoalPanel
 
 from .test_app_pilot import FakeSession, _factory
 from .test_slash_goal_loop_flags import (
@@ -37,8 +38,19 @@ def _armed() -> FakeSession:
 
 
 async def _local(pilot, app: OperatorApp, text: str) -> list[str]:
+    """The notices THIS submit added, and nothing the boot had already painted.
+
+    ``_armed()`` deliberately boots a session that ALREADY carries a goal, and
+    adopting such a session paints one ``goal restored`` system notice
+    (``OperatorApp._report_attachment_restore``). That notice is the feature
+    working — invisible standing state being announced once on adopt — so it
+    must not be suppressed; but it lands in the transcript before any submit,
+    and the exact-equality assertions below are about the submit's own words.
+    Slicing from a snapshot keeps that meaning intact.
+    """
+    before = len(_notice_texts(app))
     await _submit(pilot, app, text)
-    return _notice_texts(app)
+    return _notice_texts(app)[before:]
 
 
 @pytest.mark.asyncio
@@ -140,19 +152,36 @@ async def test_dismiss_with_nothing_up_says_so_on_either_host() -> None:
 
 @pytest.mark.asyncio
 async def test_the_bare_report_names_the_state_on_either_host() -> None:
+    """The no-argument form names the state — on the card here, in the receipt there.
+
+    RULINGS R6 makes the TUI's no-argument form the OVERLAY, so THIS host answers a
+    READ with the card and paints no receipt at all (``_open_goal_panel``: a receipt
+    is the record of an ACT, and the card is the state a read leaves behind). The
+    routed host keeps the shared vocabulary's one-liner, which is what a FOLLOWER
+    reads — it cannot be handed a card whose keys write the owner's record. So the
+    two hosts name the same state in deliberately different shapes, and the
+    assertions below pin each host's own shape rather than comparing them word for
+    word; the routed string stays the ONE wording every non-TUI host answers with
+    (``serving.py::_goal_slash``).
+    """
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
-        active = await _local(pilot, app, "/goal")
-        result = await app.run_slash_authoritative("goal", "")
+        assert await _local(pilot, app, "/goal") == [], "a read prints no receipt"
+        active_card = app.query_one(GoalPanel).render().plain
+        active = await app.run_slash_authoritative("goal", "")
         session.mark_goal_done("done")
-        done = await _local(pilot, app, "/goal")
+        assert await _local(pilot, app, "/goal") == [], "still no receipt when done"
+        done_card = app.query_one(GoalPanel).render().plain
+        done = await app.run_slash_authoritative("goal", "")
 
-    assert active == [f"goal: {GOAL} — active"]
-    assert result["text"] == active[0]
-    # A settled goal has no live work to do, so the report names the way out.
-    assert done == [f"goal: {GOAL} — done; /goal --dismiss clears it"]
+    assert GOAL in active_card and "— active" in active_card
+    assert active["text"] == f"goal: {GOAL} — active"
+    # A settled goal has no live work to do, so the report names the way out — and
+    # the card carries the same state, struck, while it is up.
+    assert GOAL in done_card and "— done" in done_card
+    assert done["text"] == f"goal: {GOAL} — done; /goal --dismiss clears it"
 
 
 @pytest.mark.asyncio
