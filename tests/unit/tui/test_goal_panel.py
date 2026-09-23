@@ -22,6 +22,8 @@ from local_operator.session.goal_judge import MAX_GOAL_CONTINUATIONS
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.goal_panel import (
     MAX_HISTORY_ROWS,
+    PANEL_PADDING_CELLS,
+    PANEL_PADDING_ROWS,
     GoalPanel,
     build_goal_body,
     clamp_history_rows,
@@ -124,12 +126,19 @@ def test_the_history_list_is_bounded_and_says_what_it_dropped() -> None:
 
 
 def test_the_body_fits_its_width_at_80_and_100_columns() -> None:
-    """The panel's two supported widths, measured in CELLS (not characters)."""
+    """The panel's two supported widths, measured in CELLS (not characters).
+
+    ``width`` here is the CONTENT box (the caller takes the padding off), and the
+    property that matters is that NOTHING WRAPS: a line one cell too long takes a
+    second row, and a card that pinned its height to its line count then loses
+    its last row off the bottom.
+    """
     history = [_entry("a settled goal with a reasonably long name")]
-    for width in (80, 100):
+    for screen in (80, 100):
+        width = screen - PANEL_PADDING_CELLS
         body = _body(width=width, history=history)
         longest = max(cell_len(line) for line in body.plain.split("\n"))
-        assert longest <= width, f"{width}: {longest} cells"
+        assert longest <= width, f"{screen}: {longest} cells in a {width}-cell box"
 
 
 def test_clamp_history_rows_never_takes_the_card_off_the_screen() -> None:
@@ -225,6 +234,36 @@ async def test_the_delete_key_deletes_without_recording_anything() -> None:
         assert session.goal_status == ""
         # DELETE records nothing: that is the whole difference from mark-done.
         assert session.history_view() == []
+
+
+@pytest.mark.asyncio
+async def test_the_card_is_tall_enough_for_its_own_content() -> None:
+    """The border-box trap: a pinned height that forgets the gutter CLIPS rows.
+
+    Measured on the first captured frame of this card, and the reason this test
+    exists: it painted its title, rule, goal and judge rows and then ran out,
+    with `settled` and the key hint invisible while still occupying height. A
+    test that only read `render().plain` saw nothing wrong — the content was
+    right and the box was too small — so the assertion has to be about the BOX.
+    """
+    session = _armed()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app._cmd_goal("", lambda body, kind="info": None)
+        await pilot.pause()
+        panel = app.query_one(GoalPanel)
+        rows = panel.render().plain.split("\n")
+        # `region` is the OUTER box: the content plus the stylesheet's own two
+        # padding rows, which is what Textual's border-box sizing hands out.
+        assert panel.region.height >= len(rows) + PANEL_PADDING_ROWS
+        assert panel.region.width <= 100
+        # AND NO LINE WRAPS. A line wider than the content box takes a second
+        # row, which is the same clipping by another route — measured on the same
+        # captured frame, where a `─` rule built to the OUTER width wrapped and
+        # pushed the key hint out of the card.
+        for line in rows:
+            assert cell_len(line) <= panel.content_size.width, line[:40]
 
 
 @pytest.mark.asyncio

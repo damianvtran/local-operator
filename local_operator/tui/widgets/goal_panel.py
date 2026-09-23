@@ -44,6 +44,22 @@ MAX_HISTORY_ROWS = 6
 MIN_PANEL_WIDTH = 46
 MAX_PANEL_WIDTH = 100
 
+#: Cells the card's own padding spends, two per side (the stylesheet's
+#: `padding: 1 2`). The BODY is built to the content box, not the outer width:
+#: a line one cell too long WRAPS, and a wrapped line pushes the card's last row
+#: out of the box it pinned — which is how the key hint went missing on the first
+#: captured frame (a `─` rule built to `outer - 2` against a content box of
+#: `outer - 4`).
+PANEL_PADDING_CELLS = 4
+
+#: Rows the card's own padding spends, one per side (the stylesheet's
+#: `padding: 1 2`). Named here because the widget SIZES ITSELF: Textual is
+#: border-box, so a pinned height that does not add these back hands the gutter
+#: the last content rows and clips the hint row off the bottom of the card — the
+#: mistake the usage card documents and this one made first (caught by looking at
+#: a rendered frame, which is why it is a named constant and a test now).
+PANEL_PADDING_ROWS = 2
+
 #: Rows the card spends on chrome, i.e. everything that is not a goal or a
 #: history row: title, rule, judge line, blank, history heading, hint.
 _CHROME_ROWS = 6
@@ -105,8 +121,12 @@ def build_goal_body(
     record, but the two keys write it, and a second writer of one record is the
     class the ownership rule exists to prevent — so the hint row drops them
     rather than advertising keys that would be refused.
+
+    ``width`` is the CONTENT box the card will render into — the caller has
+    already taken the padding off — because every line here has to fit without
+    wrapping: see :data:`PANEL_PADDING_CELLS`.
     """
-    inner = max(20, width - 2)
+    inner = max(20, width)
     out = Text()
     done = status == "done"
     title = "Goal"
@@ -128,7 +148,7 @@ def build_goal_body(
         out.append("▌ ", style="dim" if done else "bold")
         # STRUCK, and the tag is not: a struck row must stay readable, which is
         # the rule the to-do rows already follow.
-        text = truncate_cells(" ".join(goal.split()), inner - 2)
+        text = truncate_cells(" ".join(goal.split()), max(10, inner - 2))
         out.append(text, style=_DONE_STYLE if done else "")
         if done:
             out.append("  — done", style="dim")
@@ -269,7 +289,6 @@ class GoalPanel(Static):
         if not self.display or not self.is_mounted:
             return
         width = self.panel_width()
-        _, rows_above = overlay.screen_size(self)
         available = overlay.rows_above_dock(self)
         history = self._history[: clamp_history_rows(len(self._history), available)]
         body = build_goal_body(
@@ -277,7 +296,7 @@ class GoalPanel(Static):
             status=self._status,
             judge=self._judge,
             history=history,
-            width=width,
+            width=max(20, width - PANEL_PADDING_CELLS),
             cap=self._cap,
             actions=self._actions,
         )
@@ -285,10 +304,17 @@ class GoalPanel(Static):
         # Pinned rather than `auto` for the reason the usage card pins its own:
         # `auto` measures against a guessed width before layout and settles a row
         # tall, and this card is repainted after every action.
-        self.styles.height = len(body.plain.split("\n"))
-        if rows_above < 0:  # pragma: no cover - defensive, `rows_above` is floored
-            rows_above = 0
-        overlay.recentre(self, width, self.styles.height.value or 1)
+        #
+        # The PADDING ROWS ARE ADDED BACK, and that is load-bearing: Textual
+        # sizes border-box, so pinning the content count alone gives the gutter
+        # the last two content rows and the hint row falls off the bottom of the
+        # card. Measured on the first captured frame: the card painted its title,
+        # rule, goal and judge rows and then ran out, with `settled` and the key
+        # hint invisible but still occupying height.
+        rows = len(body.plain.split("\n"))
+        outer_height = rows + PANEL_PADDING_ROWS
+        self.styles.height = outer_height
+        overlay.recentre(self, width, outer_height)
         self.update(body)
 
     def on_mount(self) -> None:

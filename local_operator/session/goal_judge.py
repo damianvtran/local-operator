@@ -26,6 +26,7 @@ be raised before anyone has measured the distribution that would justify it.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -35,6 +36,8 @@ from local_operator.session.goal_loop import (
     MAX_LOOP_JUDGE_FAILURES,
     _parse_loop_verdict,
 )
+
+logger = logging.getLogger(__name__)
 
 #: How many auto-continuations ONE streak may admit before the judge stalls.
 #:
@@ -262,9 +265,7 @@ class GoalJudge:
         # next turn end can judge again rather than the goal going inert.
         error = task.exception()
         if error is not None:  # pragma: no cover - defensive
-            import logging
-
-            logging.getLogger(__name__).warning("goal judge failed", exc_info=error)
+            logger.warning("goal judge failed", exc_info=error)
 
     def _claim(self) -> bool:
         if self._in_flight:
@@ -489,7 +490,3 @@ class GoalJudge:
             return
         self._mirror.update(moved)
         self.changed(moved)
-
-    def publish(self) -> dict[str, Any]:
-        """The judge fields as this driver believes them to be, for a host's use."""
-        return dict(self._mirror)
