@@ -623,6 +623,111 @@ def _frame_skips_measurement(projection: SessionProjection) -> bool:
     return total <= budget
 
 
+#: One frame-cap memo entry: the SOURCE object (held strongly, so an identity
+#: match cannot be fooled by ``id`` reuse), the cap it was taken at, the
+#: normalizer that produced it, and the value. See :func:`_frame_capped`.
+_FrameCapEntry = tuple[str, int, Callable[[str, int], str], str]
+
+
+def _frame_capped(
+    row_memo: dict[Any, _FrameCapEntry],
+    key: Any,
+    source: str,
+    limit: int,
+    normalizer: Callable[[str, int], str],
+) -> str:
+    """``normalizer(source, limit)``, reused when that source object did not change.
+
+    WHY. ``_compact``/``_compact_multiline`` walk the WHOLE source
+    (``" ".join(text.split())``) even when the cap keeps a fraction of it, and
+    the tiers below run on EVERY repaint that is over the soft cap, ~30x/s
+    while a turn streams. Measured on this fold at N=256 with a hydrated
+    roster: 13,824 normalizer calls scanning 3.56 MB per frame, and the frame
+    after it scanned all of it again for the same answer. Those frames come
+    off ONE retained projection object, which is what makes a memo possible at
+    all.
+
+    WHY IDENTITY, NOT EQUALITY. ``to_json`` is ``asdict``, and ``deepcopy``
+    leaves an atomic ``str`` alone, so the source reaching the tiers IS the
+    row's own string object until that field is reassigned — while an
+    equality/hash pass over a multi-KB preview would cost the very walk this
+    avoids. The entry therefore holds the source strongly and compares with
+    ``is``: a recycled ``id()`` can never produce a wrong hit, and a
+    distinct-but-equal string is treated as new work, which is the safe
+    direction. ``limit`` and ``normalizer`` ride in the entry because one
+    source can be capped differently by different callers (this cap vs the
+    fold's own) and a monkeypatched normalizer must not read a stale value.
+
+    ``row_memo`` is ONE roster row's slice of the memo (see
+    :func:`_frame_cap_row_memo`), which is what keeps pruning proportional to
+    the roster instead of to every cached string. ``key`` names the slot — the
+    field for a row's own text, the field plus item indices for a todo — and it
+    is only ever read THROUGH the guard above, so two callers cannot collide
+    into a wrong value: a stale or shared slot can only cost recomputation.
+    That is also why a concurrently written entry needs no lock: the tuple is
+    replaced in one assignment, and the loop that reads it validates before
+    use.
+
+    The published bytes are unchanged BY CONSTRUCTION, not by an invariant
+    about the callers: a hit returns exactly what ``normalizer(source, limit)``
+    produced for this same object, so the tier that skips work and the tier
+    that does it emit identical frames (pinned as a whole-frame digest in
+    ``tests/unit/mobile/test_projection.py``).
+    """
+    cached = row_memo.get(key)
+    if cached is not None:
+        cached_source, cached_limit, cached_mode, capped = cached
+        if cached_source is source and cached_limit == limit and cached_mode is normalizer:
+            return capped
+    capped = normalizer(source, limit)
+    row_memo[key] = (source, limit, normalizer, capped)
+    return capped
+
+
+def _frame_cap_row_memo(projection: SessionProjection, row_id: str) -> dict[Any, _FrameCapEntry]:
+    """One roster row's slot in the projection's re-cap memo, created on demand.
+
+    The memo is slotted BY ROW so that pruning stays proportional to the roster
+    (one delete per departed child) rather than to every cached string — a flat
+    memo made the liveness sweep itself the per-frame cost this change exists
+    to remove. Slots are created for the rows a capped frame publishes and
+    dropped when a frame no longer carries them, so the cache cannot outgrow
+    the roster cap; within a row, slots are bounded by the fields and todo
+    items that row has carried, replaced in place whenever one of them changes.
+    """
+    memo = projection._frame_cap_memo
+    row_memo = memo.get(row_id)
+    if row_memo is None:
+        row_memo = {}
+        memo[row_id] = row_memo
+    return row_memo
+
+
+def _prune_frame_cap_memo(projection: SessionProjection, live_row_ids: set[str]) -> None:
+    """Release the memo slot of every roster row this frame does not publish.
+
+    A fold is bounded by the frame it just emitted, not by memory of every
+    child it has ever shown: a row that has left the roster cannot come back,
+    so its slot can only hold strings nothing will ask for again. Per row, one
+    delete — the rows are the keys, so this walks the ROSTER and not the cache;
+    a flat memo, keyed by row and field together, made the liveness sweep
+    itself the per-frame cost this change exists to remove (13,568 entries at
+    N=256 with a hydrated roster, every repaint). The fold's own path never
+    drops a row (``_sync_subagents`` only sorts them), so what this covers is
+    the projection that DOES publish a shorter roster — a copy rebuilt from a
+    partial frame — and it is what makes "bounded by the roster" true of every
+    caller rather than of one.
+
+    Entries inside a LIVE row whose todos shrank are kept until that row
+    leaves: the bound is then one generation of the shape that row had, and it
+    is replaced in place the next time those items change.
+    """
+    memo = projection._frame_cap_memo
+    for row_id in tuple(memo):
+        if row_id not in live_row_ids:
+            del memo[row_id]
+
+
 def cap_projection_frame(
     projection: SessionProjection, *, cap_bytes: int = PROJECTION_FRAME_SOFT_CAP_BYTES
 ) -> tuple[dict[str, Any], bool]:
@@ -642,7 +747,9 @@ def cap_projection_frame(
        transcript's lazy /history fetch, so nothing is lost that a tap cannot
        recover. Roster todos are agent-authored and unbounded, and a deep
        roster puts many of them on the wire at once, so they are the tier's
-       real work rather than a corner of it.
+       real work rather than a corner of it. Every re-cap here is memoised on
+       the source OBJECT (:func:`_frame_capped`), so an unchanged roster
+       re-caps nothing on the next repaint.
     1b. A pending card's option consequence lines shrink to a readable bound.
        The card itself is the loudest thing on the phone and is never dropped;
        only the prose under each option is trimmed.
@@ -722,13 +829,37 @@ def cap_projection_frame(
         return total <= cap_bytes
 
     # Tier 1: subagent text previews down to minimal bounds.
-    for row in data.get("subagents") or []:
-        row["prompt"] = _compact(str(row.get("prompt") or ""), FRAME_CAP_PROMPT_CHARS)
-        row["result_text"] = _compact_multiline(
-            str(row.get("result_text") or ""), FRAME_CAP_RESULT_CHARS
+    #
+    # The re-cap goes through ``_frame_capped``: this loop runs on every
+    # over-cap repaint and the previews are the same string objects until a
+    # field is reassigned, so an unchanged roster re-caps nothing. The memo is
+    # pruned to THIS frame's roster before the loop, so it is bounded by the
+    # rows just published rather than by every child the fold has ever shown.
+    rows = data.get("subagents") or []
+    _prune_frame_cap_memo(projection, {str(row.get("job_id") or "") for row in rows})
+    for row in rows:
+        row_id = str(row.get("job_id") or "")
+        row_memo = _frame_cap_row_memo(projection, row_id)
+        row["prompt"] = _frame_capped(
+            row_memo,
+            "prompt",
+            str(row.get("prompt") or ""),
+            FRAME_CAP_PROMPT_CHARS,
+            _compact,
         )
-        row["error_text"] = _compact_multiline(
-            str(row.get("error_text") or ""), FRAME_CAP_ERROR_CHARS
+        row["result_text"] = _frame_capped(
+            row_memo,
+            "result_text",
+            str(row.get("result_text") or ""),
+            FRAME_CAP_RESULT_CHARS,
+            _compact_multiline,
+        )
+        row["error_text"] = _frame_capped(
+            row_memo,
+            "error_text",
+            str(row.get("error_text") or ""),
+            FRAME_CAP_ERROR_CHARS,
+            _compact_multiline,
         )
         # A hydrated child transcript on the wire predates the lazy /history
         # fetch; if one is still embedded it is pure frame weight.
@@ -760,11 +891,33 @@ def cap_projection_frame(
     # many unbounded agent-authored strings — the shape that measured
     # 1,331,102 bytes from 80 children x 25 todos. Truncate first so the
     # working line still reads, and only drop the lists if that is not enough.
+    #
+    # THIS is the tier's real per-repaint cost, which is why it is memoised
+    # too: the same measurement at N=256 found 13,056 todo calls scanning
+    # 3.13 MB against 768 calls for the previews above, all of it repeated for
+    # an unchanged roster. Todo text is not normalised before it lands on the
+    # row (``set_subagent_hydrated_details`` copies the store's strings), so a
+    # byte-identical shortcut here has to be the identity memo — a "skip it
+    # when it is already short" gate would republish a raw double space.
     for row in data.get("subagents") or []:
-        for phase in row.get("todos") or []:
-            for item in phase.get("items") or []:
-                item["text"] = _compact(str(item.get("text") or ""), FRAME_CAP_TODO_TEXT_CHARS)
-                item["reason"] = _compact(str(item.get("reason") or ""), FRAME_CAP_TODO_TEXT_CHARS)
+        row_id = str(row.get("job_id") or "")
+        row_memo = _frame_cap_row_memo(projection, row_id)
+        for phase_index, phase in enumerate(row.get("todos") or []):
+            for item_index, item in enumerate(phase.get("items") or []):
+                item["text"] = _frame_capped(
+                    row_memo,
+                    ("todo_text", phase_index, item_index),
+                    str(item.get("text") or ""),
+                    FRAME_CAP_TODO_TEXT_CHARS,
+                    _compact,
+                )
+                item["reason"] = _frame_capped(
+                    row_memo,
+                    ("todo_reason", phase_index, item_index),
+                    str(item.get("reason") or ""),
+                    FRAME_CAP_TODO_TEXT_CHARS,
+                    _compact,
+                )
     dirty.add("subagents")
     if fits():
         return data, True
