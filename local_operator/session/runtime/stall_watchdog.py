@@ -529,9 +529,21 @@ DEFAULT_STALL_S = 300.0
 #: running, and this one is room for a boot whose latency is unbounded and
 #: legitimate (there is no boot-side false-positive class to size against, only the
 #: unbounded-tail risk of cutting a slow-but-working boot). The steady bound takes
-#: over the moment the runtime engages, so the whole of this number is spent on boot
-#: and a genuinely hung boot is still cut, at this bound, with the never-engaged
-#: attribution the deadline sibling's absence carries.
+#: over the moment the runtime engages, so the whole of this number is spent on boot.
+#:
+#: IT BUYS EVIDENCE, NOT A CUT, and the distinction is the one thing the entry point's
+#: side of the split is easiest to misread (agent review round 1, R1-1). The exit leg
+#: answers through ``process._busy_probe``, which reports WORK IN FLIGHT for the whole
+#: pre-publication window — ``True`` while ``_live_handle`` is None, because a runtime
+#: still constructing itself is not idle in any sense this bound may act on — so
+#: ``arm`` seeds ``_Armed.held`` True here and every fire in this stretch is
+#: NON-FATAL. A boot that hangs is therefore DUMPED at this bound and HELD, and one
+#: that never reaches publication keeps answering "in flight" for the rest of its
+#: life, so nothing in this module ends it; the way out is the boot's own failure
+#: path or an operator (``lop stop``). What this bound contributes is the
+#: ATTRIBUTION: the fired value is this number and the deadline sibling is absent —
+#: together, the never-engaged class. The exit leg goes fatal only once the runtime
+#: has published and its work has cleared (#1439's rule, applied to the boot phase).
 DEFAULT_BOOT_STALL_S = 900.0
 
 #: The largest bound ``faulthandler`` can hold. Its timeout becomes a signed
@@ -1538,8 +1550,10 @@ def arm(
     THE BOUND IT ARMS IS THE BOOT BOUND (:data:`DEFAULT_BOOT_STALL_S`), not the
     steady one, and that is the whole of the entry point's side of the split: the
     entry point runs before anything can stamp a plane, so the deadline it sets is
-    measured from here and only :func:`engage` — which the boot path cannot reach —
-    can move it. ``boot_seconds`` overrides the boot bound for a caller that has a
+    measured from here and only :func:`engage` can move it — and ``engage`` is called
+    FROM the boot path, at the publication boundary inside ``process.amain``, so what
+    cannot reach it is nothing before that boundary rather than the boot path as a
+    whole. ``boot_seconds`` overrides the boot bound for a caller that has a
     reason (the suite's children pass one to exercise the mechanism without waiting
     out 900 s); an explicit ``seconds=`` is a statement about THIS process's whole
     arming and therefore stands as both bounds unless ``boot_seconds=`` says
@@ -1583,6 +1597,25 @@ def arm(
         # :func:`engage` a downward move by construction, which is the property its
         # cells pin.
         bound = max(boot, steady)
+        if boot < steady:
+            # THE `max` ABOVE DROPS THE BOOT BOUND HERE, and until agent review round 1
+            # (Q-1) it did so SILENTLY: every other unusable value of either knob is
+            # announced by ``_bound_from_raw`` (non-numeric, negative, beyond the C
+            # timer's range, below the floor), while a boot bound below the steady one
+            # left the operator's only artifact naming a number they never configured.
+            # The arithmetic is intended — the boot stretch is never judged more
+            # tightly than the steady bound, which is also what makes :func:`engage` a
+            # downward move by construction — so this is visibility, not a different
+            # bound, and a boot window longer than the operator asked for is exactly
+            # the kind of thing they need to be told about.
+            logger.warning(
+                "%s=%gs is below the steady bound of %gs; the boot window is %gs (boot is "
+                "never armed tighter than the steady bound)",
+                "boot_seconds" if boot_seconds is not None else ENV_BOOT_SECONDS,
+                boot,
+                steady,
+                steady,
+            )
         # THE ONE SENTENCE THAT MAKES THE SPLIT READABLE FROM THE ARTIFACT. A fired
         # value on its own cannot say which of the two bounds produced it, and the two
         # classes have different causes: a value at the steady bound is a runtime that
@@ -1747,10 +1780,11 @@ def _holds_work(busy: "BusyProbe | None") -> bool:
       that has been given no way to report what it is doing (a rig, an in-process
       host, a test of the liveness leg alone), and the bound's documented contract
       for such a caller is unchanged rather than silently withdrawn. The distinction
-      matters because the ONE production arm site (``process._start_runtime``) always
-      supplies the probe: there is no released runtime that can answer and does not,
-      so holding on absence would only ever disarm the bound for the callers that
-      cannot speak — the dead-instrument shape, not a safety win.
+      matters because the ONE production arm site (``stall_watchdog.arm`` in
+      ``process.py``'s ``__main__`` guard, the only place a real runtime child arms
+      at all) always supplies the probe: there is no released runtime that can answer
+      and does not, so holding on absence would only ever disarm the bound for the
+      callers that cannot speak — the dead-instrument shape, not a safety win.
     """
     if busy is None:
         return False
@@ -2504,6 +2538,9 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
     re-checked after the unlocked section rather than trusted from before it: that
     section can take arbitrarily long, and ``disarm`` can run inside it.
     """
+    # THE FIRST CADENCE, and only the first: it is re-derived from the LIVE bound on
+    # every wake below, because ``armed.seconds`` is no longer a value fixed at the arm
+    # (agent review round 1, R1-3 / QA Q-2).
     interval = _sample_interval(armed.seconds)
     while not stop.wait(interval):
         # THE WHOLE BODY IS GUARDED, and it is the same rule ``server._heartbeat_loop``
@@ -2532,6 +2569,24 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
             with _LOCK:
                 if _ARMED is not armed:
                     return
+                # THE CADENCE FOLLOWS THE LIVE BOUND, re-derived here on every wake
+                # rather than captured once before the loop. :func:`engage` moves
+                # ``armed.seconds`` DOWN (900 -> 300 at the shipped defaults) while the
+                # window :func:`_sample` accumulates reads that same attribute, so a
+                # cadence taken at the arm would stay the BOOT bound's for the rest of
+                # the process's life — a sampler looking LESS often than the window it
+                # measures implies. Measured before this line existed: probe-call gaps
+                # of 7.504 s both before and after an engagement moved a 90 s bound to
+                # 45 s, where ``_sample_interval(45)`` is 3.75 s. The direction was
+                # safe (``_sample_interval`` is monotone in the bound, so the frozen
+                # value can only be too coarse) and capped at ``HEARTBEAT_INTERVAL_S``,
+                # which is why this was a MINOR and not a mechanism defect — but at a
+                # steady bound under 180 s it is the difference between the window's
+                # ``/PROGRESS_SAMPLES_PER_WINDOW`` resolution and the liveness beat's
+                # ceiling, i.e. a leg deciding on fewer looks than it intends.
+                # Re-derived BEFORE the fire bookkeeping, so the ``continue`` on a
+                # recorded held fire waits on the fresh value too.
+                interval = _sample_interval(armed.seconds)
                 # BEFORE the sample, and in this order: a fire that landed since the
                 # last wake is recorded and re-armed on the same pass, only then is the
                 # exit leg applied — so a flip made while the timer was pending is in

@@ -1261,11 +1261,16 @@ def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
 # the boot bound covers and what the engagement reset makes NAMEABLE (a fire that
 # engaged has a deadline sibling; one that never engaged has none).
 
-#: One child, four arguments, because every cell in this section is the same rig with
-#: a different answer to "did it engage": ``mode`` (``never`` or ``engage``), the boot
-#: bound, the steady bound, and how long to wait before engaging. The engage line it
-#: prints is the evidence the parent asserts on — the bound it moved from and to, and
-#: BOTH planes' stamp deltas, so a reset that stamped one plane cannot pass.
+#: One child, three arguments: the boot bound, the steady bound, and how long to wait
+#: before engaging. The engage line it prints is the evidence the parent asserts on —
+#: the bound it moved from and to, and BOTH planes' stamp deltas, so a reset that
+#: stamped one plane cannot pass.
+#:
+#: A NEVER-ENGAGING SHAPE USED TO LIVE HERE and has moved to ``_BOOT_HOLD_CHILD`` below:
+#: it armed with no probes, which is not how the entry point arms, so a cell built on it
+#: could only ever agree with a claim about the boot window rather than with what a real
+#: child does with one (agent review round 1, R1-1). The attribution it was there to pin
+#: — the fired value, the absent sibling — is asserted by both of that child's cells.
 _ENGAGE_CHILD = """
 import ctypes
 import os
@@ -1274,24 +1279,22 @@ import time
 
 from local_operator.session.runtime import stall_watchdog
 
-mode = sys.argv[1]
-boot = float(sys.argv[2])
-steady = float(sys.argv[3])
-delay = float(sys.argv[4])
+boot = float(sys.argv[1])
+steady = float(sys.argv[2])
+delay = float(sys.argv[3])
 
 assert stall_watchdog.arm(boot_seconds=boot, seconds=steady), "the child could not arm the bound"
 print(f"armed:{os.getpid()}", flush=True)
-if mode == "engage":
-    time.sleep(delay)
-    before = dict(stall_watchdog._ARMED.last_beat)
-    moved = stall_watchdog.engage()
-    after = dict(stall_watchdog._ARMED.last_beat)
-    deltas = " ".join(f"{plane}={after[plane] - before[plane]:.6f}" for plane in sorted(after))
-    print(
-        f"engage:{moved} bound:{stall_watchdog._ARMED.boot_seconds:g}->"
-        f"{stall_watchdog._ARMED.seconds:g} stamps:{deltas}",
-        flush=True,
-    )
+time.sleep(delay)
+before = dict(stall_watchdog._ARMED.last_beat)
+moved = stall_watchdog.engage()
+after = dict(stall_watchdog._ARMED.last_beat)
+deltas = " ".join(f"{plane}={after[plane] - before[plane]:.6f}" for plane in sorted(after))
+print(
+    f"engage:{moved} bound:{stall_watchdog._ARMED.boot_seconds:g}->"
+    f"{stall_watchdog._ARMED.seconds:g} stamps:{deltas}",
+    flush=True,
+)
 
 lib = ctypes.PyDLL(None)
 lib.sleep.argtypes = [ctypes.c_uint]
@@ -1301,7 +1304,6 @@ lib.sleep(600)
 
 def _engage_run(
     tmp_path: Path,
-    mode: str,
     boot: float,
     steady: float,
     delay: float = 0.0,
@@ -1313,7 +1315,7 @@ def _engage_run(
     from the arm" is a claim about TIME, and nothing in the dump carries it.
     """
     started = time.monotonic()
-    result = _run_script(_ENGAGE_CHILD, tmp_path, args=(mode, str(boot), str(steady), str(delay)))
+    result = _run_script(_ENGAGE_CHILD, tmp_path, args=(str(boot), str(steady), str(delay)))
     elapsed = time.monotonic() - started
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     return result, pid, _dump_for(tmp_path, pid), elapsed
@@ -1613,30 +1615,245 @@ def test_a_boot_knob_spelled_off_arms_the_steady_bound_and_only_the_steady_knob_
         stall_watchdog.disarm()
 
 
-def test_a_runtime_that_never_engages_fires_at_the_boot_bound_with_no_sibling(
+def test_a_boot_bound_below_the_steady_one_is_announced_not_silently_dropped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """QA round 1, Q-1: the one unusable boot value that used to vanish in silence.
+
+    ``arm`` never arms tighter than the steady bound (``bound = max(boot, steady)``),
+    which is intended twice over — the boot stretch must not be judged more tightly than
+    the steady one, and ``max`` is what makes ``engage`` a downward move by
+    construction — but a boot bound BELOW the steady one therefore leaves no trace at
+    all: the header, the announce line and the timer all carry the steady bound while
+    the operator's knob said otherwise. Every other unusable spelling (``abc``, ``-5``,
+    ``1e12``, below the floor) already warns from ``_bound_from_raw``. Measured before
+    this warning: ``LOP_RUNTIME_BOOT_STALL_SECONDS=60`` → ``boot_bound_seconds() ==
+    60.0``, ``armed == 300.0``, ``warnings == []``.
+
+    The second half is the inverse, and it is the reason this is a warning rather than
+    a line in ``announce``: an operator who configured nothing must not be told about a
+    clamp that did not happen. The arithmetic is asserted unchanged in both halves, so
+    a future edit cannot satisfy this cell by moving the bound.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    try:
+        with caplog.at_level(logging.WARNING, logger=stall_watchdog.logger.name):
+            assert stall_watchdog.arm(boot_seconds=60.0, seconds=300.0, directory=tmp_path) is True
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == stall_watchdog.logger.name
+        ]
+        assert any(
+            "boot_seconds=60" in message and "below the steady bound of 300" in message
+            for message in messages
+        ), f"the dropped boot bound was not announced: {messages}"
+        assert [seconds for seconds, _, _ in fake.armed] == [300.0], (
+            "the warning must not change the arithmetic: boot is still never armed "
+            f"tighter than the steady bound, but the timer took {fake.armed}"
+        )
+
+        stall_watchdog.disarm()
+        caplog.clear()
+        fake.armed.clear()
+        with caplog.at_level(logging.WARNING, logger=stall_watchdog.logger.name):
+            assert stall_watchdog.arm(directory=tmp_path) is True
+        noisy = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == stall_watchdog.logger.name
+        ]
+        assert (
+            not noisy
+        ), f"the shipped default pair warned, which would put a line on every boot: {noisy}"
+        assert [seconds for seconds, _, _ in fake.armed] == [
+            stall_watchdog.DEFAULT_BOOT_STALL_S
+        ], fake.armed
+    finally:
+        stall_watchdog.disarm()
+
+
+#: THE PRODUCTION ARM OF THE BOOT WINDOW, as ``process.py``'s ``__main__`` guard
+#: makes it: ``arm(probe=process._progress_probe, busy=process._busy_probe)``. The two
+#: cells below are this one child with different answers to "is anything in flight",
+#: because that answer is what decides whether a boot-phase fire ENDS the process —
+#: and the production answer during boot is ``_busy_probe``'s ``True`` (no handle yet),
+#: not the ``False`` an arming that supplies no probe produces. A cell that arms
+#: without a probe and then asserts a cut agrees with a claim no runtime follows
+#: (agent review round 1, R1-1); these cells read the answer off the production
+#: callables themselves.
+#:
+#: The park is a GIL-RELEASING ``CDLL`` sleep rather than ``_ENGAGE_CHILD``'s
+#: GIL-holding ``PyDLL`` one, and that is what the held case needs: the process must
+#: SURVIVE the fire and still be able to report what it found.
+_BOOT_HOLD_CHILD = """
+import ctypes
+import os
+import sys
+import time
+
+from local_operator.session.runtime import process, stall_watchdog
+
+probes = sys.argv[1]
+boot = float(sys.argv[2])
+steady = float(sys.argv[3])
+park = float(sys.argv[4])
+
+if probes == "prod":
+    # THE PRE-PUBLICATION BOOT STATE, asserted rather than assumed: this is the window
+    # whose exit-leg answer both cells are about, and a rig that drifted out of it
+    # would be measuring a different question.
+    assert process._live_handle is None, "this child is not in the boot state"
+    assert (
+        process._busy_probe() is True
+    ), "the production busy probe no longer reports work in flight during boot"
+    probe, busy = process._progress_probe, process._busy_probe
+else:
+    # NO PROBE AT ALL: ``_holds_work(None)`` is False, so the timer is armed fatally.
+    probe, busy = None, None
+
+if not stall_watchdog.arm(boot_seconds=boot, seconds=steady, probe=probe, busy=busy):
+    raise SystemExit("the child could not arm the bound")
+armed = stall_watchdog._ARMED
+print(
+    f"armed:{os.getpid()} probes:{probes} bound:{armed.seconds:g} held:{armed.held}",
+    flush=True,
+)
+
+lib = ctypes.CDLL(None)
+lib.sleep.argtypes = [ctypes.c_uint]
+started = time.monotonic()
+lib.sleep(int(park))
+text = armed.path.read_text(encoding="utf-8")
+print(
+    f"survived:{time.monotonic() - started:.2f} held:{armed.held} "
+    f"fires:{text.count(stall_watchdog.FIRED_MARKER)} "
+    f"held_marker:{stall_watchdog.HELD_MARKER in text}",
+    flush=True,
+)
+"""
+
+
+def _boot_hold_run(
+    tmp_path: Path, probes: str, boot: float, steady: float, park: float
+) -> tuple[subprocess.CompletedProcess[str], int, Path]:
+    """Run one life of ``_BOOT_HOLD_CHILD`` and hand back what a reader would have."""
+    result = _run_script(
+        _BOOT_HOLD_CHILD, tmp_path, args=(probes, str(boot), str(steady), str(park))
+    )
+    # THE CHILD'S OWN DIAGNOSIS FIRST, because it is the informative one: the child
+    # asserts the pre-publication boot state before it arms, so a change to the probe it
+    # is about lands in its stderr and not in a parse error here.
+    if "armed:" not in result.stdout:
+        raise AssertionError(
+            f"the child never armed: rc={result.returncode} "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    return result, pid, _dump_for(tmp_path, pid)
+
+
+def test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD(
     tmp_path: Path,
 ) -> None:
-    """THE CLASS THE SPLIT MAKES NAMEABLE, as a real fire: it never engaged at all.
+    """R1-1: what the ENTRY POINT's arming actually does with a boot that never ends.
 
-    The child arms a 2 s boot bound and a 1 s steady bound and never engages, so this is
-    the measured plurality exactly — no session judged, no beat ever landing — and the
-    two facts a reader gets from it are the ones the design exists to produce: the value
-    on the fired line is the BOOT bound (it survived past the steady bound, which is what
-    makes a 1 s steady bound harmless here), and there is NO deadline sibling, because
-    only an engagement or a beat writes one.
+    The entry point arms as ``arm(probe=process._progress_probe,
+    busy=process._busy_probe)``, and ``_busy_probe`` answers **``True`` while
+    ``_live_handle is None``** — the whole pre-publication boot — so ``_Armed.held``
+    is True and every fire in this stretch arms NON-FATALLY. A hung boot is therefore
+    DUMPED at the boot bound and HELD, never ended: the exit leg goes fatal only once
+    the runtime has published and its work has cleared (#1439's rule, applied to the
+    boot phase), and a boot that never publishes keeps answering "in flight" for the
+    rest of its life, so nothing in this module ends it.
 
-    MUTATION THIS CELL CATCHES: arm the steady bound from the entry point (i.e. drop the
-    boot bound from ``arm``'s resolution) — the child fires at 1 s with 1 on the fired
-    line, and this cell goes red on the value it asserts.
+    WHY THIS CELL EXISTS AND WHAT IT REPLACES. The cell below pins the boot bound's
+    ATTRIBUTION through an arming with NO busy probe, where ``_holds_work(None)`` is
+    False and the fire is therefore fatal — so it could only ever agree with a claim
+    about a cut the production arming does not make (agent review round 1, R1-1).
+    This cell arms through the production callables, so a change to either of them
+    moves it: ``_busy_probe`` answering False during boot, ``_Armed.held`` no longer
+    seeded from the probe, or ``_arm_timer``'s exit leg ceasing to read it all turn
+    this cell red on a surviving process.
+
+    MUTATION THIS CELL CATCHES: arm with ``busy=lambda: False`` (or drop the probe)
+    and the child dies at the boot bound with ``rc=1``, so nothing below is reached;
+    make the boot-phase fire fatal by any other route and the same.
     """
     boot, steady = 2 * SHORT_BOUND_S, SHORT_BOUND_S
-    result, pid, dump, _elapsed = _engage_run(tmp_path, "never", boot, steady)
+    result, pid, dump = _boot_hold_run(tmp_path, "prod", boot, steady, 4.0)
+
+    line = next((row for row in result.stdout.splitlines() if row.startswith("armed:")), "")
+    assert f"probes:prod bound:{boot:g} held:True" in line, (
+        f"the production arming no longer holds the boot phase: {line!r} "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    summary = next((row for row in result.stdout.splitlines() if row.startswith("survived:")), "")
+    assert result.returncode == 0 and summary, (
+        f"a boot-phase fire ended a boot the production probe reported in flight: rc="
+        f"{result.returncode} {result.stdout!r} {result.stderr!r}"
+    )
+    assert summary.split()[1] == "held:True", summary
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text[:400]
+    assert _fired_seconds(text) == pytest.approx(float(boot)), (
+        f"the fire carried {_fired_seconds(text)}s rather than the {boot:g}s boot bound: "
+        f"{text[:400]!r}"
+    )
+    assert any(
+        row.startswith(stall_watchdog.HELD_MARKER) for row in text.splitlines()
+    ), f"the dump does not say the boot-phase fire was held: {text[:900]!r}"
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
+    assert "THIS IS THE BOOT BOUND" in text, (
+        "the header does not say that this value means the runtime never engaged, which "
+        f"is the whole reading this class needs: {text[:400]!r}"
+    )
+    assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
+        "a never-engaged held fire left a deadline sibling, so presence no longer "
+        "answers 'did anything ever re-arm this timer'"
+    )
+
+
+def test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut(
+    tmp_path: Path,
+) -> None:
+    """THE POSITIVE CONTROL for the cell above: the same boot, ended.
+
+    THE ARMING THIS CELL USES, stated because it is the point of the pair: NO probe is
+    passed at all, so ``_holds_work(None)`` answers False and ``_arm_timer`` arms
+    FATALLY. That is the shape QA measured a real fire from (a 3 s boot bound over a
+    1 s steady one → ``Timeout (0:00:03.0...)``, rc=1, no sibling) and the shape every
+    caller with no way to report what it is doing keeps — the bound's documented
+    contract for such a caller is unchanged. It is NOT the production arming: the
+    entry point always passes ``busy=_busy_probe``, which holds the whole boot phase
+    (see the cell above). Together the two say what the boot bound can and cannot end,
+    which is why the control is kept rather than folded into its sibling.
+
+    The two facts a reader gets from this fire are the ones the split exists to
+    produce: the value on the fired line is the BOOT bound (it survived the steady
+    bound, which is what makes a 1 s steady bound harmless here), and there is NO
+    deadline sibling, because only an engagement or a beat writes one.
+
+    MUTATION THIS CELL CATCHES: arm the steady bound from the entry point (i.e. drop
+    the boot bound from ``arm``'s resolution) — the child fires at 1 s with 1 on the
+    fired line, and this cell goes red on the value it asserts.
+    """
+    boot, steady = 2 * SHORT_BOUND_S, SHORT_BOUND_S
+    result, pid, dump = _boot_hold_run(tmp_path, "noprobe", boot, steady, 6.0)
+    assert (
+        "survived:" not in result.stdout
+    ), f"an idle boot outlived its own bound: {result.stdout!r} {result.stderr!r}"
     assert (
         result.returncode == 1
     ), f"the boot bound never fired: {result.stdout!r} {result.stderr!r}"
-    assert "engage:" not in result.stdout, "this child engaged after all"
     text = dump.read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, text[:400]
+    assert not any(
+        row.startswith(stall_watchdog.HELD_MARKER) for row in text.splitlines()
+    ), "a fatal fire wrote the held marker, so a reader would call an ended boot stalled"
     assert _fired_seconds(text) == pytest.approx(float(boot)), (
         f"a runtime that never engaged fired at {_fired_seconds(text)}s rather than its "
         f"{boot:g}s boot bound: {text[:400]!r}"
@@ -1674,7 +1891,7 @@ def test_engagement_moves_the_bound_to_the_steady_one_and_stamps_both_planes(
     measured from the arm and the child outlives the window it should not.
     """
     boot, steady = 4 * SHORT_BOUND_S, SHORT_BOUND_S
-    result, pid, dump, _elapsed = _engage_run(tmp_path, "engage", boot, steady)
+    result, pid, dump, _elapsed = _engage_run(tmp_path, boot, steady)
     line = next((row for row in result.stdout.splitlines() if row.startswith("engage:")), "")
     assert (
         "engage:True" in line
@@ -1728,7 +1945,7 @@ def test_the_deadline_resets_on_engagement_not_on_arm(tmp_path: Path) -> None:
     kills the child before it can print.
     """
     boot, steady, delay = 4 * SHORT_BOUND_S, SHORT_BOUND_S, 2.0
-    result, _pid, dump, elapsed = _engage_run(tmp_path, "engage", boot, steady, delay)
+    result, _pid, dump, elapsed = _engage_run(tmp_path, boot, steady, delay)
     assert "engage:True" in result.stdout, (
         f"the child did not reach its engagement, so a fire before it says nothing about "
         f"the reset: {result.stdout!r} {result.stderr!r}"
@@ -2611,6 +2828,107 @@ def test_arming_with_a_probe_starts_the_sampler_and_disarming_stops_it(
     assert stop.is_set(), "the sampler was left running past a clean exit"
 
 
+#: The cadence cell's child: a sampler whose PROBE CALLS ARE TIMESTAMPED, so the
+#: interval it actually looked at can be read off the run instead of inferred from a
+#: private local. The probe is a rig clock rather than a production one, and that is
+#: the one place in this file where that is the right trade: the cadence is derived
+#: from the BOUND, never from what the probe answers, and the bound is what moves. It
+#: returns ``((), True)`` — no motion, work in flight — so the progress leg can never
+#: fire and the sampler does nothing but wake, which is the whole measurement.
+#:
+#: ``busy`` answers True for the same reason: the steady bound here is short enough
+#: that the timer WILL fire inside the window, and a fatal fire would end the process
+#: before it could report. The exit leg is not what this cell measures, and holding it
+#: leaves the cadence untouched — a held fire re-arms the TIMER; it does not touch the
+#: interval the sampler derives from ``armed.seconds``.
+_CADENCE_CHILD = """
+import sys
+import time
+
+from local_operator.session.runtime import stall_watchdog
+
+boot = float(sys.argv[1])
+steady = float(sys.argv[2])
+engage_after = float(sys.argv[3])
+park = float(sys.argv[4])
+
+calls = []
+
+
+def probe():
+    calls.append(time.monotonic())
+    return (), True
+
+
+assert stall_watchdog.arm(
+    probe=probe, busy=lambda: True, boot_seconds=boot, seconds=steady
+), "could not arm"
+started = time.monotonic()
+time.sleep(engage_after)
+moved = stall_watchdog.engage()
+engaged_at = time.monotonic()
+time.sleep(park)
+stall_watchdog.disarm()
+after = [call - started for call in calls if call > engaged_at]
+gaps = [second - first for first, second in zip(after, after[1:])]
+print(
+    f"engage:{moved} bound:{steady:g} calls_after:{len(after)} "
+    f"max_gap:{max(gaps) if gaps else -1:.3f}",
+    flush=True,
+)
+"""
+
+
+def test_the_sampler_cadence_follows_an_engagement_instead_of_the_armed_bound(
+    tmp_path: Path,
+) -> None:
+    """Agent review round 1, R1-3 / QA Q-2: the window moved, so the look has to.
+
+    ``_progress_sampler`` derives its look interval from ``armed.seconds``, and before
+    this cell's fix it derived it ONCE, before the loop — while ``_sample`` reads the
+    same attribute live for the window it accumulates. This PR is what makes that
+    attribute movable after the arm, so the two could disagree: measured with boot 90 /
+    steady 45, the probe-call gaps were ``[7.504]`` on BOTH sides of an engagement that
+    moved the bound 90 → 45, where ``_sample_interval(45)`` is 3.75 s.
+
+    THE CELL MEASURES IT THE OTHER WAY ROUND, from the bound the sampler was never
+    armed for: boot 12 s (``_sample_interval`` 1 s) over a steady 1.2 s (0.1 s), with
+    the engagement arriving BEFORE the first wake, so the interval captured at the arm
+    can only ever be the wrong one for every sample the window contains. A sampler
+    still on the arm's cadence wakes twice in the window; one that re-derives wakes
+    once per steady interval, an order of magnitude more often. The assertion is a
+    COUNT and a MAXIMUM GAP with wide margins rather than a gap pinned to a float,
+    because what is being pinned is WHICH of two cadences is in force, not a
+    scheduler's precision under fleet load.
+
+    MUTATION THIS CELL CATCHES: move ``interval = _sample_interval(armed.seconds)``
+    back out of the loop (or out of the lock block, past the ``continue``) and
+    ``calls_after`` collapses from 16 to 2 and ``max_gap`` rises to the boot interval.
+    """
+    boot, steady = 12.0, 1.2
+    park = 2.5
+    result = _run_script(_CADENCE_CHILD, tmp_path, args=(str(boot), str(steady), "0.1", str(park)))
+    summary = next((row for row in result.stdout.splitlines() if row.startswith("engage:")), "")
+    assert summary.startswith(f"engage:True bound:{steady:g}"), (
+        f"the engagement did not happen or did not move the bound: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    calls_after = int(summary.split("calls_after:", 1)[1].split()[0])
+    max_gap = float(summary.split("max_gap:", 1)[1])
+    assert calls_after >= 6, (
+        f"the sampler looked {calls_after}x in {park}s of a {steady:g}s bound, which is "
+        f"the {boot:g}s BOOT bound's cadence "
+        f"({stall_watchdog._sample_interval(boot):.3f}s) rather than "
+        f"the live one ({stall_watchdog._sample_interval(steady):.3f}s): {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    assert max_gap <= 0.3, (
+        f"the widest gap between samples after the engagement was {max_gap:.3f}s, the "
+        f"cadence of the bound the sampler was ARMED with rather than the one it "
+        f"measures: {result.stdout!r}"
+    )
+
+
 # -- the in-flight guard and the production wiring ---------------------------
 #
 # BOTH OF THESE EXIST BECAUSE AGENT REVIEW ROUND 1 MEASURED THEIR ABSENCE, and
@@ -2788,6 +3106,18 @@ def test_the_progress_leg_is_wired_at_the_one_arm_site_and_reads_the_live_handle
         "every test would stay green and the fleet would look protected"
     )
     assert isinstance(passed["probe"], ast.Name) and passed["probe"].id == "_progress_probe"
+    # THE EXIT LEG'S WIRING IS THE SAME KIND OF LINE, and it is the one R1-1 was
+    # about: ``busy=`` is what decides whether a fire may END the process, and dropping
+    # it turns a boot that is held today into one that is ended while it is still
+    # constructing itself. The two cells above drive both answers through these very
+    # callables; this pins that the entry point passes the second one at all, which no
+    # behaviour in this file can observe (a child that arms the way the ENTRY POINT
+    # does is the only witness, and it is the cell above).
+    assert "busy" in passed, (
+        "the entry point arms without a busy probe, so a fire during boot is armed "
+        "fatally and a runtime still constructing itself would be ended by it"
+    )
+    assert isinstance(passed["busy"], ast.Name) and passed["busy"].id == "_busy_probe"
 
     published = [
         node
@@ -2811,9 +3141,19 @@ def test_the_progress_leg_is_wired_at_the_one_arm_site_and_reads_the_live_handle
     assert (
         probe_source is not None and "_live_handle" in probe_source
     ), "``_progress_probe`` no longer reads ``_live_handle``"
+    # The same for the OTHER half of the pair, where the answer is inverted on purpose:
+    # no handle yet is "judge nothing" for the progress leg and "in flight" for the exit
+    # leg (a runtime constructing itself is not idle in any sense the exit may act on).
+    # Lose that read and the boot phase stops being held, silently, with every cell that
+    # arms its own probe still green.
+    busy_source = ast.get_source_segment(source, _function(tree, "_busy_probe"))
+    assert (
+        busy_source is not None and "_live_handle" in busy_source
+    ), "``_busy_probe`` no longer reads ``_live_handle``, so boot is no longer held"
     # The behavioural twin of the source claim: arming with the real callable
     # installs THE REAL callable, which is what cell above this one drives.
     assert process_module._progress_probe.__module__ == process_module.__name__
+    assert process_module._busy_probe.__module__ == process_module.__name__
 
 
 def _function(tree: ast.AST, name: str) -> ast.AST:

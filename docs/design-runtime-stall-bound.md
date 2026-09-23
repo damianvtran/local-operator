@@ -128,6 +128,25 @@ from boot. That is also what makes the never-engaged class NAMEABLE: a fire that
 engaged has the deadline sibling `engage` writes, and one that never engaged has
 none. Engagement never widens the bound.
 
+**What that bound does with a hung boot: it DUMPS it and HOLDS it, it does not cut
+it.** The exit leg answers through `process._busy_probe`, which reports work in
+flight for the whole pre-publication window — `True` while `_live_handle` is `None`,
+because a runtime still constructing itself is not idle in any sense that bound may
+act on — so `arm` seeds `_Armed.held` true and every fire in this stretch is
+non-fatal: the fire writes its dump and its `bound held:` marker, and the process
+carries on. A boot that never reaches publication therefore keeps answering "in
+flight" for the rest of its life, and nothing in the module ends it; the way out is
+the boot's own failure path or an operator (`lop stop`). What the boot bound
+contributes in that window is the ATTRIBUTION — the fired value is the boot bound and
+the deadline sibling is absent, together the never-engaged class — while the exit leg
+only becomes fatal once the runtime has published and its work has cleared (a
+property of the in-flight prohibition, #1439, not of the boot phase). Pinned as a
+pair, because the two arming shapes answer different questions:
+`test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD` (the entry point's
+own arming, `busy=process._busy_probe`, held at `rc 0`) and
+`test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut` (a caller with no
+probe at all, armed fatally, `rc 1`).
+
 **Still open in that window, and NOT closed here.** A tick that returns early
 without raising is never re-created by `_watch_stall_beats`, whose restart fires
 only on an exception (`_do_shutdown` is the same class: a plane is unreported
