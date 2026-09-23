@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -794,6 +795,184 @@ def test_the_delete_preempt_declines_a_runtime_with_work_or_a_viewer(
     target.detached_at = time.time() - 1.0
     registry.publish(target, tmp_path)
     assert cleanup_mod._keep_alive_resident(directory, tmp_path) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_rehearsal_does_not_withdraw_a_real_deletes_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """Review round 2, R2-1: the rehearsal must not defeat the act it rehearses.
+
+    The bug this pins: the dry arm ran the WITHDRAWAL, which sits on the asking
+    arm ("we asked and the delete still refuses"). A rehearsal asks nothing, so
+    it had no request of its own to take back — and running the withdrawal there
+    removed the file of a REAL delete waiting at that moment, so the runtime never
+    saw it and the real delete refused after its whole bound. The reviewer
+    measured exactly that: control deleted in 0.51 s; with a rehearsal running,
+    refused after 2.01 s.
+
+    The tick is slowed to ``REAP_CHECK_S`` = 1.2 s so the request CANNOT be
+    granted while the rehearsal runs: that is what makes the file's survival the
+    only variable. The real delete then proceeds inside its own 2 s bound once
+    the slowed tick lands, which is the second half of the cell.
+    """
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    lease = _lease_for(tmp_path, session_id)
+    runtime = FakeRuntime(pid=os.getpid(), detached_at=time.time() - 1.0)
+    registry.publish(runtime._record, tmp_path)
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 1.2)
+
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    async def release_the_lease_on_exit() -> None:
+        await stop.wait()
+        lease.unlink()
+
+    releaser = asyncio.ensure_future(release_the_lease_on_exit())
+    await asyncio.sleep(0.6)
+    assert not stop.is_set()
+
+    request = registry.exit_request_path(directory)
+    real = asyncio.ensure_future(
+        asyncio.to_thread(cleanup_mod.delete_session, tmp_path, session_id, actor="tui")
+    )
+    for _ in range(200):  # the real delete's write lands here, well under 1.2 s
+        if request.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert request.exists(), "the real delete never wrote its request"
+
+    # THE REHEARSAL, WHILE THE REAL DELETE IS WAITING.
+    rehearsal = await asyncio.to_thread(
+        cleanup_mod.delete_session, tmp_path, session_id, actor="tui", dry_run=True
+    )
+
+    assert request.exists(), "the rehearsal withdrew a request it never wrote"
+    assert rehearsal.deleted is True and rehearsal.refusal == "", (
+        "the rehearsal must report what the real call would do, not the refusal it clears",
+        rehearsal,
+    )
+    assert directory.is_dir(), "a rehearsal removes nothing"
+
+    outcome = await real
+    assert outcome.deleted is True, outcome.refusal
+    assert await task is True
+    releaser.cancel()
+
+
+@pytest.mark.asyncio
+async def test_the_request_path_logs_the_idle_time_it_measured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    keep_alive: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review round 2, R2-4: the misstatement F4 caught, on the new path.
+
+    The request path leaves the drain early, so its exit line must report the
+    seconds it ACTUALLY idled rather than the window it never ran: the LRU's path
+    has printed the measured time since round 1, and this one still claimed the
+    window ("idle for 300.0s" for a 0.15 s stay). The line's own parenthetical is
+    the policy, not the measurement, and it stays.
+    """
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    runtime = FakeRuntime(pid=os.getpid(), detached_at=time.time() - 1.0)
+    registry.publish(runtime._record, tmp_path)
+    lease = _lease_for(tmp_path, session_id)
+    registry.write_exit_request(
+        directory,
+        {
+            "session_id": session_id,
+            "pid": os.getpid(),
+            "actor": "test",
+            "requested_at": time.time(),
+        },
+    )
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    async def release_the_lease_on_exit() -> None:
+        await stop.wait()
+        if lease.exists():
+            lease.unlink()
+
+    releaser = asyncio.ensure_future(release_the_lease_on_exit())
+    with caplog.at_level(logging.INFO, logger="local_operator.session.runtime.process"):
+        await asyncio.wait_for(stop.wait(), 10.0)
+    assert await task is True
+    releaser.cancel()
+
+    lines = [record.getMessage() for record in caplog.records if "idle for" in record.getMessage()]
+    assert lines, caplog.text
+    measured = float(lines[-1].split("idle for ")[1].split("s")[0])
+    assert measured < 5.0, lines[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_request_is_not_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """Review round 2, R2-2/R2-5: the request acts only while it is FRESH.
+
+    The withdrawal is not atomic with the runtime's read, and a requester that
+    dies between the write and the withdrawal leaves its file behind. Both are
+    bounded by the request's own age: a stale file is a statement about an act
+    that is over. Here a request stamped ten minutes ago is ignored (the runtime
+    keeps its window) and a fresh one, written to the same path, ends it — so the
+    bound is what decides, not the file's existence.
+    """
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    runtime = FakeRuntime(pid=os.getpid(), detached_at=time.time() - 1.0)
+    registry.publish(runtime._record, tmp_path)
+    lease = _lease_for(tmp_path, session_id)
+
+    registry.write_exit_request(
+        directory,
+        {
+            "session_id": session_id,
+            "pid": os.getpid(),
+            "actor": "test",
+            "requested_at": time.time() - 600.0,
+        },
+    )
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    async def release_the_lease_on_exit() -> None:
+        await stop.wait()
+        if lease.exists():
+            lease.unlink()
+
+    releaser = asyncio.ensure_future(release_the_lease_on_exit())
+    await asyncio.sleep(0.8)  # several ticks with the stale file in place
+    assert not stop.is_set(), "a stale request ended a runtime it no longer described"
+
+    registry.write_exit_request(
+        directory,
+        {
+            "session_id": session_id,
+            "pid": os.getpid(),
+            "actor": "test",
+            "requested_at": time.time(),
+        },
+    )
+    await asyncio.wait_for(stop.wait(), 10.0)
+    assert handle.disposed and runtime.closed
+    assert await task is True
+    releaser.cancel()
 
 
 @pytest.mark.asyncio
