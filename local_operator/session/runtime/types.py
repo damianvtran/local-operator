@@ -1092,6 +1092,25 @@ class SessionRecord:
     #: ``PROTOCOL_VERSION`` deliberately does not move for it. Nothing is
     #: required to read it: a runtime without it keeps today's residency.
     detached_at: float | None = None
+    #: At least one attach CLIENT is connected — the reaper's own term 3
+    #: (``RuntimeServer.attach_clients``), which is NOT the same fact as
+    #: ``detached`` directly above.
+    #:
+    #: WHY BOTH EXIST, because two fields that look alike invite exactly one
+    #: mistake (review round 1, F1). ``detached`` is VISIBILITY: it is true while
+    #: a multiplexing TUI has switched to another session and left this one's
+    #: terminal attached but not on screen (``viewer_watch displaying=False``),
+    #: and it is what a picker paints a row from. This one is ATTACHMENT, which
+    #: is what forbids an exit. A caller asking "may this runtime go?" needs
+    #: this one; a caller painting "nobody is watching" needs the other. The
+    #: keep-alive cap charged itself on ``detached`` until this field existed, so
+    #: a switched-away TUI's runtime — which can never enter a drain while its
+    #: viewer holds it — sat in a cap slot that could never be given back.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, like ``detached_at`` above:
+    #: ``from_json`` drops unknown keys, an older runtime's record defaults to
+    #: False, and ``PROTOCOL_VERSION`` deliberately does not move for it.
+    watching: bool = False
     #: This session is WAITING FOR A PERSON: ``"approval"``, ``"ask"``, or
     #: None. A parked gate holds the runtime resident for up to a day, so the
     #: cost has to be findable — this field is what puts it in `lop sessions`

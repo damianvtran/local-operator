@@ -121,7 +121,7 @@ DEFAULT_GRACE_S = 3.0
 #: window of 0 simply leaves the ordinary drain.
 DEFAULT_KEEP_ALIVE_SECONDS = 300
 
-#: HOW MANY DETACHED IDLE RUNTIMES ONE MACHINE KEEPS WARM
+#: HOW MANY IDLE CLIENTLESS RUNTIMES ONE INSTALL KEEPS WARM
 #: (``runtime.keep_alive_max``).
 #:
 #: The window above is per process and unbounded in aggregate, so a user who
@@ -139,10 +139,13 @@ DEFAULT_KEEP_ALIVE_SECONDS = 300
 #: exactly the wrong one, which is why the record carries WHICH MOMENT a runtime
 #: became detached (``SessionRecord.detached_at``) and not merely that it is.
 #:
-#: ONLY DETACHED IDLE RECORDS COUNT, and that is the cap's scope rather than an
-#: oversight: a runtime held by work in flight is not kept alive by this policy
-#: and must not be charged to it, or a busy fleet would evict the very windows
-#: this exists to create.
+#: ONLY IDLE, CLIENTLESS RECORDS COUNT — "no attach client is connected", the
+#: same term the reaper's own viewer predicate is built on — and that is the
+#: cap's scope rather than an oversight: a runtime someone is looking at, or one
+#: held by work in flight, is not kept alive by this policy and must not be
+#: charged to it, or a busy fleet would evict the very windows this exists to
+#: create. (A record's ``detached`` bit is *visibility*, not attachment, so it is
+#: deliberately NOT the test: see ``_keep_alive_candidates``.)
 #:
 #: A RACE LEAVES N±1 BRIEFLY, deliberately: two runtimes can each scan before
 #: either sees the other's decision, so one extra idle process can exist for one
@@ -798,7 +801,30 @@ def _detached_at(runtime: object) -> float | None:
 
 
 def _keep_alive_candidates() -> list[tuple[float, int]]:
-    """The machine's detached IDLE runtimes as ``(detached_at, pid)`` pairs.
+    """This install's idle, clientless runtimes as ``(detached_at, pid)`` pairs.
+
+    THE POPULATION IS THE REAPER'S OWN, and the ``watching`` term is what makes
+    it so (review round 1, F1). A record used to be charged on ``detached``
+    alone, which is *visibility*: a multiplexing TUI that has switched to
+    another session emits ``viewer_watch displaying=False``, so its runtime read
+    as detached while still holding a viewer — a slot charged to a runtime the
+    policy can never evict, and therefore a cap that a machine with more
+    switched-away sessions than the cap can spend entirely. ``watching`` is "no
+    attach client is connected", the fact term 3 of ``_should_exit`` is built
+    on, so a chargeable record is now one the policy could also have let go.
+
+    ``detached`` STAYS BESIDE IT rather than being replaced, and the pair is not
+    redundant: visible always implies attached, so for a record this build wrote
+    the two agree, but ``watching`` defaults to False on a record an OLDER
+    runtime published — and such a record with a viewer on screen would be
+    charged without the visibility term. Both, then: a slot is charged only to a
+    record that is neither visible nor attached.
+
+    THE SCOPE IS ONE CONFIG ROOT, not the host (QA round 1, Q-5): this scans
+    ``registry.scan()`` with the default root, i.e. the store the runtime itself
+    belongs to. Every isolated install — a test rig, a second config dir — gets
+    its own cap, which is what makes the bound a bound on *this* install's
+    memory. Two installs on one machine hold up to two caps between them.
 
     The one reader of the registry this policy needs, kept separate from the
     comparison so a test can hand :func:`_keep_alive_victim` a population
@@ -821,7 +847,9 @@ def _keep_alive_candidates() -> list[tuple[float, int]]:
 
     out: list[tuple[float, int]] = []
     for record, state in registry.scan(reap=False):
-        if state == "stale" or not getattr(record, "detached", False):
+        if state == "stale" or getattr(record, "watching", False):
+            continue
+        if not getattr(record, "detached", False):
             continue
         if getattr(record, "busy", False):
             continue
@@ -830,6 +858,46 @@ def _keep_alive_candidates() -> list[tuple[float, int]]:
             continue
         out.append((float(stamp), record.pid))
     return out
+
+
+def _exit_requested(runtime: object) -> bool:
+    """Has an EXPLICIT DELETE asked THIS run to leave?
+
+    WHO ASKS: ``cleanup.delete_session``, when the only thing keeping a
+    conversation's directory alive is a runtime this policy itself is holding
+    warm (QA round 1, Q-1 — a user who closes a conversation and deletes it was
+    refused for up to ``keep_alive_seconds`` with a sentence telling them to
+    stop a session they had just closed).
+
+    WHY IT IS HONOURED ONLY HERE, in the drain loop: the loop is reached only
+    with ``_should_exit`` holding, i.e. with no work, no viewer and no wake due,
+    so honouring the request cannot cut anything. That is the whole safety
+    property, and it is why this is a request the runtime grants rather than a
+    signal it obeys — see ``registry.EXIT_REQUEST_NAME`` for what the signal
+    alternatives cost.
+
+    ADDRESSED TO THIS RUN, like ``control``'s stop marker: a request naming
+    another pid or another conversation is not ours to honour, so a file left
+    behind by a failed attempt can never end the NEXT runtime for that session.
+    A malformed or unreadable file reads as no request at all, because a failed
+    read on a 250 ms tick must not be a decision.
+    """
+    record = getattr(runtime, "_record", None)
+    session_id = str(getattr(record, "session_id", "") or "")
+    pid = getattr(record, "pid", None)
+    if not session_id or not isinstance(pid, int):
+        return False
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import registry
+
+        request = registry.read_exit_request(config_dir() / "sessions" / session_id)
+    except Exception:  # noqa: BLE001 — a read that fails is not a request
+        logger.debug("could not read the exit request", exc_info=True)
+        return False
+    if not isinstance(request, dict):
+        return False
+    return request.get("session_id") == session_id and request.get("pid") == pid
 
 
 def _keep_alive_victim(runtime: object, cap: int) -> bool:
@@ -1352,33 +1420,53 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
         drained = False
         preempted = False
-        #: One re-draw is allowed per drain; see the tick below.
-        redrawn = False
+        idle_since = time.monotonic()
+        #: The detach stamp this window was drawn from. A DIFFERENT one means a
+        #: viewer attached and left again inside this drain, and the window then
+        #: has to be drawn again from that departure (see the tick).
+        drawn_from = _detached_at(runtime)
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
                 return True
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
-            # A VIEWER THAT CAME AND WENT INSIDE ONE TICK leaves this drain
-            # holding a window drawn BEFORE the detach it is meant to serve: the
-            # tick that would have cancelled the drain saw a viewer, and by the
-            # next one the viewer is gone, so ``_should_exit`` never went false
-            # and the window was never drawn again. Measured (a bench whose
-            # viewer attaches and disposes inside 0.25 s): the runtime left on
-            # the 3 s grace ~1 run in 8 instead of holding its keep-alive — the
-            # contract is about the STATE ("a viewer was here and left"), so it
-            # must not depend on a viewer outliving the sampling interval. One
-            # re-draw, and only when this drain is not already the keep-alive's.
-            # must not depend on a viewer outliving the sampling interval. One
-            # re-draw, and only when this drain is neither already the
-            # keep-alive's nor on a runtime that still has no stamp — the
-            # attribute read is free, and asking the policy again for a runtime
-            # nobody has looked at would put a config read on every drain.
-            if not redrawn and lru_cap == 0 and _detached_at(runtime) is not None:
-                redrawn = True
+            if _exit_requested(runtime):
+                # AN EXPLICIT DELETE ASKED THIS RUNTIME TO GO (``cleanup``'s
+                # preempt, QA round 1 Q-1). It is honoured HERE, inside the
+                # drain, which is the one place that PROVES nothing is in
+                # flight: the loop is reached only with ``_should_exit``
+                # holding, so the exit cannot cut a turn, a job, a wake or a
+                # viewer — the requester gets a runtime that leaves if it is
+                # idle and a refusal if it is not, with no path to destruction.
+                logger.info(
+                    "session runtime: an explicit delete asked this runtime to leave; "
+                    "exiting cleanly (idle-exit)"
+                )
+                drained = True
+                break
+            stamp = _detached_at(runtime)
+            if stamp is not None and stamp != drawn_from:
+                # A VIEWER THAT CAME AND WENT INSIDE ONE TICK, or a second
+                # attach/detach later in the same drain, leaves this drain
+                # holding a window drawn BEFORE the departure it is meant to
+                # serve: the tick that would have cancelled the drain saw a
+                # viewer, and by the next one the viewer is gone, so
+                # ``_should_exit`` never went false and the window was never
+                # drawn again. Measured: a bench whose viewer attaches and
+                # disposes inside 0.25 s took the cold spawn ~1 run in 8, and QA
+                # round 1 measured the second-detach case leaving on the FIRST
+                # window instead of the newer one. The contract is about the
+                # STATE ("a viewer was here and left"), so it must not depend on
+                # a viewer outliving the sampling interval, nor on there being
+                # only one departure per drain. Re-drawing only when the stamp
+                # MOVED keeps the config read off every runtime that has no
+                # claim to a window, and a drain that nothing touches pays
+                # exactly what it paid before.
+                drawn_from = stamp
                 window_s, lru_cap = _drain_window_s(grace_s, runtime)
                 deadline = time.monotonic() + window_s
+                idle_since = time.monotonic()
                 next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
             if next_lru_check is not None and time.monotonic() >= next_lru_check:
                 next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S
@@ -1432,10 +1520,16 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         # THE REASON NAMES THE TERM THAT ACTUALLY HELD; see ``_idle_exit_reason``.
         reason = _idle_exit_reason()
+        # WHAT WAS MEASURED, not what was allowed (review round 1, F4). On the
+        # ordinary path the two agree — the drain ran its window to the end — so
+        # this prints the window. On a preemption (the LRU gave the slot up) the
+        # runtime idled for a fraction of it, and printing the window made a
+        # reader sizing residency from the log off by 60x; the LRU line above
+        # names the reason, and this line now names the elapsed time.
         logger.info(
             "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
             "exiting cleanly (%s)",
-            window_s,
+            window_s if drained else time.monotonic() - idle_since,
             WARM_WINDOW_S,
             reason,
         )
