@@ -100,7 +100,6 @@ _CHROME_ROWS = 6
 #: the docked prompt. Defined AFTER ``_CHROME_ROWS`` because it is a sum of the
 #: two, and a forward reference here would be a NameError at import.
 _SQUEEZE_ROWS = PANEL_PADDING_ROWS + _CHROME_ROWS + 1
-_CHROME_ROWS = 6
 
 #: The ink a settled goal is struck with. A real SGR 9, not a colour: a
 #: strikethrough survives on terminals with no colour and reads as "finished"
