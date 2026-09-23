@@ -312,7 +312,7 @@ ListingStatus = Literal["ok", "cached", "stale", "static", "unauthenticated", "e
 #: reader asking "which providers did not answer?" may name exactly these.
 #:
 #: WHY this is a separate vocabulary from ``ListingStatus`` rather than every
-#: non-``ok`` value. A status answers "how did we get these rows", and four of
+#: non-``ok`` value. A status answers "how did we get these rows", and three of
 #: its values are NOT failures: ``cached`` served a stored document on purpose
 #: (fresh enough under the picker's TTL, or refreshing in the background),
 #: ``static`` means the provider has no listing endpoint at all (or a fetch
@@ -321,10 +321,18 @@ ListingStatus = Literal["ok", "cached", "stale", "static", "unauthenticated", "e
 #: provider needs a credential it was not given. Treating the STATUS as the
 #: failure signal is what made the desktop picker accuse all 23 providers —
 #: including the two aggregators whose 452 rows were on screen — of having "not
-#: answered" (D1): ``ok``/``cached``/``static``/``unauthenticated`` produced rows
-#: (or were never asked) and only ``stale``/``empty`` genuinely have none.
+#: answered" (D1).
 #:
-#: ``static``/``unauthenticated`` are reported to the user elsewhere (the TUI
+#: ``static`` is deliberately NOT here despite being a non-listing status, because
+#: it conflates "no listing endpoint" (a provider that legitimately serves only
+#: bundled registry rows) with "a fetch failed and nothing was cached". The
+#: desktop route resolves that ambiguity with the row count it already has — a
+#: ``static`` provider that contributed ZERO entries gets reported, a ``static``
+#: provider whose bundled rows are on screen does not (R1-4/Q1). That is why this
+#: set holds only the two statuses whose meaning is unambiguous, and the route
+#: owns the one case that needs a second fact.
+#:
+#: ``unauthenticated`` is likewise reported to the user elsewhere (the TUI
 #: footer's access note and ``_catalogue_status``); naming them here too would be
 #: one fact in two places, so this set stays the two that only a listing reader
 #: can see.

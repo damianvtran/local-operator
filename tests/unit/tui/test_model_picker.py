@@ -219,10 +219,17 @@ def test_a_substring_match_beats_a_merely_fuzzy_one() -> None:
     """`opus` is a SUBSEQUENCE of `anthropic/claude-sonnet-4` — o and p from
     "anthropic", u from "claude", s from "sonnet". Ranking subsequence hits
     alongside substring hits therefore answered a query naming one model with a
-    list containing several unrelated ones."""
+    list containing several unrelated ones.
+
+    SUBSTRING HITS LEAD, and the subsequence rows follow rather than vanish. The
+    old form asserted `names == [...]` exactly, which held because the base code
+    chose `pool = exact or fuzzy` and DROPPED every fuzzy row once one exact match
+    existed — the R1-1 eviction. Membership is now "matched anything at all", so
+    this pins the leading rows and that they are the substring ones.
+    """
     names = [row.model_id for row in rank_rows(_rows(), "opus")]
-    assert names == ["claude-opus-5", "claude-opus-4-1"]
-    assert all("opus" in name for name in names)
+    assert names[:2] == ["claude-opus-5", "claude-opus-4-1"]
+    assert all("opus" in name for name in names[:2])
 
 
 def test_the_fuzzy_fallback_still_resolves_typos_and_elisions() -> None:
