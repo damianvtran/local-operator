@@ -162,6 +162,26 @@ def test_an_all_digit_target_resolves_as_a_pid(fake_scan) -> None:
     assert record is a
 
 
+def test_numeric_pid_target_uses_one_registry_scan(monkeypatch) -> None:
+    """A PID typed as a bare target is resolved from its existing snapshot."""
+    record = _Record(48213, conversation_name="alpha")
+    scan_calls = 0
+
+    def scan(root=None):
+        nonlocal scan_calls
+        scan_calls += 1
+        return [(record, "live")]
+
+    monkeypatch.setattr(peer_send.registry, "scan", scan)
+
+    resolved, candidates, error = peer_send.resolve_peer_target(target="48213")
+
+    assert resolved is record
+    assert candidates == []
+    assert error == ""
+    assert scan_calls == 1
+
+
 def test_digits_that_are_not_a_pid_fall_through_to_the_substring_match(fake_scan) -> None:
     """A numeric session id or name still resolves when no record has that pid."""
     b = _Record(20, conversation_name="beta", session_id="777")

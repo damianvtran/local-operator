@@ -1207,6 +1207,14 @@ class ProjectionFold:
         # (SubagentProgressEvent is never per-delta by contract).
         self._subagents: dict[str, SubagentRow] = {}
         self._subagent_started_at: dict[str, float] = {}
+        # Hold each source object strongly so an identity match cannot be fooled
+        # by id reuse, and replace the slot when that field's source changes.
+        # Identity avoids an O(L) equality/hash walk over long previews on every
+        # root event; pruning after each successful roster pass bounds retention
+        # to the currently published job ids.
+        self._subagent_compact_cache: dict[
+            tuple[str, str], tuple[str, int, Callable[[str, int], str], str]
+        ] = {}
         # The working line's label, the PHASE that label belongs to, and its
         # clock origin.
         #
@@ -2170,6 +2178,7 @@ class ProjectionFold:
             ancestor_nodes[job_id] = lineage
             return lineage
 
+        live_job_ids = {node.job_id for node in nodes}
         for node in nodes:
             job = read.job(node.job_id)
             lifecycle = roster.get(node.job_id)
@@ -2186,7 +2195,13 @@ class ProjectionFold:
             # launch user message, resolved by launch_message_id), which the
             # phone fetches lazily; carrying it uncapped in every repaint scales
             # the frame with roster depth.
-            row.prompt = _compact(node.prompt or "", SUBAGENT_PROMPT_PREVIEW_CHARS)
+            row.prompt = self._compact_subagent_field(
+                node.job_id,
+                "prompt",
+                node.prompt or "",
+                SUBAGENT_PROMPT_PREVIEW_CHARS,
+                _compact,
+            )
             row.launch_message_id = node.launch_message_id
             row.effort = node.effort
             # Preserve #298's ancestor_ids feature on the O(children) path.
@@ -2243,14 +2258,28 @@ class ProjectionFold:
                 # GENEROUSLY (see SUBAGENT_ERROR_CHARS) or the failure tail is
                 # lost with no recovery path. Newlines preserved on both so a
                 # multi-line handoff or stack trace stays legible.
-                row.result_text = _compact_multiline(
-                    str(lifecycle.result_text or ""), SUBAGENT_OUTCOME_CHARS
+                row.result_text = self._compact_subagent_field(
+                    node.job_id,
+                    "result_text",
+                    str(lifecycle.result_text or ""),
+                    SUBAGENT_OUTCOME_CHARS,
+                    _compact_multiline,
                 )
-                row.error_text = _compact_multiline(
-                    str(lifecycle.error_text or ""), SUBAGENT_ERROR_CHARS
+                row.error_text = self._compact_subagent_field(
+                    node.job_id,
+                    "error_text",
+                    str(lifecycle.error_text or ""),
+                    SUBAGENT_ERROR_CHARS,
+                    _compact_multiline,
                 )
                 if lifecycle.age_s is not None:
                     row.elapsed_s = max(0.0, float(lifecycle.age_s))
+            else:
+                # A missing lifecycle no longer reaches the result/error
+                # normalizers. Drop their source references while preserving the
+                # existing row fields, which this legacy path leaves untouched.
+                self._subagent_compact_cache.pop((node.job_id, "result_text"), None)
+                self._subagent_compact_cache.pop((node.job_id, "error_text"), None)
             details = getattr(job, "latest_details", None)
             progress = str(details.get("progress") or "") if isinstance(details, Mapping) else ""
             row.progress = progress if row.status == "running" else ""
@@ -2262,7 +2291,31 @@ class ProjectionFold:
             # every child transcript synchronously on each root event was the
             # freeze this change removes.
         self._sync_subagents()
+        # The map is a per-fold memo, not a history of every child this fold has
+        # ever seen. Removed nodes cannot be returned on this successful pass.
+        for key in tuple(self._subagent_compact_cache):
+            if key[0] not in live_job_ids:
+                del self._subagent_compact_cache[key]
         self._bump()
+
+    def _compact_subagent_field(
+        self,
+        job_id: str,
+        field: str,
+        source: str,
+        limit: int,
+        normalizer: Callable[[str, int], str],
+    ) -> str:
+        """Reuse a compacted value only for this exact source object and policy."""
+        key = (job_id, field)
+        cached = self._subagent_compact_cache.get(key)
+        if cached is not None:
+            cached_source, cached_limit, cached_mode, compacted = cached
+            if cached_source is source and cached_limit == limit and cached_mode is normalizer:
+                return compacted
+        compacted = normalizer(source, limit)
+        self._subagent_compact_cache[key] = (source, limit, normalizer, compacted)
+        return compacted
 
     def set_subagent_hydrated_details(
         self,

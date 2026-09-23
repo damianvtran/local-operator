@@ -18723,13 +18723,17 @@ def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
     twice)."""
     requested = raw if isinstance(raw, list) else [raw]
     ids: list[str] = []
+    seen: set[str] = set()
     errors: list[str] = []
     for item in requested:
         resolved, error = comms.resolve(str(item))
         if error is not None:
             errors.append(error)
         for job_id in resolved:
-            if job_id not in ids:
+            # Broadcasts can overlap explicit targets; keep ordered output but
+            # avoid quadratic list membership as the recipient set grows.
+            if job_id not in seen:
+                seen.add(job_id)
                 ids.append(job_id)
     return ids, errors
 
