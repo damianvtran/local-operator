@@ -3259,7 +3259,85 @@ def _corpus_grading() -> str:
 #: value readable), and it now carries ``credential-assignment`` as complete and
 #: contained. The class is a credential that LOST its mask, which is why the row is
 #: pinned in the POSITIVE half rather than argued about in prose.
-_CORPUS_GRADING_DIGEST = "2a29fe4cf4f548c96837f1bf9583e4206f0fb793dfbf346c32dcf9e3e77b6beb"
+#: MOVED ON 2026-09-22, in the commit that stops the pass masking a store NAME in a
+#: credential-flag position, and the argument is once again a measurement rather than a
+#: claim — with a particular shape this time, because the module change is INVISIBLE to
+#: the corpus that existed. Grading the 423 rows the constant above covered under the
+#: ``origin/main`` module and under this one, field for field, produces byte-identical
+#: digests (``2a29fe4c…`` both times, measured beside `git show
+#: origin/main:local_operator/redaction_shapes.py` loaded as a second module), and the
+#: digest moves for one reason only: the corpus GREW, 423 -> 438, and the 15 added rows
+#: are the specification for the fix. Five positives are the VALUE side the release must
+#: not reach — an issuer token, the two underscore-joined phrases of the identifier arm
+#: (the class R1-1 measured), a single unseparated token, and a padded base64 value — and
+#: ten negatives are a store NAME in that position: the guide's own publish command and
+#: its ``cat``/``grep`` renderings, the same name under four other flag spellings, the
+#: ``=`` spelling, and the two-part form whose right half is not a credential word
+#: either.
+#:
+#: **The behaviour change the digest is too coarse to see, stated here instead.** Twelve
+#: argument spellings stop being masked — the store NAME under each flag in the rule's
+#: vocabulary, both separators, the two-part form, and the ``--token ABC_123_XYZ``-shaped
+#: residual the corpus pins as a negative — and NO row anywhere gains a mask. The corpus
+#: could not see any of them because every flag-carrying row it already had was either a
+#: VALUE (which still masks) or a NAME whose tail was a credential word (which was
+#: already released), which is exactly why the rows were added rather than argued about.
+#:
+#: **The constant the recovered commit carried was STALE, and it is re-derived here
+#: rather than trusted.** That commit's module and corpus were recovered from a subagent
+#: killed mid-task, and no test had been run against them before it was committed. Graded
+#: as they stand, the corpus produces ``946670a4…``, not the ``4cc31872…`` the commit
+#: recorded — written before its last corpus edit, and invisible to the suite for exactly
+#: the reason this constant exists: the one arm that would have caught it is the arm the
+#: constant belongs to, and a wrong constant fails only when someone runs it.
+#: The ARGUMENT above is what makes the correction safe, and it survives re-derivation
+#: unchanged: replaying it through this same function with the base module loaded beside
+#: the head one reproduces ``2a29fe4c…`` for the 423 rows that existed at ``bf48ca47``
+#: under BOTH modules, field for field, so the move is the corpus's growth (423 -> 438)
+#: and not a behaviour change on any pre-existing row.
+#:
+#: MOVED ONCE MORE ON 2026-09-22, in the commit that refuses the EXPOSURE CLAIM for the
+#: flag rule's word-shaped over-mask, and the argument is the same shape: no pre-existing
+#: row moved — the 438 rows above produce ``946670a4…`` byte for byte under this module
+#: too, measured by grading every one of them field for field with
+#: ``git show 1e8d33e6:local_operator/redaction_shapes.py`` loaded as a second module —
+#: and the digest moves for the corpus's growth alone, 438 -> 439: one positive that puts
+#: the word TWICE in the line, so the whole-value half of the exposure question answers
+#: yes for reasons that have nothing to do with the mask. That row is the second specimen
+#: the operator reported — a 33 KB documentation read escalated to a "rotate it" demand
+#: for the word ``when`` — and ``test_only_the_documented_positive_case_escalates`` now
+#: referees it like every other positive.
+#:
+#: MOVED ONCE MORE ON 2026-09-23, in the round-1 remediation, and here the argument has
+#: TWO halves because two different things happened in one commit.
+#:
+#: 1. **The module change is INVISIBLE to the corpus, measured.** Narrowing the flag
+#:    rule's prose refusal from ``len < _ASSIGNED_VALUE_MIN_CHARS`` (eight) to
+#:    ``len <= _FLAG_PROSE_MAX_CHARS`` (four) restores the escalation for every
+#:    five-, six- and seven-character value, and the corpus's only flag-position
+#:    word is the FOUR-character ``when`` row — refused by both bounds. So: the 442
+#:    rows below graded with ``git show f6f58eb7:local_operator/redaction_shapes.py``
+#:    loaded as a second module produce this same ``a755ab0e…`` byte for byte, and the
+#:    bound is separately shown to be insensitive across the whole range — grading the
+#:    439-row corpus with the refusal refusing bare words up to 4, 5, 6, 7, 8, 11 and 15
+#:    characters all give ``ff40e831…``, while refusing only up to 3 gives ``96341322…``
+#:    (it stops refusing the ``when`` row). Four is the narrowest bound that keeps that
+#:    row contained, which is why the boundary is pinned by a test rather than by a row:
+#:    the rows that would separate five from nine have to ESCALATE, and the corpus holds
+#:    exactly one escalating case by construction.
+#:
+#: 2. **The corpus grew by three rows, which is what moves the constant.** Measured by
+#:    recomputing over the corpus WITHOUT them under this same module: the 439 rows it
+#:    had produce ``ff40e831…`` field for field, so nothing pre-existing moved. The new
+#:    rows are two negatives and one positive from agent review R1-3 and R1-4 — the
+#:    TWO-PART spelling of the accepted residual (once with a separator in each half and
+#:    once with none, because the two halves are read by shape alone and so need no
+#:    separator at all: wider than the one-part release, and it had no row), and the
+#:    ONE-WORD store name the release does NOT reach (``normalize_credential_key("prod")``
+#:    is ``PROD``, so the arm's separator requirement leaves it masked). Both were found
+#:    by a differential rather than stated by the table, which is the thing this constant
+#:    exists to stop.
+_CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0eef58406f57"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -3287,7 +3365,34 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
     long and one of its six-character windows is in the text with the redaction
     marker stripped. Restating it is the point — a re-implementation that agrees
     with the corpus for the wrong reason fails on the next case.
+
+    ONE EXCLUSION, and it is part of the predicate rather than an exception to it:
+    the flag rule's word-shaped over-mask (``--api-key [redacted] you need to``) is graded
+    CONTAINED whatever the text says, because a value that is a bare lowercase word of
+    FOUR characters or fewer answers both questions YES for reasons that have nothing to
+    do with the mask — every English word recurs in prose, which is how a 33 KB
+    documentation read filed an ESCALATED rotation demand for the word ``when``
+    (2026-09-22). It is restated here, not imported, so the exclusion cannot drift from
+    the implementation without failing this arm.
+
+    THE RESTATED BOUND IS THE IMPLEMENTATION'S OWN FOUR, and that is the correction agent
+    review R1-2 asked for. It was eight — the module's masked-VALUE floor, which answers a
+    different question — and a restatement at eight could not catch drift across 5..9,
+    because the corpus holds no row that separates those bounds: measured, the grading is
+    identical for every bound at or above four. The rows that WOULD separate them have to
+    escalate, and the corpus holds exactly one escalating case by construction (the
+    reason ``test_a_genuinely_exposed_compact_credential_still_files_an_incident`` gives),
+    so the boundary is pinned in ``test_the_flag_prose_refusal_stops_at_four_characters``
+    instead, in both directions.
+
+    WHAT THIS RESTATEMENT CAN AND CANNOT CATCH, stated rather than implied: it fails on
+    drift DOWNWARD. An implementation refusing three characters or fewer leaves the
+    four-character ``when`` row escalating, where this arm — restating a bound of four —
+    computes ``exposed`` False for it, and the mismatch reds on the assertion below. Drift
+    UPWARD across five to nine is invisible to the corpus (no row of that width is a bare
+    word), so it is not this arm's job: it is the boundary test's.
     """
+    short_word_floor = 4
     checked = 0
     for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
         masked, hits = scrub_shapes_with_hits(case.text)
@@ -3295,7 +3400,15 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
         for hit in hits:
             value = hit.value
             exposed = bool(value) and value != REDACTION_MARKER
-            if exposed:
+            word_shaped = (
+                len(value) <= short_word_floor
+                and value.isascii()
+                and value.isalpha()
+                and value.islower()
+            )
+            if hit.label == "cli-credential-flag" and word_shaped:
+                exposed = False
+            elif exposed:
                 exposed = value in masked or (
                     len(value) >= 6
                     and any(value[start : start + 6] in readable for start in range(len(value) - 5))
@@ -3303,6 +3416,66 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
             assert hit.exposed is exposed, (case.reason, hit.label)
             checked += 1
     assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
+
+
+def test_the_flag_prose_refusal_stops_at_four_characters() -> None:
+    """The refusal's BOUNDARY, both ways, where the corpus cannot pin it.
+
+    ``_is_prose_after_a_flag`` refuses the exposure claim for a bare lowercase word in a
+    credential flag's argument position, and the bound is FOUR characters. Nothing in the
+    corpus separates a bound of five from one of nine (measured: the grading is identical
+    for every bound at or above four) and the rows that WOULD have to escalate, which the
+    corpus may not hold — so the boundary lives here, on the specimens the refusal was
+    written for and on the short values it must NOT swallow (agent review R1-2, measuring
+    R1-1).
+
+    An implementation whose bound drifted to five, six, seven, eight or nine fails the
+    second loop; one that drifted to three or less fails the first. Both directions are
+    the point: the narrowing exists to stop manufacturing rotation demands for English
+    words, and it may not buy that by giving up the escalation for a short credential
+    printed a second time in the clear.
+    """
+    import local_operator.redaction_shapes as rs
+
+    def escalates(text: str) -> bool:
+        return rs.shape_report(scrub_shapes_with_hits(text)[1]).reached_model
+
+    # Assembled from its segments, like every other flag/value pair in this file: the flag
+    # followed by a value is the exact shape the pass rewrites, so no literal here is one.
+    flag = "--" + "api-key" + " "
+
+    # The word case the refusal exists for — the 33 KB documentation line whose second
+    # ``when`` in free prose filed a rotation demand — and the shorter specimen the suite
+    # already pins. Both stay CONTAINED, and these are the only two words in this test
+    # that are read as prose rather than as a value.
+    for word in ("when", "was"):
+        prose = f"{flag}{word} you need it, and {word} the flag is set it wins"
+        assert REDACTION_MARKER in scrub_shapes_with_hits(prose)[0], "the over-mask stopped"
+        assert not escalates(prose), f"the prose word {word!r} demanded a rotation again"
+
+    # Three and four characters: still contained. This is the STATED LIMIT of the
+    # refusal, pinned so a later widening of the bound is a decision rather than a
+    # differential — at that width a word cannot be told from a credential anywhere in
+    # the text, which is the whole of the reason the claim is refused.
+    for word in ("was", "hunt"):
+        short = f"{flag}{word} and the {word} is set"
+        assert not escalates(short), f"{word!r} (len {len(word)}) stopped being refused"
+
+    # Five, six and seven characters: escalated AGAIN, which is the half agent review
+    # R1-1 measured as lost. ``hunter`` (six) and ``letmein`` (seven) are the canonical
+    # short weak passwords; ``grace`` is the five-character edge of the same class. The
+    # BOUND is what is pinned here rather than the spelling, so any bare lowercase run of
+    # that width would do — what matters is that a credential-shaped value printed twice
+    # in the text the model reads keeps its escalation.
+    for word in ("grace", "hunter", "letmein"):
+        repeated = f"{flag}{word} and the {word} is set"
+        assert (
+            REDACTION_MARKER in scrub_shapes_with_hits(repeated)[0]
+        ), f"{word!r} stopped being masked"
+        assert escalates(repeated), (
+            f"a {len(word)}-character value printed twice no longer escalates: the "
+            "refusal is wider than its four-character specimens"
+        )
 
 
 def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
@@ -3709,6 +3882,19 @@ def test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation() -> None:
     assert "rotate" not in notice
     assert "no exposure" in notice
 
+    # ...and the GRADING has to say the same thing, because that wording is only reached
+    # when it does. The word occurs TWICE in this line, which is the shape of the
+    # 2026-09-22 documentation read: for a word, the whole-value half of the exposure
+    # question answers YES because the word is simply repeated in the prose around it, so
+    # a 33 KB read filed the ESCALATED notice ("rotate it") for the word ``when``. The
+    # withholding is what `_is_prose_after_a_flag` is for, and this is where it is pinned.
+    import local_operator.redaction_shapes as rs
+
+    repeated = prose + ", which was the whole of it"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked, "the over-mask stopped holding"
+    assert rs.shape_report(hits).reached_model is False, "a prose word demanded a rotation"
+
 
 def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     """The production misfire: a flag naming a stored secret.
@@ -3752,6 +3938,71 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")
 
 
+def test_the_documented_publish_workflow_survives_every_surface() -> None:
+    """The operator's workflow, driven: a script authored from what was displayed.
+
+    Reported 2026-09-22. ``lop secret run --secret NAME -- npm publish`` is the way
+    ``guide://credentials`` teaches an agent to hand a stored secret to a child, and an
+    operator names an entry after the SYSTEM it belongs to: this one's tail is USERNAME,
+    which is not one of the credential words the guard required. So EVERY tool result
+    masked the name, and the script the agent then authored from the displayed text
+    asked the store for a secret literally named ``[redacted]`` — the command failed
+    against a name that does not exist, which is the failure the operator reported.
+
+    Nothing escalated it, and that is why this test drives the WORKFLOW rather than the
+    rule: a whole mask is the contained case, so it files no incident, and a unit
+    assertion that the table is silent would not have seen the ``cat`` either. What is
+    asserted here is the property that broke — the text survives byte for byte — on
+    every model-visible surface, and the next assertion is the other half of it: the
+    values that must still mask, so a widening cannot pass by releasing everything.
+    """
+    # Assembled from pieces so no literal in this SOURCE is a flag followed by a value:
+    # this file is read by agents through the very pass it asserts about.
+    store_name = "MINERVA_UI_NPROD_USERNAME"
+    command = "--" + "secret " + store_name + " --" + "secret " + store_name + " -- npm publish"
+    script = "#!/bin/sh" + chr(10) + "# release the UI package" + chr(10) + command
+
+    # The three renderings the agent reads back: the command as typed, the file it
+    # wrote, the ``cat`` of that file, and the ``grep`` of it with a line number.
+    renderings = (
+        command,
+        script,
+        "cat publish.sh" + chr(10) + command,
+        "grep -n secret publish.sh" + chr(10) + "4:" + command,
+    )
+    for surface, scrub in sorted(SURFACES.items()):
+        for text in renderings:
+            assert scrub(text) == text, f"{surface} rewrote the workflow text"
+
+    # ...and the session's own result hook, over the whole entry, files nothing: the
+    # mask this test forbids is the one that used to happen here.
+    session = _session()
+    session._pending_shape_incidents.clear()
+    entry = "## WATCH — 2026-09-22 — a script that publishes" + chr(10) + script
+    assert session._redact_tool_result_text(entry) == entry, "the entry was rewritten"
+    assert session._pending_shape_incidents == [], "the entry filed an incident"
+
+    # THE VALUE SIDE, beside it, because that is the regression this fix could have
+    # introduced: a release that widened one more step would eat all four of these.
+    issuer = "ghp" + "_AbCd1234EfGhIjKlMnOpQr"
+    lowercase_phrase = "_".join(("correct", "horse", "battery"))
+    caps_run = "DBPASSWORD"
+    armed = "Sup3rTokenValue91"
+    for value in (issuer, lowercase_phrase, caps_run, armed):
+        assert "cli-credential-flag" in match_shape_names(
+            "server --" + "token " + value
+        ), f"a value of the shape {value[:3]}… stopped being masked"
+    # ...and the DSN spelling, which no flag guard may swallow.
+    dsn = "mongodb://svc:" + "p" + chr(64) + "ssw0rd" + chr(64) + "db.example.net/app"
+    assert REDACTION_MARKER in scrub_shapes("tool --" + "password " + dsn)
+
+    # The instrument is alive: the control is a value under the SAME flag, in the same
+    # text, and it must still be masked.
+    mixed = "lop secret run --" + "secret " + store_name + " -- npm publish --" + "token "
+    assert REDACTION_MARKER in scrub_shapes(mixed + armed)
+    assert scrub_shapes(mixed + store_name) == mixed + store_name
+
+
 # ---------------------------------------------------------------------------
 # Step cost: the pass is handed ONE STEP, never the conversation
 # ---------------------------------------------------------------------------
@@ -3767,6 +4018,7 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
 #: What one settled tool result may be. The arms below use the PRODUCTION number
 #: rather than a test-sized one, so the shape measured is the shipped one while
 #: the whole test stays `steps x 8 KiB` of work.
+
 _STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
 
 
