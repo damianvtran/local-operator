@@ -17,39 +17,54 @@ what a user does constantly.
 2. Both keys are read through the registry's own path, at the moment a window
    is drawn — the ``#576`` failure (a key written nested and read flat) is
    invisible from every angle except this one.
-3. The window is honoured by the reaper on a FAKE CLOCK, so a 300 s residency
-   costs no wall time, and the build-refresh check still fires INSIDE it (see
-   ``_reaper``'s own docstring: the drain loop is where that check runs for
-   exactly this case).
-4. The machine-wide LRU: with six detached idle records, the two least recently
-   detached give up their windows and the four newest keep theirs — ordered by
-   ``detached_at``, not by pid and not by insertion.
+3. The window is honoured by the REAL reaper on real seconds and small windows,
+   so a residency under test costs a few seconds rather than five minutes, and
+   the build-refresh check still fires INSIDE it (see ``_reaper``'s own
+   docstring: the drain loop is where that check runs for exactly this case).
+   The fake clock those cells used to run on was removed in review round 1 (F2):
+   a drain tick reaches real machinery, so a pumped fake clock let the tick's
+   latency decide the cell — see the section header above the drain cells.
+4. One INSTALL's LRU (the cap is enforced over one config root, QA round 1
+   Q-5): with six detached idle records, the two least recently detached give up
+   their windows and the four newest keep theirs — ordered by ``detached_at``,
+   not by pid and not by insertion. A record with a CLIENT attached is not
+   charged at all, which is the reaper's own term rather than visibility
+   (review round 1, F1).
 5. Every way the LRU can fail to answer keeps the runtime, including the one
    that matters — a scan that cannot see our own record is not evidence that we
    are outside the cap.
 6. ``detached_at`` is stamped by the server at the viewer's departure, cleared
    when one returns, and survives the round trip to the discovery record on
    disk, where an older reader drops it rather than refusing the record.
+7. A SECOND departure inside one drain re-draws the window, so a re-open can
+   never be refused a slot the runtime had already given up (QA round 1, Q-2) —
+   the same contract as item 3, one layer out.
+8. An EXPLICIT delete preempts the window it is standing in: the request is a
+   file the runtime honours in its own drain, i.e. only when nothing is in
+   flight, and the delete then proceeds in the same request (QA round 1, Q-1).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
+from local_operator.session import cleanup as cleanup_mod
+from local_operator.session.archived import read_archived, set_archived
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.process import (
     DEFAULT_GRACE_S,
     DEFAULT_KEEP_ALIVE_MAX,
     DEFAULT_KEEP_ALIVE_SECONDS,
-    KEEP_ALIVE_SCAN_S,
     _drain_window_s,
     _keep_alive_candidates,
     _keep_alive_max,
@@ -58,9 +73,6 @@ from local_operator.session.runtime.process import (
     _reaper,
 )
 from local_operator.session.runtime.types import SessionRecord
-
-_REAL_ASYNCIO = asyncio
-_REAL_TIME = time
 
 #: A pid no process on any platform this runs on can hold, for the ``stale``
 #: arm of the candidate filter — the record is published, the owner is gone.
@@ -99,6 +111,10 @@ class FakeRuntime:
         self._record = _record(pid=pid, detached=detached_at is not None)
         self._record.detached_at = detached_at
         self._attaches = attaches
+        # ATTACHMENT beside visibility, as the production record carries both:
+        # ``detached`` is what a picker paints a row from, ``watching`` is what
+        # forbids an exit (and what the cap charges a slot on).
+        self._record.watching = attaches > 0
         self._boot_build = boot
         self.retiring: list[tuple[str, str, bool, str]] = []
         self.closed = False
@@ -135,107 +151,6 @@ class FakeHandle:
 
     async def dispose(self) -> None:
         self.disposed = True
-
-
-class Clock:
-    """A monotonic clock the test moves, so a 300 s window costs no wall time.
-
-    ``ticks`` counts the REAPER's sleeps, and it is what makes the pump
-    deterministic: the pump waits for a tick rather than for a duration, so the
-    fake clock advances exactly one tick at a time and can never be overshot by
-    an unknown amount while the pump was yielding.
-    """
-
-    def __init__(self, start: float = 50_000.0) -> None:
-        self.now = start
-        self.ticks = 0
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-
-class FakeTime:
-    """``process.time`` with a movable ``monotonic``; everything else delegated."""
-
-    def __init__(self, clock: Clock) -> None:
-        self._clock = clock
-
-    def monotonic(self) -> float:
-        return self._clock.now
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(_REAL_TIME, name)
-
-
-class FakeAsyncio:
-    """``process.asyncio`` whose ``sleep`` advances the fake clock by its argument."""
-
-    def __init__(self, clock: Clock) -> None:
-        self._clock = clock
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(_REAL_ASYNCIO, name)
-
-    async def sleep(self, seconds: float) -> None:
-        self._clock.advance(seconds)
-        self._clock.ticks += 1
-        await _REAL_ASYNCIO.sleep(0)
-
-
-async def _pump_until(
-    clock: Clock,
-    seconds: float,
-    *,
-    start: float,
-    until: Callable[[], bool] | None = None,
-    budget_s: float = 60.0,
-) -> None:
-    """Drive loop turns until the fake clock has advanced ``seconds``.
-
-    WHAT IS ASSERTED IS THE FAKE CLOCK, and that is the only thing a turn bound
-    may be derived from — but a turn is NOT free, and pretending otherwise is
-    what made this helper flake on CI (``test (3.12, 4)``, 2026-09-23): a tick of
-    the drain reaches real machinery (the refresh path hops a thread), and while
-    the reaper waits on that, a pump yielding only ``sleep(0)`` can spend its
-    whole turn budget in microseconds. Measured: 20 000 turns bought 5 s of fake
-    time on a runner where the identical cell bought 60 s locally.
-
-    So the pump yields REAL time (half a millisecond per turn — small enough
-    that the fake clock is still entirely under the reaper's control, large
-    enough to give a thread-hopping tick its slot) and is bounded by BOTH a
-    wall-clock budget and a turn cap. The budget is a hang guard, not a timing
-    assertion (AGENTS.md, "keep a wall-clock assertion alongside it, with a
-    ceiling set for catastrophe"), and the failure it raises says which bound was
-    hit so a genuinely stuck reaper is not read as a slow runner.
-
-    ``until`` is why the bound has to be a predicate and not just a duration: a
-    reaper that has LEFT no longer sleeps, so a pump waiting for the clock to
-    reach a value past its exit would spin to the cap. Every caller passes the
-    condition it expects to become true, and then asserts it did.
-    """
-    deadline = _REAL_TIME.monotonic() + budget_s
-    waits = 0
-    while _REAL_TIME.monotonic() < deadline:
-        if until is not None and until():
-            return
-        if clock.now - start >= seconds:
-            return
-        # ONE REAPER TICK AT A TIME. Waiting for the tick rather than yielding a
-        # fixed number of turns is what keeps the fake clock from being overshot:
-        # the reaper's own sleeps are what move it, and a pump that yields real
-        # time while the reaper spins on zero-delay sleeps can let it advance
-        # hundreds of fake seconds inside one pump turn (measured: a cell that
-        # asserts "still resident at 295 s" read 301 s instead). The inner wait is
-        # real time so a tick that has to hop a thread still completes.
-        ticks = clock.ticks
-        while clock.ticks == ticks and _REAL_TIME.monotonic() < deadline:
-            waits += 1
-            await _REAL_ASYNCIO.sleep(0.001)
-    raise AssertionError(
-        f"the reaper stopped sleeping: {seconds}s of fake time needed, "
-        f"{clock.now - start:.1f}s elapsed after {waits} waits and "
-        f"{budget_s:.0f}s of real time"
-    )
 
 
 @pytest.fixture
@@ -388,16 +303,13 @@ def test_the_settings_registry_declares_both_keys() -> None:
         assert setting.path[0] == "runtime", "path and key namespace must agree"
 
 
-# -- 3. the reaper on a fake clock ------------------------------------------------
-
-
-def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
-    clock = Clock()
-    monkeypatch.setattr(child_mod, "time", FakeTime(clock))
-    monkeypatch.setattr(child_mod, "asyncio", FakeAsyncio(clock))
-    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 1.0)  # one fake second per tick
-    monkeypatch.setattr(child_mod, "_build_changed", lambda _boot: None)
-    return clock
+# -- 3. the reaper, on real seconds ------------------------------------------------
+#
+# Every cell below that WATCHES a drain runs on real seconds and small windows — the
+# convention the repo's own reaper tests use for their grace cells — and for a measured
+# reason: a drain tick reaches real machinery (the build watch), so a pumped fake clock
+# let the tick's latency decide the cell (review round 1, F2). The window's VALUE is not
+# pinned here at all; it is pinned where it is decided, by the policy cells above.
 
 
 @pytest.mark.asyncio
@@ -455,28 +367,30 @@ async def test_a_viewer_that_comes_and_goes_inside_one_tick_still_starts_the_win
     attaches and disposes inside one ``REAP_CHECK_S`` tick never makes
     ``_should_exit`` go false — the tick that would have cancelled the drain saw
     a viewer, and by the next one the viewer is gone. Left alone, that runtime
-    exits on the 3 s grace it was drawn with, having just been looked at.
-    Measured before this guard: ~1 run in 8 of a re-open bench took the cold
-    spawn instead of the live attach, with the record's stamp present the whole
-    time.
+    exits on the grace it was drawn with, having just been looked at. Measured
+    before this guard: ~1 run in 8 of a re-open bench took the cold spawn
+    instead of the live attach, with the record's stamp present the whole time.
 
-    Here the stamp appears one fake second into a drain drawn WITHOUT one, and
-    the assertion is that the runtime then holds the keep-alive window rather
-    than the 3 s it started with.
+    Here the stamp appears inside a drain drawn WITHOUT one, and the assertion is
+    that the runtime then holds the keep-alive window rather than the base grace
+    it started with.
+
+    REAL SECONDS, like the two cells that watch a drain to its end, and for the
+    same measured reason: a tick reaches real machinery (the build watch), and on
+    a fake clock driven by pump turns that latency decides the cell — this one
+    read "the runtime left on the grace it drew before the viewer arrived" in 2
+    runs of 10 at the grace it was never about, with the re-draw simply landing
+    late. The spans are small enough to pay for in wall time.
     """
-    clock = _fake_clock(monkeypatch)
-    # A BASE GRACE WIDER THAN ONE TICK, so the drain drawn before the viewer can
-    # still be running when the state changes: one fake second per tick, and the
-    # first draw lands at t=1.
-    monkeypatch.setenv("LOP_SESSION_GRACE_S", "10")
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.6")
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: 2.0)
     runtime = FakeRuntime()  # no viewer yet: the drain is drawn on the base grace
     monkeypatch.setattr(child_mod, "_keep_alive_candidates", lambda: [(999.0, runtime._record.pid)])
     handle = FakeHandle()
     stop = asyncio.Event()
-    start = clock.now
     task = asyncio.ensure_future(_reaper(handle, runtime, stop))
 
-    await _pump_until(clock, 2.0, start=start, until=stop.is_set)
+    await asyncio.sleep(0.4)  # inside the base grace
     assert not stop.is_set(), "the base grace ended before the state change"
     # A viewer arrives, is seen, and leaves — all inside one tick, AFTER the
     # drain was drawn on the pre-viewer state (which is the point: the tick that
@@ -484,11 +398,13 @@ async def test_a_viewer_that_comes_and_goes_inside_one_tick_still_starts_the_win
     runtime._record.detached_at = time.time()
     runtime._record.detached = True
 
-    await _pump_until(clock, 30.0, start=start, until=stop.is_set)
+    # The base grace would have ended at ~0.6 s; the departure must carry the
+    # deadline to the 2 s window drawn from it.
+    await asyncio.sleep(1.2)
     assert not stop.is_set(), "the runtime left on the grace it drew before the viewer arrived"
 
-    await _pump_until(clock, 320.0, start=start, until=stop.is_set)
-    assert stop.is_set(), "the re-drawn keep-alive window never ended"
+    await asyncio.wait_for(stop.wait(), 3.0)
+    assert handle.disposed and runtime.closed
     assert await task is True
 
 
@@ -546,16 +462,21 @@ async def test_the_build_refresh_fires_inside_the_keep_alive_window(
 async def test_an_unviewed_runtime_still_exits_on_the_base_grace(
     monkeypatch: pytest.MonkeyPatch, keep_alive: None
 ) -> None:
-    """The other side of the same mechanism: no stamp, no window, 3 s."""
-    clock = _fake_clock(monkeypatch)
+    """The other side of the same mechanism: no stamp, no window, the base grace.
+
+    REAL SECONDS like every cell that watches a drain (see the harness note in
+    the PR body): the assertion is positive — it leaves — so a generous bound
+    costs nothing and a pumped fake clock only adds a way to fail on how long a
+    tick took.
+    """
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.5")
     runtime = FakeRuntime()  # nobody ever attached
     handle = FakeHandle()
     stop = asyncio.Event()
-    start = clock.now
     task = asyncio.ensure_future(_reaper(handle, runtime, stop))
 
-    await _pump_until(clock, DEFAULT_GRACE_S + 5.0, start=start, until=stop.is_set)
-    assert stop.is_set(), "an unwatched runtime held a keep-alive window"
+    await asyncio.wait_for(stop.wait(), 30.0)
+    assert handle.disposed and runtime.closed
     assert await task is True
 
 
@@ -563,8 +484,12 @@ async def test_an_unviewed_runtime_still_exits_on_the_base_grace(
 async def test_the_lru_is_not_consulted_for_an_unviewed_runtime(
     monkeypatch: pytest.MonkeyPatch, keep_alive: None
 ) -> None:
-    """No viewer ever left, so no scan: the registry is not read at all."""
-    clock = _fake_clock(monkeypatch)
+    """No viewer ever left, so no scan: the registry is not read at all.
+
+    Real seconds, and the wait is LONGER than the cap's scan interval (5 s) on
+    purpose: a runtime with no window must leave without ever reaching it.
+    """
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.5")
     scans: list[int] = []
 
     def candidates() -> list[tuple[float, int]]:
@@ -575,9 +500,8 @@ async def test_the_lru_is_not_consulted_for_an_unviewed_runtime(
     runtime = FakeRuntime()
     handle = FakeHandle()
     stop = asyncio.Event()
-    start = clock.now
     task = asyncio.ensure_future(_reaper(handle, runtime, stop))
-    await _pump_until(clock, DEFAULT_GRACE_S + 5.0, start=start, until=stop.is_set)
+    await asyncio.wait_for(stop.wait(), 30.0)
     assert await task is True
     assert scans == []
 
@@ -586,9 +510,15 @@ async def test_the_lru_is_not_consulted_for_an_unviewed_runtime(
 async def test_a_lru_victim_leaves_before_its_window_ends(
     monkeypatch: pytest.MonkeyPatch, keep_alive: None
 ) -> None:
-    """The cap's whole purpose: the fleet settles at N, not at "as many as opened"."""
-    clock = _fake_clock(monkeypatch)
-    runtime = FakeRuntime(detached_at=1.0)
+    """The cap's whole purpose: the fleet settles at N, not at "as many as opened".
+
+    Real seconds with a WINDOW LONGER THAN THE SCAN INTERVAL, so the assertions
+    say what the cell means: the runtime is gone shortly after the first scan
+    (``KEEP_ALIVE_SCAN_S`` = 5 s) and far short of a window it could otherwise
+    have held (`_keep_alive_seconds` pinned to 30 s here).
+    """
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: 30.0)
+    runtime = FakeRuntime(detached_at=time.time() - 1.0)
     # Four more recently detached peers, so this one is fifth of five.
     monkeypatch.setattr(
         child_mod,
@@ -597,14 +527,56 @@ async def test_a_lru_victim_leaves_before_its_window_ends(
     )
     handle = FakeHandle()
     stop = asyncio.Event()
-    start = clock.now
+    started = time.monotonic()
     task = asyncio.ensure_future(_reaper(handle, runtime, stop))
 
-    # The first scan lands at KEEP_ALIVE_SCAN_S, so a few fake seconds is all it
-    # takes — and the assertion is that it is far short of the window.
-    await _pump_until(clock, KEEP_ALIVE_SCAN_S + 5.0, start=start, until=stop.is_set)
-    assert stop.is_set(), "the least recently detached runtime kept its window"
-    assert clock.now - start < 60.0, "it waited out the whole window first"
+    # The first scan lands at KEEP_ALIVE_SCAN_S, so the runtime goes soon after
+    # it — and the assertion is that it is far short of the 30 s window.
+    await asyncio.wait_for(stop.wait(), 30.0)
+    assert time.monotonic() - started < 25.0, "it waited out the whole window first"
+    assert handle.disposed and runtime.closed
+    assert await task is True
+
+
+@pytest.mark.asyncio
+async def test_a_second_departure_inside_one_drain_redraws_the_window(
+    monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """QA round 1, Q-2: the window follows the LAST departure, not the first.
+
+    Two re-opens in a row, each closed again, land in ONE drain — and the drain
+    used to draw its window once, so the second departure re-used the FIRST
+    one's deadline: QA measured the second re-open spawning (1231 ms) with a 6 s
+    window because the runtime left 6 s after the first detach. The re-open a
+    user just made is the one the window exists for, so the deadline is drawn
+    again from the newer stamp — and a drain nothing touches still draws exactly
+    once, which is what keeps the config read off every other drain.
+
+    REAL SECONDS, deliberately: see the sub-tick cell above for what a pumped
+    fake clock does to a cell that watches the drain.
+    """
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.5")
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: 2.5)
+    runtime = FakeRuntime(detached_at=time.time() - 0.5)
+    monkeypatch.setattr(child_mod, "_keep_alive_candidates", lambda: [(999.0, runtime._record.pid)])
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    await asyncio.sleep(0.4)  # the first window is running
+    assert not stop.is_set()
+    # A viewer arrives and leaves again, inside the SAME drain: the stamp moves.
+    runtime._record.detached_at = None
+    await asyncio.sleep(0.4)
+    second = time.monotonic()
+    runtime._record.detached_at = second
+
+    # The FIRST window would have closed ~2.2 s after the first stamp; the second
+    # departure must carry the deadline to ~2.5 s after ITSELF.
+    await asyncio.sleep(2.0)
+    assert not stop.is_set(), "the drain kept the first departure's deadline"
+    await asyncio.wait_for(stop.wait(), 3.0)
+    assert time.monotonic() - second >= 2.0, "the window was not drawn from the second departure"
     assert handle.disposed and runtime.closed
     assert await task is True
 
@@ -706,28 +678,237 @@ def test_a_runtime_with_no_stamp_is_never_a_victim(monkeypatch: pytest.MonkeyPat
     assert _keep_alive_victim(FakeRuntime(pid=4242), 1) is False
 
 
+# -- 4b. the explicit delete, which must not wait the window out -------------------
+
+
+def _marked_store(root: Path) -> None:
+    """A store ``remove_session_dir`` will remove from: it demands the marker."""
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    cleanup_mod.mark_store(sessions)
+
+
+def _conversation(root: Path, session_id: str) -> Path:
+    """A conversation on disk that ``is_user_session`` admits as the user's own."""
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"type": "message", "payload": {"role": "user", "content": "hello"}}) + "\n",
+        encoding="utf-8",
+    )
+    return directory
+
+
+def _lease_for(root: Path, session_id: str) -> Path:
+    """A lease naming THIS process, which is what makes the guard's probe real.
+
+    The preempt identifies its target by the pid the lease names and checks it
+    against the discovery record, so the fixture has to be a pair that agrees:
+    one live pid, written in both places.
+    """
+    path = root / "sessions" / session_id / ".execution-lease"
+    path.write_text(json.dumps({"generation": "g", "pid": os.getpid()}), encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_delete_preempts_the_keep_alive_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """QA round 1, Q-1: the delete ASKS, the runtime grants, the delete proceeds.
+
+    The regression this pins: with the window at its shipped 300 s, a
+    conversation the user had just closed could not be deleted — the explicit
+    delete was refused with "That conversation is open in a running session.
+    Stop it before deleting it." about a session nothing was running in, for up
+    to five minutes, and the user's remedy was to hunt for a stop they had
+    already performed by closing the conversation.
+
+    The runtime here is the REAL ``_reaper`` over a fake handle and the REAL
+    cleanup path; only the process boundary is collapsed (the runtime is a task,
+    not a child), which is why the delete is called IN A THREAD — a synchronous
+    caller that blocked this loop would stop the very reaper meant to answer,
+    exactly as the desktop route would stop nothing at all if the runtime were
+    in-process in production. QA round 2 exercises the cross-process route.
+    """
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    lease = _lease_for(tmp_path, session_id)
+    runtime = FakeRuntime(pid=os.getpid(), detached_at=time.time() - 1.0)
+    registry.publish(runtime._record, tmp_path)
+
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    async def release_the_lease_on_exit() -> None:
+        """What the runtime's own exit path does with its lease."""
+        await stop.wait()
+        lease.unlink()
+
+    releaser = asyncio.ensure_future(release_the_lease_on_exit())
+
+    await asyncio.sleep(0.6)  # parked in its keep-alive window
+    assert not stop.is_set(), "the runtime left before anything asked it to"
+    assert lease.exists()
+
+    outcome = await asyncio.to_thread(cleanup_mod.delete_session, tmp_path, session_id, actor="tui")
+
+    assert outcome.deleted is True, outcome.refusal
+    assert not directory.exists()
+    assert stop.is_set() and handle.disposed and runtime.closed
+    assert await task is True
+    releaser.cancel()
+
+
+def test_the_delete_preempt_declines_a_runtime_with_work_or_a_viewer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The predicate the preempt stands on, and the two ways it must say no.
+
+    ``cleanup._keep_alive_resident`` may return a record ONLY for a conversation
+    whose runtime the keep-alive alone is holding. Busy and WATCHED records are
+    both somebody's work — and a request delivered to one of them would sit
+    unread, because the runtime grants it inside its idle drain only, so the
+    delete would refuse after the wait. Declining here is what makes the refusal
+    immediate and, more importantly, what keeps the request away from a runtime
+    whose work the delete has no business touching. The last assertion is the
+    positive half: the idle, clientless record IS a target, so the two refusals
+    are not the predicate failing everything.
+    """
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    _lease_for(tmp_path, session_id)
+
+    for extra in ({"busy": True}, {"watching": True}):
+        record = _record(pid=os.getpid(), detached=True, **extra)
+        record.detached_at = time.time() - 1.0
+        registry.publish(record, tmp_path)
+        assert cleanup_mod._keep_alive_resident(directory, tmp_path) is None, extra
+
+    target = _record(pid=os.getpid(), detached=True)
+    target.detached_at = time.time() - 1.0
+    registry.publish(target, tmp_path)
+    assert cleanup_mod._keep_alive_resident(directory, tmp_path) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_preempted_request_is_withdrawn_when_the_delete_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """The request goes away with the act it belonged to.
+
+    The preempt clears the LEASE, and the guard has other terms: here an armed
+    wake keeps the conversation undeletable after the runtime has left. The
+    refusal is the right answer, and the file the delete wrote must not outlive
+    it — a request that stayed behind would end the NEXT runtime for this
+    conversation at its first idle drain, which is a lost optimisation rather
+    than a wrong exit, and still not a thing to leave behind.
+    """
+    from local_operator.wakes.store import entry_path
+
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    lease = _lease_for(tmp_path, session_id)
+    runtime = FakeRuntime(pid=os.getpid(), detached_at=time.time() - 1.0)
+    registry.publish(runtime._record, tmp_path)
+    wake = entry_path(tmp_path, session_id)
+    wake.parent.mkdir(parents=True, exist_ok=True)
+    wake.write_text("{}", encoding="utf-8")
+
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    async def release_the_lease_on_exit() -> None:
+        await stop.wait()
+        lease.unlink()
+
+    releaser = asyncio.ensure_future(release_the_lease_on_exit())
+    await asyncio.sleep(0.6)
+    assert not stop.is_set(), "the runtime left before anything asked it to"
+
+    outcome = await asyncio.to_thread(cleanup_mod.delete_session, tmp_path, session_id, actor="tui")
+
+    assert outcome.deleted is False
+    assert "wake" in outcome.refusal, outcome.refusal
+    assert stop.is_set(), "the runtime was never asked to leave"
+    assert not registry.exit_request_path(directory).exists(), "the request outlived the act"
+    assert await task is True
+    releaser.cancel()
+
+
+@pytest.mark.asyncio
+async def test_an_archive_does_not_share_the_delete_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """Q-1's second half, and it is a REGRESSION PIN rather than a fix.
+
+    The finding asked whether archiving shares the guard the delete stands
+    behind. It does not, and the reason is structural: an archive removes
+    nothing, so there is nothing to refuse — the desktop route states it as its
+    own contract ("archiving NEVER removes anything, so there is no guard, no
+    refusal and no 409") and ``archived.set_archived`` is a write to an index.
+    The keep-alive therefore cannot make an archive fail, before this change or
+    after it, and the cell pins that WHILE a warm runtime sits on the
+    conversation: the flag lands and the runtime is left alone, because an
+    archived conversation is still on disk and still resumable and must not lose
+    the runtime that keeps its re-open cheap.
+    """
+    session_id = "keepalive01"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _marked_store(tmp_path)
+    directory = _conversation(tmp_path, session_id)
+    _lease_for(tmp_path, session_id)
+    runtime = FakeRuntime(pid=os.getpid(), detached_at=time.time() - 1.0)
+    registry.publish(runtime._record, tmp_path)
+
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    await asyncio.sleep(0.6)
+    assert not stop.is_set(), "the runtime left before the cell could ask"
+
+    assert set_archived(tmp_path, session_id, True) is True
+    assert session_id in read_archived(tmp_path)
+    assert not stop.is_set() and not runtime.closed, "an archive ended the runtime"
+    assert (directory / ".execution-lease").exists()
+
+    stop.set()
+    await task
+
+
 # -- 5. the candidate population, read from a real registry ------------------------
 
 
-def test_candidates_are_detached_idle_live_records_only(
+def test_candidates_are_idle_clientless_live_records_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The filter, against the real ``registry.scan`` over a real run directory.
 
-    Four published records, three of which must not hold a cap slot: one being
-    WATCHED (``detached=False``), one BUSY, and one whose owner is gone
-    (``stale``). Only the live detached idle one may come back — and it must come
-    back with its stamp read off the FILE, which is the round trip that also
-    proves the field is serialized at all.
+    Five published records, four of which must not hold a cap slot: one whose
+    viewer is VISIBLE (``detached=False``), one a multiplexing TUI has SWITCHED
+    AWAY from — ``detached=True`` with a client still attached, which is the
+    pair review round 1's F1 was about — one BUSY, and one whose owner is gone
+    (``stale``). Only the live idle clientless one may come back, and it must
+    come back with its stamp read off the FILE, which is the round trip that
+    also proves the field is serialized at all.
 
-    One record per pid, because the run directory is KEYED by pid: four records
+    One record per pid, because the run directory is KEYED by pid: records
     sharing a pid would be one file. Liveness is stubbed at the registry's own
-    probe (``registry.pid_alive``) rather than arranged with four real child
+    probe (``registry.pid_alive``) rather than arranged with real child
     processes — the classification is the registry's subject, and what is under
     test here is the FILTER over its verdicts.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    alive = {9001, 9002, 9003}
+    alive = {9001, 9002, 9003, 9004}
     monkeypatch.setattr(registry, "pid_alive", lambda pid, *, check_zombie=False: pid in alive)
 
     def publish(pid: int, stamp: float, **flags: Any) -> None:
@@ -737,8 +918,9 @@ def test_candidates_are_detached_idle_live_records_only(
         registry.publish(record, tmp_path)
 
     publish(9001, 111.0)  # the one that counts
-    publish(9002, 222.0, detached=False)  # somebody is watching it
+    publish(9002, 222.0, detached=False)  # somebody is watching it, on screen
     publish(9003, 333.0, busy=True)  # work in flight
+    publish(9004, 555.0, watching=True)  # switched away, still holding a viewer
     publish(_DEAD_PID, 444.0)  # the owner is gone
 
     assert _keep_alive_candidates() == [(111.0, 9001)]

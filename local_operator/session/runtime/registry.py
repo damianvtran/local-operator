@@ -261,6 +261,75 @@ def read_stop_marker(conversation_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+#: THE EXIT REQUEST: the file an EXPLICIT DELETE leaves in a conversation
+#: directory to ask that conversation's runtime to leave.
+#:
+#: WHY NOT A SIGNAL, which is the obvious alternative and was rejected on
+#: evidence. SIGTERM cannot express this: its handler deliberately DRAINS a
+#: runtime with work in flight (bounded by ``types.SIGNAL_DRAIN_S``), so a
+#: delete that refused would still have left a runtime that cuts its work two
+#: minutes later — destruction from a request that was never granted. A NEW
+#: signal (SIGUSR2, SIGUSR1 being the stack-dump switch) fails the other way: a
+#: mixed-version fleet answers an unknown signal with its DEFAULT disposition,
+#: which is fatal, so the delete would kill an older build outright.
+#:
+#: So the request is a FILE, and the runtime decides: it is honoured ONLY inside
+#: the idle drain, which is the one place the runtime has already proved that no
+#: turn, job, gate or wake is in flight. An older build simply never reads it,
+#: and the delete falls back to today's refusal. The requester is named in the
+#: payload for the same reason ``control``'s stop marker names its author: the
+#: artifact should say who asked.
+#:
+#: Deliberately NOT fsynced, exactly like the stop marker (see
+#: :func:`_staged_write`): this is a request between two processes on one host
+#: and the 0.25 s reaper tick it is read on is far longer than the write.
+EXIT_REQUEST_NAME = "runtime-exit-request.json"
+
+
+def exit_request_path(conversation_dir: Path) -> Path:
+    """Where one conversation's exit request lives."""
+    return conversation_dir / EXIT_REQUEST_NAME
+
+
+def write_exit_request(conversation_dir: Path, payload: dict[str, Any]) -> Path:
+    """Stage-write an exit request (0600, :func:`publish`'s shape).
+
+    Raises when the write fails, so a caller can report that it could not ask
+    rather than waiting on a request nobody made. Does NOT create the
+    conversation directory: the requester holds one already (it is asking about
+    a directory it can see), and creating one here would be a cleanup path
+    writing a session store into existence.
+    """
+    target = exit_request_path(conversation_dir)
+    _staged_write(target, payload, prefix=f".{EXIT_REQUEST_NAME}.")
+    return target
+
+
+def read_exit_request(conversation_dir: Path) -> dict[str, Any] | None:
+    """The exit request as a dict, or ``None`` when there is none.
+
+    Tolerant like :func:`read_stop_marker`, and it must be: the reader is a
+    runtime's own reaper tick, so an unreadable or malformed file means "no
+    usable request" rather than an exception in a loop that runs every 250 ms.
+    """
+    try:
+        data = json.loads(exit_request_path(conversation_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def remove_exit_request(conversation_dir: Path) -> None:
+    """Take one conversation's exit request back. Best-effort.
+
+    The requester withdraws its own request when the runtime does not leave —
+    a request that outlives the act it belonged to would end the NEXT runtime
+    for that conversation at its first idle drain, which is a lost optimisation
+    rather than a wrong exit, but it is not a thing to leave behind.
+    """
+    _unlink_quietly(exit_request_path(conversation_dir))
+
+
 #: The TURN JOURNAL: the conversation-scoped row a runtime opens when a turn
 #: starts and closes when it ends.
 #:

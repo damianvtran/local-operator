@@ -1999,6 +1999,37 @@ class TestTheApprovalsCopyIsTrueOnBothSurfaces:
         assert "that session's own process" in section.description, section.description
 
 
+class TestTheResidencyKeysStateTheirOwnCaveats:
+    """Review round 1, F6 and QA round 1, Q-5: the two warm-runtime keys.
+
+    Both are ``Scope.LIVE``, and the qualification a user needs is that LIVE is a
+    statement about the KEY, not a promise that an edit reaches a runtime that is
+    already inside the window it drew — that runtime keeps it. A caveat living
+    only in a code comment is a claim the user cannot read, so it belongs in the
+    section description, and this pins it there (and out of the per-key comment,
+    which contradicted itself on exactly this point).
+
+    Q-5 rides along because it is the same class of correction: the cap is
+    enforced over the runtime's OWN config root, so "machine-wide" was a promise
+    the code does not make — two installs on one host hold a cap each.
+    """
+
+    def test_the_section_says_an_edit_lands_at_the_next_window(self) -> None:
+        section = next(entry for entry in settings_io.SECTIONS if entry.name == "runtime")
+        assert "next draws its window" in section.description, section.description
+
+    def test_the_cap_names_its_scope_and_not_the_machine(self) -> None:
+        setting = settings_io.resolve_key("runtime.keep_alive_max")
+        assert setting is not None
+        assert "this install" in setting.help, setting.help
+        assert "Machine-wide" not in setting.help, setting.help
+
+    def test_the_window_help_still_names_the_off_switch(self) -> None:
+        setting = settings_io.resolve_key("runtime.keep_alive_seconds")
+        assert setting is not None
+        assert "keeps nothing warm" in setting.help, setting.help
+
+
 class TestConfigEditQualifiesALoosening:
     """``lop config edit tool_approval_mode auto`` must not read as "ungated now".
 

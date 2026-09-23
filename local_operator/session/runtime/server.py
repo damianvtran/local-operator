@@ -4131,6 +4131,11 @@ class RuntimeServer:
                 leaving=self._leaving,
                 started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
+                # ATTACHMENT, not visibility: the reaper's own term 3, and the
+                # fact the keep-alive cap charges a slot on. Published from the
+                # same read as ``detached`` because the two answers come from one
+                # snapshot of ``_clients`` (see ``_visible_attach_surfaces``).
+                watching=bool(self.attach_clients()),
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,
             )
