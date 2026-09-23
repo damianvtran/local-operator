@@ -27144,11 +27144,15 @@ class OperatorApp(App[None]):
         convenience, not the only route back into the registry: ``read.children``
         and ``read.nodes`` on a class without them still reach
         ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` may raise
-        outside this guard. Both callers wrap their whole resolver work, so a
-        raising reader blanks the dock rather than escaping into a Textual handler;
-        ``paused_child_ids`` separately guards its own node read and degrades to an
-        empty set. That is the behavior this must keep, and why the capability
-        check is a ``getattr`` rather than a cast.
+        outside this guard. EVERY raising step in both callers is guarded, so a
+        raising reader blanks the dock rather than escaping into a Textual
+        handler; the only statements either caller leaves outside a guard are
+        ``getattr``/attribute reads, which cannot raise, and
+        ``_subagent_child_counts``' ``paused_child_ids``, which guards its own
+        body and degrades to an empty set. The narrower statement is the exact
+        one — "both callers wrap their whole body" held for the OUTCOME, not for
+        the syntax (review round 3, N3-1). That is the behavior this must keep,
+        and why the capability check is a ``getattr`` rather than a cast.
 
         The follower's ``SnapshotSubagentComms`` is the case that has no
         ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
@@ -27346,9 +27350,12 @@ class OperatorApp(App[None]):
             return {}
         try:
             # Built INSIDE the try, like the roster resolver's: ``_roster_read``
-            # cannot raise today, but this method's totality claim is about its
-            # whole body, and a build moved back out would escape it into a
-            # Textual message handler instead of blanking the marks.
+            # cannot raise today, but a build moved back out would be a raising
+            # step outside the guard, and it would escape into a Textual message
+            # handler instead of blanking the marks. The guard covers every step
+            # that CAN raise; the ``manager``/``paused`` statements after it sit
+            # outside because ``getattr`` cannot raise and ``paused_child_ids``
+            # guards its own body (review round 3, N3-1).
             read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
             for node in cast(Sequence[Any], read.nodes()):
