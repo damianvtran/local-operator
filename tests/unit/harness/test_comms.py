@@ -3013,3 +3013,24 @@ def test_a_live_and_a_clean_child_are_unaffected_by_the_pre_attach_path() -> Non
     assert row.status == "completed"
     assert row.error_text is None
     assert row.session_id == "definitely-a-transcript-dir"
+
+
+def test_an_unattached_child_with_no_outcome_is_still_not_snapshotted() -> None:
+    """R2-2: the negative arm must exercise an UNATTACHED record.
+
+    The sibling negative arm uses an ATTACHED child, so it would pass even if a
+    fix kept every unattached record and the change were wrong. This arm is the
+    parked/queued case the pinning contract is about: no transcript AND no
+    outcome, so it must NOT be snapshot — otherwise a restart with the job row
+    swept plants a ``gone — never started`` ghost row.
+    """
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("parked", "queued behind the gate")
+    assert comms._records["parked"].session_dir is None
+    assert comms._records["parked"].outcome is None
+    assert comms.snapshot() == [], (
+        "an unattached child with no outcome was snapshot — a parked child must "
+        "leave no durable record"
+    )

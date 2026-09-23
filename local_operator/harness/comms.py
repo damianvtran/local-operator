@@ -1233,12 +1233,23 @@ class SubagentComms:
             return PeekWindow(job_id, job_id, "gone", 0, error=f"unknown subagent {job_id!r}")
         info = self._describe(record, time.time())
         if record.session_dir is None:
+            # Two classes reach here and they are NOT the same: a child still
+            # PARKED has not started, but a child that SETTLED before attaching
+            # (a launch that failed inside an install swap) DID run and is the
+            # diagnosed case this record is kept for. Telling its parent it
+            # "has not started yet" hides the very failure the roster now names,
+            # so the settled arm reports its recorded reason instead.
+            if record.outcome is not None:
+                reason = record.error_text or record.result_text or "it never attached"
+                detail = f"the subagent ended before it attached ({reason}) — no transcript"
+            else:
+                detail = "the subagent has not started yet, so it has no transcript to read"
             return PeekWindow(
                 job_id,
                 record.label,
                 info.status,
                 0,
-                error="the subagent has not started yet, so it has no transcript to read",
+                error=detail,
             )
         transcript_file = record.session_dir / TRANSCRIPT_FILENAME
         if not transcript_file.exists():

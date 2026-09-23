@@ -946,8 +946,11 @@ class AsyncJobManager:
         settle. A row that was still ``queued`` (parked behind the capacity
         gate, ``status == "running"`` with ``queued == True``) never ran and has
         no transcript, so it is NOT interrupted — it is simply gone; it is
-        dropped rather than restored, matching the comms side, which already
-        skips it in ``snapshot()`` because its record has no ``session_dir``.
+        dropped rather than restored. The comms side agrees, but for a narrower
+        reason than "no ``session_dir``": ``snapshot()`` now keeps a
+        no-transcript record that has a recorded terminal ``outcome`` (a child
+        that died DURING launch), and drops only a record with neither a
+        transcript nor an outcome — which is exactly this parked case.
         Every restored row is flagged ``restored`` and carries no runtime
         handles (an ``AsyncJob`` serializes none — the abort signal and asyncio
         task live in the manager's own ``_signals``/``_tasks`` maps, which the
