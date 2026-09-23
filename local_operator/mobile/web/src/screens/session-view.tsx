@@ -195,8 +195,14 @@ export function SessionScreen({
 	   This header reads its pin state from the LIST store (`useSessions`); without
 	   retaining that stream a session opened directly by URL would never receive a
 	   repaint, so a pin set here — or cleared on another surface — would not
-	   correct itself until navigation. The stream is refcounted, so mounting it
-	   here alongside the list screen is free. */
+	   correct itself until navigation.
+
+	   STATED RATHER THAN CALLED "FREE": the stream is refcounted per MOUNT, and
+	   React destroys before it creates, so navigating between the list and a
+	   session closes and reopens the SSE (measured: `{opened:1,closed:0}` ->
+	   `{opened:2,closed:1}`). That is acceptable — one reconnect on a user-driven
+	   navigation, over a short-lived socket — but it is not free, and a reader
+	   should not plan around it being. (Review round 2, M2-3.) */
 	useEffect(() => retainSessionListStream(), []);
 
 	useCompletionView(sessionId, projection, rootRef,

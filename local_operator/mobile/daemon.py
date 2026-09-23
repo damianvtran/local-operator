@@ -351,13 +351,18 @@ def _rank_row(
     the live projection's gate for the window where the record has not caught
     up, so a phone-visible gate is never unranked.
 
-    ``provisional`` is the PHONE-WOKEN window: a /wake (or a start) accepted by
-    this daemon but not yet published as a live record. That row has no
-    ``SessionEntry`` yet, so the shared ``active`` rule would file it under
-    Previous and it would pop into Active a moment later — the same jump this
-    change exists to remove, arriving by another route. It is ranked as a live
-    ``idle`` row instead, which is what it is about to become and what the wake
-    path's own comment promises the list shows.
+    ``provisional`` is the PHONE-WOKEN window: a ``/wake`` accepted by this
+    daemon but whose runtime has not yet been discovered (``retain_provisional_active``
+    holds the marker for one scan interval). That row has no ``SessionEntry`` yet,
+    so the shared ``active`` rule would file it under Previous and it would pop
+    into Active a moment later — the same jump this change exists to remove,
+    arriving by another route. It is ranked as a live ``idle`` row instead, which
+    is what it is about to become and what the wake path's own comment promises
+    the list shows. Deliberately ranked as ``idle`` rather than as whatever the
+    sidebar would say: the sidebar has no equivalent window because its wake
+    transition is not observed the same way, so there is no second mode to
+    match — the honest statement of a row in this window is "active and doing
+    nothing yet".
 
     ONE DELIBERATE DIVERGENCE FROM THE SIDEBAR, stated rather than hidden: the
     catalogue's key carries a ``wake_rank`` band inside Previous, and these
@@ -852,9 +857,9 @@ class SessionTable:
                 mtime=mtime,
                 attention=attention,
                 pending_kind=(p.pending.kind if p and p.pending else ""),
-                # THE PHONE-WOKEN WINDOW (review MAJOR 1): a /wake or a start this
-                # daemon accepted but has not yet seen register a record. Ranking it
-                # as a live row is what makes it land in Active at once instead of
+                # THE PHONE-WOKEN WINDOW (review MAJOR 1): a /wake this daemon
+                # accepted but has not yet seen register a record. Ranking it as a
+                # live row is what makes it land in Active at once instead of
                 # flashing under Previous until the runtime publishes.
                 provisional=session_id in self.provisional_active,
             )

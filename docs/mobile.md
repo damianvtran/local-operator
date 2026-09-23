@@ -166,12 +166,15 @@ Screens, following branding.md §7's agent-output hierarchy:
   the daemon sorts every row on the shared catalogue key
   (`session.catalog.CatalogEntry.rank` — the tier from `session_category`, the
   wake band, birth, id) and marks each row active/previous with the shared
-  `active` rule, so the three surfaces cannot disagree about a row's tier or
-  about which list a conversation is in, and the phone's list is STABLE across
-  activity refreshes (an early version re-derived the key from live state and
-  moved rows as sessions streamed). One asymmetry, which is the sidebar's own:
-  the phone's rows carry no wake data, so the catalogue's wake band inside
-  Previous is a constant here. The screen only GROUPS what it is sent:
+  `active` rule, so the three surfaces agree about a row's tier (within a
+  section) and about which list a conversation is in, and the phone's list is
+  STABLE across activity refreshes (an early version re-derived the key from
+  live state and moved rows as sessions streamed). Two asymmetries, both
+  deliberate: the wake band (the phone's rows carry no wake data, so `wake_rank`
+  is a constant here), and the phone-woken window (a `/wake` accepted but not yet
+  discovered is ranked as a live `idle` row so it lands in Active at once — the
+  sidebar has no equivalent window, so no equivalent tier). The screen only
+  GROUPS what it is sent:
   **★ Pinned**, **Active Sessions**, **Previous Sessions**.
 
   A conversation is pinned with a long-press on its row (★ Pinned is where it
