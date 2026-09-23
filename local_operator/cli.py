@@ -1731,17 +1731,13 @@ def config_edit_command(args: argparse.Namespace) -> int:
             # The guessing ladder below knows int/float/bool/null and nothing
             # structured, so a cascade's JSON fell through it as a plain
             # string and was stored verbatim. ``coerce`` owns the CASCADE
-            # parse — one definition shared with the page — and its
-            # ``ValueError`` is written for the user, so the except arm below
-            # reports it rather than this call site inventing its own wording.
-            try:
-                value = settings_io.coerce(setting, value)
-            except ValueError as error:
-                print(
-                    paint(f"Error: {args.key}: {error}", ERROR, stream=sys.stderr),
-                    file=sys.stderr,
-                )
-                return 1
+            # parse — one definition shared with the page — and raises a
+            # ``ValueError`` written for the user, which this function's
+            # existing ``except ValueError`` reports in the same words, on the
+            # same stream, with the same exit code as every other refusal
+            # here. Catching it again at this call site would be a second copy
+            # of that format to keep in sync.
+            value = settings_io.coerce(setting, value)
         else:
             # Try to convert to int
             try:

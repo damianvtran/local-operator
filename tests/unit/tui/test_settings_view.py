@@ -2513,9 +2513,10 @@ async def test_begin_edit_refuses_a_kind_that_is_not_edited_as_text(tmp_path: Pa
 
 #: The exact bytes v0.43.10 left in a victim's `config.yml`. The pre-#440 page
 #: seeded its free-text editor with `str(mapping)`, so what got stored is the
-#: mapping's Python repr with whatever the user typed appended — reproduced
-#: here through the page's own writer rather than hand-written into YAML, so
-#: this pins the state the shipped bug actually produced.
+#: mapping's Python repr with whatever the user typed appended. It used to be
+#: reproduced through the page's own writer; `coerce` and `validate` now
+#: refuse this shape, so the fixture below writes it into YAML directly —
+#: see there for why that is the honest setup rather than a shortcut.
 _CORRUPT_CASCADE = "{'default': ['anthropic/claude-opus-5', 'openrouter/deepseek']}x"
 
 
@@ -2541,10 +2542,7 @@ def _corrupt_the_cascade(tmp_path: Path) -> None:
     now the ONLY way in, and it is exactly what those users' disks look like.
     """
     config = tmp_path / "config.yml"
-    loaded = yaml.safe_load(config.read_text()) if config.exists() else None
-    document = loaded if isinstance(loaded, dict) else {}
-    values = document.setdefault("values", {})
-    values.setdefault("retry", {})["fallbackChains"] = _CORRUPT_CASCADE
+    document = {"values": {"retry": {"fallbackChains": _CORRUPT_CASCADE}}}
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
     assert _values(tmp_path)["retry"]["fallbackChains"] == _CORRUPT_CASCADE
 

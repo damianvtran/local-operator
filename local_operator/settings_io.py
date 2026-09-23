@@ -3252,24 +3252,21 @@ def coerce(setting: Setting, text: str) -> Any:
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
-        # editor is the only other way to build one. Without this arm the
-        # kind fell through to ``return text`` and every writer that does not
-        # go through the chain editor — ``lop config edit``, the HTTP PATCH
-        # route — stored the user's JSON as a STRING. ``validate`` had no
-        # ``CASCADE`` arm either, so the write was accepted and reported as a
-        # success, while ``resolve_chain`` and ``read_chains`` both require a
-        # ``Mapping`` and silently read a string as "no cascade configured".
-        # The failover the user had just asked for never ran, and nothing on
-        # any surface said so.
-        import json
-
+        # chain editor is the only other way to build one. Without this arm
+        # the kind fell through to ``return text``, so the two writers that do
+        # not go through that editor — ``lop config edit`` and a hand-edited
+        # ``config.yml`` — put a STRING where a mapping belongs. ``validate``
+        # had no ``CASCADE`` arm either, so the write was accepted and
+        # reported as a success, while ``resolve_chain`` and ``read_chains``
+        # both require a ``Mapping`` and silently read a string as "no cascade
+        # configured". The failover the user had just asked for never ran, and
+        # nothing on any surface said so.
         try:
-            parsed = json.loads(text)
+            return json.loads(text)
         except ValueError:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
-        return parsed
     return text
 
 
@@ -3382,15 +3379,15 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         return _keymap.validate_key(value)
     if setting.kind is Kind.CASCADE:
         # Same rule the HOTKEY arm above states, for the same reason: `lop
-        # config edit`, the PATCH route and a hand-edited config.yml all reach
-        # this value without passing the page's chain editor. A shape the
-        # failover layer cannot read is not a cascade that merely looks odd —
+        # config edit` and a hand-edited config.yml both reach this value
+        # without passing the page's chain editor. A shape the failover layer
+        # cannot read is not a cascade that merely looks odd —
         # `resolve_chain` returns ``None`` for it and routing continues as
         # though nothing were configured, which is the one outcome the user
         # cannot see. Refusing names the problem while the user is still
         # looking at the command that caused it.
         if not isinstance(value, Mapping):
-            return 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
+            return 'expected a JSON object of chains, e.g. {"default": ["anthropic/claude-opus-5"]}'
         for key, hops in value.items():
             if not isinstance(key, str) or not key.strip():
                 return 'every chain needs a name, e.g. "default"'
@@ -3400,8 +3397,22 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
             if isinstance(hops, str) or not isinstance(hops, Sequence):
                 return f"chain {key!r} must be a list of provider/model hops"
             for hop in hops:
+                # `_hop_label` is the DISPLAY formatter and answers a weaker
+                # question — it returns any non-empty string unchanged, so it
+                # accepts `gpt-4o`, which `expand_fallback_targets` then drops
+                # for having no provider. That is this bug wearing a different
+                # hat: stored, confirmed, and routing nothing. It still gates
+                # the mapping form, whose label carries the effort a string
+                # hop may not; `validate_hop` — the predicate the page's hop
+                # editor and the server's `_write_cascade` already share — is
+                # what a string hop is held to, so the three writers cannot
+                # disagree about what a hop is.
                 if not _hop_label(hop):
                     return f"chain {key!r} has a hop that is not provider/model: {hop!r}"
+                if isinstance(hop, str):
+                    problem = validate_hop(hop)
+                    if problem is not None:
+                        return f"chain {key!r}: {problem}"
         return None
     return None
 

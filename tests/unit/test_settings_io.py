@@ -2267,6 +2267,7 @@ class TestConfigEditStoresACascadeAsAMapping:
 
         from local_operator.cli import config_edit_command
         from local_operator.providers.failover import (
+            RetrySettings,
             expand_fallback_candidates,
             resolve_chain,
         )
@@ -2277,7 +2278,14 @@ class TestConfigEditStoresACascadeAsAMapping:
             == 0
         ), capsys.readouterr()
 
-        chains = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+        raw = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+        # Through ``RetrySettings.from_settings`` rather than handing ``raw``
+        # straight to ``resolve_chain``: no production caller reads the config
+        # mapping directly, and ``_normalize_chains`` in between is where a
+        # hop that survived validation but cannot become a route is silently
+        # dropped. Asserting past it is what makes "the failover now has
+        # somewhere to go" an end-to-end claim.
+        chains = RetrySettings.from_settings({"retry": {"fallbackChains": raw}}).fallback_chains
         selector = "anthropic/claude-opus-5"
         chain = resolve_chain(selector, chains)
         assert chain is not None, "no chain resolved for the configured selector"
@@ -2297,12 +2305,42 @@ class TestConfigEditStoresACascadeAsAMapping:
         value the cascade cannot use must not be written and then reported as
         a success, whether it arrived as bare text or as JSON of the wrong
         shape.
+
+        Run against a config that ALREADY holds a working cascade, because
+        the exit code is only half the contract the name promises. On an empty
+        store "refused" and "stored nothing" are indistinguishable, and the
+        case that costs a user something is the one where a fat-fingered edit
+        lands on a cascade they were relying on.
         """
         import argparse
+        import json as _json
 
         from local_operator.cli import config_edit_command
 
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-        for bad in ("not json at all", '["a","b"]', '{"default":"not-a-list"}'):
+        good = {"default": ["anthropic/claude-haiku-4-5-20251001"]}
+        assert (
+            config_edit_command(
+                argparse.Namespace(key="retry.fallbackChains", value=_json.dumps(good))
+            )
+            == 0
+        ), capsys.readouterr()
+
+        for bad in (
+            "not json at all",
+            '["a","b"]',
+            '{"default":"not-a-list"}',
+            # Parses, is a mapping, and every hop is a non-empty string — but
+            # `gpt-4o` names no provider, so `expand_fallback_targets` would
+            # drop it and the cascade would route nothing. The display helper
+            # `_hop_label` accepts it; `validate_hop` is what catches it.
+            '{"default":["gpt-4o"]}',
+            '{"default":["anthropic/claude-opus-5 (low)"]}',
+            '{"":["anthropic/claude-opus-5"]}',
+        ):
             code = config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=bad))
             assert code == 1, f"{bad!r} was accepted: {capsys.readouterr()}"
+            stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+            assert (
+                stored == good
+            ), f"{bad!r} was refused but still overwrote the cascade: {stored!r}"
