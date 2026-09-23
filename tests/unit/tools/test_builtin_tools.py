@@ -5022,6 +5022,381 @@ async def test_glob_respects_gitignore_unless_pattern_names_it(tools, context, t
 
 
 # ---------------------------------------------------------------------------
+# The bounded search walk (SEARCH_WALK_DEADLINE_S)
+#
+# What these pin: a walk the budget stopped returns a PARTIAL result and says
+# so. The measured failure they exist for is a 2315.8 s grep in a delegated
+# child — 39.2 of that job's 40.1 minutes inside tool calls — whose answer
+# (`200 match(es) ... of 1386`) carried no sign that the tree was only half
+# read, and whose ripgrep attempt had been killed on its own deadline and
+# silently replaced by an unbounded Python walk.
+#
+# No test here sleeps or asserts elapsed seconds (AGENTS.md, "Timing, flakes"):
+# budgets are driven by a SCRIPTED clock, which also pins where the check
+# happens.
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedClock:
+    """A ``time`` stand-in whose ``monotonic()`` readings are scripted.
+
+    The walk reads the clock at every directory boundary, so the readings below
+    make it pass the root's boundary check and expire at the first
+    subdirectory's — a PARTIAL file set, produced without any elapsed time and
+    without a sleep. Once the script is spent the reading stays past every
+    deadline, which is the state the walk is already stopped in.
+    """
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+
+    def monotonic(self) -> float:
+        return self._readings.pop(0) if self._readings else float("inf")
+
+
+def test_walk_entries_stops_mid_tree_on_its_deadline(tmp_path, monkeypatch) -> None:
+    """The budget stops the walk where it stands and reports itself truncated.
+
+    Reading 1 passes the root boundary check, reading 2 (one level in) is past
+    the deadline, so the result is the two files the walk had reached — not the
+    four in the tree, and not a silent claim to have walked it all.
+    """
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "c.txt").write_text("c")
+    (tmp_path / "sub" / "d.txt").write_text("d")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(builtin, "time", _ScriptedClock(0.0, 200.0))
+        stopped = builtin._walk_entries(tmp_path, deadline=100.0)
+
+    assert stopped.truncated is True
+    assert {p.name for p in stopped.files} == {"a.txt", "b.txt"}
+
+    # Without a budget the same call reaches the whole tree: the injection is
+    # what changed the answer, not the walk.
+    complete = builtin._walk_entries(tmp_path)
+    assert complete.truncated is False
+    assert {p.name for p in complete.files} == {"a.txt", "b.txt", "c.txt", "d.txt"}
+
+
+def test_count_oversized_files_walks_the_tree_exactly_once(tmp_path, monkeypatch) -> None:
+    """The rg engine's skipped-file count is ONE pass, not walk-then-stat.
+
+    The count needs only the count — never the file list — so the walk stats
+    each file as it reaches it. Pinned structurally by counting the walk
+    helper's calls and by making the old second traversal (``_grep_file_set``)
+    fail if anything reaches for it.
+    """
+    (tmp_path / "small.py").write_text("needle\n")
+    (tmp_path / "big.py").write_text("needle\n" * 200000)  # > 1MB
+    calls: list[int] = []
+    real = builtin._walk_entries
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builtin, "_walk_entries", spy)
+    monkeypatch.setattr(
+        builtin,
+        "_grep_file_set",
+        lambda target: pytest.fail("the count re-walked the tree for a file list it discards"),
+    )
+
+    assert builtin._count_oversized_files(tmp_path) == (1, "")
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_grep_walks_the_tree_exactly_once(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A whole rg-engine grep makes ONE walk of the tree, not two.
+
+    Before this, the file set walked the tree and the oversized count walked it
+    again (110.7 s of scandir each, on the store in the constant's comment).
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg walk path cannot run")
+    (tmp_path / "small.py").write_text("needle\n")
+    (tmp_path / "big.py").write_text("needle\n" * 200000)  # > 1MB
+    calls: list[int] = []
+    real = builtin._walk_entries
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builtin, "_walk_entries", spy)
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "(ripgrep)" in result.text, "rg engine did not run; the walk count proves nothing"
+    assert "1 file(s) skipped over the 1MB cap" in result.text
+    assert len(calls) == 1, f"the rg path walked the tree {len(calls)} time(s); it must walk once"
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_deadline_keeps_partial_records_and_skips_the_python_walk(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """An rg scan killed on its OWN budget is not an rg failure.
+
+    The trap this pins (measured, 2026-09-23): ``_ripgrep_scan`` returned None
+    for every non-0/1 exit, so a deadline-killed rg (rc -9) was read as "rg
+    errored" — its records were thrown away and ``execute_grep`` fell through to
+    the Python engine, whose unbounded walk is what turned a 30 s bound into a
+    2315.8 s call. Now the partial records survive, the truncation is stated,
+    and the Python walk is never entered.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg deadline path cannot run")
+    (tmp_path / "hit.py").write_text("needle\n")
+    walked: list[int] = []
+    real = builtin._grep_file_set
+
+    def spy(*args, **kwargs):
+        walked.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(builtin, "_grep_file_set", spy)
+    # Already spent: rg is killed on its first read of the scan budget.
+    monkeypatch.setattr(builtin, "GREP_SCAN_DEADLINE_S", -1.0)
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert walked == [], "a budget-killed rg fell back to the unbounded Python walk"
+    assert "(ripgrep)" in result.text, "the rg engine's provenance must survive the stop"
+    assert "Partial search:" in result.text
+    assert "GREP_SCAN_DEADLINE_S" in result.text
+    assert "path=<subdirectory>" in result.text
+    assert result.useless is False
+    assert "No matches for" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_error_still_falls_back_to_the_python_engine(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A GENUINE rg error keeps the old fall-back, which the change reserves.
+
+    rg exits 2 on a pattern it cannot compile (look-around), while Python's re
+    accepts it — a real rg-side failure, addressed with the real binary rather
+    than a mocked returncode.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg error path cannot run")
+    (tmp_path / "hit.py").write_text("needle = 1\n")
+
+    result = await _call(tools, "grep", {"pattern": "needle(?= )"}, context)
+
+    assert result.is_error is False, result.text
+    assert "hit.py:1:needle = 1" in result.text
+    assert "(ripgrep)" not in result.text, "rg failed; the note must not claim it ran"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("python_engine")
+async def test_grep_with_a_stopped_walk_does_not_answer_no_matches(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """The honesty contract: a stopped walk is never an absence of matches.
+
+    The tree below HAS a match; the walk never reaches it, so the only honest
+    answer names the stop, says the result is partial, and says how to narrow
+    it — and it is not ``useless``, because it does not close the question.
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "hit.py").write_text("needle\n")
+    monkeypatch.setattr(builtin, "SEARCH_WALK_DEADLINE_S", -1.0)
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert result.useless is False
+    assert "No matches for" not in result.text
+    assert "Partial search:" in result.text
+    assert "SEARCH_WALK_DEADLINE_S" in result.text
+    assert "path=<subdirectory>" in result.text and "include=<glob>" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("python_engine")
+async def test_grep_with_a_stopped_walk_marks_its_matches_partial(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """With matches, the existing header contract stays and the stop is added.
+
+    The truncation clause is additive: `1 match(es) for 'needle'` and
+    `path:line:text` render exactly as before, and the result still says it is
+    part of a tree that was not fully read.
+    """
+    hit = tmp_path / "hit.py"
+    hit.write_text("needle\n")
+
+    def partial_file_set(target):
+        return builtin._WalkOutcome(files=[hit], truncated=True), target
+
+    monkeypatch.setattr(builtin, "_grep_file_set", partial_file_set)
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "1 match(es) for 'needle'" in result.text
+    assert "hit.py:1:needle" in result.text
+    assert "these results are partial" in result.text
+    assert "SEARCH_WALK_DEADLINE_S" in result.text
+    assert result.useless is False
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_count_from_a_stopped_walk_is_a_lower_bound(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A count the walk did not finish is a LOWER BOUND, and says so.
+
+    Printing `0 file(s) skipped` from a truncated walk would claim a total the
+    walk never established — the same lie as `no matches`, one level down.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg count path cannot run")
+    (tmp_path / "hit.py").write_text("needle\n")
+    monkeypatch.setattr(builtin, "SEARCH_WALK_DEADLINE_S", -1.0)
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "hit.py:1:needle" in result.text, "the rg scan itself must still have matched"
+    assert "file(s) skipped over the 1MB cap; a lower bound" in result.text
+    assert "SEARCH_WALK_DEADLINE_S" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("python_engine")
+async def test_untouched_grep_footers_are_byte_identical(tools, context, tmp_path) -> None:
+    """With no budget spent, the footer contract renders EXACTLY as before.
+
+    The whole point of the truncation clause is that it is additive: these are
+    the literals the pre-change tool produced for a small tree, and a normal
+    grep must leave every one of them untouched. The one deliberate exception
+    is the no-match spelling below, which the pre-change code emitted with a
+    missing space on the file count (`'absent'in 2 file(s).`); that typo lives
+    in the same string this change rewrites, no test or doc referenced it, and
+    it is fixed here rather than preserved — flagged in the PR body as the only
+    byte that moved outside the truncation clause.
+    """
+    (tmp_path / "a.py").write_text("needle\n")
+    (tmp_path / "b.py").write_text("needle\n")
+
+    found = await _call(tools, "grep", {"pattern": "needle"}, context)
+    assert found.text.split(":\n", 1)[0] == "2 match(es) for 'needle'"
+
+    paged = await _call(tools, "grep", {"pattern": "needle", "skip": 1}, context)
+    assert (
+        paged.text.split(":\n", 1)[0]
+        == "1 match(es) for 'needle' of 2 (use skip=2 for the next page) (skipped 1)"
+    )
+
+    nothing = await _call(tools, "grep", {"pattern": "absent"}, context)
+    assert nothing.text == "No matches for 'absent' in 2 file(s)."
+    assert nothing.useless is True
+
+    no_paths = await _call(tools, "glob", {"pattern": "*.zzz"}, context)
+    assert no_paths.text == "No paths matched pattern '*.zzz'."
+    assert no_paths.useless is True
+
+
+def test_glob_walk_finds_exactly_what_pathlib_finds(tmp_path) -> None:
+    """The bounded glob walk cannot change WHAT is found, only how far it got.
+
+    ``_glob_walk`` supervises pathlib's traversal by decomposing a ``**``
+    pattern instead of calling ``root.glob(pattern)`` directly (pathlib hands
+    no checkpoint back, and a ``**`` that matches nothing yields nothing at
+    all). That decomposition must be invisible in the result, so every pattern
+    shape is compared against the plain call over a tree carrying nesting, a
+    hidden directory and multiple wildcard levels.
+    """
+    (tmp_path / "src" / "deep" / "nest").mkdir(parents=True)
+    (tmp_path / "src" / "a.py").write_text("x")
+    (tmp_path / "src" / "deep" / "b.py").write_text("x")
+    (tmp_path / "src" / "deep" / "nest" / "c.txt").write_text("x")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "d.md").write_text("x")
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "e.py").write_text("x")
+    (tmp_path / "top.py").write_text("x")
+
+    patterns = (
+        "**",
+        "**/*",
+        "**/*.py",
+        "src/**",
+        "src/**/*.py",
+        "src/**/*.md",
+        "*/*.py",
+        "**/docs",
+        "**/docs/**",
+        "*/**/*.py",
+        "**/**/*.py",
+        "*.py",
+        "nomatch/**/*.py",
+        "src/*/nest/*",
+    )
+    for pattern in patterns:
+        expected = sorted(
+            p.relative_to(tmp_path).as_posix() + ("/" if p.is_dir() else "")
+            for p in tmp_path.glob(pattern)
+        )
+        walked = builtin._glob_walk(tmp_path, pattern)
+        assert walked.truncated is False, pattern
+        assert walked.paths == expected, pattern
+
+
+def test_glob_walk_stops_on_its_deadline(tmp_path, monkeypatch) -> None:
+    """The glob walk really is supervised, on a ``**`` pattern with no match.
+
+    This is the shape that could not be bounded by abandoning the iterator:
+    pathlib scans the whole tree and yields nothing, so the stop has to happen
+    inside its traversal. The scripted clock expires at the first checkpoint.
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("x")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(builtin, "time", _ScriptedClock(0.0, 1e9))
+        walked = builtin._glob_walk(tmp_path, "**/*.nomatch")
+
+    assert walked.truncated is True
+    assert walked.paths == []
+    assert walked.examined >= 1, "the checkpoint never ran; the walk was not supervised"
+
+
+@pytest.mark.asyncio
+async def test_glob_with_a_stopped_walk_does_not_answer_no_paths_matched(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """glob's no-match answer is subject to the same contract as grep's.
+
+    The tree below HAS a match; the walk is stopped before reaching it, and the
+    answer must say the listing is partial rather than report no paths matched.
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "hit.txt").write_text("x")
+    monkeypatch.setattr(builtin, "SEARCH_WALK_DEADLINE_S", -1.0)
+
+    result = await _call(tools, "glob", {"pattern": "**/*.txt"}, context)
+
+    assert result.useless is False
+    assert "No paths matched pattern" not in result.text
+    assert "Partial search:" in result.text
+    assert "SEARCH_WALK_DEADLINE_S" in result.text
+    assert "a literal directory prefix" in result.text
+
+
+# ---------------------------------------------------------------------------
 # bash: steering detach vs real abort
 # ---------------------------------------------------------------------------
 
