@@ -2697,9 +2697,14 @@ async def test_the_dock_names_a_FAILED_cut_off_child_as_cut_off_not_failed() -> 
     now = time.time()
     cut = _Job("cut", "draft the memo", status="failed")
     cut.cut_off_cause = "continuation-limit"
-    cut.error_text = (
-        "the turn kept being asked to continue, so it was stopped and the pending message dropped."
-    )
+    # The PRODUCTION string, not a hand-typed sentence: the runner stamps
+    # ``format_cut_off_notice``, which itself leads ``turn cut off — ``. A
+    # fixture with a bare sentence passed while the real row doubled the phrase
+    # (``cut off — turn cut off — …``), which is exactly how that regression
+    # slipped through rounds 1-2 (design D9 / QA Q-3, Q-4).
+    from local_operator.incidents import format_cut_off_notice
+
+    cut.error_text = format_cut_off_notice("continuation-limit")
     cut.settled_at = now
     plain = _Job("plain", "rank the leads", status="failed")
     plain.error_text = "provider timeout: stream stalled: no data for 180s"
@@ -2735,6 +2740,15 @@ async def test_the_dock_names_a_FAILED_cut_off_child_as_cut_off_not_failed() -> 
     assert rendered["cut"].index("cut off") < rendered["cut"].index(
         "kept being asked"
     ), f"the row carries the words but not the signal: {rendered['cut']}"
+    # The word appears ONCE: the production notice already says it, so an
+    # unconditional prefix doubled it (design D9).
+    assert (
+        rendered["cut"].count("cut off") == 1
+    ), f"the cut-off word is duplicated on the row: {rendered['cut']}"
+    # ...and it still LEADS, so the row reads as cut off before its prose.
+    assert rendered["cut"].lstrip("• ").lstrip().startswith("cut off") or (
+        rendered["cut"].index("cut off") < rendered["cut"].index("kept being asked")
+    ), rendered["cut"]
     # The control: a plain provider failure must NOT be relabelled.
     assert "cut off" not in rendered["plain"], rendered["plain"]
     assert rendered["cut"] != rendered["plain"], (

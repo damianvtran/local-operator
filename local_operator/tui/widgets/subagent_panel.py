@@ -781,7 +781,25 @@ def _read_row(
             # two states tell apart at a glance while keeping the sentence that
             # says what happened on the same row.
             word = status_glyph(status, cut_off=True)[1]
-            activity = f"{word} \u2014 {activity}" if activity else word
+            # NOT when the prose already says it: the production error text is
+            # ``format_cut_off_notice``, which itself begins ``turn cut off — ``,
+            # so an unconditional prefix rendered ``cut off — turn cut off — ...``
+            # on the dock and the child page for every cause (runtime-shutdown and
+            # runtime-killed double identically) — design D9. Prefixing is for the
+            # case where the text does NOT already lead with the fact; when it does,
+            # the word is already on the row. Case-folded so ``Turn cut off`` counts
+            # as already-led.
+            # ``format_cut_off_notice`` leads ``turn cut off — ``, so the word sits a
+            # few characters in rather than at position 0; the test is a short-window
+            # containment (the word within ``len(word)+6`` cells) so ``cut off —`` and
+            # ``turn cut off —`` both count as already-led, while a provider error
+            # that happens to mention the phrase later in its prose still gets the
+            # leading word.
+            already_led = word.casefold() in activity.casefold()[: len(word) + 6]
+            if activity:
+                activity = activity if already_led else f"{word} \u2014 {activity}"
+            else:
+                activity = word
     else:
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "result_text", "") or "")).split()
