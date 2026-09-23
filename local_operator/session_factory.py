@@ -3163,7 +3163,12 @@ def _store_maintenance_stamp_is_fresh(config_dir: Path, pass_names: list[str]) -
         or not isinstance(completed_at, (int, float))
     ):
         return False
-    age = time.time() - float(completed_at)
+    try:
+        age = time.time() - float(completed_at)
+    except (OverflowError, ValueError):
+        # JSON permits integers too large for float conversion; they cannot be
+        # a valid wall-clock completion time and must not suppress a safe retry.
+        return False
     return 0 <= age <= _STORE_MAINTENANCE_STAMP_TTL_SECONDS
 
 

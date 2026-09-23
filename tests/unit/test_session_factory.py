@@ -4274,7 +4274,7 @@ def test_store_maintenance_failed_pass_retries_without_completion_stamp(
     assert stamp.exists(), "successful retry did not publish completion"
 
 
-@pytest.mark.parametrize("invalid_stamp", ["expired", "version"])
+@pytest.mark.parametrize("invalid_stamp", ["expired", "version", "oversized_timestamp"])
 def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4288,9 +4288,15 @@ def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
     payload = json.loads(stamp_path.read_text(encoding="utf-8"))
     if invalid_stamp == "expired":
         payload["completed_at"] -= session_factory._STORE_MAINTENANCE_STAMP_TTL_SECONDS + 1
-    else:
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif invalid_stamp == "version":
         payload["version"] += 1
-    stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        # Python's JSON decoder accepts arbitrary-size integers; a valid JSON
+        # stamp outside float range is invalid metadata, not a worker crash.
+        payload["completed_at"] = 10**400
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
 
     first_count = len(calls)
     session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
