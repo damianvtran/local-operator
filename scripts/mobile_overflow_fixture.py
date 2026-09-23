@@ -2,7 +2,10 @@
 defects under review, for before/after capture at a phone viewport.
 
 Run:  PYTHONPATH=. .venv/bin/python scripts/mobile_overflow_fixture.py [PORT]
-Login at http://127.0.0.1:<port> with password `overflow-demo`.
+Login at http://127.0.0.1:<port>. The password is NOT fixed and never printed:
+it does NOT default and does NOT print one: export `LOP_MOBILE_FIXTURE_PASSWORD`
+(or pass it as the second argument) and give the capture scripts the same variable,
+or the fixture refuses to start.
 
 Three sessions, each one shaped to isolate one surface:
 
@@ -37,6 +40,7 @@ LOCAL_OPERATOR_CONFIG_DIR are re-homed by ``scripts.probe_isolation`` on import.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 import uvicorn
@@ -54,7 +58,43 @@ from local_operator.mobile.types import (
     TranscriptEntry,
 )
 
-PASSWORD = "overflow-demo"
+#: The daemon's password for THIS run: the caller's second argument, or a value
+#: generated here.
+#:
+#: WHY THERE IS NO LITERAL. A fixed password is REUSABLE: it outlives the fixture,
+#: it lives in the repo, and every script that imports it shares one value — so it
+#: ended up in transcripts that merely READ this file, and it had to be rotated.
+#: The replacement is per-run and loopback-only, and NOTHING IN THIS FILE PRINTS IT
+#: (the startup banner names the port only). A caller that wants to log in by hand,
+#: or a capture script that fills the login form, supplies the value explicitly —
+#: which is also the only way it is ever shared.
+#: The variable NAME (never a value) a caller may use instead of the second argument.
+#: (``scripts/mobile_overflow_capture.py``). Written out here rather than imported
+#: from there ON PURPOSE: these are sibling capture scripts, and importing one from
+#: the other would drag Chrome/CDP code into a fixture that only serves a daemon.
+FIXTURE_PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
+
+
+def required_password(argv_rest: list[str]) -> str:
+    """The per-run password, or a refusal that names how to supply one.
+
+    THERE IS NO DEFAULT AND NO GENERATED FALLBACK, and that is the point: a fixed
+    fallback is a reusable credential the moment two runs share it, which is exactly
+    how the previous value became one that had to be rotated; and a SILENTLY generated
+    one leaves a human unable to log in, which invites a fixed one back. The caller
+    supplies it — the capture scripts read the same variable — and nothing here prints
+    it, so neither the value nor a placeholder for it appears in any source or log.
+    """
+    value = argv_rest[0] if argv_rest else os.environ.get(FIXTURE_PASSWORD_ENV, "")
+    if not value:
+        raise SystemExit(
+            "this fixture needs a per-run password: pass it as the second argument, or "
+            f"set {FIXTURE_PASSWORD_ENV}. Generate one with "
+            "python -c 'import secrets;print(secrets.token_urlsafe(16))' and export it. "
+            "It is never defaulted and never printed by this script."
+        )
+    return value
+
 
 LONG_QUESTION = (
     "The remediation touches the mobile projection wire, the phone's ask card, "
@@ -400,7 +440,8 @@ def _stale_projection() -> SessionProjection:
 
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4187
-    daemon = MobileDaemon(port=port, password=PASSWORD, dial_registrants=False)
+    password = required_password(sys.argv[2:])
+    daemon = MobileDaemon(port=port, password=password, dial_registrants=False)
     for projection in (
         _roster_projection(),
         _ask_projection(),
@@ -427,7 +468,7 @@ async def main() -> None:
         daemon.session_projections[projection.session_id] = projection
         daemon.table.entries[record.pid] = entry
     app = build_app(daemon)
-    print(f"Fixture mobile: http://127.0.0.1:{port} password {PASSWORD}", flush=True)
+    print(f"Fixture mobile: http://127.0.0.1:{port}", flush=True)
     await uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     ).serve()

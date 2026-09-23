@@ -36,6 +36,12 @@ export const AGENT_GLYPH: Record<SubagentRow["status"], string> = {
 	failed: "✗",
 	cancelled: "–",
 	parked: "‖",
+	/* `…` and NOT the spinner: a child parked waiting for a free slot is not
+	   spending, so the whole treatment is the non-spinning dim gutter
+	   (`agentStatusClass` falls through to `text-ink-dim`). The ellipsis is
+	   chosen for coverage — it reads as "waiting" in every font on every
+	   phone, where `⏸` and `⋯` render as tofu on some. */
+	queued: "…",
 };
 
 export function agentStatusClass(status: SubagentRow["status"]): string {
@@ -126,6 +132,7 @@ export function AgentRoster({
 	if (direct.length === 0) return null;
 	const running = direct.filter((agent) => agent.status === "running").length;
 	const failed = direct.filter((agent) => agent.status === "failed").length;
+	const queued = direct.filter((agent) => agent.status === "queued").length;
 	const rows = (
 		<div className="flex w-full flex-col gap-1 pb-2">
 			{direct.map((agent) => (
@@ -191,6 +198,17 @@ export function AgentRoster({
 							{running}/{direct.length} running
 						</span>
 					</span>
+					{queued > 0 ? (
+						/* The same `shrink-0 whitespace-nowrap` rule as the failure count, and
+						   for the same reason: the number must not break between `3` and
+						   `queued`, and the label is the span that yields. It is here because a
+						   capacity-parked child is deliberately NOT in the `running`
+						   numerator — without this the header would just read a smaller
+						   fraction and never say why. */
+						<span className="shrink-0 whitespace-nowrap font-mono text-mono-sm text-ink-dim">
+							· {queued} queued
+						</span>
+					) : null}
 					{failed > 0 ? (
 						/* `shrink-0 whitespace-nowrap`: the count is the row's least
 						   expendable token, so it neither shrinks nor breaks between

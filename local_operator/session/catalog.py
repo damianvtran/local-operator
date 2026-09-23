@@ -196,6 +196,26 @@ class CatalogEntry:
             )
         if self.row.live_state == "attached":
             return "attached"
+        # THE ``delegating`` RUNG, below ``attached`` and above the armed wake,
+        # mirroring ``row_state_mark``'s order exactly so the glyph and the words
+        # cannot disagree. It sits here because the rungs above it are all
+        # LOUDER facts about the row rather than about its children: a parked
+        # gate, a wedged or busy runtime, an unread outcome and "a terminal is
+        # watching this" each outrank "work is running one layer down".
+        #
+        # WHY A CODE AND NOT JUST A LABEL. The desktop renderer derives BOTH the
+        # glyph and its ink from this string alone, so a label-only change is
+        # invisible on exactly the surface that was complained about. The count
+        # still rides inside ``status`` (see :meth:`status`), which is what makes
+        # the edge channel publish when a count changes: the dedupe key is
+        # ``(code, label)`` with the clock term removed, so ``0 -> 2`` and
+        # ``2 -> 1`` each publish one ``session_status`` frame while a 15 s
+        # heartbeat rewrite publishes none.
+        #
+        # The predicate is the ROW's (:attr:`resume.SessionRow.delegating`), the
+        # same one ``row_state_mark`` reads — one fact, two renderings.
+        if self.row.delegating is not None:
+            return "delegating"
         if self.row.wakes and not self.row.wakes_dormant:
             return "scheduled"
         if self.row.live_state == "idle":
@@ -337,6 +357,24 @@ class CatalogEntry:
         # schedule drew the wake mark while the tooltip said "Recent").
         if self.row.live_state == "attached":
             return "Open"
+        # The rung's words. Same position as the arm in :attr:`status_code`, and
+        # the same predicate: the COUNT is spelled into the label because that is
+        # what the transport already carries — no new payload field is needed for
+        # a client to show it, and the ``(code, label)`` dedupe key then moves
+        # whenever the count does.
+        #
+        # The noun is "subagent" and not "agent" on purpose, and it is the word
+        # the rest of the product already uses: this row's own record field is
+        # ``subagents_running``, ``/info`` tallies in it (``info/render.py:435``,
+        # ``plural(n, "subagent")``), and the TUI's own stop notice says
+        # "N subagent(s) still running" (``tui/app.py:20950``). "Agent" alone is
+        # ambiguous in this product, which has an "Agents" page of reusable
+        # PROFILES — a different thing entirely. The
+        # label also never leads with "Delegating": that would imply the parent
+        # is acting, and "the parent's own turn is not running" is the one fact
+        # this state asserts.
+        if self.row.delegating is not None:
+            return delegating_label(*self.row.delegating)
         if self.row.wakes and not self.row.wakes_dormant:
             count = self.row.wakes
             return f"Scheduled ({count} wake{'s' if count != 1 else ''})"
@@ -423,6 +461,47 @@ class CatalogEntry:
             # grow a second line for it.
             sentence = sentence[:157].rstrip() + "…"
         return f"{base} — {sentence}"
+
+
+def delegating_label(running: int, queued: int) -> str:
+    """The ``delegating`` row's words, from the two counts the record reported.
+
+    Three shapes, because the two counts answer different questions and either
+    can be the whole of the answer:
+
+    * ``{N} subagent(s) running`` — the complaint's own case, and what the rung
+      reads as when nothing is parked;
+    * ``{N} subagent(s) running · {M} queued`` — the ``·`` addend shape
+      ``/info``'s fleet line already uses (``info/render.py:443``), so a parent
+      at capacity is distinguishable from one that is merely busy;
+    * ``{M} subagent(s) queued`` — children parked with nothing yet spending, a
+      state that must NOT read as idle (the capacity gate parks a child with
+      ``queued=True``: ``harness/subagent.py:663``, ``harness/jobs.py:648``).
+
+    SINGULAR AT ONE (``1 subagent running``), matching ``Scheduled (1 wake)``:
+    a plural here is the kind of small wrongness a reader notices before they
+    notice the state.
+
+    ZERO IS NEVER PRINTED FOR A COUNT THAT WAS NOT REPORTED. The caller passes
+    the normalised pair, so a record that reported only one of the two counts
+    simply does not get that addend — the alternative, printing ``0 queued``,
+    would assert a measurement nobody made. A queued count is also never
+    mentioned at zero even when it WAS reported: "0 queued" is noise on a row
+    whose news is the running children.
+
+    Public rather than private because the words are the wire's: the string this
+    returns lands in ``CatalogEntry.status``, which the desktop row's ``title``
+    and ``sr-only`` carry verbatim, and naming it lets any surface that wants the
+    same sentence ask for it instead of assembling a second vocabulary (U11).
+    """
+    noun = "subagent" if running == 1 else "subagents"
+    if running < 1:
+        queued_noun = "subagent" if queued == 1 else "subagents"
+        return f"{queued} {queued_noun} queued"
+    head = f"{running} {noun} running"
+    if queued >= 1:
+        return f"{head} · {queued} queued"
+    return head
 
 
 def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEntry:
@@ -712,6 +791,13 @@ def decorate_rows(
         pending: str | None = None
         leaving = ""
         kind = ""
+        # Relaxed from the record, never defaulted to zero: a row with no record
+        # (a cold or already-reaped session) has NO count to report, and the
+        # difference between that and "zero children" is what keeps a renderer
+        # from asserting "no subagents" about a session it could not ask. Only
+        # the live branch below can set them, exactly like ``leaving``.
+        subagents_running: int | None = None
+        subagents_queued: int | None = None
         if record_state is not None:
             record, state = record_state
             # ``wedged`` here means the owner has stopped reporting, which is a
@@ -743,6 +829,18 @@ def decorate_rows(
             # record written by an OLDER runtime has no such field, and this
             # runs on the poll loop behind ``/resume``.
             leaving = str(getattr(record, "leaving", "") or "")
+            # THE COUNTS THE READER ALREADY HOLDS. `registry.scan` handed this
+            # function the whole record and the two fields were simply dropped;
+            # they are what makes a parent whose own turn ended while its
+            # children still run distinguishable from an idle one, since
+            # ``live_state`` is deliberately the parent's own lane
+            # (``ServingSessionHandle.is_conversationally_active`` excludes
+            # children from it). Read through ``getattr`` like ``leaving``
+            # above and for the same reason: a record written by an OLDER
+            # runtime has no such field, and this runs on the poll loop behind
+            # ``/resume``.
+            subagents_running = getattr(record, "subagents_running", None)
+            subagents_queued = getattr(record, "subagents_queued", None)
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
         age: float | None = None
@@ -753,6 +851,8 @@ def decorate_rows(
                 live_state=live_state,
                 pending=pending,
                 leaving=leaving,
+                subagents_running=subagents_running,
+                subagents_queued=subagents_queued,
                 wakes=len(schedules),
                 wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
                 kind=kind,
