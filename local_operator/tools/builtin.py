@@ -9410,9 +9410,7 @@ def _glob_walk(root: Path, pattern: str) -> _GlobWalk:
     try:
         for path in _bounded_glob(root, pattern, budget):
             rel = path.relative_to(root).as_posix()
-            explicitly_named = bool(prefix) and (
-                rel == prefix or rel.startswith(prefix + "/")
-            )
+            explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
             if not explicitly_named and cache.ignores(path):
                 continue
             out.add(rel + ("/" if path.is_dir() else ""))
