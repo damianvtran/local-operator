@@ -1014,26 +1014,49 @@ class SubagentComms:
         (``child``, ``unsubscribe``, ``ask``, ``pending``) are deliberately
         omitted — they belong to a running loop and cannot cross a restart.
 
-        ``session_dir`` is stored as a string (``Path`` is not JSON-native) and
-        a record with none (a child that never started, so has no transcript)
-        is skipped entirely: it is not resumable and carries nothing a resumed
-        session could act on.
+        ``session_dir`` is stored as a string (``Path`` is not JSON-native).
+        A record with NONE is kept only when it has a recorded terminal
+        ``outcome``: such a child settled before it attached (a launch that
+        failed inside an install swap), and its outcome and error text are what
+        its parent needs to diagnose it — the missing transcript makes it not
+        resumable, which is a different fact from "this child did not exist".
+        A record with no transcript AND no outcome is a child still parked
+        behind the capacity gate; it is live, carries nothing a resumed session
+        could act on, and is skipped as before.
         """
         rows: list[dict[str, Any]] = []
         for record in self._records.values():
-            # A record with NO transcript directory is NOT dropped. It is a child
-            # that died before ``attach`` ran — a launch that failed during an
-            # install swap is the measured case — and dropping it made the class
-            # invisible AND unreachable: ``hub op=list`` could not name it,
-            # ``hub op=peek`` by id or label returned "unknown subagent", and
-            # ``resume`` was impossible, so the parent could only re-dispatch
-            # from scratch and lose whatever the child had done. Its settled
-            # OUTCOME and its ``error_text`` are durable facts about it and are
-            # what its parent needs to diagnose it, so the row survives even
-            # though there is no transcript to replay. It can never claim
-            # ``resumable`` (see ``_describe``): the write below carries no
-            # ``session_dir``, so ``resume`` refuses it with its own honest
-            # reason rather than promising a resume that then fails.
+            # A record with NO transcript directory is dropped UNLESS it has a
+            # recorded terminal outcome.
+            #
+            # Two classes have no transcript, and they must be treated
+            # differently:
+            #
+            # * a child that SETTLED before it attached — it died during the
+            #   launch, and a launch that failed inside an install swap is the
+            #   measured case (job ``f6ed760e3449``, "No package metadata was
+            #   found for local-operator"). Dropping it made the class invisible
+            #   AND unreachable: ``hub op=list`` could not name it, ``hub op=peek``
+            #   by id or label returned "unknown subagent", and ``resume`` was
+            #   impossible, so the parent could only re-dispatch from scratch and
+            #   lose whatever the child had done. Its OUTCOME and its
+            #   ``error_text`` are durable facts and are what its parent needs to
+            #   diagnose it, so the row survives. It still never claims
+            #   ``resumable`` (see ``_describe``): there is no transcript to
+            #   replay, and the write below carries no ``session_dir``.
+            #
+            # * a child that is PARKED — queued behind the capacity gate and
+            #   never started, so it has no recorded ``outcome``. It has no
+            #   outcome and no
+            #   transcript, and ``record_launch`` runs before the gate clears, so
+            #   keeping it would plant a ghost row that renders ``gone — never
+            #   started`` after a restart with the job row swept — exactly the
+            #   row ``main`` deliberately drops, and the contract
+            #   ``test_a_never_started_child_is_not_snapshotted`` pins. A parked
+            #   child needs no durable record: it is live, and the live job row
+            #   is its home.
+            if record.session_dir is None and record.outcome is None:
+                continue
             rows.append(
                 {
                     "job_id": record.job_id,

@@ -998,9 +998,13 @@ class AsyncJobManager:
                 continue
             if row.status == "running":
                 if row.queued:
-                    # Parked and never started, so it has no transcript to show
-                    # or resume; a ``⇥ interrupted`` row for it would invite a
-                    # resume that finds nothing. Drop it entirely.
+                    # Parked and never started (settled is False, no outcome
+                    # recorded), so it has no transcript to show or resume; a
+                    # ``⇥ interrupted`` row for it would invite a resume that
+                    # finds nothing. Drop it entirely. A queued child that DID
+                    # settle before attaching is ``status == "failed"`` rather
+                    # than "running", so it is not this branch and keeps its row
+                    # (and its comms record) for diagnosis.
                     continue
                 # No task backs it any more; a live-looking row would spin a
                 # spinner forever and invite a cancel that finds nothing.
