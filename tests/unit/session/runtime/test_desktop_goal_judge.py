@@ -23,6 +23,7 @@ import pytest
 from local_operator.harness.types import (
     AgentEndEvent,
     ChatRequest,
+    Message,
     MessageStartEvent,
     ModelSpec,
     NoticeEvent,
@@ -131,6 +132,21 @@ def make_handle(session: Session) -> ServingSessionHandle:
     return handle
 
 
+def _user_messages(session: Session) -> list[Message]:
+    """The user rows, TYPED as ``Message``.
+
+    ``session.history()`` is the ``AgentMessage`` union, so reading ``.text`` or
+    ``.provider_payload`` off a row is a type error until the row is narrowed —
+    the same narrowing the e2e cells make inline, kept here because four cells
+    need it.
+    """
+    return [
+        row
+        for row in session.history()
+        if isinstance(row, Message) and getattr(row, "role", "") == "user"
+    ]
+
+
 def _user_rows(session: Session) -> list[str]:
     """Every user-role row the session's own context carries, in order."""
     return [
@@ -167,14 +183,15 @@ async def test_an_agent_end_admits_a_continuation_through_the_prompt_queue(tmp_p
         history = session.history_view()
         assert [entry["status"] for entry in history] == ["done"]
         assert history[0]["reason"] == "All the work is done"
+        assert session.goal_judge is not None
         assert session.goal_judge["state"] == "done"
         assert session.goal_judge["verdict"] == "achieved"
         # The continuation row is durable and carries the STRUCTURAL stamp, so a
         # viewer that never heard of the recogniser still knows not to paint it.
         continuation = [
             row
-            for row in session.history()
-            if getattr(row, "text", "") == goal_continuation_prompt("Ship it")
+            for row in _user_messages(session)
+            if row.text == goal_continuation_prompt("Ship it")
         ]
         assert len(continuation) == 1
         assert continuation[0].provider_payload == {"harness_injected": True}
@@ -225,6 +242,7 @@ async def test_an_error_turn_sets_waiting_and_admits_nothing(tmp_path):
     try:
         session._emit_nowait(AgentEndEvent(messages=[], error="provider exploded", generation=1))
         await asyncio.sleep(0.05)
+        assert session.goal_judge is not None
         assert session.goal_judge["state"] == "waiting"
         assert stream.judge_calls == []
         assert stream.requests == []
@@ -246,14 +264,14 @@ async def test_an_injected_continuation_row_is_stamped_and_never_announced(tmp_p
 
     def watch(event: Any) -> None:
         if isinstance(event, MessageStartEvent) and getattr(event.message, "role", "") == "user":
-            seen.append(event.message.text)
+            seen.append(getattr(event.message, "text", ""))
 
     session.subscribe(watch)
     try:
         await session.prompt(
             goal_continuation_prompt("Ship it"), harness_injected=True, message_id="m1"
         )
-        rows = [row for row in session.history() if getattr(row, "role", "") == "user"]
+        rows = _user_messages(session)
         assert len(rows) == 1
         assert rows[0].provider_payload == {"harness_injected": True}
         assert is_harness_chrome(rows[0].text)
@@ -272,12 +290,12 @@ async def test_an_ordinary_prompt_carries_no_stamp_and_is_announced(tmp_path):
 
     def watch(event: Any) -> None:
         if isinstance(event, MessageStartEvent) and getattr(event.message, "role", "") == "user":
-            seen.append(event.message.text)
+            seen.append(getattr(event.message, "text", ""))
 
     session.subscribe(watch)
     try:
         await session.prompt("just talk to me", message_id="m2")
-        rows = [row for row in session.history() if getattr(row, "role", "") == "user"]
+        rows = _user_messages(session)
         assert len(rows) == 1
         assert not rows[0].provider_payload
         assert seen == ["just talk to me"]
@@ -503,7 +521,9 @@ async def test_a_stall_reaches_attached_surfaces_once_and_names_the_bound():
         # `{"run": 0}` is exactly the diff `_drive`'s streak reset publishes at
         # the next turn end (`tests/unit/session/test_goal_judge.py` pins that
         # shape): the state does NOT move, so the receipt must not repeat.
-        handle._goal_judge_driver()._publish(run=0)
+        driver = handle._goal_judge_driver()
+        assert driver is not None
+        driver._publish(run=0)
         await _drain_notices(handle)
         assert [event.text for event in cap_seen] == [STALLED_CAP_NOTICE]
     finally:

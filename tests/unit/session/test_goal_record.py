@@ -378,7 +378,11 @@ def test_the_fold_reads_a_goal_with_no_status_as_active():
     from local_operator.session.frontend_state import _fold_goal_status
 
     class _Session:
-        pass
+        # Declared rather than left absent: these doubles stand in for a
+        # restored session, and the two fields are the WHOLE question the fold
+        # answers — a goal with a record's status beside it, or without one.
+        goal: str = ""
+        goal_status: str = ""
 
     inherited = _Session()
     inherited.goal = "still going"

@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 from rich.cells import cell_len
 from rich.style import Style
+from textual.content import Content
 
 from local_operator.session.goal_judge import MAX_GOAL_CONTINUATIONS
 from local_operator.tui.app import OperatorApp
@@ -36,6 +37,27 @@ from .test_app_pilot import FakeSession, _factory
 GOAL = "land the OAuth refresh fix"
 
 
+def _card_body(panel: GoalPanel) -> Content:
+    """The content the card is carrying, narrowed for the type gate.
+
+    ``Widget.render()`` is typed as a union of renderables, so reaching `.plain`
+    or `.spans` through it is a type error even though this card always renders a
+    ``Content`` — and the isinstance is not decoration, it is the claim every card
+    assertion here rests on. (It renders a ``Content`` rather than the rich
+    ``Text`` the formatter builds: Textual wraps what a ``Static`` is given.)
+    """
+    rendered = panel.render()
+    assert isinstance(rendered, Content)
+    return rendered
+
+
+def _card_text(panel: GoalPanel) -> str:
+    """The card's text. Kept apart from the renderable so the difference the
+    frames taught us stays explicit: this is what is IN THE BODY, and a row's
+    index against `panel.region.height` is what is inside the PAINTED BOX."""
+    return _card_body(panel).plain
+
+
 def _entry(text: str, status: str = "done") -> dict[str, str]:
     return {
         "id": f"id-{text}",
@@ -45,6 +67,23 @@ def _entry(text: str, status: str = "done") -> dict[str, str]:
         "settled_at": "2026-09-21T11:30:00+00:00",
         "reason": "the judge said so" if status == "done" else "",
     }
+
+
+def _binding_keys() -> set[str]:
+    """The keys the card binds, from a tuple OR a ``Binding`` entry.
+
+    ``BINDINGS`` is typed as a union of both spellings (Textual accepts either),
+    so unpacking it as tuples is a type error even though this class declares
+    only tuples — and the audit below is exactly the kind of thing that should
+    keep reading them.
+    """
+    keys: set[str] = set()
+    for entry in GoalPanel.BINDINGS:
+        if isinstance(entry, tuple):
+            keys.add(entry[0])
+        else:
+            keys.add(entry.key)
+    return keys
 
 
 def _struck_spans(body) -> list[str]:  # noqa: ANN001
@@ -188,7 +227,7 @@ def test_the_action_keys_are_the_panels_own_and_not_global() -> None:
     """Audited, not assumed: a global action would be a persisted keymap id."""
     from local_operator import keymap
 
-    bindings = {key for key, _, _ in GoalPanel.BINDINGS}
+    bindings = _binding_keys()
     assert {"d", "c", "q", "escape"} <= bindings
     remappable = {action.id for action in keymap.KEY_ACTIONS}
     assert all(f"keymap.{key}" not in remappable for key in bindings)
@@ -216,7 +255,7 @@ async def test_the_bare_command_opens_the_overlay() -> None:
         await pilot.pause()
         panel = app.query_one(GoalPanel)
         assert panel.is_open
-        assert GOAL in panel.render().plain
+        assert GOAL in _card_text(panel)
         assert app.focused is panel
 
 
@@ -234,7 +273,7 @@ async def test_the_done_key_strikes_the_goal_and_records_it() -> None:
         assert [row["text"] for row in session.history_view()] == [GOAL]
         panel = app.query_one(GoalPanel)
         assert panel.is_open, "the card stays up so the struck state is visible"
-        body = panel.render()
+        body = _card_body(panel)
         assert "— done" in body.plain
         assert GOAL in _struck_spans(body), "the done goal must be struck on the card"
 
@@ -260,7 +299,7 @@ async def test_the_clear_key_arms_first_and_only_the_second_press_erases() -> No
         assert session.goal == GOAL, "one press must not erase anything"
         assert session.goal_status == "active"
         panel = app.query_one(GoalPanel)
-        assert "c again to clear · esc cancels" in panel.render().plain
+        assert "c again to clear · esc cancels" in _card_text(panel)
         await pilot.press("c")
         await pilot.pause()
         assert session.goal == ""
@@ -288,7 +327,7 @@ async def test_escape_cancels_an_armed_clear() -> None:
         app._cmd_goal("", lambda body, kind="info": None)
         await pilot.pause()
         panel = app.query_one(GoalPanel)
-        assert "c again to clear" not in panel.render().plain
+        assert "c again to clear" not in _card_text(panel)
         assert session.goal == GOAL
 
 
@@ -309,7 +348,7 @@ async def test_the_card_is_tall_enough_for_its_own_content() -> None:
         app._cmd_goal("", lambda body, kind="info": None)
         await pilot.pause()
         panel = app.query_one(GoalPanel)
-        rows = panel.render().plain.split("\n")
+        rows = _card_text(panel).split("\n")
         # `region` is the OUTER box: the content plus the stylesheet's own two
         # padding rows, which is what Textual's border-box sizing hands out.
         assert panel.region.height >= len(rows) + PANEL_PADDING_ROWS
@@ -399,7 +438,7 @@ async def test_the_card_counts_the_settled_goals_it_did_not_paint() -> None:
         total = len(session.history_view())
         assert total > MAX_HISTORY_ROWS
         panel = app.query_one(GoalPanel)
-        assert f"… {total - MAX_HISTORY_ROWS} more settled" in panel.render().plain
+        assert f"… {total - MAX_HISTORY_ROWS} more settled" in _card_text(panel)
 
 
 @pytest.mark.asyncio
@@ -424,7 +463,7 @@ async def test_a_short_terminal_says_the_list_was_clipped_rather_than_none() -> 
         app._cmd_goal("", lambda body, kind="info": None)
         await pilot.pause()
         panel = app.query_one(GoalPanel)
-        body = panel.render().plain
+        body = _card_text(panel)
         assert "none yet" not in body, "the record has eleven; the card must not deny them"
         assert "more settled" in body
         # On the ground that cannot hold the notice either, the card is clipped
@@ -453,7 +492,7 @@ async def test_the_clip_notice_is_painted_once_the_ground_can_hold_it() -> None:
         app._cmd_goal("", lambda body, kind="info": None)
         await pilot.pause()
         panel = app.query_one(GoalPanel)
-        lines = panel.render().plain.split("\n")
+        lines = _card_text(panel).split("\n")
         notice = next(index for index, line in enumerate(lines) if "more settled" in line)
         assert notice < panel.region.height, "the notice must be inside the painted box"
 
@@ -482,7 +521,7 @@ async def test_a_clipped_record_says_so_on_the_card() -> None:
         app._cmd_goal("", lambda body, kind="info": None)
         await pilot.pause()
         panel = app.query_one(GoalPanel)
-        body = panel.render().plain
+        body = _card_text(panel)
         assert "older settled goals were dropped from this record" in body
         assert "none yet" not in body, "a clipped record cannot be reported as empty"
 
