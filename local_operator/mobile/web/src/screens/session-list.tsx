@@ -615,7 +615,7 @@ export function SessionListScreen() {
 					placeholder="Search conversations…"
 					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
-				    {/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
+				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 				    round 1, D2). The session view's ☆ is one tap away and does the same
 				    thing, but a reader has to already be in a conversation to find it, so
 				    it cannot teach the list's own long-press.
