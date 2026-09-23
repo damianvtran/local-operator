@@ -4621,9 +4621,29 @@ class Session:
         provider call: idle changes apply to the next turn, and mid-turn changes
         apply to the next model step. Only that tail changes — never the cached
         prefix or an in-flight request.
+
+        The non-empty half delegates to :meth:`arm_goal`, which is the ONE
+        routine that starts a goal's life. A ``set`` returning only the text
+        left the record's status, judge state, token and history on the
+        PREVIOUS goal, and the two durable halves then disagreed about which
+        goal is current (agent review round 2, MAJOR-5): a new objective set
+        over a SETTLED one inherited ``status="done"``, so ``GoalJudge``'s
+        ``_enabled`` refused it, the card struck the new text through as
+        achieved, and the prompt withheld ``<goal>`` on the very ``!= "done"``
+        gate this feature added — a goal silently inert, which is the failure
+        mode the judged goal exists to remove. Over an ACTIVE goal the same
+        path also kept the departed goal's token, and the token is the judge's
+        staleness guard, so a replaced goal dropped nothing.
+
+        What a prior goal's HISTORY does is ``arm``'s rule, and the reason the
+        plain replacement can adopt it unchanged: a goal already SETTLED is
+        left in the history it was recorded into at settle time (its chip
+        window is a display state, not a second settle), and a goal that was
+        still ``active`` is appended as ``superseded``. So a plain ``--goal``
+        replacement is exactly as non-destructive to the outgoing objective as
+        ``/goal B`` over ``/goal A``, and no branch here loses one.
         """
-        stored = self._goal_state.set(text)
-        if not stored:
+        if not (text or "").strip():
             # A CLEARED goal is ``/goal --clear``'s act, so it goes through the
             # ONE routine that performs it rather than a second blanking here —
             # and the two DID differ: this branch journalled the attachment
@@ -4636,22 +4656,8 @@ class Session:
             # ``delete_goal`` also takes the token with it, which is what stops
             # a late verdict against the departed goal matching the next text.
             self.delete_goal()
-            return stored
-        # A goal written WITHOUT arming still needs a token, or the judge
-        # refuses to run on it (see ``GoalState.ensure_token``). This is the
-        # plain "replace the text" act — the mobile relay and ``lop --goal``
-        # — and its goal is standing work by the same reading that makes a
-        # restored record `active`, so the two halves must not disagree about
-        # whether it is pursued. No record write here: the token is this
-        # session's, nothing in flight spans a boot, and this path
-        # deliberately keeps `set_goal` a tail write plus a journal rather
-        # than a second `arm`.
-        self._goal_state.ensure_token()
-        # Same tail, same fate on resume as the team/agent briefs, so the goal
-        # is journalled by the same mechanism rather than a second one.
-        self._persist_attachment()
-        self.refresh_frontend_state()
-        return stored
+            return ""
+        return self.arm_goal(text)
 
     def arm_goal(self, text: str) -> str:
         """``/goal <text>``: set the objective, mark it active, arm the judge.
@@ -4661,9 +4667,11 @@ class Session:
         :meth:`GoalState.arm`) cannot be got wrong host by host. Journals and
         publishes once, the way :meth:`set_goal` pairs them.
 
-        ``set_goal`` remains for the plain "replace the text" act (the mobile
-        relay and the restore path use it): it is the same tail write without
-        the record's settle/arm bookkeeping.
+        ``set_goal``'s non-empty half delegates here rather than re-deriving the
+        same rule: a plain replacement (the mobile relay, ``lop --goal``) starts
+        a NEW life exactly as ``/goal <text>`` does (agent review round 2,
+        MAJOR-5). Only its EMPTY half is its own — and that one delegates to
+        ``delete_goal`` for the same reason.
         """
         stored = self._goal_state.arm(text)
         self._persist_attachment()

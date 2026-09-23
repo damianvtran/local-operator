@@ -4560,12 +4560,6 @@ class OperatorApp(App[None]):
         # the turn boundary (never mid-turn, so a turn is never half-applied).
         self._loop_running = False
         self._loop_cancelled = False
-        #: Whether THIS terminal's standing-goal judge is already running. App
-        #: level rather than per-interaction because a continuation's own turn
-        #: end arrives at this same flag and the judge is started and finished
-        #: entirely inside one interaction's turn-end path; the flag suppresses
-        #: exactly that re-entry, and nothing else reads it.
-        self._goal_judge_in_flight = False
         #: Goal-mode state for `/loop <goal text>`. `_loop_goal` is BOTH the
         #: mode flag and the payload: goal mode is active iff it is truthy while
         #: `_loop_running`. Carrying the goal here (not via `set_goal`) keeps the
@@ -34720,9 +34714,9 @@ class OperatorApp(App[None]):
         from local_operator.session.goal_judge import owns_the_session
 
         source = self._interaction
-        if session is None or not owns_the_session(session) or self._goal_judge_in_flight:
+        if session is None or not owns_the_session(session) or source.goal.judge_in_flight:
             return
-        self._goal_judge_in_flight = True
+        source.goal.judge_in_flight = True
         try:
             self.run_worker(
                 self._rearm_goal_judge_worker(session, source),
@@ -34730,7 +34724,7 @@ class OperatorApp(App[None]):
                 group=source.worker_group("goal_judge"),
             )
         except Exception:  # noqa: BLE001 — an additive worker must not fail boot
-            self._goal_judge_in_flight = False
+            source.goal.judge_in_flight = False
             logger.debug("goal judge re-arm could not be started", exc_info=True)
 
     async def _rearm_goal_judge_worker(self, session: Any, source: SessionInteraction) -> None:
@@ -34748,7 +34742,7 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — the judge is additive, never boot's fate
             logger.debug("goal judge re-arm failed", exc_info=True)
         finally:
-            self._goal_judge_in_flight = False
+            source.goal.judge_in_flight = False
 
     def _maybe_judge_goal_turn(self, message: TurnEnded) -> None:
         """React to a LOCAL turn's end by judging the standing goal (§3.3).
@@ -34771,9 +34765,9 @@ class OperatorApp(App[None]):
         session: Any = self._session
         if session is None or not owns_the_session(session):
             return
-        if self._goal_judge_in_flight:
+        if source.goal.judge_in_flight:
             return
-        self._goal_judge_in_flight = True
+        source.goal.judge_in_flight = True
         try:
             self.run_worker(
                 self._goal_judge_worker(
@@ -34789,7 +34783,7 @@ class OperatorApp(App[None]):
             # The flag is released HERE because the worker never ran, so its own
             # `finally` will not: a terminal that believed a judge was in flight
             # would never judge this session again.
-            self._goal_judge_in_flight = False
+            source.goal.judge_in_flight = False
             logger.debug("goal judge worker could not be started", exc_info=True)
 
     async def _goal_judge_worker(
@@ -34822,7 +34816,7 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — the judge is additive, never a turn's fate
             logger.debug("goal judge worker failed", exc_info=True)
         finally:
-            self._goal_judge_in_flight = False
+            source.goal.judge_in_flight = False
 
     async def _loop_goal_worker(self, goal: str, source: SessionInteraction | None = None) -> None:
         """Run goal mode: loop turns toward ``goal`` until the judge releases.
