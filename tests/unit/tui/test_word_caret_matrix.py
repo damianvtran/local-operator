@@ -62,6 +62,7 @@ Encoding notes (verified against textual 8.2.8, see `test_word_caret.py`):
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -148,6 +149,12 @@ ENCODINGS = ("csi", "meta", "esc_prefixed")
 #: loop that silently checks fewer cells is caught too).
 CELLS_PER_GROUP = 18  # csi 8 + meta 2 + esc-prefixed 8
 ESCAPE_PENDING_CELLS_PER_GROUP = 10  # csi 8 + meta 2; the esc spelling is excluded by nature
+
+#: The ``idle`` flag each ``_SharedApp.run`` arm actually ran under, in order.
+#: ``_boot_shared`` clears it per boot and ``run`` appends, so a test that drives
+#: the real fixture can assert what the fixture's arms passed -- see
+#: ``test_both_parity_arms_read_through_the_idle_barrier``.
+_ARM_IDLE_FLAGS: list[bool] = []
 
 #: Composer states. Each is a setup coroutine plus the buffer it leaves behind.
 STATES: dict[str, dict[str, Any]] = {
@@ -269,14 +276,17 @@ async def _run(
     unchanged: arrange, install the stop spy, hold an escape if this cell wants
     one, act, settle, observe.
 
-    ``idle`` is for the PARITY ARMS only (see
-    ``test_the_shared_app_still_behaves_like_a_boot_of_its_own``). It adds the
-    CPU-idle wait ``pilot.press`` already performs internally
+    ``idle`` adds the CPU-idle wait ``pilot.press`` already performs internally
     (``App._press_keys`` → ``wait_for_idle``) after the act, so an arm whose key
     is dispatched through the binding system is observed only once its action
-    has landed. The hot path keeps the zero-delay queue barriers ``_settle``
-    documents, and with them the rare load flake those barriers allow -- see the
-    flake note on the parity test.
+    has landed. It is passed by both arms of the parity comparison (see
+    ``test_the_chord_is_indistinguishable_from_its_plain_arrow``) for the reason
+    its docstring states: the oracle and the tested arm must read through the
+    same barrier, so the wait is symmetric rather than applied to one side only.
+    It costs ~20 ms per arm and is paid on the comparison arms alone; the rest
+    of the module keeps the zero-delay queue barriers ``_settle`` documents,
+    safe because those arms share one barrier strength on both sides of whatever
+    they compare.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     messages = MessageWaiter()
@@ -553,14 +563,23 @@ class _SharedApp:
         started from a state the boot never produced is not a cell of this
         matrix, whatever it then observes.
 
-        ``idle`` is for the PARITY ARMS only and is OFF on the hot path: it adds
-        the CPU-idle wait ``pilot.press`` already performs internally
-        (``App._press_keys`` → ``wait_for_idle``) between the act and the
-        observation, so an arm whose key is dispatched through the binding system
-        is read only once its action has landed. It costs a 20 ms sleep per arm,
-        which is why the 774 hot arms do not pay it -- they keep the zero-delay
-        queue barriers ``_settle`` documents and the rare load flake those
-        barriers allow.
+        ``idle`` adds the CPU-idle wait ``pilot.press`` already performs
+        internally (``App._press_keys`` → ``wait_for_idle``) between the act and
+        the observation, so an arm whose key is dispatched through the binding
+        system is read only once its action has landed. It is passed by the
+        COMPARISON arms -- the parity test above and
+        ``test_the_shared_app_still_behaves_like_a_boot_of_its_own`` -- and that
+        is a symmetry requirement rather than a tuning knob: the chord and its
+        plain-arrow oracle read through the SAME barrier, because an asymmetric
+        one IS the load flake those arms used to see (a chord still pending while
+        its plain arrow had landed; see the flake note on the parity test). The
+        cost is ~20 ms per arm, paid only on the comparison arms' 400 of the
+        module's 814; the remaining hot arms in this module keep the zero-delay
+        queue barriers ``_settle`` documents, and that is safe because each of
+        them compares two observations read through ONE barrier strength -- the
+        escape-pending axis puts a chord against a chord (the never-rewritten
+        horizontal control), and the guard tests check an absolute outcome with
+        no oracle arm at all -- so no arm can be read ahead of its counterpart.
         """
         await _reset(self._pilot, self._editor)
         await _arrange(self._pilot, self._editor, self._state, self._history)
@@ -581,6 +600,12 @@ class _SharedApp:
         await act(self._pilot, self._app)
         if idle:
             await wait_for_idle(0)
+        # Recorded so the parity test's guard observes the FIXTURE's arms rather
+        # than building its own: an arm that built its own ``idle=True`` call
+        # would pass this flag check trivially, and would stay green even if
+        # this fixture dropped the flag. See
+        # ``test_both_parity_arms_read_through_the_idle_barrier``.
+        _ARM_IDLE_FLAGS.append(idle)
         await _settle(self._pilot, self._editor, self._messages)
         return _observe(self._editor, self._stops)
 
@@ -608,6 +633,8 @@ async def _boot_shared(state: str, history: bool) -> AsyncIterator[_SharedApp]:
 
         app.post_message = _spy  # type: ignore[method-assign]
         shared = _SharedApp(pilot, app, editor, messages, stops)
+        # One boot is one fixture run, so its arms start from an empty record.
+        _ARM_IDLE_FLAGS.clear()
         await shared.arrange_group(state, history)
         yield shared
 
@@ -636,8 +663,16 @@ async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
             raw = _encode(encoding, chord)
             assert raw is not None
 
-            expected = await shared.run(_press_plain(CHORDS[chord]))
-            actual = await shared.run(_feed_bytes(raw))
+            # BOTH arms read through the idle barrier, and that symmetry is the
+            # fix rather than a preference: the chord arm is fed straight to the
+            # driver while the oracle arm goes through ``pilot.press`` (whose
+            # ``App._press_keys`` already ends in ``wait_for_idle``), so reading
+            # only one side through it let a still-pending chord be compared
+            # against a landed arrow -- the "1 of 18 cells diverged" flake. See
+            # the flake note on
+            # ``test_the_shared_app_still_behaves_like_a_boot_of_its_own``.
+            expected = await shared.run(_press_plain(CHORDS[chord]), idle=True)
+            actual = await shared.run(_feed_bytes(raw), idle=True)
             arms += 2
 
             if actual != expected:
@@ -650,6 +685,72 @@ async def test_the_chord_is_indistinguishable_from_its_plain_arrow(
     # shrink the matrix while every remaining assertion still passed.
     assert arms == 2 * CELLS_PER_GROUP, f"ran {arms} arms, not {2 * CELLS_PER_GROUP}"
     assert not failures, f"{len(failures)} of {len(cells)} cells diverged:\n" + "\n".join(failures)
+
+
+@pytest.mark.asyncio
+async def test_both_parity_arms_read_through_the_idle_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An asymmetric barrier IS the flake, so its symmetry is pinned, not assumed.
+
+    This guard drives the REAL parity test --
+    ``test_the_chord_is_indistinguishable_from_its_plain_arrow`` for one group --
+    rather than constructing arms of its own. That distinction is the whole point:
+    a guard that built its own ``idle=True`` call would assert a tautology
+    (that a call it wrote reaches ``wait_for_idle``) and would stay green even
+    after the fixture dropped the flag, which is exactly the failure mode a guard
+    must not have. So it observes the fixture's own arms through two channels:
+    ``_ARM_IDLE_FLAGS``, which ``_SharedApp.run`` fills with the ``idle`` flag
+    each arm actually ran under (``_boot_shared`` clears it per boot), and a spy
+    on the module-level ``wait_for_idle``, which counts the waits those arms
+    issued. Removing ``idle=True`` from EITHER fixture arm makes that arm record
+    ``False``, and makes the spy count fall short of the arm count -- red on
+    either signal.
+
+    The spy sees ONLY this module's calls: ``_SharedApp.run`` and ``_run``
+    reference ``wait_for_idle`` as a module global (which is why patching the
+    module attribute reaches them), whereas textual's own pilots bind their copy
+    at import time (``textual/_wait.py`` → ``textual/pilot.py:15``,
+    ``textual/app.py:91``), so ``pilot.pause`` and ``App._press_keys`` never
+    route through it. ``_settle``, ``_reset`` and ``_arrange`` do not call it at
+    all, so each ``idle=True`` arm contributes exactly one spy call -- the count
+    and the arm count are directly comparable.
+
+    WHAT THIS DOES NOT PROVE: that ``wait_for_idle`` actually waits for pending
+    work. That is textual's contract, not this module's (``textual/_wait.py``,
+    the function whose docstring states it returns once the process is idle),
+    and re-proving it here would be testing the dependency. What is proven is
+    narrower and is the thing the fix changed: the barrier is applied on both
+    sides of the comparison, in the fixture as written.
+    """
+    module = sys.modules[__name__]
+    calls: list[float] = []
+    real = module.wait_for_idle
+
+    async def spy(min_sleep: float = 0.0, max_sleep: float = 1.0) -> None:
+        calls.append(min_sleep)
+        await real(min_sleep, max_sleep)
+
+    monkeypatch.setattr(module, "wait_for_idle", spy)
+
+    # Drive the REAL fixture. ``_boot_shared`` inside it clears
+    # ``_ARM_IDLE_FLAGS`` and each ``run`` appends, so after this call the list
+    # holds exactly the flags the parity test's own 36 arms passed.
+    await test_the_chord_is_indistinguishable_from_its_plain_arrow("resting", False)
+
+    flags = list(_ARM_IDLE_FLAGS)
+    assert flags, "the parity test ran no arms -- the guard observed nothing"
+    assert all(flags), (
+        f"a parity arm ran without the idle barrier: flags={flags} -- an arm with "
+        "idle=True stripped leaves the asymmetric barrier that is the flake"
+    )
+    # Each idle arm issues exactly one module-level ``wait_for_idle`` (the call
+    # ``run`` makes when ``idle`` is set), so a flag that stayed True without its
+    # wait would also be caught here.
+    assert len(calls) >= len(flags), (
+        f"{len(flags)} parity arms ran but only {len(calls)} idle waits were issued: "
+        "an arm recorded idle=True whose wait did not reach wait_for_idle"
+    )
 
 
 @pytest.mark.parametrize(("state", "history"), _groups(), ids=lambda v: str(v))
@@ -835,27 +936,32 @@ async def test_the_shared_app_still_behaves_like_a_boot_of_its_own(
     #370 defect and these cells are what pins the reused path to the same
     verdict.
 
-    WHAT IT DOES NOT PROVE, and why the arms here carry an idle wait the hot
-    path does not. This comparison is only as trustworthy as the barrier it
-    reads through, and the hot path's is deliberately weak: ``_settle`` uses
-    zero-delay queue barriers, so under extreme CPU starvation a key whose caret
-    action is dispatched through the binding system can still be pending when
-    the observation is taken -- measured on this host, that fires roughly once
-    per full-file run at load ~150-176, BOTH before and after the restructure,
-    and always with the chord arm unmoved while its plain arm moved. A genuine
-    reuse leak would print the same "disagree" message as that race, which is
-    what makes the race unacceptable HERE: a guard that cannot be told apart from
-    the thing it guards against is not a guard. So both sides of this comparison
-    wait for CPU idle after the act (``idle=True`` -- the same wait
-    ``pilot.press`` performs internally, ~20 ms an arm), and the 774 hot arms
-    keep the cheap barrier.
+    WHY BOTH SIDES READ THROUGH AN IDLE BARRIER, and not just this test's. This
+    comparison is only as trustworthy as the barrier it reads through, and
+    ``_settle``'s is deliberately cheap: zero-delay queue barriers, so under
+    extreme CPU starvation a key whose caret action is dispatched through the
+    binding system can still be pending when the observation is taken -- measured
+    on this host, that fires roughly once per full-file run at load ~150-176,
+    BOTH before and after the restructure, and always with the chord arm unmoved
+    while its plain arm moved. That asymmetry is the whole defect: the chord arm
+    is fed straight to ``app._driver`` (``_feed_bytes``) while the oracle arm
+    goes through ``pilot.press``, whose ``App._press_keys`` already ends in
+    ``wait_for_idle``, so the two arms were read through barriers of different
+    strength and the weak one could be read early. A genuine reuse leak would
+    print the same "disagree" message as that race, which is what made the race
+    unacceptable HERE: a guard that cannot be told apart from the thing it guards
+    against is not a guard. So the fix is symmetry, applied wherever an arm is
+    compared against another: both sides wait for CPU idle after the act
+    (``idle=True`` -- the same wait ``pilot.press`` performs internally, ~20 ms an
+    arm), and that is now the rule for the parity test's arms too, not a
+    concession on this one test's. The arms that are NOT comparison arms keep the
+    cheap barrier, which is safe because they compare like against like through a
+    single barrier strength.
 
     What is proven: for the first and last cell of every group, a reused app and
     a boot of its own agree observation for observation, once both are read
     through an idle-waiting barrier. What is not: anything about the MIDDLE of a
-    group (the reset's fingerprint assertion covers those), and nothing about the
-    hot arms' exposure to that starvation race, which this change neither causes
-    nor fixes.
+    group, which the reset's fingerprint assertion covers.
     """
     cells = _cells_for(state, history)
     assert cells, f"no cells for {state} (history={history})"
