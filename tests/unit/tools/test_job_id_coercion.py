@@ -38,6 +38,7 @@ from local_operator.tools.builtin import (
     _coerce_hub_to,
     _coerce_job_targets,
     _coerce_single_job_id,
+    _hub_targets,
 )
 
 # Fixed seed: the corpus must be identical on every run and on CI, so a failure
@@ -408,6 +409,14 @@ def test_hub_to_still_drops_bare_json_literals(payload):
     """
     assert _coerce_hub_to(payload) == []
     assert HubParams(op="ask", to=payload, message="ping").to == []
+
+
+def test_hub_targets_preserve_broadcast_order_and_deduplicate_explicit_id():
+    class FakeComms:
+        def resolve(self, target: str) -> tuple[list[str], None]:
+            return (["child-a", "child-b"] if target == "all" else ["child-a"]), None
+
+    assert _hub_targets(FakeComms(), ["all", "child-a"]) == (["child-a", "child-b"], [])
 
 
 def test_hub_ask_reaches_a_child_whose_id_is_all_digits():
