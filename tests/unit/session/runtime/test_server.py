@@ -472,12 +472,14 @@ async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> No
         follower = json.loads(await attach_reader.readline())
         sync = json.loads(await attach_reader.readline())
         # The ATTACH welcome is identity-only (``_slim_welcome_frame``): a full-TUI
-        # client discards the projection, so the gate it never renders is ABSENT
-        # rather than null here. What the follower actually reads is the canonical
-        # snapshot below, which is the assertion this test is about; the daemon's
-        # projection overlay is checked at the end of the walk.
+        # client discards the projection, so what it carries is the identity with
+        # EMPTY collections — no gate overlay to render, and no roster to walk.
+        # What the follower actually reads is the canonical snapshot below, which
+        # is the assertion this test is about; the daemon's projection overlay is
+        # checked at the end of the walk.
         assert follower["op"] == "welcome", follower
-        assert "pending" not in follower["data"], follower
+        assert follower["data"]["pending"] is None, follower
+        assert follower["data"]["subagents"] == [], follower
         assert sync["data"]["snapshot"]["pending_gate"] is None
 
         handle._frontend.mutate(
@@ -4572,10 +4574,14 @@ async def test_an_attach_is_welcomed_with_identity_alone_while_a_daemon_keeps_it
         # conversation it landed on against this field before anything else.
         assert data["session_id"] == "s1"
         assert data["conversation_name"] == "fake"
-        assert not ({"transcript", "subagents", "todos", "pending"} & set(data)), (
-            "a payload field the attach client never reads is exactly what the "
-            "identity-only welcome exists to stop serializing"
-        )
+        # THE PAYLOAD IS EMPTY, NOT MERELY SMALL: the collections are present and
+        # empty, which is what keeps the frame a valid projection of its own op
+        # for a client that rebuilds it field by field — and it is the same object
+        # the send ceiling substitutes, so "identity only" has one definition.
+        assert data["transcript"] == [], data
+        assert data["subagents"] == [], data
+        assert data["todos"] == [], data
+        assert data["pending"] is None, data
         # THE COMPATIBILITY CLAIM, TESTED RATHER THAN ASSUMED: the client's own
         # parser rebuilds a projection from this payload.
         assert _projection_from_json(data, record).session_id == "s1"

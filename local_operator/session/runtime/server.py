@@ -214,26 +214,6 @@ _MAX_LINE_BYTES = 1 << 20
 #: the wait has no ceiling of its own — the parked hop is what measured 15.0 s.
 _ONLOOP_BIND_GRACE_S = 0.1
 
-#: The identity fields the identity-only welcome carries (``_slim_welcome_frame``).
-#:
-#: ``session_id`` and ``pid`` are REQUIRED rather than a selection: the client
-#: rebuilds a ``SessionProjection`` from this payload, that dataclass requires
-#: both, and it overwrites ``pid`` from its own discovery record immediately
-#: after. The rest are the identity a welcome is read for, and every one of them
-#: is a plain scalar the handle's seed already holds — no transcript, no roster,
-#: no fold.
-_WELCOME_IDENTITY_FIELDS = (
-    "session_id",
-    "pid",
-    "kind",
-    "conversation_name",
-    "cwd",
-    "model_label",
-    "model_selector",
-    "effort",
-    "effort_ladder",
-)
-
 
 def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
     """Encoded bytes this frame occupies on the wire, with the delimiter counted.
@@ -6611,17 +6591,19 @@ class RuntimeServer:
         ``_on_connection``, runtime-stall-42983.log). A frame nobody reads is not
         worth any chance of that.
 
+        THE PAYLOAD IS ``_identity_projection()``, the SAME object the send
+        ceiling substitutes when a projection cannot be written at all — one
+        notion of "identity only" rather than two that drift, and it keeps the
+        empty collections that make the frame a valid projection of its own op
+        for a client rebuilding it field by field.
+
         The client accepts this op (``attach_client`` treats ``welcome`` exactly
-        as it treats ``projection``) and tolerates the missing keys, which is
-        what makes the payload a subset rather than a new contract.
+        as it treats ``projection``); an older client that only knew the
+        projection op never reaches here.
         """
-        seed = getattr(self._handle, "session_projection_seed", None)
-        if seed is None:
+        if getattr(self._handle, "session_projection_seed", None) is None:
             return None
-        return {
-            "op": "welcome",
-            "data": {name: getattr(seed, name, None) for name in _WELCOME_IDENTITY_FIELDS},
-        }
+        return {"op": "welcome", "data": self._identity_projection()}
 
     def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
         """This connection's handshake proof, or ``None`` when there is none to give.
