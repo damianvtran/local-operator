@@ -2055,6 +2055,17 @@ class SubagentComms:
         if record is None:
             return None, f"unknown subagent {job_id!r}"
         if record.session_dir is None:
+            # Distinguish the two no-transcript classes, as the roster and peek
+            # already do: a child that SETTLED before attaching did run, and
+            # telling its parent it "never started" hides the very failure this
+            # PR surfaces. Both are genuinely not resumable (no transcript), so
+            # the verdict is unchanged — only the sentence was wrong.
+            if record.outcome is not None:
+                reason = record.error_text or record.result_text or "it never attached"
+                return None, (
+                    f"subagent {record.label} ended before it attached ({reason}), so "
+                    "there is no transcript to resume; launch a new one with 'task'"
+                )
             return None, (
                 f"subagent {record.label} never started, so it has no transcript to resume; "
                 "launch a new one with 'task'"
