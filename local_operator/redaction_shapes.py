@@ -2359,30 +2359,51 @@ def _pem_header_piece_end(piece: str) -> int | None:
     each one is a constant-time question against the prefix machine's flags — no
     search, and no partition to walk.
 
-    The stops are tried in the pattern's order and the first that yields a structure
-    wins: the tail's `[ \\t]*` is greedy, so after the rigid structure it consumes the
-    trailing whitespace and the lookahead must hold THERE — the earliest reachable
-    terminator, and the piece's end only when no terminator precedes it. That is also
-    why the returned offset is the stop and not the piece's length: the pattern's
-    lookahead does not consume its `\\r`.
+    The answer is the EARLIEST stop an accepted structure can reach — the pattern's own
+    priority on the stops — and the scan below keeps that by taking the minimum over the
+    accepted candidates rather than returning from a loop. The tail's `[ \\t]*` is greedy,
+    so after the rigid structure it consumes the trailing whitespace and the lookahead
+    must hold THERE: the earliest reachable terminator, and the piece's end only when no
+    terminator precedes it. That is also why the returned offset is the stop and not the
+    piece's length: the pattern's lookahead does not consume its `\\r`.
+
+    The scan is hoisted out of the stop loop and the flags conjunct out of the per-key
+    test (`PR1427 D1`), because as written the two mechanisms MULTIPLIED: measured on this
+    box, a 40 KB line of `BEGIN ` literals cost 3.34 s of CPU and a 46 KB line of CR
+    terminators 2.71 s, against 2.1 ms and 6.3 ms after the correction. No answer moves:
+    the conjunct is independent of the key and a necessary condition of every acceptance
+    through its `at`, so asking it once per BEGIN only skips candidates that could not
+    have been accepted anyway.
     """
     if _PEM_BEGIN not in piece or _PEM_KEY not in piece:
         return None
     length = len(piece)
-    flags: bytearray | None = None
+    # (1) The endings map, built from the STOPS side: ONE O(len(piece)) walk, instead of a
+    # whole BEGIN/KEY scan per stop. A candidate's tail stop is the greedy run's own end,
+    # and where two stops could offer the same `key_end` the SMALLEST stop wins — that is
+    # what the ascending stop loop returned.
+    stop_of: dict[int, int] = {}
     for stop, rigid_ends in _pem_armour_tail_stops(piece):
-        endings = {
-            end - rigid
-            for end in rigid_ends
-            for rigid in _pem_rigid_end_lengths(piece, end)
-            if end - rigid >= 0
-        }
-        if not endings:
-            continue
-        if flags is None:
-            flags = _pem_prefix_end_flags(piece)
-        at = piece.find(_PEM_BEGIN)
-        while at >= 0:
+        for end in rigid_ends:
+            for rigid in _pem_rigid_end_lengths(piece, end):
+                key_end = end - rigid
+                if key_end >= 0:
+                    previous = stop_of.get(key_end)
+                    if previous is None or stop < previous:
+                        stop_of[key_end] = stop
+    if not stop_of:
+        return None
+    flags = _pem_prefix_end_flags(piece)
+    best: int | None = None
+    at = piece.find(_PEM_BEGIN)
+    while at >= 0:
+        # (3) The flags conjunct is independent of the key and necessary for every
+        # acceptance through this `at`, so asking it here — before the run walk and the KEY
+        # window — cannot change an answer, and it keeps both off every BEGIN occurrence
+        # that cannot accept at all.
+        if any(
+            at - rigid >= 0 and flags[at - rigid] for rigid in _pem_rigid_end_lengths(piece, at)
+        ):
             body = at + len(_PEM_BEGIN)
             # The `[A-Z0-9 ]*` between the literals is a run, so its end bounds where
             # `PRIVATE KEY` may begin — and a `PRIVATE KEY` that starts inside it and
@@ -2393,14 +2414,12 @@ def _pem_header_piece_end(piece: str) -> int | None:
                 bound += 1
             key = piece.find(_PEM_KEY, body, bound + len(_PEM_KEY))
             while 0 <= key <= bound:
-                if key + len(_PEM_KEY) in endings:
-                    for rigid in _pem_rigid_end_lengths(piece, at):
-                        start = at - rigid
-                        if start >= 0 and flags[start]:
-                            return stop
+                stop = stop_of.get(key + len(_PEM_KEY))
+                if stop is not None and (best is None or stop < best):
+                    best = stop
                 key = piece.find(_PEM_KEY, key + 1, bound + len(_PEM_KEY))
-            at = piece.find(_PEM_BEGIN, at + 1)
-    return None
+        at = piece.find(_PEM_BEGIN, at + 1)
+    return best
 
 
 def _anchored_key_value_guard(match: Match[str]) -> bool:
