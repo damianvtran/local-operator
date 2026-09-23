@@ -1,9 +1,15 @@
 # Browser extension release record
 
-Section 11 of `submission-checklist.md` requires that every Chrome Web Store
-release be recorded with the facts needed to reproduce and audit it: the exact
-artifact, the commit it was built from, and how it reached the store. This file
-is that record.
+Every Chrome Web Store release is recorded here with the facts needed to
+reproduce and audit it: the exact artifact, the commit it was built from, and
+how it reached the store. This file is that record, and **this header is the
+standing requirement's source — not `submission-checklist.md` §11.** §11 is the
+*post-approval* section: all it asks of this file is the approval half of a
+table (approved version, approval timestamp, item ID, listing URL, artifact
+SHA-256, source commit, protocol version), while the rule that an *unapproved*
+submission is recorded here with its route is this header's — which is why the
+0.1.20 submission entry below has no §11 row to point at. (Correction owed to
+PR #1352's review, which caught §11 cited for the whole rule.)
 
 **Add a new section for every release, newest first.** Never edit a shipped
 entry except to append its approval timestamp or a post-release incident note —
@@ -52,22 +58,83 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.20 — submitted 2026-09-23, in review as of 2026-09-23
+
+This is the submission of the tree the entry below pins. That entry was written
+on 2026-09-22, before anything had been dispatched, and it stands as the record
+of the renumber; the rows here are the submission's own state.
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.20 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; a revision of it) |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `dad3b92f` — the merge commit of PR #1435, the renumber that **set** this version (`git rev-parse dad3b92ff6ef0e166f5e0caed0ffa8dcd3539402:extension` returns the tree hash below). The **build** ran from `1392324b` instead — this workflow dispatches `ref=main`, and `main` was `1392324b…` at 2026-09-23T13:54:40Z — and the pair is not a contradiction: `git log --oneline dad3b92f..1392324b -- extension/` is empty, so both refs resolve `extension/` to the same tree, and the tree hash is the field that pins the input. Both commits are named so an auditor does not have to work out which one a given sentence means |
+| `extension/` tree hash | `c1b5780a214cb795a19bfe5b0c160ebc904e2d15` |
+| Artifact SHA-256 | *not recoverable — the same automated-path limitation as v0.1.18, v0.1.17 and earlier. The upload is the half that succeeded and the `STAGED_PUBLISH` call is the half that was refused, so a revision was uploaded and no copy of the file is retained* |
+| Artifact size | 13 files, no source maps (`validated Chrome Web Store package v0.1.20 (13 files, no source maps)`) |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Refused by the API, then submitted from the Dashboard** — `chrome-web-store.yml`, [run 35870383291](https://github.com/damianvtran/local-operator/actions/runs/35870383291), dispatched by `damianvtran` on `main` at 2026-09-23T13:54:40Z with `version=0.1.20` (`headSha=1392324b…`). Its build/validate step reports **296 tests, 0 fail** and `validated Chrome Web Store package v0.1.20 (13 files, no source maps)`; the submit call was then answered **HTTP 400**, `status: INVALID_ARGUMENT`, `reason: INVALID_ITEM_METADATA`, *"Your submission does not meet the requirements to be published in the store. Check the Developer Dashboard for steps to resolve."* |
+| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.20` once the store reports the revision `STAGED` |
+| Store state | `PENDING_REVIEW` for this revision, with **0.1.18 still the live version** — the store's own fields, read by promote run [35874866430](https://github.com/damianvtran/local-operator/actions/runs/35874866430) at 2026-09-23T14:33:16Z: `submitted state=PENDING_REVIEW distributionChannels=[crxVersion=0.1.20 deployPercentage=100]; published state=PUBLISHED distributionChannels=[crxVersion=0.1.18 deployPercentage=100]` |
+| State last checked | 2026-09-23T14:33:16Z — the timestamp of that run's own output line, i.e. the run's own reading |
+| Approval timestamp | ***Not applicable — the revision is in review.*** There is no approval instant to record and none is invented; see the note below on what that promote run does and does not evidence |
+| Previously published | v0.1.18, `PUBLISHED` at 100% — see that entry, whose publication this file records with the successful promote run behind it |
+
+**The refusal was a new class, and the uploaded revision survived it.** The store
+refusals this file records before this one are all queue-state answers —
+`FAILED_PRECONDITION` / `NOT_UPDATEABLE`, *"You may not edit or publish an item
+that is in review."* — which say an item is already queued and nothing about the
+package. This one is `INVALID_ARGUMENT` / `INVALID_ITEM_METADATA`: the package
+built, validated and uploaded, and the *submission* was refused on the item's own
+metadata. Per the operator, the outstanding field was the `downloads` permission
+justification — the manifest change most likely to be it, and the one completed
+before the Dashboard submission — needed because this tree's manifest gained
+`"optional_permissions": ["downloads"]` (`git show c1b5780a…:manifest.json`; the
+v0.1.18 tree `3341f432…` declares no `optional_permissions` at all). The
+operator completed it in the Developer Dashboard and submitted from there, and
+the store then reported the revision `PENDING_REVIEW` at `crxVersion=0.1.20` —
+the reading quoted in the table, taken by the next promote dispatch. **The
+Dashboard step is the operator's account of the route, not a run's record**; what
+a run holds is the state that followed it, which is why that state is quoted raw
+and dated.
+
+**What the promote run does and does not evidence.** Run 35874866430 was
+dispatched for `0.1.20` and refused at its own gate — *"only an approved STAGED
+revision can be promoted"* — printing the store's fields on the way out. That is
+what makes it the useful read: the refusal is the probe, and the `submitted` half
+is the evidence that 0.1.20 is the queued revision. It is **not** evidence of any
+approval, and no `STAGED` reading for 0.1.20 exists yet, so the approval row
+stays not-applicable until a promote succeeds.
+
+**0.1.19 never reached the store.** The entry below carries the three refused
+dispatches and the eight trees that version came to name; 0.1.20 is the repair
+for that ambiguity, and it is the number the store now holds.
+
+---
+
 ## v0.1.20 — on `main`, NOT submitted (as of 2026-09-22)
 
 The number moved so that the extension version pins exactly one tree again.
-**`0.1.19` named two trees, and no revision was ever created under it.**
+**`0.1.19` named eight trees — by this file's own counting convention — and no
+revision was ever created under it.**
 `97753b4c` (`feat(browser): serve downloads from the extension, behind operator
 switches`) is the commit that set the number — its parent reads `0.1.18` — and
 the tree it named is `8a49f477b0e33969524de6fdc98d19150a1f6ac1`
 (`git rev-parse 97753b4c:extension`). **Seven** commits then landed under
 `extension/` without the bump the rule requires: `97250981`, `bd74a1fc`,
 `f53cbdce`, `ab05f3da`, `594db769`, `5300a59b`, `e8ed28a1` — all file-transfer
-and consent work, and all of it now inside what ships. By 2026-09-22
-`origin/main:extension` was `270538e3dd15870212a4ef35b06b15e4e83f6f21`, a
-different tree reading the same `0.1.19`. That is the ambiguity AGENTS.md
-forbids, and the same shape as the 0.1.14 three-tree mess below. So the repair
-is the renumber the 0.1.15 entry already establishes, not a recall: `0.1.20`
-names the tree this bump lands.
+and consent work, and all of it now inside what ships. Under this file's
+counting convention — every tree that landed under the number counts, which is
+what makes the 0.1.14 entry's mess *three* trees and not two — that is
+**eight** trees: the tree `97753b4c` named (`8a49f477…`), plus one per landed
+commit (`791a8f14…`, `a7477713…`, `de1ee574…`, `f9af392c…`, `d3664516…`,
+`c66a89da…`, `270538e3…`). By 2026-09-22 `origin/main:extension` was
+`270538e3dd15870212a4ef35b06b15e4e83f6f21`, a different tree reading the same
+`0.1.19`. That is the ambiguity AGENTS.md forbids, and the same shape as the
+0.1.14 mess below — three trees there, eight here, five more. So the repair is
+the renumber the 0.1.15 entry already establishes, not a recall: `0.1.20` names
+the tree this bump lands.
 
 | Field | Value |
 | --- | --- |
@@ -102,23 +169,59 @@ to them), and both generated targets — `extension/src/protocol.gen.ts` and the
 `extension/ui-vendor/` bundle, whose headers carry an INPUT hash over
 `protocol.py` — are regenerated with `gen_ts`, not hand-edited.
 
-**What moved, and what deliberately did not.** Seven sites carry the tree's
-version: the two manifests, `EXPECTED_EXTENSION_VERSION`, the two generated
+**What moved, and what deliberately did not.** Seven sites are the *curated
+identity set* that carries the tree's version: the two manifests,
+`EXPECTED_EXTENSION_VERSION`, the two generated
 targets, and the two synthetic performance fixtures that report this tree's
 version on the wire (`extension/scripts/popup-performance-live.mjs`,
 `extension/tests/fixtures/worker-performance.mjs` — both had been left at
-`0.1.17` through the 0.1.18 and 0.1.19 renumbers). `PROTO_VERSION` stays 1, and
-so does `CAPABILITY_MIN_EXTENSION_VERSION["download"] = "0.1.19"`: that table
+`0.1.17` through the 0.1.18 and 0.1.19 renumbers). The seven are curated, not an
+inventory: the tree carries version literals in more than a dozen other fixtures
+and scripts by design (`popup-states-shot.mjs`, `bridge-wedge.integration.test.mjs`,
+`popup-render.integration.test.mjs`, `worker-multi-identity.integration.test.mjs`,
+…), so read this list as the identity sites a renumber must move — the two
+fixtures above came to be two renumbers stale precisely because a curated list
+was taken as complete — never as everything that names a version.
+`PROTO_VERSION` stays 1, and so does
+`CAPABILITY_MIN_EXTENSION_VERSION["download"] = "0.1.19"`: that table
 names the first extension **tree** that can serve a capability-gated method —
 the tree `97753b4c` introduced — so it is a statement about git history rather
 than about the name this tree carries, and moving it would change the refusal
 copy this runtime gives an older peer. A version-pin repair changes no
-behaviour, and that is checkable rather than asserted: diffing the two
+behaviour — with one caveat that makes the sentence exact rather than
+approximately true: `EXPECTED_EXTENSION_VERSION` is advisory-only, so nothing is
+refused, but a peer reporting `0.1.19` (a locally built copy of the pre-bump
+tree — nothing shipped under it) begins to see the update advisory, and the
+`worker-performance.mjs` fixture moves from `0.1.17` to `0.1.20`, crossing the
+`0.1.19` capability floor; both are intended and unobservable to any user. It is
+checkable rather than asserted: diffing the two
 `extension/` trees (`git diff 270538e3dd15870212a4ef35b06b15e4e83f6f21
 c1b5780a214cb795a19bfe5b0c160ebc904e2d15`) yields **version literals and
-generated header stamps and nothing else** — 16 files, 38 changed lines, every
-one of them a `"version"` literal, an `EXPECTED_EXTENSION_VERSION`, or an
-`Inputs sha256:` line.
+generated header stamps and nothing else** — **17 files**, 38 changed lines,
+every one of them a `"version"` literal, an `EXPECTED_EXTENSION_VERSION`, or an
+`Inputs sha256:` line (the 17th, `ui-vendor/driver/file-transfer.tables.gen.ts`,
+is the one file in the diff carrying two `Inputs sha256:` headers).
+
+**A flake observed while verifying the pin, and why it cannot be
+version-related.** Three wall-clock-sensitive bridge tests failed in one wider
+local run and passed in another on the same host minutes apart, at load average
+108-197 — PR #1435's body recorded it, and this paragraph corrects the argument
+that body made, which said the two files contain "no version literal". The first
+half of that claim is true and the second is not: `test_bridge_wedge.py` carries
+`0.1.0`, `0.1.8` and `0.1.10`, and `test_multi_identity.py` carries `0.1.10` and
+`0.1.13`. The conclusion holds on the stronger argument that replaces it: every
+literal in those two files sits below both versions in play — `0.1.19`, the
+capability floor that did not move, and `0.1.20`, the expected version that did
+— so the predicate these tests exercise cannot flip on any literal they carry,
+and no version string can reach a wall-clock path. (The two test files *call*
+`extension_older` nowhere; the call sites are the daemon's advisory checks at
+`daemon.py:1754` and `:4071`, against `EXPECTED_EXTENSION_VERSION`,
+`resources.py:677` against `OWNERSHIP_MIN_EXTENSION_VERSION`, and
+`backend.py:749` against `CAPABILITY_MIN_EXTENSION_VERSION` — so the literals the
+tests carry are what decides, and all of them sit below both floors.) Recorded
+rather than dropped because a
+checkably-false "no literal exists" is what a later reader leans on to dismiss
+a genuinely version-related flake.
 
 ## v0.1.18 — submitted 2026-09-20, pending review as of 2026-09-20
 
@@ -159,8 +262,11 @@ check, generated-from-Python tables beside it in
 `src/worker.ts` change with them, and every `driver/` module is vendored into
 `ui-vendor/` for the desktop app to consume, which is where **11 of those 21
 paths** come from. The same window carries #1338's additive console/surface
-error-code vocabulary (11 new `ErrorCode` members in the generated
-`src/protocol.gen.ts`) and the version move itself. The design of record is
+error-code vocabulary and the version move itself; the count needs both halves,
+because #1338 accounts for **11** of the new members while **this entry's own
+tree diff adds 12** (the generated `src/protocol.gen.ts` enum goes 18 → 30
+between `bc3cfba6…` and `3341f432…`), and an auditor who adds up the diff will
+otherwise land on 12 and distrust the 11. The design of record is
 `docs/design/browser-file-transfer.md`.
 
 **`download` is in the vocabulary and served by nothing — deliberately.**
@@ -201,6 +307,33 @@ timestamps and both raw lines come from `gh run view 35514131365`; and the
 `PUBLISHED` half of `Previously published` is confirmed on the public listing,
 not from a workflow's success — a workflow exit code is not evidence that a
 version is live.
+
+**Post-submission addendum (appended 2026-09-23): approved and published, by the
+promote route.** The `Approval timestamp` row above is left as written — this
+file corrects a shipped entry by appending, which is what that row itself says —
+and the approval is recorded here. 0.1.18 went live on **2026-09-22**, and for
+the first time since 0.1.10 the documented route is what put it there:
+`chrome-web-store-promote.yml`, [run
+35736288300](https://github.com/damianvtran/local-operator/actions/runs/35736288300),
+dispatched by `damianvtran` on `main` at 2026-09-22T13:51:32Z, completed
+`success` at 13:52:11Z and printed `promoted Chrome Web Store extension
+omibaecbjdhgbbcedbnnnmjpmopfheof v0.1.18 to PUBLISHED` at 2026-09-22T13:52:08Z.
+The public listing is the independent half and agrees: **"Version 0.1.18"**,
+**"Updated September 22, 2026"**, **122KiB** (checked 2026-09-23).
+
+**The shape of that evidence, since it is not a timestamp.** The successful
+promote run *is* the approval evidence — it is the store's own answer and the
+first successful promote since 0.1.10's, against every promote dispatch in
+between failing — but it is not the approval *instant*: the run refuses unless
+the revision is already `STAGED`, so approval landed before 13:52:08Z and
+appears in no run we hold. It is bounded from this file's own history instead:
+the 0.1.19 dispatch recorded above was refused at 2026-09-22T13:33:04Z because
+*"You may not edit or publish an item that is in review."* — i.e. 0.1.18 was
+still *in* review then — and the promote succeeded at 13:52:08Z, so the approval
+instant lies **between 2026-09-22T13:33:04Z and 13:52:08Z**. Two rows above are
+consequently stale — `Store state` and `Promotion route` — and the heading's
+"pending review as of 2026-09-20" is superseded by this addendum; the heading is
+left standing, as this file leaves it.
 
 ---
 
