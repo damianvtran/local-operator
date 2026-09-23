@@ -16,7 +16,8 @@ import logging
 import statistics
 import threading
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from typing import Any, Callable, Coroutine, cast
 
 import pytest
@@ -2095,6 +2096,191 @@ async def test_desktop_watch_lease_separates_visibility_and_notification_deliver
     finally:
         await desktop.detach()
         await terminal.detach()
+        runtime.close()
+
+
+# ---------------------------------------------------------------------------
+# ATTACHED vs ATTENDED (docs/design/attached-interface-signal.md §2)
+#
+# The incident: a desktop app that was open, FOCUSED and VISIBLE, holding a live
+# lease on this session's conversation, whose machine-wide record could not NAME
+# the conversation it was showing (``session_id: ""``) — so the attention
+# predicate denied, the model-facing probe answered False, and at least twenty
+# live sessions carried a block telling their model ``nobody is watching a
+# screen``. The operator was reading one of them.
+#
+# Two questions are pinned apart here, and each consumer reads exactly one:
+# ATTACHED ("an interface can PRESENT a question") for the model; ATTENDED ("a
+# person is looking right now") for notification rung 1, unchanged.
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _desktop_presence_claim(
+    root, *, session_id: str, focused: bool = True, visible: bool = True
+) -> Iterator[None]:
+    """Publish the machine-wide delivery record the incident was read from (§1.1).
+
+    Written through the REAL publisher, so the record carries this process's pid
+    and a fresh heartbeat — the file's shape is the contract between the app and
+    this reader, and a hand-built dict would stop testing it. Closed on exit:
+    ``close`` withdraws only the publisher's OWN record (R6) and reaps its beat
+    task, so nothing outlives the test.
+    """
+    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
+    from local_operator.session.runtime import presence
+
+    publisher = DesktopDeliveryPublisher(root)
+    publisher.update(
+        "sub-1",
+        can_notify=True,
+        can_notify_kinds=["complete", "error"],
+        session_id=session_id,
+        window={"exists": True, "focused": focused, "visible": visible, "minimized": False},
+    )
+    # The reader caches its answer for PRESENCE_CACHE_TTL_S, so a write must
+    # never be masked by an answer taken before it.
+    presence.reset_cache()
+    try:
+        yield
+    finally:
+        publisher.close()
+        presence.reset_cache()
+
+
+def _desktop_connection(runtime: RuntimeServer):
+    """The live desktop attach connection in this runtime's table."""
+    return next(c for c in runtime._clients.values() if c.surface == "desktop")
+
+
+@pytest.mark.asyncio
+async def test_a_focused_desktop_pane_that_cannot_name_its_conversation_is_still_attached(
+    monkeypatch, tmp_path
+) -> None:
+    """THE INCIDENT REPRODUCTION (§1.1, §2.3).
+
+    A desktop app with a focused, visible window, a live delivery lease and this
+    session's pane mounted, whose record cannot name the conversation, must count
+    as ATTACHED — and must still count as UNATTENDED, because focus/visibility on
+    a machine-wide record is rung 1's business, not the model's.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=False, can_notify=True)
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            # Tier B deliberately does NOT move here: `desktop_visible` is false,
+            # so nobody is looking at this session — which is what routing needs.
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unfocused_desktop_pane_is_attached_though_nobody_is_watching(
+    monkeypatch, tmp_path
+) -> None:
+    """§1.3: focus is the wrong question for the model, and it FLAPS.
+
+    A window that is visible but not focused (the operator is reading a terminal
+    beside it) reports ``attended=False``, so rung 1 correctly sees no watcher —
+    while the pane is mounted and a card painted now would be there when they
+    look. Tier A must answer across that difference; Tier B must not.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id="s1", focused=False):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_multiplexed_terminal_away_from_this_session_is_attached_but_not_attended() -> None:
+    """A viewer holding this session in a tab it is not displaying (§1.3).
+
+    Tier A counts the connection, because that process can paint the card the
+    moment the operator switches to it; Tier B must keep dropping it, which is
+    the whole of the ``viewer_watch`` fix it was written for.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    terminal = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _wait_record()
+        await terminal.connect(record, "s1")
+        await terminal.viewer_watch(displaying=False)
+        assert runtime.attached_surfaces() == frozenset({"attach"})
+        assert runtime.watching_surfaces() == frozenset()
+    finally:
+        await terminal.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_connection_is_never_attached() -> None:
+    """The mobile daemon's ADOPTION dial covers every session on the machine.
+
+    Counting it would let a machine running ``lop mobile`` report an interface on
+    every session, including one nobody has ever opened — the same reasoning as
+    rung 1's (``server.py::watching_surfaces``), applied to the model-facing
+    question because a model told "a question WILL be presented" has to be told
+    the truth.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        _reader, writer = await _dial(record)
+        assert runtime.attached_surfaces() == frozenset()
+        assert runtime.watching_surfaces() == frozenset()
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_reaper_still_sees_no_viewer_without_a_visible_panel() -> None:
+    """THE NEGATIVE THAT MUST NOT MOVE: residency was not loosened (§1.5).
+
+    ``attach_clients()`` is the predicate that keeps a runtime resident. A
+    desktop connection that is neither visible nor notification-capable is not a
+    front end, so it must count for nothing in EITHER predicate — a runtime with
+    no panel attached still exits.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=False, can_notify=False)
+        assert runtime.attach_clients() == 0
+        assert runtime.attached_surfaces() == frozenset()
+    finally:
+        await desktop.detach()
         runtime.close()
 
 

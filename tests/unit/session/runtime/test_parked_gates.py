@@ -378,3 +378,38 @@ def test_a_phone_watching_parks_for_the_configured_day(monkeypatch) -> None:
     )
 
     assert handle._gate_timeout_s() == 24 * 3600.0
+
+
+def test_an_attached_pane_parks_a_gate_without_anyone_watching_it(monkeypatch) -> None:
+    """The gate reads ATTACHMENT, so a mounted pane parks it (§2.2).
+
+    The question a park bets on is "will this be seen", not "is anybody looking
+    this second": a desktop pane holding this conversation will show the card
+    the moment the operator returns to it, and a gate that expired in the
+    meantime would answer a question nobody was given the chance to answer.
+    Notifications OFF, so the park provably comes from the pane.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    class _AttachedOnly:
+        """A registrant that answers attachment but reports no watcher."""
+
+        def attached_surfaces(self):
+            return frozenset({"desktop"})
+
+        def watching_surfaces(self):
+            return frozenset()
+
+        def set_record_pending(self, pending):
+            return None
+
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
+    handle._registrant = _AttachedOnly()  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        ServingSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.notify.notifications_enabled", lambda: False, raising=False
+    )
+
+    assert handle._gate_timeout_s() == 24 * 3600.0
