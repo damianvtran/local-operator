@@ -3612,10 +3612,11 @@ class ServingSessionHandle(SessionHandle):
         overnight) and the user answers it when they come back.
 
         The short cap survives for exactly the case it was written for: no
-        client can present the card at all. With a viewer attached, or a phone
-        watching, something is showing the question to someone; with nothing
-        attached the card exists only in this process's memory, and a bounded
-        wait is still the honest behaviour there.
+        client can present the card at all. With an interface attached — a
+        terminal, a phone, or a desktop pane holding this conversation —
+        something can show the question to someone; with nothing attached the
+        card exists only in this process's memory, and a bounded wait is still
+        the honest behaviour there.
         """
         if self._registrant is None:
             # No control socket at all: an embedded or reduced host, where the
@@ -3626,10 +3627,11 @@ class ServingSessionHandle(SessionHandle):
             # because the policy stopped reading it.
             return PENDING_REQUEST_TIMEOUT_S
         parked = self._parked_timeout_s()
-        if self._watching_surfaces() or self._desktop_notification_available():
-            # A visible terminal/phone or a notification-capable desktop can
-            # reach a person. This is not the interactivity probe: background
-            # delivery earns a parked wait, never an assertion somebody is here.
+        if self._attached_surfaces() or self._desktop_notification_available():
+            # Something can PRESENT the card, or an OS banner can reach a person
+            # out of band. This is the attachment predicate, not the attention
+            # one: parking is a bet that a question will eventually be seen, which
+            # a mounted pane settles whether or not anyone is looking this second.
             return parked
         # Nothing is presenting the card. A parked gate is still preferable to
         # a denial when the user has an out-of-band way to be told about it
@@ -3680,7 +3682,7 @@ class ServingSessionHandle(SessionHandle):
         return DEFAULT_UNATTENDED_GATE_TIMEOUT_H
 
     def _install_interactivity_probe(self) -> None:
-        """Let the MODEL know whether anyone can answer a question.
+        """Let the MODEL know whether a question can be PRESENTED to anyone.
 
         The runtime is the only component that knows — it owns the control
         socket's connection table — and the session's goal-state holder is
@@ -3690,12 +3692,19 @@ class ServingSessionHandle(SessionHandle):
         the prompt closure asks at turn start, so a viewer that comes and
         goes fifty times costs exactly one line of context, and no transcript
         row is ever written for an attach or a detach.
+
+        It reads ATTACHMENT, never attention. The attention predicate is the
+        one that told a focused, visible desktop app's own session that nobody
+        was at a screen, because the machine-wide record could not name the
+        conversation (see ``docs/design/attached-interface-signal.md``); it also
+        flaps with window focus, which is the one thing a block inside the
+        persisted system prefix must never do.
         """
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
         try:
-            holder.interactive_probe = lambda: bool(self._watching_surfaces())
+            holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
 
@@ -3724,6 +3733,45 @@ class ServingSessionHandle(SessionHandle):
                 return frozenset(cast("frozenset[str]", reader()))
             except Exception:  # noqa: BLE001 — routing must never raise into a gate
                 logger.debug("could not read the watching surfaces", exc_info=True)
+        return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
+
+    def _attached_surfaces(self) -> frozenset[str]:
+        """Which kinds of surface can PRESENT a question, for the MODEL.
+
+        The ATTACHMENT predicate, not the attention one: see
+        ``RuntimeServer.attached_surfaces`` for why those are different questions
+        and why focus is absent from this one. This is what the interactivity
+        probe reads, so it is what decides the ``<interactivity>`` block the
+        model carries.
+
+        Falls back to the narrow answers an OLDER registrant can still give. Two
+        of them, in this order, and the order is the point:
+
+        1. ``watching_surfaces()`` — the ATTENTION question. Attention is a
+           strict SUBSET of attachment (a surface somebody is looking at can
+           present a card), so an older registrant's attention answer is sound
+           evidence of attachment. Reading it first is what keeps a PHONE
+           watcher parking a gate on a mixed-version fleet, which is the case
+           ``test_parked_gates.test_a_phone_watching_parks_for_the_configured_day``
+           pins.
+        2. ``attach_clients()`` — the same question one bit wide, and the
+           reading this handle's own probe already had available.
+
+        Both arms can only ever turn "unattached" into "attached". That is the
+        direction the whole predicate is biased: a wrong "attached" costs a
+        parked gate and a late answer, a wrong "unattached" costs a turn that
+        gives up on a question the operator was ready to answer.
+        """
+        server = self._registrant
+        reader = getattr(server, "attached_surfaces", None)
+        if callable(reader):
+            try:
+                return frozenset(cast("frozenset[str]", reader()))
+            except Exception:  # noqa: BLE001 — an unreadable probe must not fail a turn
+                logger.debug("could not read the attached surfaces", exc_info=True)
+        watching = self._watching_surfaces()
+        if watching:
+            return watching
         return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
 
     def _session_id_for_resume(self) -> str:

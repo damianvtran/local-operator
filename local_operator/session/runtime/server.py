@@ -4261,6 +4261,56 @@ class RuntimeServer:
             else frozenset()
         )
 
+    def attached_surfaces(self) -> frozenset[str]:
+        """Which KINDS of interface can PRESENT a card the operator will see.
+
+        Sibling of :meth:`watching_surfaces`, NOT a replacement. That one answers
+        "is a person looking at this session right now" and is the whole of rung 1
+        of the notification ladder (``docs/DESKTOP_API.md``, "The notification
+        eligibility ladder"). This one answers "is there an interface that could
+        show this session a question, and that the operator returns to" — the
+        question the MODEL needs, because a question asked now is answered when
+        they look, not when they are looking.
+
+        FOCUS IS DELIBERATELY ABSENT, and it must not be "tidied" into agreement
+        with :meth:`_visible_attach_surfaces`. Focus flaps with window z-order,
+        and this answer is rendered into the persisted system-prompt tail
+        (``prompts_api.build_system_blocks``), so every flap would move a block
+        the model carries on every request. A window that is merely not frontmost
+        still holds a mounted pane this conversation can be painted into.
+
+        The desktop clause is THE :meth:`attach_clients` CLAUSE VERBATIM. Both
+        ask "could this front end present something", so both must compute it the
+        same way; the machine-wide presence record decides NEITHER, because an
+        empty ``session_id`` there is absence of evidence rather than evidence
+        against (:meth:`_desktop_visible`).
+
+        A terminal attach is counted even while it is displaying ANOTHER session
+        (``terminal_displaying`` False): the connection is the process that can
+        paint the card the moment the operator switches back to it. This asks
+        about presentation, not about attention.
+        """
+        attached: set[str] = set()
+        # SNAPSHOT BEFORE ITERATING (C8): read from the session's loop while the
+        # runtime's own loop registers and drops clients in this dict — the same
+        # hazard ``attach_clients`` documents.
+        for conn in list(self._clients.values()):
+            if conn.kind != "attach":
+                continue
+            if conn.surface == "desktop":
+                if self._desktop_lease_live(conn) and (
+                    conn.desktop_visible or conn.desktop_can_notify
+                ):
+                    attached.add("desktop")
+            else:
+                attached.add("attach")
+        if self.watch_supported and self.phone_watchers > 0:
+            # Reported as ``viewer`` rather than ``daemon``, for the reason given
+            # on :meth:`watching_surfaces`: a relay being dialled is true of every
+            # session on a machine running ``lop mobile``.
+            attached.add("viewer")
+        return frozenset(attached)
+
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
 
