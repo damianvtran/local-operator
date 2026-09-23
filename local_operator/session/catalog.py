@@ -7,7 +7,6 @@ The catalog has no acknowledgement path: listing a conversation is not reading i
 
 from __future__ import annotations
 
-import heapq
 import json
 import logging
 import os
@@ -20,7 +19,11 @@ from typing import Any
 from local_operator.info.model import format_duration
 from local_operator.resume import SessionRow
 from local_operator.session.archived import archived_ids
-from local_operator.session.creation import session_category, session_created_at
+from local_operator.session.creation import (
+    CREATED_AT_NAME,
+    session_category,
+    session_created_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -908,6 +911,76 @@ SUBAGENT_LAYER_CAP = 40
 #: caching a live fact would freeze the list.
 _ROW_CACHE: dict[Path, tuple[tuple[float, int], SessionRow]] = {}
 
+#: ``sessions root -> {session_id: ((st_ino, st_mtime_ns, st_size), birth)}`` for
+#: ``created_at.json``. WHY: ``load_catalog`` must stamp EVERY candidate's birth
+#: before ranking (the rank key is ``-created_at``, and no cheaper bound on it is
+#: sound: activity can precede a hand-edited, restored or ``st_birthtime``
+#: fallback birth, and a bounded selection then drops the row from the page --
+#: PR #1470 review round 1, F1/Q-1). The open+read+parse per candidate was
+#: 0.80 s of a 1.47 s desktop list at 9,400 directories (D-F7). The sidecar is
+#: write-once by contract (#800), so a birth read on one poll is still true on
+#: the next unless the file itself changed -- and one ``stat`` says whether it
+#: did. The value served is always ``session_created_at``'s own answer.
+#:
+#: THE KEY is the sidecar's inode, nanosecond mtime and size. The one writer
+#: (``creation.ensure_session_created_at``) publishes through a hard link of a
+#: fresh temp file, so every rewrite is a new inode; a hand edit or replacement
+#: moves mtime (and usually size and inode); a deleted-and-recreated directory
+#: gets a new inode; a renamed directory is a different id. The accepted blind
+#: spot is an in-place rewrite that keeps the same inode, the same size AND
+#: restores the same nanosecond mtime (``touch -r`` after editing) -- served
+#: stale until the process restarts or the file changes again.
+#:
+#: NOT CACHED: a directory with no readable sidecar. Its birth comes from
+#: ``origin.json`` or ``st_birthtime`` (``creation.session_created_at``), which
+#: this key cannot validate, so it is read every time -- the same cost as before,
+#: for the ~0.4% of directories measured without one (39 of 9,725).
+#:
+#: BOUNDED: each ``load_catalog`` call prunes its root's map to that call's
+#: candidates, so a map holds at most one entry per visible session of the
+#: store (648 on the reporting store; 10,000 on a 10k store of visible
+#: sessions), and deleted or newly hidden sessions drop out on the next call.
+#: At most :data:`_BIRTH_MEMO_ROOTS` roots are kept, oldest evicted first, so a
+#: process that lists many stores (the test suite) cannot grow it without limit.
+_BIRTH_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], float]]] = {}
+_BIRTH_MEMO_ROOTS = 4
+
+
+def _memo_root(sessions: Path) -> dict[str, tuple[tuple[int, int, int], float]]:
+    """This store's birth memo, created (and the oldest root evicted) on first use."""
+    key = str(sessions)
+    memo = _BIRTH_MEMO.get(key)
+    if memo is None:
+        # ``pop(..., None)``: the desktop lists from worker threads, so two
+        # calls can evict the same root; losing a memo only costs a re-read.
+        while len(_BIRTH_MEMO) >= _BIRTH_MEMO_ROOTS:
+            _BIRTH_MEMO.pop(next(iter(_BIRTH_MEMO), ""), None)
+        memo = _BIRTH_MEMO.setdefault(key, {})
+    return memo
+
+
+def _memoized_birth(sessions: Path, session_id: str) -> float:
+    """``session_created_at`` for one candidate, re-read only when its sidecar changed.
+
+    STAT BEFORE READ, deliberately: a sidecar replaced between the two lands its
+    NEW value under the OLD key, so the next call's stat misses and re-reads --
+    the race resolves toward a re-read, never toward serving a stale birth.
+    """
+    memo = _memo_root(sessions)
+    session_dir = os.path.join(sessions, session_id)
+    try:
+        info = os.stat(os.path.join(session_dir, CREATED_AT_NAME))
+    except OSError:
+        memo.pop(session_id, None)
+        return session_created_at(Path(session_dir))
+    key = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = memo.get(session_id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    born = session_created_at(Path(session_dir))
+    memo[session_id] = (key, born)
+    return born
+
 
 def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
     """``(activity_mtime, size)`` for the transcript, or ``None`` if unreadable.
@@ -1000,7 +1073,9 @@ def cached_session_rows(
                 mtime,
                 session_name(session_dir),
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
-                created_at=session_created_at(session_dir),
+                # Through the memo ``load_catalog`` has just filled, so hydrating
+                # a page row does not read its birth a second time on a cold call.
+                created_at=_memoized_birth(directory / "sessions", session_id),
                 archived=archived,
             )
         rows.append(row)
@@ -1042,78 +1117,6 @@ def subagent_population(directory: Path) -> int:
     from local_operator.resume import _scan_sessions
 
     return len(_scan_sessions(directory)[1])
-
-
-def _select_page(
-    entries: Sequence[CatalogEntry],
-    birth_bounds: Mapping[str, float],
-    limit: int,
-    pinned: frozenset[str],
-    sessions: Path,
-) -> list[CatalogEntry]:
-    """The ranked page plus off-page pins, reading birth dates only for rows that can compete.
-
-    ``entries`` mixes rows whose ``created_at`` is already real (subagent layer,
-    desktop drafts, live rows the registry appended) with scan candidates still
-    carrying the 0.0 placeholder; an id in ``birth_bounds`` is a placeholder and
-    its value is an UPPER BOUND on its birth — the scan's activity mtime.
-
-    WHY THE BOUND HOLDS. Birth is written once, when the directory is first
-    materialised (``creation.ensure_session_created_at``), BEFORE any transcript
-    or inbox append can move the activity clock past it; a fork stamps a fresh
-    birth before copying bytes in, and ``Transcript._restore_mtime`` only ever
-    puts back an EARLIER activity time, never one before birth. Measured on the
-    reporting store, 2026-09-22: 0 of 9,517 directories with activity had
-    ``created_at`` later than it. Since ``rank`` sorts ``-created_at`` ascending,
-    ``created_at <= bound`` makes ``(tier, wake, -bound, id)`` a LOWER bound on
-    the row's real key.
-
-    THE SELECTION IS THEREFORE EXACT, not a heuristic: a best-first pass pops
-    the smallest key; a placeholder is resolved (one ``created_at.json`` read)
-    and pushed back with its real key, and a resolved row is emitted. A row is
-    emitted only when its real key is no larger than every remaining row's
-    lower bound, so the page is the same rows in the same order a full sort
-    would give, for the cost of reading births for the page plus the rows
-    whose activity is recent enough to contend for it. A store that violated
-    the bound (a hand-edited ``created_at.json``, a ``touch``-ed-back
-    transcript) degrades to that row ranking as though it were born at its
-    last activity, and the returned list is still sorted by real key.
-
-    ``pinned`` rows beyond the page are resolved individually and appended in
-    rank order, which is below every page row for the reason above.
-    """
-    from dataclasses import replace
-
-    heap: list[tuple[tuple[int, int, float, str], bool, int, CatalogEntry]] = []
-    for index, entry in enumerate(entries):
-        key = entry.rank
-        bound = birth_bounds.get(entry.id)
-        if bound is None:
-            heap.append((key, True, index, entry))
-        else:
-            heap.append(((key[0], key[1], -bound, key[3]), False, index, entry))
-    heapq.heapify(heap)
-
-    def resolve(entry: CatalogEntry) -> CatalogEntry:
-        # ``replace`` rather than rebuilding, so every derived field the entry
-        # already carries (attention, subagent marks) is kept.
-        born = session_created_at(sessions / entry.id)
-        return replace(entry, row=entry.row._replace(created_at=born))
-
-    page: list[CatalogEntry] = []
-    while heap and len(page) < max(limit, 0):
-        key, resolved, index, entry = heapq.heappop(heap)
-        if resolved:
-            page.append(entry)
-            continue
-        real = resolve(entry)
-        heapq.heappush(heap, (real.rank, True, index, real))
-    extras = [
-        entry if resolved else resolve(entry)
-        for _key, resolved, _index, entry in heap
-        if entry.id in pinned
-    ]
-    return sorted(page, key=lambda entry: entry.rank) + sorted(extras, key=lambda entry: entry.rank)
 
 
 def load_catalog(
@@ -1276,21 +1279,21 @@ def load_catalog(
                     label=label,
                 )
             )
-    # Creation time is the immutable ordering key (#800), and every row this
-    # function RETURNS is stamped with it. Scan candidates are NOT stamped here,
-    # though: reading ``created_at.json`` for every candidate was 0.80 s of a
-    # 1.47 s desktop list at 9,400 directories (and 2.8 s of 4.7 s on a 10k
-    # store of visible sessions), for a page that returns ~200-500 of them.
-    # They carry the placeholder 0.0 plus an UPPER BOUND on their birth — the
-    # scan's activity mtime — and :func:`_select_page` reads the real value only
-    # for rows that can still reach the page. No placeholder escapes: every
-    # returned entry is resolved first. See ``_select_page`` for why the bound
-    # holds.
+    # Creation time is the immutable ordering key (#800), so every construction
+    # site must stamp it. Rows left at the 0.0 default all tie and fall through
+    # to the session-id tie-break, which silently reverses newest-first order.
+    # EVERY candidate, before ranking: see `_BIRTH_MEMO` for why no cheaper
+    # bound is sound, and why a warm call pays one stat here instead of a read.
+    sessions_root = directory / "sessions"
+    birth_memo = _memo_root(sessions_root)
+    for stale in birth_memo.keys() - {candidate[0] for candidate in candidates}:
+        birth_memo.pop(stale, None)
     rows = [
         SessionRow(
             session_id,
             mtime,
             "",
+            created_at=_memoized_birth(sessions_root, session_id),
             # Stamped from the scan's own read so a row that never reaches
             # ``cached_session_rows`` below (nothing here guarantees every
             # candidate is hydrated) still states its archive state honestly.
@@ -1298,7 +1301,6 @@ def load_catalog(
         )
         for session_id, mtime, _origin, archived in candidates
     ]
-    birth_bounds = {session_id: mtime for session_id, mtime, _origin, _archived in candidates}
     # One directory read plus a stat per unlisted candidate, NOT
     # ``glob("*/desktop.json")``. The glob looks equivalent and is not: a
     # pattern whose wildcard is a DIRECTORY component makes pathlib open and
@@ -1435,13 +1437,15 @@ def load_catalog(
         # is the only read of that store, and it happens after the decoration.
         logger.warning("session catalogue could not read attention state", exc_info=True)
         rows = [row._replace(degraded=row.degraded + (DECORATION_ATTENTION,)) for row in rows]
-    unranked = (
-        [entry_for(row, attention.get(identities[row.id])) for row in rows]
-        # The ONE join point. Sub entries are concatenated here rather than
-        # being members of `rows`, so they never pass through the decoration
-        # and attention work above -- and this stays a single ranking over a
-        # single list.
-        + subagent_entries
+    ranked = list(
+        rank_entries(
+            [entry_for(row, attention.get(identities[row.id])) for row in rows]
+            # The ONE join point. Sub entries are concatenated here rather than
+            # being members of `rows`, so they never pass through the
+            # decoration and attention work above -- and this stays a single
+            # `rank_entries` call over a single list.
+            + subagent_entries
+        )
     )
     # THE PAGE, THEN THE PINS THAT FELL OUTSIDE IT. The slice is a RECENCY
     # window, and a pin is the one thing in this listing that is not recency: it
@@ -1451,31 +1455,28 @@ def load_catalog(
     # exactly the row the window removes — so the caller that renders pins names
     # them and gets them back here.
     #
-    # WHAT THIS COSTS: one ``created_at.json`` read per pinned extra, and that
-    # is the reason it lives here rather than in a caller. Every candidate's
-    # row, decoration and attention lookup has ALREADY happened by this point,
-    # so an extra costs a membership test and its own birth read, not a scan, a
-    # hydration or a second `cached_session_rows` call. A caller-side union
-    # would have to re-scan the store or re-hydrate by id, and the id lookup it
-    # would need is the one thing this function does not return.
+    # WHAT THIS COSTS: nothing measurable, and that is the reason it lives here
+    # rather than in a caller. Every candidate's row, decoration and attention
+    # lookup has ALREADY happened by this point — the slice is the only thing
+    # that discarded these entries — so an extra costs one membership test, not
+    # a scan, a hydration or a second `cached_session_rows` call. A caller-side
+    # union would have to re-scan the store or re-hydrate by id, and the id
+    # lookup it would need is the one thing this function does not return.
     #
     # SILENTLY ABSENT WHEN IT CANNOT BE RESOLVED, deliberately: an id that is
     # not in ``ranked`` at all — a hidden (delegated) run, which never reaches
     # ``candidates``, or a directory that has since been deleted — is simply not
     # appended, rather than raising. The caller asked for a row it would like to
     # render, not for a promise this store cannot keep.
-    # The window is the caller's own page bound, so a pinned row sitting
-    # exactly AT that bound is carried too — it is a row the caller's page does
-    # not carry, which is the whole condition. Order is preserved: the extras
-    # rank below every page row by construction, so appending them keeps the
-    # result in rank order.
-    entries = _select_page(
-        unranked,
-        birth_bounds,
-        limit,
-        frozenset(pinned_off_page),
-        directory / "sessions",
-    )
+    entries = ranked[:limit]
+    if pinned_off_page:
+        # The window is the caller's own page bound, so a pinned row sitting
+        # exactly AT that bound is carried too — it is a row the caller's page
+        # does not carry, which is the whole condition. Order is preserved: the
+        # extras rank below every page row by construction, so appending them
+        # keeps the result in rank order.
+        wanted = set(pinned_off_page)
+        entries += [entry for entry in ranked[limit:] if entry.id in wanted]
     # KNOWN LIMITATION, decided rather than missed. This slice applies to the
     # COMBINED list, so a store with more than ~160 visible sessions cannot fit
     # both populations in CATALOG_SCAN_LIMIT. Sub rows do not lose that race:
