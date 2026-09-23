@@ -31,6 +31,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.harness.rows import is_harness_notice_text
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -106,15 +107,14 @@ E2E_ORACLE_MODEL = ModelSpec(provider="openai", model_id="e2e-oracle-model", con
 ADOPT_TIMEOUT_S = 20.0
 
 
-def last_user_text(request: ChatRequest) -> str:
-    """The question a provider call is ASKING: its last user-role row.
+def _user_row_texts(request: ChatRequest | Mapping[str, Any]) -> list[str]:
+    """The text of every USER-role row in one recorded call, in order.
 
-    A provider call carries the whole conversation, so the last user row is what
-    distinguishes the calls a goal-owning session makes from one another — the
-    human's own words for their turn, the judge's forked question for its aside,
-    one of the two loop prompts for a self-continuation. Reading the WHOLE
-    message list instead would match the goal transcript every time and label
-    every call the same.
+    TWO SHAPES, because two harnesses record different things. The in-process
+    cells hold ``ChatRequest``s. The exec cells drive a real ``lop`` subprocess
+    against a real loopback provider, so the call happened in ANOTHER PROCESS
+    and all there is to read is the raw wire body — there is no request object
+    to hold. One reader for both, so the census below labels them identically.
 
     Only TEXT blocks are read, and the two skips are separate facts. ``Content``
     is ``TextContent | ImageContent`` and an image block carries no ``text`` at
@@ -125,16 +125,67 @@ def last_user_text(request: ChatRequest) -> str:
     costing a separator. Both are load-bearing for the census that labels calls
     by their question, so neither may be folded into the other.
     """
-    users = [message for message in request.messages if message.role == "user"]
-    if not users:
+    if isinstance(request, Mapping):
+        rows = [
+            message
+            for message in request.get("messages") or ()
+            if isinstance(message, Mapping) and message.get("role") == "user"
+        ]
+        texts: list[str] = []
+        for row in rows:
+            content = row.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+                continue
+            texts.append(
+                " ".join(
+                    block.get("text") or ""
+                    for block in content or ()
+                    if isinstance(block, Mapping) and block.get("type") == "text"
+                )
+            )
+        return texts
+    return [
+        " ".join(
+            block.text for block in message.content if isinstance(block, TextContent) and block.text
+        )
+        for message in request.messages
+        if message.role == "user"
+    ]
+
+
+def last_user_text(request: ChatRequest | Mapping[str, Any]) -> str:
+    """The question a provider call is ASKING: its last user-role row that is not STATE.
+
+    A provider call carries the whole conversation, so the last user row is what
+    distinguishes the calls a goal-owning session makes from one another — the
+    human's own words for their turn, the judge's forked question for its aside,
+    one of the two loop prompts for a self-continuation. Reading the WHOLE
+    message list instead would match the goal transcript every time and label
+    every call the same.
+
+    STATE ROWS ARE SKIPPED, and that is a correction rather than a nicety: the
+    runtime appends its ``[session-state]`` records, todo reminders and notices
+    AFTER the turn's own prompt, so on those calls the raw last row is a state
+    record and the question sits one row above it. Measured: both of the count
+    loop's iterations in the exec cell end with ``[session-state]``, and a reader
+    that took the raw last row labelled them user turns. The heads come from
+    ``harness.rows`` — the module that already decides what counts as a
+    harness-minted row — rather than from a second list here, because a second
+    list is how a relabelled call goes unnoticed.
+
+    A call whose rows are ALL state (or that has none) still reads as its last
+    row, so the skip can only ever sharpen a label, never blank one.
+    """
+    texts = _user_row_texts(request)
+    if not texts:
         return ""
-    return " ".join(
-        block.text for block in users[-1].content if isinstance(block, TextContent) and block.text
-    )
+    questions = [text for text in texts if not is_harness_notice_text(text)]
+    return (questions or texts)[-1]
 
 
 def provider_call_kinds(
-    requests: Sequence[ChatRequest],
+    requests: Sequence[ChatRequest | Mapping[str, Any]],
     *,
     goal: str,
     extra: Mapping[str, str] | None = None,
@@ -149,7 +200,10 @@ def provider_call_kinds(
     twice, or a command that re-asks) from the harness legitimately working the
     goal. The property that survives the feature is that a command starts exactly
     ONE user-authored turn and that every other call is attributable, and this is
-    the instrument that can state it.
+    the instrument that can state it. It reads EITHER recorded shape — a
+    ``ChatRequest`` or a raw wire body — so the exec cells, which drive a real
+    ``lop`` subprocess and can only see the wire, are censused by this instrument
+    rather than by a second one.
 
     Labels, from the question each call asks:
 

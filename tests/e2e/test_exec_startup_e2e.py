@@ -20,7 +20,7 @@ import pytest
 
 from local_operator.config import ConfigManager
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
-from tests.e2e.harness import NO_NOTIFY_ENV
+from tests.e2e.harness import NO_NOTIFY_ENV, provider_call_kinds, user_turns
 
 
 @pytest.fixture
@@ -233,7 +233,18 @@ def test_exec_team_count_loop_and_resume(exec_server):
         stdin="",
     )
     assert result.returncode == 0
-    assert len(requests) == 3
+    # A CENSUS, not a total. This command starts ONE user turn, and the standing
+    # goal's judge rides beside it: the judge is armed by ``--goal`` and NOT by
+    # ``--loop`` (a count loop judges nothing — ``GoalLoop.run``'s ``if goal:``
+    # guards that), so it fires ONCE, at the first turn end, and then stops
+    # because its verdict settled the goal. The loop then contributes its own two
+    # iterations. A bare ``== 3`` was written before the judge existed and cannot
+    # tell this from a command that re-submitted its argument, which is what the
+    # census below is for (see ``provider_call_kinds``).
+    kinds = provider_call_kinds(requests, goal="Ship safely")
+    assert user_turns(kinds) == 1, "one user-authored turn, submitted once"
+    assert kinds.count("judge") == 1, "the goal judge's forked aside, exactly once"
+    assert kinds.count("loop") == 2, "the count loop's own two iterations"
     wire = json.dumps(requests[0])
     for expected in ("COLLABORATION_SENTINEL", "PROJECT_SENTINEL", "manager", "coder", "reviewer"):
         assert expected in wire
@@ -246,10 +257,22 @@ def test_exec_team_count_loop_and_resume(exec_server):
         "exec", "Resume without replay", "--resume", session_id, "--clear-goal", "--json", stdin=""
     )
     assert resumed.returncode == 0
-    assert len(requests) == 4
+    # One more user turn and NOTHING else: ``--clear-goal`` is what stops a
+    # judge riding this turn end, so the goal's aside is still the single call
+    # the first command made.
+    kinds = provider_call_kinds(requests, goal="Ship safely")
+    assert user_turns(kinds) == 2, "the exec turn and the resume's own turn"
+    assert kinds.count("judge") == 1, "a cleared goal is not judged"
+    assert kinds.count("loop") == 2
+    before = len(requests)
     missing_goal = run("exec", "--resume", session_id, "--loop", "1", stdin="")
     assert missing_goal.returncode != 0
-    assert len(requests) == 4
+    # A REFUSED run reaches no provider at all, and this is the refusal the
+    # cleared goal must produce: ``--loop`` needs a goal and this resume has
+    # none. It is the regression the cell exists for — clearing only the
+    # attachment left the text in ``goal.json``, so this resume read the goal
+    # back out of the sidecar and STARTED a loop instead of refusing.
+    assert len(requests) == before
     assert "COLLABORATION_SENTINEL" in json.dumps(requests[-1])
     persisted = (directory / "transcript.jsonl").read_text()
     assert "Headless audit" in persisted
