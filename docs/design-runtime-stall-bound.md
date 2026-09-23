@@ -118,7 +118,9 @@ bind, publication) was spent against a clock no boot code could re-arm, and the
 only possible deadline was `arm + 300 s`. Measured over 68 retained dumps on the
 build carrying the observation header: 17 fires, 10 of them at the full
 `Timeout (0:05:00)` value, i.e. no beat ever re-armed the timer at all — the
-never-engaged class, and the plurality. `DEFAULT_BOOT_STALL_S`
+never-engaged class, and the plurality. (An UPPER bound on that class, not an exact
+count: a failed re-arm is indistinguishable from it by the armed value alone; see the
+exception below.) `DEFAULT_BOOT_STALL_S`
 (`LOP_RUNTIME_BOOT_STALL_SECONDS`, same spellings and floor/ceiling as the steady
 knob, `off` meaning "no boot phase") is what `arm` arms with; the runtime's first
 ENGAGEMENT — the publication boundary in `process.amain`, where `_live_handle` is
@@ -127,6 +129,20 @@ and stamps BOTH planes, so the steady bound is measured from engagement rather t
 from boot. That is also what makes the never-engaged class NAMEABLE: a fire that
 engaged has the deadline sibling `engage` writes, and one that never engaged has
 none. Engagement never widens the bound.
+
+*Exception, measured (design review round 1, D1):* engagement is not atomic. `engage()`
+moves the bound in memory and stamps both planes, THEN replaces the C timer, so a
+replacement that FAILS leaves the original boot-bound timer in force while the bound
+reads steady. A single fire can therefore carry the boot value on a runtime that DID
+engage. The dump names this (`[stall watchdog] re-arm failed: the engage could not
+re-arm the timer, ...`), which is why every statement of the never-engaged reading —
+the boot note, the comment above it, and `HOW_TO_READ_THE_FIRED_VALUE` — is qualified
+on the re-arm having SUCCEEDED rather than stated flatly.
+
+`engage()` is also **not idempotent**: an unguarded second call after a successful
+first one would compute a negative remainder from the already-reset stamp and fire
+early. `engage()` returns early when the bound is already at steady, so only the first
+call moves it.
 
 **What that bound does with a hung boot: it DUMPS it and HOLDS it, it does not cut
 it.** The exit leg answers through `process._busy_probe`, which reports work in
@@ -146,7 +162,8 @@ found with pid <pid>` and the process goes on; and an operator ends it by signal
 the pid the dump is named for, which its header carries (`kill -TERM <pid>`, not gated
 on any record). What the boot bound contributes in that window is the ATTRIBUTION — the
 fired value is the boot bound and the deadline sibling is absent, together the
-never-engaged class — while the exit leg only becomes fatal once the runtime has
+the never-engaged class — *provided the re-arm succeeded*; an engaged runtime whose
+timer replacement failed can fire at the boot value too (D1) — while the exit leg only becomes fatal once the runtime has
 published and its work has cleared (a property of the in-flight prohibition, #1439,
 not of the boot phase). Pinned as a pair, because the two arming shapes answer
 different questions:

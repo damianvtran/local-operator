@@ -518,8 +518,12 @@ DEFAULT_STALL_S = 300.0
 #:
 #: MEASURED over 68 retained dumps on the build that carries the observation header:
 #: 17 fires, and 10 of them carried the full ``Timeout (0:05:00)`` value — i.e. NO
-#: beat ever re-armed the timer, which is the never-engaged class and the plurality
-#: of that build's fires. (The other 7 show the planes' boot latencies differ: the
+#: beat ever re-armed the timer, the never-engaged class and the plurality of that
+#: build's fires. (THOSE 10 ARE AN UPPER BOUND ON THAT CLASS, not an exact count: a
+#: failed re-arm is indistinguishable from a never-engaged runtime by the armed value
+#: alone -- see :func:`engage` -- which is why the note below and
+#: :data:`HOW_TO_READ_THE_FIRED_VALUE` both qualify the reading.)
+#: (The other 7 show the planes' boot latencies differ: the
 #: re-arm line names WORKLOAD "has reported nothing since the ARM" while SERVING
 #: "reported 0 s ago" — the workload plane is the long pole, which is why
 #: :func:`engage` stamps BOTH.)
@@ -554,7 +558,11 @@ DEFAULT_STALL_S = 300.0
 #:   signal is not gated on any record).
 #:
 #: What this bound contributes is the ATTRIBUTION: the fired value is this number
-#: and the deadline sibling is absent — together, the never-engaged class. The exit
+#: and the deadline sibling is absent — together the never-engaged class, WHEN THE RE-ARM
+#: SUCCEEDED. An engaged runtime whose timer replacement FAILED has no sibling either
+#: (nothing re-armed it, so no beat ever wrote one) and can fire at this value, which is
+#: why :func:`engage` records that failure in the dump rather than letting the value and
+#: the missing sibling be read as never-engaged. The exit
 #: leg goes fatal only once the runtime has published and its work has cleared
 #: (#1439's rule, applied to the boot phase).
 DEFAULT_BOOT_STALL_S = 900.0
@@ -630,14 +638,23 @@ OBSERVATION_NOT_VERDICT = (
 #: ``0:05:00``-style value, which is :func:`arm`'s own bound and means NO beat ever
 #: re-armed the timer (the never-engaged class -- a main thread idle from boot), while
 #: 19 read a small value (0.4-17 s), which is a beat's recomputed remainder and means a
-#: plane's stamp, not the bound, was what the timer measured. Nothing in the file said
-#: which of the two a number was, so "which plane went quiet, and when" stayed
+#: plane's stamp, not the bound, was what the timer measured. THE FIRST READING IS
+#: CONDITIONAL ON THE RE-ARM, for the same reason the boot note is (design review round
+#: 1, D1): :func:`engage` moves the bound in memory BEFORE it replaces the timer, so an
+#: engaged runtime whose replacement FAILED keeps the original C timer and can fire at
+#: the armed value -- a member of this 6, not of the never-engaged class, and the class
+#: the paragraph below states as an exception rather than hiding. Nothing in the file
+#: said which of the two a number was, so "which plane went quiet, and when" stayed
 #: unreadable on a runtime whose own record is the only witness left.
 HOW_TO_READ_THE_FIRED_VALUE = (
     "HOW TO READ WHAT FIRES: the value on the fired line above the stacks is the seconds the "
     "timer was LAST ARMED FOR, and which arming that was is the whole question. It is the bound "
     "above, with no beat re-arming it at all, when no loop ever reported -- a runtime that never "
-    "engaged, its main thread idle from boot. It is a SMALLER value when a beat recomputed it "
+    "engaged, its main thread idle from boot, PROVIDED THE RE-ARM SUCCEEDED. An ENGAGE whose "
+    "timer replacement FAILED is the exception: the bound moves in memory while the original "
+    "timer stays in force, so a fire can carry this value on a runtime that DID engage -- the "
+    "dump then carries a 're-arm failed' line, and that line's absence is what makes the "
+    "never-engaged reading safe. It is a SMALLER value when a beat recomputed it "
     "from the oldest plane's stamp, which is how a plane that went quiet shows up as a number "
     f"below the bound. {DUMP_PREFIX}-<pid>{DEADLINE_SUFFIX} holds the deadline the timer is "
     "currently armed for and the leg that pinned it, rewritten by every beat THAT RE-ARMED, and "
@@ -1438,7 +1455,10 @@ def deadline_path(pid: int | None = None, directory: Path | None = None) -> Path
     ITS ABSENCE IS A SIGNAL, not a gap: nothing writes it at :func:`arm`, so a missing
     sibling means no beat ever re-armed this timer -- the never-engaged class, whose
     fire carries the ARMING value rather than a recomputed remainder
-    (:data:`HOW_TO_READ_THE_FIRED_VALUE`).
+    (:data:`HOW_TO_READ_THE_FIRED_VALUE`). THE ONE EXCEPTION IS A FAILED RE-ARM: a
+    replacement that raises leaves the previous timer in force and writes
+    :data:`REARM_FAILED_MARKER` instead of a sibling, so absence-plus-an-armed-value is
+    the never-engaged class only when that line is absent (see :func:`engage`).
 
     ARM CLEARS IT, AND THAT IS NOT A CONTRADICTION OF THE PARAGRAPH ABOVE. A PID IS
     RECYCLED, so a sibling in this directory may be the previous holder's, and it would
@@ -1650,7 +1670,7 @@ def arm(
                 f"session to judge: nothing can stamp a plane in it, so the value above is "
                 f"the whole of what a fire in that stretch measured. The runtime's first "
                 f"engagement moves the bound to {steady:g}s and stamps BOTH planes. "
-                f"When re-arming succeeds, a fired value of {bound:g}s — this number — means "
+                f"When re-arming succeeds, a fired value of {bound:g}s -- this number -- means "
                 f"the runtime never engaged. If engagement could not re-arm the timer, see the "
                 f"re-arm-failed message in this dump; the timer may still fire at the boot bound.\n"
             )
@@ -1686,9 +1706,10 @@ def arm(
         # there it reads as a beat of THIS life -- an mtime BEFORE this process's own arm
         # epoch, a leg naming a plane of a dead life, on a fire whose own value says no beat
         # ever re-armed the timer -- and that presence/absence is the ONE thing a reader has
-        # for telling the never-engaged class from a stale plane (see :func:`deadline_path`),
-        # so a stale file must not be able to fake it. Best-effort: a file that cannot be
-        # removed must not stop the bound being armed.
+        # for telling the never-engaged class from a stale plane (given a fire at the armed
+        # value with no 're-arm failed' line; see :func:`engage`), so a stale file must not
+        # be able to fake it. Best-effort: a file that cannot be removed must not stop the
+        # bound being armed.
         try:
             inherited.unlink()
         except OSError:
@@ -2302,7 +2323,10 @@ def engage() -> bool:
             # the WRONG CLASS: the sibling is absent (no beat has ever written it), which
             # is the signature of the never-engaged runtime, while the value on a fired
             # line would be the boot bound. The bound did move in memory, so the dump has
-            # to carry both facts.
+            # to carry both facts. THIS LINE IS ALSO WHAT KEEPS THE HEADER'S NOTES TRUE:
+            # the qualified never-engaged reading is safe exactly when this line is absent
+            # (see :data:`HOW_TO_READ_THE_FIRED_VALUE`), so a reader who finds it in the
+            # dump must not make that reading.
             if not _write_dump_line(
                 armed,
                 f"{REARM_FAILED_MARKER}the engage could not re-arm the timer, so a fired line "
@@ -2315,8 +2339,10 @@ def engage() -> bool:
         else:
             # AFTER a successful re-arm, and only then, exactly as :func:`beat` does: the
             # sibling must carry the deadline the timer really holds. Its EXISTENCE is
-            # also the reader's half of the split — a runtime that engaged has one, and
-            # the never-engaged class has none (see :func:`deadline_path`).
+            # also the reader's half of the split — a runtime that re-armed has one, and
+            # the never-engaged class has none (see :func:`deadline_path`) — and it is the
+            # successful-re-arm half of the qualification the header notes carry, which is
+            # why the failure above writes a line rather than leaving absence to speak.
             _record_deadline(armed)
         return True
 
@@ -2808,7 +2834,8 @@ def disarm() -> None:
             try:
                 # Beside the dump (see the docstring): a surviving sibling would advertise
                 # a deadline for a process that disarmed, and the sibling's absence is
-                # half of how a never-engaged fire is told apart from a stale-plane one.
+                # half of how a never-engaged fire is told apart from a stale-plane one
+                # (the other half being the absence of a 're-arm failed' line).
                 # WHEN A HELD FIRE IS KEPT the pair is kept with it, deliberately: the
                 # sibling names the deadline the fire was waiting for, so a reader
                 # comparing "was due at" against "fired at" reads one episode rather

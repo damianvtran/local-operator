@@ -503,7 +503,8 @@ def test_a_parked_workload_plane_trips_the_bound_while_the_serving_plane_is_heal
 # so the first two questions anyone asks of one were unanswerable from it: which loop
 # stopped reporting, and when. Measured over 26 retained fires, 6 carried a full
 # ``0:05:00``-style value (arm's own bound, no beat ever re-arming it — the
-# never-engaged class) and 19 a small one, 0.4-17 s (a beat's recomputed remainder,
+# never-engaged class, when no re-arm-failed line is present) and 19 a small one,
+# 0.4-17 s (a beat's recomputed remainder,
 # pinned by the OTHER plane's stale stamp). The number was there; nothing said which
 # it was; and the stamps that decide it die with the process. The cells below pin the
 # two records that fix that — the transition written into the dump, and the deadline
@@ -608,7 +609,8 @@ def test_arm_clears_a_deadline_sibling_an_earlier_holder_of_the_pid_left(
 
     The rule a reader is given (:data:`stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE`) is a
     fact about presence and absence: the sibling is there when a beat of THIS life re-armed
-    the timer, and not there when no beat ever did. A pid is RECYCLED and these files are
+    the timer, and not there when no beat ever did (or when the re-arm FAILED, which writes
+    a line of its own). A pid is RECYCLED and these files are
     keyed by pid alone, so a file a previous holder left is the one thing that can make the
     rule say the wrong thing -- and ``arm`` opens the dump with ``"w"`` (fresh per life)
     while leaving the pair's other half alone. Measured (QA round 1, Q1): a run that fired
@@ -892,7 +894,9 @@ def test_the_header_says_how_to_read_a_fired_value_and_the_deadline_sibling(
     is written at ARM time, so it is present whether or not this runtime ever fires.
 
     MUTATION THIS CELL CATCHES: drop ``{HOW_TO_READ_THE_FIRED_VALUE}`` from the header in
-    ``arm`` — the fired value goes back to being a number with no stated meaning.
+    ``arm`` — the fired value goes back to being a number with no stated meaning. The
+    qualifier is asserted by its own parts, so re-stating the never-engaged reading
+    unconditionally (design review round 1, D2) also turns this cell red.
     """
     assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
     try:
@@ -901,6 +905,17 @@ def test_the_header_says_how_to_read_a_fired_value_and_the_deadline_sibling(
         stall_watchdog.disarm()
 
     assert stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE in text, text[:600]
+    # The never-engaged reading is conditional on a SUCCESSFUL re-arm, because an
+    # engaged runtime whose timer replacement failed can carry the same armed value.
+    assert "PROVIDED THE RE-ARM SUCCEEDED" in stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE
+    assert (
+        "An ENGAGE whose timer replacement FAILED is the exception"
+        in stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE
+    )
+    assert (
+        "that line's absence is what makes the never-engaged reading safe"
+        in stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE
+    )
     assert (
         f"{stall_watchdog.DUMP_PREFIX}-<pid>{stall_watchdog.DEADLINE_SUFFIX}" in text
     ), f"the header does not name the sibling a reader has to go and open: {text[:600]!r}"
@@ -1257,9 +1272,12 @@ def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
 #
 # The measured population this is sized for: over 68 retained dumps on the build
 # carrying the observation header, 10 of its 17 fires carried the full ``0:05:00``
-# value — no beat ever re-armed the timer, the never-engaged class. Those are what
+# value — no beat ever re-armed the timer, the never-engaged class, and an UPPER bound
+# on that class rather than an exact count: a failed re-arm is indistinguishable from
+# it by the armed value alone (see ``engage``). Those are what
 # the boot bound covers and what the engagement reset makes NAMEABLE (a fire that
-# engaged has a deadline sibling; one that never engaged has none).
+# re-armed has a deadline sibling; one that never did has none — and a re-arm that
+# FAILED writes its own line instead).
 
 #: One child, three arguments: the boot bound, the steady bound, and how long to wait
 #: before engaging. The engage line it prints is the evidence the parent asserts on —
