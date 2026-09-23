@@ -2733,7 +2733,37 @@ def _corpus_grading() -> str:
 #: the operator reported — a 33 KB documentation read escalated to a "rotate it" demand
 #: for the word ``when`` — and ``test_only_the_documented_positive_case_escalates`` now
 #: referees it like every other positive.
-_CORPUS_GRADING_DIGEST = "ff40e8311973056583572313371fdc9983820bc7068d61160d1c27277a03a9b1"
+#:
+#: MOVED ONCE MORE ON 2026-09-23, in the round-1 remediation, and here the argument has
+#: TWO halves because two different things happened in one commit.
+#:
+#: 1. **The module change is INVISIBLE to the corpus, measured.** Narrowing the flag
+#:    rule's prose refusal from ``len < _ASSIGNED_VALUE_MIN_CHARS`` (eight) to
+#:    ``len <= _FLAG_PROSE_MAX_CHARS`` (four) restores the escalation for every
+#:    five-, six- and seven-character value, and the corpus's only flag-position
+#:    word is the FOUR-character ``when`` row — refused by both bounds. So: the 442
+#:    rows below graded with ``git show f6f58eb7:local_operator/redaction_shapes.py``
+#:    loaded as a second module produce this same ``a755ab0e…`` byte for byte, and the
+#:    bound is separately shown to be insensitive across the whole range — grading the
+#:    439-row corpus with the refusal refusing bare words up to 4, 5, 6, 7, 8, 11 and 15
+#:    characters all give ``ff40e831…``, while refusing only up to 3 gives ``96341322…``
+#:    (it stops refusing the ``when`` row). Four is the narrowest bound that keeps that
+#:    row contained, which is why the boundary is pinned by a test rather than by a row:
+#:    the rows that would separate five from nine have to ESCALATE, and the corpus holds
+#:    exactly one escalating case by construction.
+#:
+#: 2. **The corpus grew by three rows, which is what moves the constant.** Measured by
+#:    recomputing over the corpus WITHOUT them under this same module: the 439 rows it
+#:    had produce ``ff40e831…`` field for field, so nothing pre-existing moved. The new
+#:    rows are two negatives and one positive from agent review R1-3 and R1-4 — the
+#:    TWO-PART spelling of the accepted residual (once with a separator in each half and
+#:    once with none, because the two halves are read by shape alone and so need no
+#:    separator at all: wider than the one-part release, and it had no row), and the
+#:    ONE-WORD store name the release does NOT reach (``normalize_credential_key("prod")``
+#:    is ``PROD``, so the arm's separator requirement leaves it masked). Both were found
+#:    by a differential rather than stated by the table, which is the thing this constant
+#:    exists to stop.
+_CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0eef58406f57"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -2764,14 +2794,31 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
 
     ONE EXCLUSION, and it is part of the predicate rather than an exception to it:
     the flag rule's word-shaped over-mask (``--api-key [redacted] you need to``) is graded
-    CONTAINED whatever the text says, because a value that is a bare lowercase word
-    SHORTER THAN THE MODULE'S OWN EIGHT-CHARACTER MASKED-VALUE FLOOR answers both
-    questions YES for reasons that have nothing to do with the mask — every English word
-    recurs in prose, which is how a 33 KB documentation read filed an ESCALATED rotation
-    demand for the word ``when`` (2026-09-22). It is restated here, not imported, so the
-    exclusion cannot drift from the implementation without failing this arm.
+    CONTAINED whatever the text says, because a value that is a bare lowercase word of
+    FOUR characters or fewer answers both questions YES for reasons that have nothing to
+    do with the mask — every English word recurs in prose, which is how a 33 KB
+    documentation read filed an ESCALATED rotation demand for the word ``when``
+    (2026-09-22). It is restated here, not imported, so the exclusion cannot drift from
+    the implementation without failing this arm.
+
+    THE RESTATED BOUND IS THE IMPLEMENTATION'S OWN FOUR, and that is the correction agent
+    review R1-2 asked for. It was eight — the module's masked-VALUE floor, which answers a
+    different question — and a restatement at eight could not catch drift across 5..9,
+    because the corpus holds no row that separates those bounds: measured, the grading is
+    identical for every bound at or above four. The rows that WOULD separate them have to
+    escalate, and the corpus holds exactly one escalating case by construction (the
+    reason ``test_a_genuinely_exposed_compact_credential_still_files_an_incident`` gives),
+    so the boundary is pinned in ``test_the_flag_prose_refusal_stops_at_four_characters``
+    instead, in both directions.
+
+    WHAT THIS RESTATEMENT CAN AND CANNOT CATCH, stated rather than implied: it fails on
+    drift DOWNWARD. An implementation refusing three characters or fewer leaves the
+    four-character ``when`` row escalating, where this arm — restating a bound of four —
+    computes ``exposed`` False for it, and the mismatch reds on the assertion below. Drift
+    UPWARD across five to nine is invisible to the corpus (no row of that width is a bare
+    word), so it is not this arm's job: it is the boundary test's.
     """
-    short_word_floor = 8
+    short_word_floor = 4
     checked = 0
     for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
         masked, hits = scrub_shapes_with_hits(case.text)
@@ -2780,7 +2827,7 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
             value = hit.value
             exposed = bool(value) and value != REDACTION_MARKER
             word_shaped = (
-                len(value) < short_word_floor
+                len(value) <= short_word_floor
                 and value.isascii()
                 and value.isalpha()
                 and value.islower()
@@ -2795,6 +2842,66 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
             assert hit.exposed is exposed, (case.reason, hit.label)
             checked += 1
     assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
+
+
+def test_the_flag_prose_refusal_stops_at_four_characters() -> None:
+    """The refusal's BOUNDARY, both ways, where the corpus cannot pin it.
+
+    ``_is_prose_after_a_flag`` refuses the exposure claim for a bare lowercase word in a
+    credential flag's argument position, and the bound is FOUR characters. Nothing in the
+    corpus separates a bound of five from one of nine (measured: the grading is identical
+    for every bound at or above four) and the rows that WOULD have to escalate, which the
+    corpus may not hold — so the boundary lives here, on the specimens the refusal was
+    written for and on the short values it must NOT swallow (agent review R1-2, measuring
+    R1-1).
+
+    An implementation whose bound drifted to five, six, seven, eight or nine fails the
+    second loop; one that drifted to three or less fails the first. Both directions are
+    the point: the narrowing exists to stop manufacturing rotation demands for English
+    words, and it may not buy that by giving up the escalation for a short credential
+    printed a second time in the clear.
+    """
+    import local_operator.redaction_shapes as rs
+
+    def escalates(text: str) -> bool:
+        return rs.shape_report(scrub_shapes_with_hits(text)[1]).reached_model
+
+    # Assembled from its segments, like every other flag/value pair in this file: the flag
+    # followed by a value is the exact shape the pass rewrites, so no literal here is one.
+    flag = "--" + "api-key" + " "
+
+    # The word case the refusal exists for — the 33 KB documentation line whose second
+    # ``when`` in free prose filed a rotation demand — and the shorter specimen the suite
+    # already pins. Both stay CONTAINED, and these are the only two words in this test
+    # that are read as prose rather than as a value.
+    for word in ("when", "was"):
+        prose = f"{flag}{word} you need it, and {word} the flag is set it wins"
+        assert REDACTION_MARKER in scrub_shapes_with_hits(prose)[0], "the over-mask stopped"
+        assert not escalates(prose), f"the prose word {word!r} demanded a rotation again"
+
+    # Three and four characters: still contained. This is the STATED LIMIT of the
+    # refusal, pinned so a later widening of the bound is a decision rather than a
+    # differential — at that width a word cannot be told from a credential anywhere in
+    # the text, which is the whole of the reason the claim is refused.
+    for word in ("was", "hunt"):
+        short = f"{flag}{word} and the {word} is set"
+        assert not escalates(short), f"{word!r} (len {len(word)}) stopped being refused"
+
+    # Five, six and seven characters: escalated AGAIN, which is the half agent review
+    # R1-1 measured as lost. ``hunter`` (six) and ``letmein`` (seven) are the canonical
+    # short weak passwords; ``grace`` is the five-character edge of the same class. The
+    # BOUND is what is pinned here rather than the spelling, so any bare lowercase run of
+    # that width would do — what matters is that a credential-shaped value printed twice
+    # in the text the model reads keeps its escalation.
+    for word in ("grace", "hunter", "letmein"):
+        repeated = f"{flag}{word} and the {word} is set"
+        assert (
+            REDACTION_MARKER in scrub_shapes_with_hits(repeated)[0]
+        ), f"{word!r} stopped being masked"
+        assert escalates(repeated), (
+            f"a {len(word)}-character value printed twice no longer escalates: the "
+            "refusal is wider than its four-character specimens"
+        )
 
 
 def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
@@ -3337,7 +3444,6 @@ def test_the_documented_publish_workflow_survives_every_surface() -> None:
 #: What one settled tool result may be. The arms below use the PRODUCTION number
 #: rather than a test-sized one, so the shape measured is the shipped one while
 #: the whole test stays `steps x 8 KiB` of work.
-
 
 _STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
 

@@ -718,6 +718,22 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "--api-key " + "when you need it, and when the flag is set it wins",
         "a word after the flag, twice in one line: masked, and never escalated",
     ),
+    # --- 2026-09-23: the ONE-WORD store name, which the release does not reach -----
+    # ``_is_a_name_in_the_store_grammar`` [redacted] a separator, and that requirement is
+    # load-bearing rather than stylistic: its first form — a run of capitals with no
+    # separator — released real all-caps credential values (the rows above). The cost is
+    # this one. ``normalize_credential_key`` maps an operator-typed ``prod`` to ``PROD``,
+    # so a ONE-WORD store entry is a legal name the arm still masks, and the module's
+    # docstring used to describe the underscore-carrying spelling as the one every
+    # operator-typed key collapses to. Pinned here as a positive because the behaviour
+    # that must not drift is the MASK: the release is narrower than that docstring
+    # implied, the docstring is corrected in the same commit, and a later round that
+    # widens the release needs this row to argue against (agent review R1-4). Assembled
+    # from its parts, like the rows above, so no literal in this SOURCE is a flag VALUE.
+    Case(
+        _secret_run("PROD"),
+        "the accepted over-mask: a ONE-WORD store name carries no separator to read",
+    ),
 )
 
 
@@ -1266,6 +1282,35 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         "--token " + "ABC_123_XYZ",
         "the accepted residual: an all-caps underscore token is read as a NAME",
+    ),
+    # --- 2026-09-23: the TWO-PART spelling of the same residual, which had no row ---
+    # ``--secret [redacted] is the flag's documented grammar, so BOTH halves are
+    # references and each is read by its env-name shape alone. The arm is therefore
+    # WIDER than the one-part release above, which does require an underscore, and the
+    # width is the grammar's rather than an accident: the left half is a store entry's
+    # name, and the store leaves a ONE-WORD key with no separator (``prod`` is an entry,
+    # ``normalize_credential_key`` and all), while the right half is the child's variable,
+    # whose conventional spelling has none either (``PGPASSWORD``). Two rows, because the
+    # two spellings behave DIFFERENTLY against the module this change replaced, and both
+    # readings are measured rather than argued:
+    #
+    #   * caps halves WITH separators are clean on both modules — pinned so the two-part
+    #     reading is a rule someone wrote down rather than a side effect of the halves
+    #     happening to look like names;
+    #   * caps halves with NO separator in either are MASKED at ``5e799c4c`` and released
+    #     here. That is the residual agent review R1-3 measured, and it had no row
+    #     anywhere: a differential found it rather than the corpus stating it. It is the
+    #     sharper of the two releases, which is why it is the row the finding asked for.
+    #
+    # Both released deliberately; the value side above (issuer tokens, padded base64,
+    # digit-carrying phrases) is what keeps the release narrow.
+    Case(
+        "--token " + "PROD" + "=" + "PGPASSWORD",
+        "a two-part argument with a separator in each half: read as references, as at base",
+    ),
+    Case(
+        "--token " + "ABCDEF" + "=" + "ABCDEF",
+        "no separator in EITHER half: masked at the base module, released by this change",
     ),
 )
 

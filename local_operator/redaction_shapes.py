@@ -1299,11 +1299,22 @@ _CLI_CREDENTIAL_FLAG_NAME = re.compile(r"(?i)^--" + _CREDENTIAL_FLAG_WORDS + r"$
 def _is_a_name_in_the_store_grammar(token: str) -> bool:
     """Whether ``token`` is spelled the way a stored secret's NAME is spelled.
 
-    Caps, digits and underscores, with at least one underscore. That is the spelling
-    :func:`local_operator.variables.normalize_credential_key` collapses every
-    operator-typed key to — ``github token``, ``github-token`` and ``GITHUB_TOKEN``
-    are one entry named ``GITHUB_TOKEN`` — and the spelling ``lop secret run`` exports
-    into a child's environment.
+    Caps, digits and underscores, with **at least one underscore**. That is the spelling
+    :func:`local_operator.variables.normalize_credential_key` collapses a MULTI-WORD
+    operator-typed key to — ``github token``, ``github-token`` and ``GITHUB_TOKEN`` are
+    one entry named ``GITHUB_TOKEN`` — and the spelling ``lop secret run`` exports into a
+    child's environment.
+
+    **A ONE-WORD store name is left masked, and that residual is stated rather than
+    implied** (agent review R1-4). ``normalize_credential_key("prod")`` is ``PROD``: one
+    word collapses to a single run of capitals, which is exactly the spelling the next
+    paragraph refuses, so ``lop secret run --secret prod`` is still masked and the
+    operator who names an entry with one word does not get the release this change is
+    for. ``PROD`` is pinned in the corpus as that residual, in the half that asserts the
+    MASK, so a later round narrowing or widening it has a row to argue against. Case
+    does not rescue it: a lower-case ``prod`` is refused for the separate reason below,
+    and admitting a bare run of capitals released the five real credential values in
+    this paragraph's next sentence.
 
     **The underscore is the measured floor, not a stylistic preference.** A single run
     of capitals is a credential someone chose, and agent review R1-1 measured that
@@ -1368,6 +1379,17 @@ def _value_is_a_reference_to_a_credential(value: str) -> bool:
     entry looks like and this arm cannot tell the two apart, so it is read as a NAME,
     released, and pinned as a corpus negative carrying that reason rather than left to a
     differential to discover.
+
+    **The two-part residual is WIDER than that one, and it is pinned too** (agent review
+    R1-3). Because the halves are read by the env-name shape ALONE, the two-part spelling
+    does not need a separator in either half: ``--token ABCDEF=ABCDEF`` was masked before
+    this change and is released by it, where the one-part ``--token ABCDEF`` is still
+    masked for want of an underscore. That asymmetry is the grammar rather than an
+    accident — the left half is a store entry's name, which need not carry a separator
+    (``prod`` is a legal entry), and the right half is the child's variable, which
+    conventionally does not (``PGPASSWORD``) — so it is stated and pinned as two corpus
+    negatives, one with a separator in each half and one with none, instead of being
+    narrowed into breaking ``--secret prod=PGPASSWORD``.
     """
     if _is_a_name_in_the_store_grammar(value):
         return True
@@ -2825,6 +2847,20 @@ def _present_heads(text: str, values: Sequence[str]) -> set[str]:
 #: from prose anywhere in the text (see :func:`_is_prose_after_a_flag`).
 _BARE_WORD = re.compile(r"[a-z]+")
 
+#: The LONGEST bare lowercase run in a flag's argument position that is still read as
+#: prose. Four, because that is the width of the two specimens the refusal was measured
+#: for (``when``, and the three-character word the suite pins) — and NO wider.
+#:
+#: It deliberately does not borrow :data:`_ASSIGNED_VALUE_MIN_CHARS` (eight), which it
+#: used to: that floor answers a different question (is a short value under a
+#: credential-shaped NAME a placeholder?), and borrowing it swallowed the escalation for
+#: every five-, six- and seven-character value printed a second time in the clear — the
+#: canonical short weak passwords, which is the case the survival question exists to
+#: catch (agent review R1-1). Measured: the 439-row corpus grades identically for every
+#: bound at or above four (four, five, six, seven, eight, eleven and fifteen were run),
+#: and differently only at three — so the wider bound bought nothing.
+_FLAG_PROSE_MAX_CHARS = 4
+
 
 def _is_prose_after_a_flag(hit: ShapeHit) -> bool:
     """Whether this hit is the flag rule's over-mask of an English word.
@@ -2855,24 +2891,34 @@ def _is_prose_after_a_flag(hit: ShapeHit) -> bool:
     direction (:data:`_VENDOR_TAIL_IS_A_NAME`: there the match is refused); keeping the
     mask and refusing the claim is the protective half of that trade.
 
-    **The class, and the length bound on it.** A bare run of lowercase letters, and
-    shorter than :data:`_ASSIGNED_VALUE_MIN_CHARS` — the module's own masked-value
-    floor, which already says of this shape "a short value under a credential-shaped
-    name is a placeholder or a word, not a credential". The bound is the same
-    judgement applied to the other end: the corpus pins three bare lowercase runs of
-    SIXTEEN characters as positives, and for a run that long the exposure question
-    keeps its power — a second copy of a sixteen-character token really is evidence
-    that this copy was not the only one. Nothing with a digit, a separator, a symbol
-    or any upper-case letter is this class at all.
+    **The class, and the length bound on it.** A bare run of lowercase letters, no
+    longer than :data:`_FLAG_PROSE_MAX_CHARS` (four). The bound is the width of the two
+    specimens this refusal was written for — the four-character ``when`` above, and the
+    three-character word the suite pins — not the module's own masked-value floor it
+    first borrowed. :data:`_ASSIGNED_VALUE_MIN_CHARS` (eight) answers a DIFFERENT
+    question: whether a short value under a credential-shaped NAME is a placeholder or a
+    word. Applied here it read a judgement nobody made, and cost the escalation for
+    every five-, six- and seven-character value — the canonical short weak passwords,
+    printed twice in the text the model reads, which is the case the survival question
+    exists to catch (agent review R1-1). Measured on the 439-row corpus: the grading is
+    identical for every bound at or above four, so the wider bound bought nothing.
+    Nothing with a digit, a separator, a symbol or any upper-case letter is this class at
+    all.
 
-    **The stated limit.** A word-shaped credential that really IS printed a second time
-    in the clear is graded contained, so it files no rotation demand — the price of not
-    manufacturing one for every English word, and it is pinned in the corpus rather than
-    left for a differential to find.
+    **The stated limit, narrowed to four characters.** A credential-shaped value of
+    three or four lowercase characters that really IS printed a second time in the clear
+    is still graded contained, so it files no rotation demand: at that width a word
+    cannot be told from a credential ANYWHERE in the text, which is the whole of the
+    refusal, and it is the price of not manufacturing a rotation demand for every English
+    word that recurs in ordinary prose. It is pinned on BOTH sides of the boundary — the
+    four-character ``when`` row in the corpus has to stay contained, and the five-, six-
+    and seven-character cases in
+    ``test_the_flag_prose_refusal_stops_at_four_characters`` have to escalate again —
+    rather than left for a differential to find.
     """
     return (
         hit.label == "cli-credential-flag"
-        and len(hit.value) < _ASSIGNED_VALUE_MIN_CHARS
+        and len(hit.value) <= _FLAG_PROSE_MAX_CHARS
         and _BARE_WORD.fullmatch(hit.value) is not None
     )
 
