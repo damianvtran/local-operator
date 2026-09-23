@@ -1257,11 +1257,13 @@ class DesktopSessionBridge:
         if self.remote is not remote or not self.read_attach_outran:
             return
         self.read_attach_outran = False
-        if remote.attaching:
-            # A RETAINED dial is still ``attaching``, which is exactly what the
-            # served frame already said; its own late rollover follows when (if)
-            # the owner answers, as it did before this change.
-            return
+        # PUBLISHED FOR A RETAINED DIAL TOO. The served frame may predate the
+        # attempt's CLASSIFICATION, not only its outcome: under load the
+        # registry read that decides ``owner-silent``/``owner-leaving`` runs in a
+        # worker thread that can outlast the grace, so the first frame carries
+        # the documented unclassified default (``no-runtime`` with
+        # ``attaching: true``). This frame is the correction; a retained dial's
+        # own late rollover still follows if the owner answers.
         self.publish_frontend_replace()
 
     async def _ensure_facade(self) -> AttachedSession:

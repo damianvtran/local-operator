@@ -120,6 +120,23 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "home").mkdir(parents=True, exist_ok=True)
 
 
+async def _classified(bridge: DesktopSessionBridge) -> None:
+    """Wait for the bridge's read attempt to CLASSIFY, on the event, not the clock.
+
+    The first frame no longer waits for the attempt (``READ_FIRST_FRAME_GRACE_S``),
+    so a test that asserts the classified token must wait for the thing that
+    produces it: the attempt's own task settling, or its dial being retained.
+    """
+    deadline = time.monotonic() + READ_ATTACH_BUDGET_S + DEADLOCK_GUARD_S
+    while time.monotonic() < deadline:
+        task = bridge.read_attach_task
+        remote = bridge.remote
+        if task is None or task.done() or (remote is not None and remote.attaching):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the read attempt never settled")
+
+
 async def _get(client: AsyncClient, url: str) -> tuple[int, float, dict[str, Any]]:
     started = time.monotonic()
     response = await client.get(url)
@@ -156,6 +173,7 @@ async def test_a_bridge_read_serves_a_silent_owner_cold_with_its_rows(
         elapsed = time.monotonic() - started
 
         assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"a read waited {elapsed:.2f}s"
+        await _classified(bridge)
         snapshot = await bridge.snapshot()
         assert snapshot["payload"]["cold"] is True
         assert snapshot["payload"]["cold_reason"] == "owner-silent"
@@ -184,6 +202,18 @@ async def test_the_read_routes_answer_200_for_a_silent_owner(
         assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"the snapshot waited {elapsed:.2f}s"
         payload = body["result"]["payload"]
         assert payload["cold"] is True
+        assert payload["attaching"] is True
+        # The first frame no longer waits for the attempt, so under load it can
+        # predate the CLASSIFICATION and carry the documented unclassified
+        # default; it may never claim a live owner or a runtime that is leaving.
+        assert payload["cold_reason"] in {"owner-silent", "no-runtime"}
+        # The attempt classifies within its own budget, and every later read
+        # (the retained dial is ``attaching``) names the live-but-silent owner.
+        deadline = time.monotonic() + READ_ATTACH_BUDGET_S + DEADLOCK_GUARD_S
+        while payload["cold_reason"] != "owner-silent" and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            _status, _elapsed, body = await _get(harness.client, base)
+            payload = body["result"]["payload"]
         assert payload["cold_reason"] == "owner-silent"
         assert payload["attaching"] is True
 
@@ -316,7 +346,8 @@ async def test_a_rollover_reaches_the_stream_after_a_late_sync(
                 while snapshot["type"] != "snapshot":
                     snapshot = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
                 frames.append(snapshot)
-                assert snapshot["payload"]["cold_reason"] == "owner-silent"
+                # Classified, or the documented unclassified default (see above).
+                assert snapshot["payload"]["cold_reason"] in {"owner-silent", "no-runtime"}
 
                 await owner.send_sync()
 
@@ -537,7 +568,15 @@ async def test_a_mute_owner_is_served_cold_by_the_route_inside_the_budget(
 
         assert status == 200, body
         assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"a mute owner cost the read {elapsed:.2f}s"
-        assert body["result"]["payload"]["cold_reason"] == "owner-silent"
+        # First frame: classified, or the documented unclassified default.
+        assert body["result"]["payload"]["cold_reason"] in {"owner-silent", "no-runtime"}
+        # Held across the attempt (a mounted stream does exactly this), the
+        # token is the honest one once the attempt has spent its budget.
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            if bridge.read_attach_task is not None:
+                await asyncio.wait_for(asyncio.shield(bridge.read_attach_task), DEADLOCK_GUARD_S)
+            snapshot = await bridge.snapshot()
+        assert snapshot["payload"]["cold_reason"] == "owner-silent"
         await owner.stop()
 
 
@@ -825,7 +864,7 @@ async def test_a_busy_owner_is_painted_cold_at_once_and_goes_live_behind_it(
                     frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
                 assert elapsed < 0.3, f"the first frame waited {elapsed:.2f}s"
                 assert frame["payload"]["cold"] is True
-                assert frame["payload"]["cold_reason"] == "owner-silent"
+                assert frame["payload"]["cold_reason"] in {"owner-silent", "no-runtime"}
                 assert frame["payload"]["attaching"] is True
                 # The cold page is FILLED, so first paint needs no /history.
                 assert len(frame["payload"]["history"]["entries"]) == 4
