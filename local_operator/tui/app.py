@@ -128,13 +128,15 @@ from local_operator.model.effort import (
     next_effort,
     resolve_effort_in,
 )
-from local_operator.providers.catalogue import picker_rows
 
-# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
-# it is reached through a lazy seam: this module already imports the session
-# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
-# objection that applies to a Textual WIDGET does not apply to the app.
-from local_operator.references import expand_references, scan_directory_report
+# NOT imported here: `providers.catalogue` (the model picker's shared ranking)
+# and `references` (the `@path` resolver). Both are reached only after the user
+# acts -- opening `/model`, typing `@`, submitting a message with a reference --
+# and together they were ~460 ms of this module's 1.8-2.8 s import, because
+# `providers.catalogue` pulls the whole provider layer (httpx) and `references`
+# pulls `tools.builtin`. Every `lop` launch paid that before first paint
+# (backend load report B-F10). They are imported at their call sites instead;
+# `tests/unit/test_import_graph.py` pins them off this module's import graph.
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -15048,6 +15050,14 @@ class OperatorApp(App[None]):
         ``Editor.DESTRUCTIVE_COMMANDS`` and the single ``alert`` row that fills
         the word — but the authority to delete is the submission carrying `yes`,
         not a keystroke on a row.
+
+        THE REMOVAL RUNS OFF THE UI THREAD (review round 2, R2-3). A confirmed
+        delete can now ASK a warm runtime to leave and wait up to
+        ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` for it, so calling it inline froze
+        the interface for ~2.4 s on a keypress — the one shape a delete must not
+        have. It goes through a worker exactly as the slash host below does
+        (``asyncio.to_thread``), which is also why the outcome handling lives in
+        here rather than after the dispatch: the notices are the caller's.
         """
         from local_operator.paths import config_dir
         from local_operator.session.cleanup import delete_session
@@ -15059,48 +15069,63 @@ class OperatorApp(App[None]):
             )
             return
         confirmed = arg.strip().casefold() == "yes"
-        outcome = delete_session(config_dir(), session_id, actor="tui", dry_run=not confirmed)
-        if not outcome.found:
-            # Reachable when the directory is already gone (another window
-            # deleted it, or the id came from a stopped session's record).
-            notice(f"{session_id} is not on disk — nothing to delete", "warning")
-            return
-        if outcome.refusal:
-            notice(outcome.refusal, "warning")
-            return
-        if not confirmed:
-            # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on the
-            # outcome, so this host, the attached/slash host below and the
-            # detached runtime cannot drift apart on the wording of a
-            # confirmation for an irreversible act. The target is named the way
-            # the lists name it (design round 1, D2) for the same reason.
-            notice(outcome.rehearsal(), "warning")
-            return
-        # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the session
-        # it was standing in no longer exists, so leaving the user on it strands
-        # them on a dead conversation. It runs only AFTER the removal is
-        # confirmed, so a refused or rehearsed delete never moves them off their
-        # work.
-        #
-        # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
-        # ledger from the session that boots — an empty screen for a fresh
-        # conversation — so a notice written before it is erased with the
-        # outgoing one. ``_pending_fork_outcome`` is that mechanism (the fork's
-        # own receipts publish through it for the same reason), and it is used
-        # directly rather than re-spelled. A host that cannot start a new
-        # session at all never runs the transition, so there is no reset for the
-        # notice to survive and it is emitted directly after the refusal it
-        # accompanies.
-        if self._resume_factory is not None:
-            kept_clause = (
-                f"; {outcome.children} subagent run(s) it started were kept"
-                if outcome.children
-                else ""
-            )
-            self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
-        else:
-            notice(f"deleted {session_id}", "info")
-        self._cmd_new(notice)
+
+        async def delete() -> None:
+            try:
+                outcome = await asyncio.to_thread(
+                    delete_session, config_dir(), session_id, actor="tui", dry_run=not confirmed
+                )
+            except Exception:
+                # A DELETED COMMAND MUST NOT TAKE THE APP DOWN, and a silent one
+                # must not let the user believe it happened: the worker is
+                # dispatched with ``exit_on_error=False`` and this is the notice
+                # that stands in for the receipt.
+                logger.debug("delete failed", exc_info=True)
+                notice("that conversation could not be deleted", "warning")
+                return
+            if not outcome.found:
+                # Reachable when the directory is already gone (another window
+                # deleted it, or the id came from a stopped session's record).
+                notice(f"{session_id} is not on disk — nothing to delete", "warning")
+                return
+            if outcome.refusal:
+                notice(outcome.refusal, "warning")
+                return
+            if not confirmed:
+                # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on
+                # the outcome, so this host, the attached/slash host below and
+                # the detached runtime cannot drift apart on the wording of a
+                # confirmation for an irreversible act. The target is named the
+                # way the lists name it (design round 1, D2) for the same reason.
+                notice(outcome.rehearsal(), "warning")
+                return
+            # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the
+            # session it was standing in no longer exists, so leaving the user on
+            # it strands them on a dead conversation. It runs only AFTER the
+            # removal is confirmed, so a refused or rehearsed delete never moves
+            # them off their work.
+            #
+            # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
+            # ledger from the session that boots — an empty screen for a fresh
+            # conversation — so a notice written before it is erased with the
+            # outgoing one. ``_pending_fork_outcome`` is that mechanism (the
+            # fork's own receipts publish through it for the same reason), and it
+            # is used directly rather than re-spelled. A host that cannot start a
+            # new session at all never runs the transition, so there is no reset
+            # for the notice to survive and it is emitted directly after the
+            # refusal it accompanies.
+            if self._resume_factory is not None:
+                kept_clause = (
+                    f"; {outcome.children} subagent run(s) it started were kept"
+                    if outcome.children
+                    else ""
+                )
+                self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
+            else:
+                notice(f"deleted {session_id}", "info")
+            self._cmd_new(notice)
+
+        self.run_worker(delete(), group="session-delete", exit_on_error=False)
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -17880,6 +17905,40 @@ class OperatorApp(App[None]):
             self.run_worker(self._open_link(target, notice), group="open-link")
 
         self.push_screen(LinkPickerScreen(targets), _open_choice)
+
+    def open_transcript_link(self, url: str) -> None:
+        """Open a URL the user CLICKED in the transcript.
+
+        The click route's entry point, called by
+        :meth:`~local_operator.tui.widgets.transcript.TranscriptBlock.on_click`
+        once it has resolved which URL the pointer was over. The block is
+        deliberately left knowing nothing about schemes or browsers: it reports
+        a cell's link, and everything that decides whether a string may reach a
+        browser lives here, beside ``/links``.
+
+        It funnels into the SAME :meth:`_open_link` the picker uses, so the two
+        routes cannot drift — one guard, one opener, one receipt. That is the
+        property that makes the scheme check honest: a second opener spelled
+        out here would be a second place to forget it.
+
+        A worker rather than an await for :meth:`_open_link`'s own reason: the
+        launcher waits on a child process, and this is called from inside
+        Textual's event dispatch, which must not block on one.
+
+        ``LinkTarget`` is constructed rather than looked up. Its ``sender`` and
+        ``rank`` describe a ROW IN THE PICKER — which message a URL came from,
+        so two same-host links can be told apart — and a click has already
+        answered that question by pointing at one. The fields are filled with
+        what is true of this route rather than left to imply a provenance
+        nobody read.
+        """
+        source = self._interaction
+
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        target = LinkTarget(url=url, sender="agent", rank=0)
+        self.run_worker(self._open_link(target, notice), group="open-link")
 
     async def _open_link(self, target: LinkTarget, notice: NoticeFn) -> None:
         """Hand ONE url to the browser, and say what happened.
@@ -33648,6 +33707,8 @@ class OperatorApp(App[None]):
         # order and cannot import a textual widget to get it. Everything below
         # this call is session-shaped and stays here: a daemon has no sticky
         # serving spec and no runtime catalogue to merge.
+        from local_operator.providers.catalogue import picker_rows
+
         rows, _hidden = picker_rows(
             entries,
             usable=usable,
@@ -36420,6 +36481,8 @@ class OperatorApp(App[None]):
         """
         message.stop()
         picker = self._editor().picker
+        from local_operator.references import scan_directory_report
+
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         if not choices:
             picker.set_choices([])
@@ -38554,7 +38617,7 @@ class OperatorApp(App[None]):
         # user picks between them. 67 composed cells against the 74 ceiling.
         lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
-        lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
+        lines.append(_key_row("ctrl/cmd+d", "empty: quit; draft: delete forward"))
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
@@ -38735,6 +38798,8 @@ class OperatorApp(App[None]):
         async def _decline(tool_name: str, description: str) -> bool:
             """Refuse without asking — see the chain above for why."""
             return False
+
+        from local_operator.references import expand_references
 
         result = await expand_references(text, self.session_cwd(), request_approval=_decline)
         for notice in result.notices:

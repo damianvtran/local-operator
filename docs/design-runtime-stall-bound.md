@@ -116,11 +116,59 @@ freezes actually suffered (1.5-7.2 h, four of five with zero writes). A single
 synchronous step that holds the GIL for five unbroken minutes is not slow work.
 `LOP_RUNTIME_STALL_SECONDS` overrides it; `0` disables it.
 
+**The bound during BOOT: 900 s, and 300 s starts at engagement.** The steady
+bound is measured from the last sign of life, so it can only be honest once a loop
+can write one. `arm` runs from the `__main__` guard before `main()` and seeds both
+planes to that instant; the workload beat starts after publication and sleeps a
+heartbeat before its first stamp, and the serving beat starts with its serving
+thread. Thus the boot path has no clock that can re-arm the timer, and the earliest
+deadline is `arm + boot_bound`. Across 68 retained dumps on the build carrying the
+observation header, 17 fired and 10 carried the full five-minute value, an upper
+bound on the never-engaged class because a failed timer replacement can leave the
+original value in force.
+
+`DEFAULT_BOOT_STALL_S` (overridden by `LOP_RUNTIME_BOOT_STALL_SECONDS`) is the
+separate boot bound; `0`/`off` means no boot phase. At the publication boundary in
+`process.amain`, where `_live_handle` is set, `stall_watchdog.engage()` moves the
+bound down to the steady value and stamps both planes. The steady deadline is
+therefore measured from engagement, not process start. Engagement never widens
+the bound. A failed replacement is recorded as
+`[stall watchdog] re-arm failed: the engage could not re-arm the timer`; in that
+case the original boot timer may still fire even though the in-memory bound has
+moved to steady. A missing deadline sibling identifies a never-engaged runtime
+only when no re-arm-failed marker is present.
+
+`engage()` relies on its early return for idempotence: a second call while already
+at steady is a no-op. Without that guard, it re-stamps both planes and can push a
+pending fire out by a whole fresh steady bound. This delays evidence after a real
+participant goes silent; it does not make a fire early.
+
+**A hung boot is dumped and survives the bound.** The dump attributes the fire to
+the boot deadline when the evidence permits that reading; it does not authorize a
+process exit. A pre-publication `_busy_probe` sample may be recorded as held, but
+that is diagnostic metadata only: the native timer always uses `exit=False`,
+regardless of the sample or whether a busy probe exists. A boot that never
+publishes can still leave an unpublished process behind; its own construction
+failure may end it, while `lop stop` cannot resolve an absent session record. An
+operator can signal the pid named in the dump. Do not mistake watchdog expiry for
+a recovery mechanism.
+
+**Still open in that window, and NOT closed here.** A tick that returns early
+without raising is not re-created by `_watch_stall_beats`, whose restart handles
+exceptions only. Shutdown has the same unreported-plane shape. Both remain open:
+dump 24646 (19 threads, main idle in `select`, no `tick died:` line) and dump
+75019 (mid-shutdown) need their own fixes—a restart on early return and a shutdown
+state the bound recognizes. The watchdog does not solve either issue.
+
 **Why native termination is disabled.** The C callback cannot participate in
 work admission, so it cannot safely decide that an apparently idle runtime may be
 terminated. Diagnostic expiry therefore leaves the process alive; a runtime that
 stays wedged needs operator inspection and an explicit stop. Cooperative update
 retirement remains a separate work-aware path.
+
+The boot and steady bounds are pinned by `tests/unit/session/runtime/test_runtime_stall_watchdog.py`.
+The boot bound provides attribution and diagnostic evidence; neither it nor the
+steady bound retires a runtime.
 
 **Production expiry is dump-only.** The previous implementation used
 `exit=not held` to let the native timer terminate a runtime after a Python sample

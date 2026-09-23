@@ -8,7 +8,8 @@ submit-on-Enter. The subclass inverts that and takes the terminal key idioms:
 - ``Shift+Enter`` inserts a newline
 - ``Ctrl+C`` copies a live range (posts :class:`EditorCopied`); with no range
   it posts :class:`InterruptRequested` (abort the turn) — never exits
-- ``Ctrl+D`` on an EMPTY buffer quits; otherwise it falls through to delete
+- ``Ctrl+D`` or ``Cmd+D`` on an EMPTY buffer quits; on a non-empty
+  buffer either chord deletes forward
 - ``Up``/``Down`` move the picker's highlight while it is open; otherwise they
   cycle prompt history when the caret sits at the top/bottom edge of the
   buffer, and inside the text they keep their cursor-move meaning
@@ -144,7 +145,6 @@ from local_operator.clipboard import (
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
-from local_operator.references import at_references_enabled, reference_resolves
 from local_operator.sigils import at_token, at_token_spans, split_token
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
@@ -1574,7 +1574,7 @@ class ShellModeChanged(Message):
 
 
 class EditorQuit(Message):
-    """Posted on Ctrl+D with an empty buffer."""
+    """Posted on Ctrl+D or Cmd+D with an empty buffer."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1902,6 +1902,10 @@ class Editor(TextArea):
     #: disjoint, so this action and the terminal's own paste can never both
     #: run for one press.
     #:
+    #: Cmd+D joins Ctrl+D's native forward-delete binding for non-empty drafts.
+    #: The empty-buffer quit is consumed by ``_on_key`` first; leaving the
+    #: Textual binding in place here keeps both meanings on one dispatch path.
+    #:
     #: Do NOT recommend ``performable:super+v=paste_from_clipboard`` to make
     #: this more reliable: measured, that prefix makes the image-only case
     #: deliver ZERO bytes, i.e. strictly worse. The default binding already
@@ -1917,6 +1921,7 @@ class Editor(TextArea):
         Binding("alt+b", "cursor_word_left", "Cursor word left", show=False),
         Binding("alt+f", "cursor_word_right", "Cursor word right", show=False),
         Binding("ctrl+v,super+v", "system_paste", "Paste from the system clipboard", show=False),
+        Binding("super+d", "delete_right", "Delete character right", show=False),
         # The inverse of the collapse: put a collapsed paste's text back in the
         # buffer. This is the whole reason the feature ships with no setting -
         # "I wanted that paste raw" is a per-PASTE want, not a per-user one, and
@@ -3654,7 +3659,10 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
-        if key == "ctrl+d" and not self.text:
+        # Textual names the macOS Command modifier ``super``. On an empty buffer
+        # consume either quit chord here; for draft text let TextArea's matching
+        # forward-delete bindings handle Ctrl+D and Cmd+D without quitting.
+        if key in ("ctrl+d", "super+d") and not self.text:
             self.post_message(EditorQuit())
             event.stop()
             event.prevent_default()
@@ -4713,6 +4721,15 @@ class Editor(TextArea):
         blocks a path that does exist. The ink is a hint about what the resolver
         will do; the resolver's own verdict, not the hint, decides what is sent.
         """
+        if "@" not in self.text:
+            # No token can resolve in a draft without an `@`, whatever the kill
+            # switch says -- and answering that here is what keeps
+            # `local_operator.references` (which drags `tools.builtin` in, ~260 ms)
+            # off the first paint: `render_line` reaches this on every frame,
+            # including the empty composer at boot (backend load report B-F10).
+            return {}
+        from local_operator.references import at_references_enabled, reference_resolves
+
         cwd = self._reference_cwd()
         enabled = at_references_enabled()
         key: tuple[object, ...] = (self.text, cwd, enabled)

@@ -1787,7 +1787,7 @@ async def _construct_child_session(
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
-    from local_operator.tools.registry import create_tools
+    from local_operator.tools.registry import DEFAULT_TOOL_NAMES, create_tools
 
     # A resumed child is built on the STOPPED child's directory, and that is
     # the whole of the resume mechanism: ``Transcript.__init__`` reads the
@@ -1942,7 +1942,34 @@ async def _construct_child_session(
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
         web_fetch_settings=ConfigManager(config_dir()).get_config_value("web_fetch", None),
     )
-    tools = create_tools(tool_context)
+    # ``restricted`` also carries a sticky MCP-activation denial inherited by
+    # plain descendants; that is not a role allowlist and must not shrink their
+    # ordinary builtin inventory. Keep tool construction keyed to actual role
+    # policy (plus scout's explicit read-only fallback), not the MCP boundary.
+    role_limited = (profile is not None and bool(profile.tools)) or agent == "scout"
+    if role_limited:
+        # The prior full-inventory-then-filter path exposed tools in registry
+        # order; select that same order up front so createIf builders run only
+        # for schemas this role can receive. Match the old filter's order:
+        # allowlisted tools in registry order, then omitted network-floor tools
+        # in registry order, then the child-only hub capability. Keeping the
+        # floor appended matters for profiles that explicitly list one network
+        # tool but not the other; moving it ahead of the allowlist changes the
+        # provider-visible order even though the capability set is unchanged.
+        allowed_names = set(profile.tools or ()) if profile is not None else set()
+        if agent == "scout" and (profile is None or not profile.tools):
+            allowed_names.update(SCOUT_TOOL_ALLOWLIST)
+        builtin_names = [name for name in DEFAULT_TOOL_NAMES if name in allowed_names]
+        for name in DEFAULT_TOOL_NAMES:
+            if name in READ_ONLY_NETWORK_TOOLS and name not in builtin_names:
+                builtin_names.append(name)
+        if "hub" not in builtin_names:
+            builtin_names.append("hub")
+        tools = create_tools(tool_context, enabled=builtin_names)
+    else:
+        # Unrestricted/freeform children retain the full default inventory,
+        # even when sticky MCP denial is inherited from a restricted ancestor.
+        tools = create_tools(tool_context)
     # A role's tool allowlist is a capability boundary, not advice: a reviewer
     # that cannot call ``edit`` cannot "helpfully" fix what it was asked to
     # review and thereby end up reviewing its own patch. ``restricted`` itself

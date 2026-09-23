@@ -1895,9 +1895,14 @@ should be read with.
   is true of a store update, it cannot silently widen what the installed extension may
   do; the grant is requested by `chrome.permissions.request` from the options page, on
   the click that turns **Allow downloads** on, and turning the switch off hands the grant
-  back (`chrome.permissions.remove`). Verified on the built artifact: `dist/manifest.json`
-  has `version 0.1.19`, the same eight install-time permissions as 0.1.18, and `downloads`
-  under `optional_permissions`.
+  back (`chrome.permissions.remove`). **Verified at the time on the built artifact of the
+  `0.1.19` tree; no longer reproducible from this tree.** `dist/manifest.json` then read
+  `version 0.1.19`, the same eight install-time permissions as 0.1.18, and `downloads`
+  under `optional_permissions`. `main` now builds `0.1.20`, so a reader following that
+  instruction reproduces `0.1.20` and not the reading below it; the observation is kept as
+  what was checked then rather than deleted. The facts it establishes are unchanged at
+  `0.1.20`: the same eight install-time permissions, with `downloads` still the only
+  `optional_permissions` entry.
 - **Allow uploads** is the same switch for the direction that needs no permission at all
   (it rides the `debugger` grant). Its switch is the only control that direction has.
 - **The stored flag is not the truth.** The effective answer is `flag AND permission`,

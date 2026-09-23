@@ -2936,6 +2936,128 @@ async def test_ctrl_l_clears_and_resets() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["ctrl+d", "super+d"])
+async def test_quit_keys_join_attached_recovery_during_app_shutdown(
+    key: str, monkeypatch, tmp_path
+) -> None:
+    """The real empty-composer quit disposes an attached session before loop teardown."""
+    import local_operator.session.attached as attached_module
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    monkeypatch.setattr(attached_module, "find_runtime_record", lambda *args: (None, None))
+    monkeypatch.setattr(attached_module, "_RECOVERY_DIAL_CAP_S", 60.0)
+    monkeypatch.setattr(attached_module, "COLD_FALLBACK_S", 60.0)
+    retry_sleep_entered = asyncio.Event()
+    real_sleep = asyncio.sleep
+    recovery: asyncio.Task[None] | None = None
+
+    async def observe_recovery_sleep(delay: float) -> None:
+        # Signal only for this recovery worker: Textual and the pilot also use
+        # asyncio.sleep, but they are not evidence that the retry loop is parked.
+        if asyncio.current_task() is recovery:
+            retry_sleep_entered.set()
+        await real_sleep(delay)
+
+    monkeypatch.setattr(attached_module.asyncio, "sleep", observe_recovery_sleep)
+
+    async def no_takeover():
+        raise attached_module.SessionLeaseHeldError(tmp_path / "s1", 123)
+
+    session = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=no_takeover,
+        surface="desktop",
+    )
+    model = FrontendModelSpec(provider="test", model_id="model")
+    session._frontend_store = FrontendStateStore(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="test",
+            selected_model=model,
+            effective_model=model,
+        )
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    dispose = session.dispose
+
+    async def assert_recovery_joined() -> None:
+        await dispose()
+        # Assert at the disposal boundary: a later pilot yield could let a mere
+        # cancel finish and hide the missing join from this regression test.
+        assert recovery is not None and recovery.done()
+
+    monkeypatch.setattr(session, "dispose", assert_recovery_joined)
+
+    async def no_retirement(session_arg) -> None:
+        del session_arg
+
+    monkeypatch.setattr(app, "_retire_unused_runtime", no_retirement)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._session = session
+        # Exercise the real disconnect callback, recovery loop and retry sleep;
+        # the attached facade remains the app's session throughout this test.
+        session._on_disconnected("owner exited")
+        recovery = session._recovery_task
+        assert recovery is not None
+        await asyncio.wait_for(retry_sleep_entered.wait(), timeout=2)
+        # Hold the failed retry in its real pacing point until dispose cancels
+        # it; this proves shutdown joins the parked worker rather than racing it.
+        assert not recovery.done()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press(key)
+        await pilot.pause()
+        assert not app.is_running
+
+    assert recovery.done()
+    assert recovery.cancelled()
+    assert session._disposed
+
+
+@pytest.mark.asyncio
+async def test_empty_composer_accepts_textual_super_d_event() -> None:
+    """A delivered kitty-protocol Cmd+D chord follows the graceful exit route."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        await pilot.press("super+d")
+        await pilot.pause()
+
+        assert not app.is_running
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["ctrl+d", "super+d"])
+async def test_forward_delete_keys_in_nonempty_composer_do_not_quit(key: str) -> None:
+    """Ctrl+D and Cmd+D delete forward without exiting on a non-empty draft."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.load_text("draft")
+        editor.cursor_location = (0, 0)
+        await pilot.pause()
+
+        await pilot.press(key)
+
+        assert app.is_running
+        assert editor.text == "raft"
+
+
+@pytest.mark.asyncio
 async def test_session_disposed_on_exit() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
@@ -9043,13 +9165,15 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
         ("!", "shell command"),
         ("option+left/right", "by word"),
         ("shift+tab", "reasoning effort"),
-        ("ctrl+d", "empty composer"),
+        ("ctrl/cmd+d", "empty: quit; draft: delete forward"),
     ):
         row = next(
             (row for row in painted if row.strip().startswith(f"{key} ")),
             None,
         )
         assert row is not None, f"the {key} row is missing from /help"
+        if key == "ctrl/cmd+d":
+            assert "empty: quit" in row and "draft: delete forward" in row, row
         assert tail in row, (
             f"the {key} help row wrapped at 80 columns: {row.strip()!r} does not "
             f"carry {tail!r}, so the tail hangs at column 0 in the KEY gutter "
@@ -11870,7 +11994,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+pageup",
             "ctrl+r",
             "esc",
-            "ctrl+d",
+            "ctrl/cmd+d",
         )
         # Matched against the KEY GUTTER, not against the whole help text. A
         # substring test over everything passes on a mention anywhere: the
@@ -11901,7 +12025,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+pageup",
             "ctrl+r",
             "esc",
-            "ctrl+d",
+            "ctrl/cmd+d",
         )
         keyed: list[str] = []
         capturing = False
