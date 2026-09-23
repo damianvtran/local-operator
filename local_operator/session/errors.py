@@ -409,6 +409,44 @@ class ProfileRegistryUnavailable(ValueError):
         )
 
 
+class AsideUnanswered(ValueError):
+    """An off-the-record aside produced a tool call instead of an answer, twice.
+
+    The typed home for a failure the shared primitive
+    (:meth:`Session.complete_aside`) used to swallow: a bare second tool call
+    returned ``""``, which surfaced in the UI as a provider fault rather than as
+    the thing that actually happened. An aside carries no tools it may run, so a
+    model that answers with a call and then repeats that answer has produced no
+    answer at all, and saying so is the honest outcome.
+
+    A ``ValueError`` because that is what :func:`admission_error` decodes and
+    what the desktop route ladder's named-refusal arm catches — the same shape
+    :class:`AttachmentUnavailable` and :class:`ProfileRegistryUnavailable` use,
+    so this rides the existing 409 ``{"code", "message"}`` body rather than
+    falling through to a bare 500.
+
+    The sentence is built HERE rather than crossing the wire, for the reason the
+    module docstring gives: the far side rebuilds it from :data:`code`, so no
+    owner prose — and no provider body — is ever rendered as an operator-facing
+    sentence. What a caller should DO is ask again: the retry inside the aside
+    is already spent, and a second attempt is the only remaining remedy.
+
+    The goal-loop judge reaches this through the same primitive, and a raise is
+    CORRECT there: ``GoalLoop.run`` counts an exception as a judge failure
+    (``MAX_LOOP_JUDGE_FAILURES``, ``session/goal_loop.py``), which is the right
+    verdict for a judge that cannot answer in text.
+    """
+
+    code = "aside_unanswered"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The model answered your aside with a tool call instead of text, both "
+            "times it was asked. Tool calls are not available off the record, so "
+            "no answer was produced — ask again."
+        )
+
+
 class MoveIndeterminate(Exception):
     """A move whose owner outcome is UNKNOWN, so nothing may be rolled back.
 
@@ -586,4 +624,9 @@ def admission_error(
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None
         return ProfileRegistryUnavailable(count=count)
+    if code == AsideUnanswered.code:
+        # No payload: the sentence is a constant, and there is nothing about the
+        # provider's answer this side wants on the wire (it can quote the
+        # conversation or a tool name the model invented).
+        return AsideUnanswered()
     return None

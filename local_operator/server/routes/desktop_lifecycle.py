@@ -500,7 +500,14 @@ async def aside(session_id: str, body: AsideInput, request: Request):
             values[body.request_id] = entry
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
-            answer = await bridge.remote.complete_aside(turns)
+            answer = await bridge.remote.complete_aside(
+                turns,
+                on_delta=lambda delta: bridge.publish(
+                    "aside_delta",
+                    {"aside_id": body.request_id, "delta": delta},
+                    replay=False,
+                ),
+            )
             turns.append(Message.assistant(answer))
             return reply(
                 {"data": {"aside_id": body.request_id, "text": answer, "off_record": True}}

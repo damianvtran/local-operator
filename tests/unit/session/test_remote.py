@@ -181,6 +181,16 @@ async def test_multi_question_ask_advances_same_request_across_two_followers(
 async def test_remote_aside_runs_on_owner_without_joining_transcript(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """The FALLBACK: an owner that streams nothing is delivered in one piece.
+
+    ``FakeHandle.complete_aside`` takes ``turns`` alone — the shape of an owner
+    built before the delta channel existed — so the client's per-request sink
+    receives no chunk and ``AttachedSession.complete_aside`` feeds the settled
+    answer through the caller's callback once at the end. That single post-hoc
+    call is what keeps the behaviour against an old owner unchanged, and it
+    fires ONLY here: the streaming test below pins the other half (a streaming
+    owner is never charged twice).
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
     handle = FakeHandle()
@@ -200,6 +210,68 @@ async def test_remote_aside_runs_on_owner_without_joining_transcript(
         assert answer == "aside answer"
         assert deltas == ["aside answer"]
         assert handle.calls[-1][0] == "complete_aside"
+        assert remote.history() == []
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_aside_streams_the_owners_chunks_before_the_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The stream half: each ``aside_delta`` reaches the caller as it arrives.
+
+    THE HANDLE HOPS TO ANOTHER THREAD, which is not decoration — every handle
+    this seam serves (``ServingSessionHandle``, ``TuiSessionHandle``) runs the
+    primitive on the session's loop and not on the runtime's, and that is what
+    orders the chunks ahead of the receipt (the receipt's own hop is one step
+    later than the enqueues). An inline handle is not a production shape, so a
+    test built on one would be pinning an ordering no deployment has.
+
+    The ORDER is asserted, not merely the delivery: a caller that receives the
+    answer first has its sink deregistered by then and would drop the chunks —
+    exactly the failure a renderer shows as "nothing streamed".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    class StreamingAsideHandle(FakeHandle):
+        """An owner that streams two chunks from the session-loop thread."""
+
+        async def complete_aside(self, turns, *, on_delta=None) -> str:  # noqa: ANN001, ANN202
+            self.calls.append(("complete_aside", (turns,), {}))
+
+            def worker() -> None:
+                if on_delta is not None:
+                    on_delta("part one. ")
+                    on_delta("part two.")
+
+            await asyncio.to_thread(worker)
+            return "part one. part two."
+
+    observed: list[tuple[str, str]] = []
+    handle = StreamingAsideHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await AttachedSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        answer = await remote.complete_aside(
+            [Message.user("Why this approach?")],
+            on_delta=lambda chunk: observed.append(("delta", chunk)),
+        )
+        observed.append(("answer", answer))
+
+        assert observed == [
+            ("delta", "part one. "),
+            ("delta", "part two."),
+            ("answer", "part one. part two."),
+        ]
         assert remote.history() == []
     finally:
         if remote is not None:

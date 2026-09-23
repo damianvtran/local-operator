@@ -4323,7 +4323,12 @@ class ServingSessionHandle(SessionHandle):
         return result
 
     @_on_session_loop
-    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+    async def complete_aside(
+        self,
+        turns: list[dict[str, Any]],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
         """Run an off-record provider request against this session.
 
         The aside seam: a viewer asks a question that must NOT enter the
@@ -4332,22 +4337,46 @@ class ServingSessionHandle(SessionHandle):
         needs the real model, credentials and context — which is why it
         cannot be answered viewer-side.
 
+        THIS IS THE REMOTE SEAM'S INSTRUCTION SITE, and that is a placement,
+        not an implementation detail: :func:`wrap_aside_turns` wraps the last
+        user turn here because every remote caller reaches the primitive
+        through a handle like this one. It used to be applied by the TUI alone,
+        so the desktop ``/asides`` route sent the model the user's raw question
+        with no instruction that it was off the record and no instruction not
+        to call a tool — which is why tool calls appeared on that surface.
+        :meth:`Session.complete_aside` deliberately stays bare: its in-process
+        callers supply their own instruction, and the goal-loop judge (which
+        calls it with ``LOOP_JUDGE_PROMPT``) must never receive an aside wrap.
+        The stored/returned aside turns stay RAW — only the provider request
+        carries the wrapper, so the user never sees ``<aside>`` XML.
+
+        ``on_delta`` forwards each streamed text chunk to the caller that asked
+        for it, as it arrives. OPTIONAL, and probed by signature against the
+        primitive: an older/reduced session without the parameter is answered in
+        one settled piece exactly as before. The ``on_usage`` accrual below is
+        NOT optional and must keep riding every call — it is what stops a hidden
+        way of spending tokens for free (a remote aside, the goal judge) from
+        costing zero.
+
         Found by the post-U9 migration audit rather than by a review: without
         it every aside answered "this owner cannot run off-record requests".
         """
         from local_operator.harness.types import Message
+        from local_operator.session.aside import wrap_aside_turns
 
-        messages = [Message.model_validate(turn) for turn in turns]
+        messages = wrap_aside_turns([Message.model_validate(turn) for turn in turns])
         complete = self._session.complete_aside
         store = getattr(self._session, "_frontend_state_store", None)
-        if store is not None and "on_usage" in inspect.signature(complete).parameters:
+        forwards = inspect.signature(complete).parameters
+        fields: dict[str, Any] = {}
+        if on_delta is not None and "on_delta" in forwards:
+            fields["on_delta"] = on_delta
+        if store is not None and "on_usage" in forwards:
             # A remote caller receives text, not a billable usage callback. The
             # authoritative owner must charge the request here; otherwise a
             # hidden goal judge (and other remote asides) silently costs zero.
-            return await complete(
-                messages, on_usage=lambda usage: store.accrue_usage(self._session, usage)
-            )
-        return await complete(messages)
+            fields["on_usage"] = lambda usage: store.accrue_usage(self._session, usage)
+        return await complete(messages, **fields)
 
     @_on_session_loop
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:

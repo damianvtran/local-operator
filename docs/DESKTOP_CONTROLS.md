@@ -250,9 +250,17 @@ the one the desktop client reads): nothing is rolled back, the
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
 - `POST /asides`: request_id, text, optional previous aside_id. Completion runs
-  on the runtime but does not enter conversation history. GET `/asides/{aside_id}`
-  recovers a response after HTTP loss; DELETE closes a settled panel. A continuation
-  temporarily owns its prefix so two panels cannot adopt it twice.
+  on the runtime but does not enter conversation history. The model is told the
+  request is off the record and that tools are unavailable; an aside answered by a
+  bare tool call is retried ONCE with the call handed back to the model as an
+  error, and a second such answer returns **409** `aside_unanswered` rather than
+  an empty string. The answer is also streamed to the caller as live-only
+  `aside_delta` frames on the session's events stream (`{"aside_id", "delta"}`,
+  `replay: false` — never replayed, and never entering the transcript); those
+  frames are PROGRESS, and the POST response's `text` stays authoritative. GET
+  `/asides/{aside_id}` recovers a response after HTTP loss; DELETE closes a settled
+  panel. A continuation temporarily owns its prefix so two panels cannot adopt it
+  twice.
 - `POST /asides/{aside_id}/adopt`: request_id and confirmed=true. Runtime adoption
   enforces its idle guard and durable-first ordering. A latch before any await
   prevents distinct request IDs from duplicating adoption. An ambiguous failure

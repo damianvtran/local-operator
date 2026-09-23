@@ -15,6 +15,7 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     ChatRequest,
+    ImageContent,
     Message,
     ModelSpec,
     StreamEndEvent,
@@ -27,6 +28,8 @@ from local_operator.harness.types import (
     ToolResult,
     Usage,
 )
+from local_operator.session.aside import ASIDE_PROMPT, wrap_aside_turns
+from local_operator.session.errors import AsideUnanswered
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 
@@ -245,6 +248,12 @@ async def test_complete_aside_retries_a_bare_tool_call_without_tools(tmp_path) -
     front of it), so it must be BOUNDED to this case: exactly one extra
     request, never a loop. Both requests' usage is reported, because both were
     paid for. Nothing executes and nothing joins the history either way.
+
+    The retry is also a CORRECTION, not a silent repeat: the model's own call
+    rides the message list, verbatim, followed by one error result per call id
+    saying the call was not run. That pairing is load-bearing — an assistant
+    turn carrying ``tool_calls`` with no matching result for every id is a 400
+    on every provider wire — so it is pinned here field by field.
     """
     tools = [_tool("bash"), _tool("read")]
     stream = RecordingStream(
@@ -273,8 +282,18 @@ async def test_complete_aside_retries_a_bare_tool_call_without_tools(tmp_path) -
     first, retry = stream.requests
     assert first.tools == session._context.tools and first.tool_choice == "none"
     assert retry.tools == [] and retry.tool_choice == "none"
-    # The retry is the same request minus the tools: same history, same system.
-    assert [m.text for m in retry.messages] == [m.text for m in first.messages]
+    # The retry is the same request plus the correction at its tail.
+    assert retry.messages[:-2] == first.messages
+    call, refusal = retry.messages[-2:]
+    assert call.role == "assistant" and call.content == []
+    assert [(c.id, c.name, c.arguments) for c in call.tool_calls] == [
+        ("call_1", "read", {"path": "x"})
+    ]
+    # Verbatim means verbatim: the raw JSON string the provider streamed.
+    assert call.tool_calls[0].raw_arguments == '{"path": "x"}'
+    assert refusal.role == "tool"
+    assert (refusal.tool_call_id, refusal.tool_name) == ("call_1", "read")
+    assert "not available" in refusal.text
     assert retry.system_blocks == first.system_blocks
     assert [u.input_tokens for u in seen] == [1000, 1100]
     assert session._context.messages == before
@@ -284,15 +303,101 @@ async def test_complete_aside_retries_a_bare_tool_call_without_tools(tmp_path) -
 
 @pytest.mark.asyncio
 async def test_complete_aside_retry_is_bounded_to_one(tmp_path) -> None:
-    """A second bare tool call is NOT retried again: the answer is empty and
-    the caller sees it, rather than an unbounded loop off the cache prefix."""
+    """A second bare tool call is NOT retried again: it RAISES.
+
+    The old contract returned ``""``, which the card renders as an unexplained
+    blank — indistinguishable from a provider fault, and with nothing the user
+    could act on. What actually happened is that the model would not answer in
+    text even after being told its call was rejected, so the aside is
+    UNANSWERED and says so (``AsideUnanswered``).
+
+    The goal-loop judge shares this primitive and counts the raise as a judge
+    failure (``MAX_LOOP_JUDGE_FAILURES``) — the right verdict for a judge that
+    cannot answer in text.
+    """
     stream = RecordingStream(scripted=[_BARE_TOOL_CALL])
     session = make_session(tmp_path, stream, tools=[_tool("read")])
 
-    answer = await session.complete_aside([Message.user("why?")])
+    with pytest.raises(AsideUnanswered):
+        await session.complete_aside([Message.user("why?")])
 
-    assert answer == ""
     assert len(stream.requests) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_retry_that_answers_nothing_raises(tmp_path) -> None:
+    """A retry that produces no text at all (a refusal, a length stop) raises too.
+
+    The first request earned the retry by answering with a bare call; if the
+    second answers with nothing, the aside still has no answer, and ``""``
+    would report that as an empty success.
+    """
+    stream = RecordingStream(scripted=[_BARE_TOOL_CALL, [StreamEndEvent(stop_reason="refusal")]])
+    session = make_session(tmp_path, stream, tools=[_tool("read")])
+
+    with pytest.raises(AsideUnanswered):
+        await session.complete_aside([Message.user("why?")])
+
+    assert len(stream.requests) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_retry_correction_is_request_local(tmp_path) -> None:
+    """The appended call/error turn lives ONLY inside the retry request.
+
+    The no-trace contract is about every surface a turn would touch, and the
+    correction is deliberately not one of them: it is built into a COPY of the
+    request, so the live message list keeps its identity, the transcript stays
+    empty, and nothing is published to the event fan-out. A caller that took
+    its own copy of ``turns`` would see a different conversation than the one
+    the provider was sent, which is exactly what this pins.
+    """
+    stream = RecordingStream(
+        scripted=[
+            _BARE_TOOL_CALL,
+            [StreamTextDelta(delta="because."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[_tool("read")])
+    session._context.messages.append(Message.user("port it"))
+    before = list(session._context.messages)
+    events: list[object] = []
+    session.subscribe(events.append)
+    asked = [Message.user("why?")]
+
+    await session.complete_aside(asked)
+
+    first, retry = stream.requests
+    assert len(retry.messages) == len(first.messages) + 2
+    assert len(first.messages) == 2  # the live turn + the aside question, no correction
+    # The CALLER's list is untouched as well as the session's live context.
+    assert [m.text for m in asked] == ["why?"]
+    assert session._context.messages == before
+    assert all(a is b for a, b in zip(session._context.messages, before))
+    assert session._transcript.entries() == []
+    assert events == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_never_wraps_the_instruction(tmp_path) -> None:
+    """The aside wrap belongs to the REMOTE seam, not this shared primitive.
+
+    The goal-loop judge calls this method IN-PROCESS with
+    ``LOOP_JUDGE_PROMPT`` and must never receive an aside instruction — it is
+    judging the conversation, not stepping aside from it — so the tempting
+    place to add the wrap (here, where every caller converges) is the wrong
+    one. ``wrap_aside_turns`` is applied by the handles instead; see its
+    module docstring.
+    """
+    stream = RecordingStream()
+    session = make_session(tmp_path, stream)
+
+    await session.complete_aside([Message.user("why?")])
+
+    assert stream.requests[-1].messages[-1].text == "why?"
     await session.dispose()
 
 
@@ -478,3 +583,74 @@ async def test_record_shell_queues_mid_turn_and_flushes_before_the_next_prompt(t
         "tool",
     ]
     await session.dispose()
+
+
+# =============================================================================
+# The instruction: one home, applied at the remote seam
+# =============================================================================
+
+
+def test_the_aside_prompt_states_tools_are_unavailable_and_rejected() -> None:
+    """The prompt must be TRUE of the guard, not a polite fiction.
+
+    It used to say a tool call was "discarded unread", which stopped being what
+    happened the moment the retry began handing the call back as an error. A
+    prompt that promises one thing while the code does another is worse than no
+    prompt, so the two are pinned together here.
+    """
+    rendered = ASIDE_PROMPT.format(question="why?")
+
+    assert "NOT AVAILABLE" in rendered
+    assert "rejected and returned to you as an error" in rendered
+    assert rendered.endswith("why?\n</aside>")
+
+
+def test_wrap_aside_turns_wraps_only_the_last_user_turn() -> None:
+    """A continuation is wrapped at its NEW question, and nothing else moves.
+
+    The earlier pairs are the aside's own prior exchanges; wrapping them would
+    ask the model to answer a question it has already answered. The caller's
+    list is left untouched, because the raw turns are what the aside entry
+    stores and what an adopted exchange must contain.
+    """
+    turns = [Message.user("first?"), Message.assistant("first."), Message.user("second?")]
+
+    wrapped = wrap_aside_turns(turns)
+
+    assert wrapped[0] is turns[0] and wrapped[1] is turns[1]
+    assert wrapped[2].text == ASIDE_PROMPT.format(question="second?")
+    assert turns[2].text == "second?"  # the caller's list did not move
+    assert wrapped[1].text == "first."
+
+
+def test_wrap_aside_turns_keeps_attachments_and_puts_the_text_first() -> None:
+    """An attached image rides along; the wrapped text replaces position 0.
+
+    ``Message.user`` writes the text block first and attachments after it, and
+    the wrap preserves that order — a prompt that displaced the pixels would
+    hand the provider an image block with nothing asking about it.
+    """
+    image = ImageContent(data="AAAA")
+    turns = [Message.user("what is this?", images=[image])]
+
+    wrapped = wrap_aside_turns(turns)
+
+    text_block = wrapped[0].content[0]
+    assert isinstance(text_block, TextContent)
+    assert text_block.text == ASIDE_PROMPT.format(question="what is this?")
+    assert wrapped[0].content[1] is image
+
+
+def test_wrap_aside_turns_leaves_a_non_user_tail_alone() -> None:
+    """Nothing to instruct: returned unchanged rather than refused.
+
+    This seam must not be the thing that fails an aside the owner can still
+    answer, so a caller whose last turn is not a question passes through.
+    """
+    turns = [Message.user("why?"), Message.assistant("because.")]
+
+    assert wrap_aside_turns(turns) == turns
+
+
+def test_wrap_aside_turns_handles_an_empty_list() -> None:
+    assert wrap_aside_turns([]) == []

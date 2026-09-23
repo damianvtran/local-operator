@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Coroutine
+from typing import Any, Coroutine, cast
 
 import pytest
 
@@ -1048,3 +1049,159 @@ async def test_the_client_signs_instead_of_prompting_when_it_has_no_capability(
     ordinary_frame = {"op": "prompt", "text": "hi", "req": "r2"}
     assert await ordinary._present_operator_signature(dict(ordinary_frame)) == ordinary_frame
     assert calls == []
+
+
+# =============================================================================
+# Streamed asides: the delta channel on the request's own connection
+# =============================================================================
+
+
+async def _wait_until(predicate, *, timeout_s: float = 2.0) -> None:
+    """Wait for an OBSERVED fact, never for a span of time (the file's rule).
+
+    Bounded by a backstop so a wedged pump fails the assertion rather than
+    hanging the suite.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the frame never reached the client")
+
+
+class _NullWriter:
+    """The write half of a connection that goes nowhere (sink tests only)."""
+
+    def write(self, _data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+
+def _feed(reader: asyncio.StreamReader, frame: dict[str, Any]) -> None:
+    reader.feed_data(json.dumps(frame).encode() + b"\n")
+
+
+@pytest.mark.asyncio
+async def test_a_delta_frame_reaches_the_request_that_asked_for_it() -> None:
+    """The pump routes an ``aside_delta`` to its request's sink, by req id.
+
+    Driven through ``_pump`` against a reader the test feeds, which is exactly
+    what a socket hands it, so the branch under test is the production one
+    rather than a re-implementation of it.
+    """
+    client = AttachClient(lambda p: None, lambda reason: None)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    chunks: list[str] = []
+    client._delta_sinks[7] = chunks.append
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "aside_delta", "req": 7, "data": {"delta": "part one. "}})
+    await _wait_until(lambda: chunks == ["part one. "])
+
+    reader.feed_eof()
+    await pump
+
+
+@pytest.mark.asyncio
+async def test_a_delta_for_an_unknown_request_is_dropped_without_killing_the_pump() -> None:
+    """A stray chunk is not an error, and the pump keeps reading afterwards.
+
+    A card the user closed, or a request this connection never issued, must not
+    take the connection down — the frame is simply not for anyone here. The
+    SECOND frame is what proves the pump survived rather than merely not
+    raising.
+    """
+    client = AttachClient(lambda p: None, lambda reason: None)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    chunks: list[str] = []
+    client._delta_sinks[7] = chunks.append
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "aside_delta", "req": 999, "data": {"delta": "not mine"}})
+    _feed(reader, {"op": "aside_delta", "req": 7, "data": {"delta": "mine"}})
+    await _wait_until(lambda: chunks == ["mine"])
+
+    reader.feed_eof()
+    await pump
+
+
+@pytest.mark.asyncio
+async def test_a_raising_delta_sink_does_not_kill_the_pump() -> None:
+    """A host callback that throws is logged, not fatal — same as the relay's.
+
+    The aside's chunks are PROGRESS: a renderer that fails to paint one must
+    not cost the user the connection (and with it the answer the receipt is
+    still carrying).
+    """
+    client = AttachClient(lambda p: None, lambda reason: None)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    seen: list[str] = []
+
+    def explode(chunk: str) -> None:
+        seen.append(chunk)
+        raise RuntimeError("the card is gone")
+
+    client._delta_sinks[7] = explode
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "aside_delta", "req": 7, "data": {"delta": "boom"}})
+    await _wait_until(lambda: seen == ["boom"])
+    _feed(reader, {"op": "aside_delta", "req": 7, "data": {"delta": "still here"}})
+    await _wait_until(lambda: seen == ["boom", "still here"])
+    assert not pump.done(), "a rejected chunk took the connection down"
+
+    reader.feed_eof()
+    await pump
+
+
+@pytest.mark.asyncio
+async def test_an_answered_aside_deregisters_its_delta_sink() -> None:
+    """The sink is popped when the request SETTLES, on both exits.
+
+    ``complete_aside`` deregisters in a ``finally``, so a receipt that landed
+    cannot leave a sink behind for a later stray frame to feed — the discipline
+    ``_pending`` already follows. Both exits are pinned (this one answered, the
+    next timed out) because a ``finally`` that only ran on the happy path looks
+    identical from the success test.
+    """
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    # A writer-shaped object, not a StreamWriter: this test only needs the send
+    # half to be somewhere, and ``cast`` is how the tree's other doubles say so.
+    client._writer = cast(Any, _NullWriter())
+    chunks: list[str] = []
+    task = asyncio.create_task(
+        client._request_frame("complete_aside", on_delta=chunks.append, turns=[])
+    )
+    await _wait_until(lambda: bool(client._delta_sinks))
+    ((req, future),) = client._pending.items()
+
+    future.set_result({"op": "ack", "req": req, "detail": "answer."})
+    reply = await task
+
+    assert reply["detail"] == "answer."
+    assert client._delta_sinks == {}
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_aside_deregisters_its_delta_sink() -> None:
+    """The give-up path deregisters too, or a dead card keeps a live sink."""
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._writer = cast(Any, _NullWriter())
+    chunks: list[str] = []
+    task = asyncio.create_task(
+        client._request_frame("complete_aside", deadline_s=0.02, on_delta=chunks.append, turns=[])
+    )
+    await _wait_until(lambda: bool(client._delta_sinks))
+
+    with pytest.raises(OwnerAckTimeout):
+        await task
+
+    assert client._delta_sinks == {}

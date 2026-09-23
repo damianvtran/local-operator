@@ -1359,11 +1359,23 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
+            AsideUnanswered,
             AttachmentUnavailable,
             ProfileRegistryUnavailable,
         )
 
         if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        if isinstance(error, AsideUnanswered):
+            # THE REFUSAL IS THE ANSWER, exactly as it is for the three arms around
+            # it: the aside ran, the provider answered, and the model would not
+            # answer in text (twice — ``Session.complete_aside`` spends its one
+            # retry first). A bare 500 would tell the app the BACKEND broke, and
+            # the generic ``RuntimeError`` arm would tell it the runtime was
+            # UNREACHABLE, whose remedy (reconcile, reconnect) cannot help; the 409
+            # named condition carries the code a renderer keys on and the sentence
+            # that says what to do (ask again). A ``ValueError`` subclass precisely
+            # so it lands in THIS arm rather than the arms below.
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,

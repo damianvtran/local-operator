@@ -5105,7 +5105,16 @@ class RuntimeServer:
                     detail = "already admitted"
                     extra: dict[str, Any] = {}
                 else:
-                    outcome = await self._dispatch(op, frame)
+                    # The stream sink is built for the one op that uses it, so no
+                    # other dispatch pays for a closure capture. See ``_dispatch``
+                    # for why the dispatcher is handed a sink rather than ``conn``.
+                    outcome = await self._dispatch(
+                        op,
+                        frame,
+                        deliver=(
+                            self._aside_delta_sink(conn, req) if op == "complete_aside" else None
+                        ),
+                    )
                     # An op may answer with state as well as with a sentence
                     # (``AckDetail``): the extra fields ride THIS frame rather
                     # than a follow-up push, because the caller of the receipt op
@@ -5166,6 +5175,7 @@ class RuntimeServer:
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
+                AsideUnanswered,
                 AttachmentUnavailable,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
@@ -5176,6 +5186,7 @@ class RuntimeServer:
             if isinstance(
                 exc,
                 (
+                    AsideUnanswered,
                     AttachmentUnavailable,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
@@ -5504,7 +5515,23 @@ class RuntimeServer:
             logger.debug("admitted-command probe failed", exc_info=True)
             return False
 
-    async def _dispatch(self, op: str, frame: dict[str, Any]) -> str | AckDetail:
+    async def _dispatch(
+        self,
+        op: str,
+        frame: dict[str, Any],
+        *,
+        deliver: Callable[[str], None] | None = None,
+    ) -> str | AckDetail:
+        """Run one control op and return its receipt.
+
+        ``deliver`` is the frame sink for the ONE op that answers with a STREAM
+        rather than a single receipt (``complete_aside``). It exists so the
+        dispatcher keeps holding no ``conn`` — see ``_on_request``'s note on the
+        relay toggles, which are handled there for the same reason — while the
+        chunks still reach the connection that ASKED. The CALLER builds it, so
+        the target connection and the request id stay the caller's facts, and the
+        dispatcher is handed one opaque callable.
+        """
         from local_operator.mobile.types import validate_control_frame
 
         validate_control_frame(frame)
@@ -5588,7 +5615,16 @@ class RuntimeServer:
             complete_aside = getattr(h, "complete_aside", None)
             if not callable(complete_aside):
                 raise ValueError("this owner cannot run off-record requests")
-            result = complete_aside(list(frame.get("turns") or []))
+            # OPTIONAL CAPABILITY, probed rather than assumed (``_accepts_kw``,
+            # the cached signature probe the routed-slash ops use): an older or
+            # reduced owner takes ``turns`` alone, and a second ARGUMENT would
+            # break every one of those handles. Such an owner simply never
+            # streams, and the caller's settled answer is the whole reply — the
+            # pre-stream behaviour.
+            fields: dict[str, Any] = {}
+            if deliver is not None and _accepts_kw(complete_aside, "on_delta"):
+                fields["on_delta"] = deliver
+            result = complete_aside(list(frame.get("turns") or []), **fields)
             if not inspect.isawaitable(result):
                 raise ValueError("owner complete_aside operation must be awaitable")
             return await result
@@ -6160,6 +6196,46 @@ class RuntimeServer:
             loop.call_soon_threadsafe(self._relay_on_loop, data)
         except RuntimeError:  # loop closing
             pass
+
+    def _aside_delta_sink(self, conn: _ClientConn, req: Any) -> Callable[[str], None]:
+        """The per-request sink ``complete_aside`` streams its chunks through.
+
+        TWO FACTS ARE LOAD-BEARING, and they are the ones ``_relay_event``
+        documents one method up:
+
+        * the frame goes to the CONNECTION THAT ASKED, NEVER to the fan-out.
+          An aside is a private question ("explain this model"); its text is not
+          the session's event stream, so ``_clients`` is not consulted and a
+          second viewer of the same conversation sees nothing of it.
+        * the callback fires on the SESSION's loop, not this one:
+          ``ServingSessionHandle.complete_aside`` is marshalled there whole, so
+          the ``on_delta`` calls inside ``Session.complete_aside`` run on that
+          thread. The one write below hops back with ``call_soon_threadsafe``,
+          which from a single producer thread preserves emission order — a
+          direct ``conn.event_queue.put_nowait`` from here would be a
+          cross-thread mutation of an ``asyncio.Queue``.
+
+        The frame is built fresh per chunk rather than mutated in place because
+        ``_enqueue_client_frame`` runs the wire size fit over it, and a shared
+        nested ``data`` dict is exactly the aliasing a future fit pass could
+        rewrite under a frame already queued.
+        """
+
+        def send(delta: str) -> None:
+            loop = self._loop
+            if loop is None or self._closed.is_set():
+                return
+            frame: dict[str, Any] = {
+                "op": "aside_delta",
+                "req": req,
+                "data": {"delta": delta},
+            }
+            try:
+                loop.call_soon_threadsafe(self._enqueue_client_frame, conn, frame)
+            except RuntimeError:  # loop closing
+                pass
+
+        return send
 
     def _relay_on_loop(self, data: dict[str, Any]) -> None:
         """Fan one serialized AgentEvent out to event-subscribed attach clients.

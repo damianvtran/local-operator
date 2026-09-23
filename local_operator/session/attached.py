@@ -7492,16 +7492,40 @@ class AttachedSession:
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
+        """Ask the owner for the off-record answer, STREAMING it as it arrives.
+
+        ``on_delta`` is fed each chunk the owner streams while this request is
+        in flight — the same connection carries them, tagged with this request's
+        id — so the card paints the answer as the model writes it rather than
+        after the receipt. The RETURNED string is still the authoritative answer
+        (the receipt's ``detail``); a chunk that never arrived is cosmetic, a
+        receipt that never arrived is a failure.
+
+        THE FALLBACK IS THE OLD BEHAVIOUR, and it is deliberately kept: an owner
+        that sent NO deltas at all (one built before the stream existed, which
+        simply ignores the callback) gets its settled answer fed through the same
+        callback ONCE at the end. ``streamed`` is what stops a streaming owner
+        from being charged twice — the single post-hoc call fires only when
+        nothing was streamed, never as well as it.
+        """
         client = self._client
         if client is None:
             raise ConnectionError(self._unavailable_reason())
-        # The authoritative request currently returns a settled answer. Feed it
-        # through the normal delta callback once so the existing aside widget
-        # uses the same rendering path without inventing remote-only UI state.
-        answer = await client.complete_aside(
-            [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
-        )
-        if answer and on_delta is not None:
+        payload = [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+        if on_delta is None:
+            # No sink to feed, so nothing to fall back to: the settled answer is
+            # the whole reply, exactly as this method behaved before the stream.
+            return await client.complete_aside(payload)
+        streamed = False
+
+        def relay(text: str) -> None:
+            nonlocal streamed
+            streamed = True
+            if text:
+                on_delta(text)
+
+        answer = await client.complete_aside(payload, on_delta=relay)
+        if answer and not streamed:
             on_delta(answer)
         return answer
 

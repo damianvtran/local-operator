@@ -157,7 +157,10 @@ class FakeHandle:
     async def slash(self, command, args):  # noqa: ANN001, ANN202
         return await self._record("slash", command, args)
 
-    async def complete_aside(self, turns):  # noqa: ANN001, ANN202
+    async def complete_aside(self, turns) -> str:  # noqa: ANN001
+        # ``-> str`` rather than leaving it to inference: an inferred
+        # ``Literal["aside answer"]`` makes every subclass that returns different
+        # text an incompatible override (reportIncompatibleMethodOverride).
         self.calls.append(("complete_aside", (turns,), {}))
         return "aside answer"
 
