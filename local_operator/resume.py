@@ -39,6 +39,7 @@ from local_operator.session.archived import archived_ids
 #: imports no stdlib and no engine. Hiding the refusal behind a function-local
 #: import would make the type unreachable to a caller that wants to catch it.
 from local_operator.session.errors import SessionStoreUnavailable
+from local_operator.session.runtime.types import reported_subagent_count
 from local_operator.session_lease import LEASE_NAME, _read_claim
 
 logger = logging.getLogger(__name__)
@@ -2039,6 +2040,35 @@ def format_age(seconds: float) -> str:
     return "just now"
 
 
+def _counted(value: int | None) -> int:
+    """A published subagent count as an arithmetic-safe ``int``, or ``0``.
+
+    WHY A GUARD IS NEEDED AT ALL, on a field typed ``int | None``:
+    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
+    no type validation — so every field on a record is whatever the writer put
+    in the file, and :attr:`SessionRow.delegating` is the first thing to do
+    ARITHMETIC on these two. A ``str`` or a ``list`` would raise ``TypeError``
+    inside the sidebar's poll loop behind ``/resume``, and a merely-numeric
+    wrong value would pass silently and render as measured fact.
+
+    THE RULE IS NOT RESTATED HERE. ``reported_subagent_count``
+    (``session.runtime.types``, beside the fields it validates) is the one
+    implementation, shared with ``info.collect``'s fleet tally and with the
+    desktop listing's response model, because three readers disagreeing about
+    which values are believable is how one surface prints a figure another drops
+    (review round 1, R4). Its docstring carries the incident that made the rule.
+
+    ``0`` RATHER THAN ``None``, and that is this call site's own contract:
+    :attr:`SessionRow.delegating` needs a number to add, and both answers mean
+    the same thing to it — a value nobody reported can never make a row
+    delegating. Nothing here is ever RENDERED, so "not reported" and "zero"
+    cannot be confused on a frame; the surfaces that do render a count keep the
+    ``None`` (see ``CatalogEntry.status`` and ``session-list.tsx``), which is why
+    the shared function returns ``None`` and this wrapper collapses it.
+    """
+    return reported_subagent_count(value) or 0
+
+
 class SessionRow(NamedTuple):
     """One pickable conversation: what it was about, when, and its id.
 
@@ -2117,6 +2147,34 @@ class SessionRow(NamedTuple):
     #: can say it in the runtime's words — the ones `lop sessions` and `/info`
     #: print — without teaching every consumer a new token (UX round 2, U8).
     leaving: str = ""
+    #: How many of this session's OWN delegated children are running, and how
+    #: many are parked waiting for a capacity slot — both straight off the
+    #: live ``SessionRecord``, or ``None`` when there is no record or the build
+    #: that wrote it does not report them.
+    #:
+    #: WHY THEY RIDE THE ROW. The state they exist to name is invisible without
+    #: them: ``live_state`` is the parent's OWN lane, and
+    #: ``ServingSessionHandle.is_conversationally_active`` deliberately excludes
+    #: children from it (publishing residency there made every live session
+    #: claim to be working). So a parent whose turn ended while its children
+    #: still run decorates as ``idle`` and every surface reads it as no
+    #: activity. The fact was already on the record the decorators hold and was
+    #: simply dropped; carrying it on the row is what lets one predicate serve
+    #: the catalogue AND the TUI mark, so the glyph and the words cannot
+    #: disagree about whether this row is delegating.
+    #:
+    #: ``None`` IS NOT ``0``. It means "this build does not report a count",
+    #: which is the only honest thing to say about a record written before the
+    #: field existed — a client that renders it as zero asserts "no subagents"
+    #: about a session it could not ask (see :attr:`delegating`, which treats
+    #: the two identically for the STATE and differently for the COUNT).
+    #:
+    #: Defaulted exactly like ``leaving``/``heartbeat_age_s`` above, so every
+    #: existing construction site keeps working unchanged; only the live
+    #: decorators (``decorate_rows`` and the desktop feed's ``_row_for``) set
+    #: them.
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
     #: How many wakes are scheduled, and whether they are dormant because the
     #: session was deliberately stopped.
     wakes: int = 0
@@ -2156,6 +2214,54 @@ class SessionRow(NamedTuple):
     #: Immutable conversation birth, not transcript activity or runtime start.
     #: Unknown legacy dates tie at zero and are ordered by session id.
     created_at: float = 0.0
+
+    @property
+    def delegating(self) -> tuple[int, int] | None:
+        """``(running, queued)`` when this row owns subagent work, else ``None``.
+
+        THE single fact behind the ``delegating`` state, read by both builders
+        of a status — ``session.catalog.CatalogEntry.status_code``/``status``
+        and ``tui.widgets.session_picker.row_state_mark`` — so the words and
+        the glyph are two renderings of one answer rather than two derivations
+        that a future edit can drift apart. That is the same shape
+        ``CatalogEntry.shows_completion_mark`` has, and for the same reason: the
+        pairing used to be held together by a comment asking the next author to
+        keep the two ladders in step, and a comment is not a mechanism.
+
+        IT ANSWERS ONLY THE COUNT QUESTION, deliberately. Every rung ABOVE
+        this state is a separate louder fact — a parked gate, a wedged or busy
+        runtime, an unread completion, an attached session — and each caller
+        already tests those in its own ladder before it reaches this one, in
+        the order ``row_state_mark`` documents. Folding them in here would give
+        the two callers a second, hidden precedence to keep in step, which is
+        the failure this property exists to remove.
+
+        THE DRAIN IS THE ONE EXCEPTION, and it is here rather than left to the
+        callers because ``leaving`` is a GATE and not a rung: in
+        ``CatalogEntry.status`` the phrase already wins above ``busy``, but
+        ``status_code`` has no leaving arm at all, so a draining row whose
+        ``live_state`` happened to be idle would otherwise publish ``delegating``
+        beside a tooltip reading "Leaving…" — and would draw ``⇉`` next to it.
+        A runtime committed to exiting is the stronger fact, so it suppresses
+        the state at the one place both readers look.
+
+        ``None`` report is treated as zero FOR THE STATE: an unknown count can
+        never make a row delegating. It is still not written as a zero anywhere
+        — the label builder in the catalogue omits a count it was not given.
+        "Queued with nothing running" is the case that must not read as idle:
+        the capacity gate parks a child with ``queued=True`` while it waits for a
+        slot (``harness/subagent.py:663``, ``queued = jobs_manager.at_capacity()``
+        → ``harness/jobs.py:648``, whose ``at_capacity`` counts only
+        non-``queued`` running jobs), so a parent holding only parked children is
+        working in exactly the sense the operator is complaining about.
+        """
+        if self.leaving:
+            return None
+        running = _counted(self.subagents_running)
+        queued = _counted(self.subagents_queued)
+        if running + queued < 1:
+            return None
+        return running, queued
 
 
 #: The fork tag's text as a FILTER sees it. The mark itself is drawn per

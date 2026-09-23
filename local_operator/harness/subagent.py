@@ -927,6 +927,12 @@ def _make_runner(
             # arrives here too (it cancels underneath); record_outcome leaves
             # the record's ``paused`` flag alone precisely so the roster can
             # still tell the two apart.
+            #
+            # A cancellation is a DELIBERATE stop unless the child's own loop
+            # already classified the end as involuntary — a cancel that raced
+            # the budget guard is still the budget guard, and the child's
+            # recorded cause is the more specific fact.
+            cancelled_cause = str(final.get("cut_off_cause") or "")
             with contextlib.suppress(BaseException):
                 await _settle_child_cleanup(
                     asyncio.create_task(_finish_child_browser(child, comms, job_id, "cancelled"))
@@ -938,6 +944,8 @@ def _make_runner(
                     job_id=job_id,
                     label=label,
                     status="cancelled",
+                    cut_off_cause=cancelled_cause,
+                    cut_off=str(final.get("cut_off") or ""),
                 )
             raise
         except Exception as exc:
@@ -945,6 +953,17 @@ def _make_runner(
             # is what the roster shows for a failed child once the row is
             # swept, which is the state an operator is most likely to be
             # looking at when they ask what went wrong.
+            #
+            # The CAUSE comes from the child's own classification, read off the
+            # relay's cell (the loop reported its end) with the child's own flag
+            # as the fallback for an arm the relay never saw — the budget guard
+            # ends the child's run normally, so the relay always sees it, but a
+            # cancellation that races the settle can reach here without one.
+            # ``None``-safe on ``child``: this arm can fire before the child is
+            # even built.
+            cut_off_cause = str(final.get("cut_off_cause") or "")
+            if not cut_off_cause and child is not None:
+                cut_off_cause = str(getattr(child, "_cut_off_cause", "") or "")
             await _finish_child_browser(child, comms, job_id, "failed")
             await _publish_terminal_outcome(
                 comms,
@@ -954,6 +973,8 @@ def _make_runner(
                 label=label,
                 status="failed",
                 error_text=str(exc),
+                cut_off_cause=cut_off_cause,
+                cut_off=str(final.get("cut_off") or ""),
             )
             raise
         finally:
@@ -1158,6 +1179,8 @@ async def _publish_terminal_outcome(
     status: str,
     error_text: str | None = None,
     result_text: str | None = None,
+    cut_off_cause: str = "",
+    cut_off: str = "",
 ) -> tuple[str, str | None, str | None]:
     """Resolve and deliver the one terminal fact owned by a child run.
 
@@ -1165,6 +1188,13 @@ async def _publish_terminal_outcome(
     that fan-out must therefore interrupt delivery, not rewrite completion or
     failure into cancellation. Retrying the interrupted fan-out also reaches
     subscribers skipped when an earlier subscriber was cancelled.
+
+    ``cut_off_cause``/``cut_off`` ride the same three surfaces as the status:
+    the child's job ROW (what the panel and ``jobs.list()`` read), the emitted
+    ``SubagentEndEvent`` (what the parent's stream sees), and the comms RECORD
+    (the durable half that outlives the swept row). A child the loop cut off
+    mid-flight used to settle with no vocabulary at all, so its parent saw a
+    child that had "finished" — the reported "stopping without committing".
     """
     outcome = (
         comms.record_outcome(
@@ -1172,6 +1202,7 @@ async def _publish_terminal_outcome(
             status,
             error_text=error_text,
             result_text=result_text,
+            cut_off_cause=cut_off_cause,
         )
         if comms is not None
         else None
@@ -1181,12 +1212,20 @@ async def _publish_terminal_outcome(
         error_text,
         result_text,
     )
+    if job is not None:
+        # The row is the LIVE surface: ``subagent_panel.status_glyph`` reads it
+        # as ``cut_off=bool(job.cut_off_cause)`` and renders the word "cut off".
+        # Written here rather than at the call sites so every settle arm (the
+        # clean, the cancelled and the failed one) stamps it exactly once.
+        job.cut_off_cause = cut_off_cause
     event = SubagentEndEvent(
         job_id=job_id,
         label=label,
         status=resolved_status,
         error_text=resolved_error,
         result_text=resolved_result,
+        cut_off_cause=cut_off_cause,
+        cut_off=cut_off,
     )
     try:
         await emit(event)
@@ -1336,6 +1375,16 @@ def _make_relay(
         elif isinstance(event, AgentEndEvent):
             if event.error:
                 final["error"] = event.error
+            # The child's OWN classification, carried rather than re-derived:
+            # ``Session._classify_cut_off`` has already decided whether this end
+            # is involuntary, and re-deciding from ``error`` here would answer
+            # the same question in a second place — the drift this taxonomy
+            # exists to remove. Both fields default to "", so a clean child end
+            # and an OLD child runtime that has never heard of them both leave
+            # the cells empty.
+            if event.cut_off_cause:
+                final["cut_off_cause"] = event.cut_off_cause
+                final["cut_off"] = event.cut_off
         if progress is not None:
             # Same string into latest_details so the 1 Hz jobs.list() poll
             # and the event stream agree about what the child is doing.
@@ -1738,7 +1787,7 @@ async def _construct_child_session(
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
-    from local_operator.tools.registry import create_tools
+    from local_operator.tools.registry import DEFAULT_TOOL_NAMES, create_tools
 
     # A resumed child is built on the STOPPED child's directory, and that is
     # the whole of the resume mechanism: ``Transcript.__init__`` reads the
@@ -1893,7 +1942,34 @@ async def _construct_child_session(
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
         web_fetch_settings=ConfigManager(config_dir()).get_config_value("web_fetch", None),
     )
-    tools = create_tools(tool_context)
+    # ``restricted`` also carries a sticky MCP-activation denial inherited by
+    # plain descendants; that is not a role allowlist and must not shrink their
+    # ordinary builtin inventory. Keep tool construction keyed to actual role
+    # policy (plus scout's explicit read-only fallback), not the MCP boundary.
+    role_limited = (profile is not None and bool(profile.tools)) or agent == "scout"
+    if role_limited:
+        # The prior full-inventory-then-filter path exposed tools in registry
+        # order; select that same order up front so createIf builders run only
+        # for schemas this role can receive. Match the old filter's order:
+        # allowlisted tools in registry order, then omitted network-floor tools
+        # in registry order, then the child-only hub capability. Keeping the
+        # floor appended matters for profiles that explicitly list one network
+        # tool but not the other; moving it ahead of the allowlist changes the
+        # provider-visible order even though the capability set is unchanged.
+        allowed_names = set(profile.tools or ()) if profile is not None else set()
+        if agent == "scout" and (profile is None or not profile.tools):
+            allowed_names.update(SCOUT_TOOL_ALLOWLIST)
+        builtin_names = [name for name in DEFAULT_TOOL_NAMES if name in allowed_names]
+        for name in DEFAULT_TOOL_NAMES:
+            if name in READ_ONLY_NETWORK_TOOLS and name not in builtin_names:
+                builtin_names.append(name)
+        if "hub" not in builtin_names:
+            builtin_names.append("hub")
+        tools = create_tools(tool_context, enabled=builtin_names)
+    else:
+        # Unrestricted/freeform children retain the full default inventory,
+        # even when sticky MCP denial is inherited from a restricted ancestor.
+        tools = create_tools(tool_context)
     # A role's tool allowlist is a capability boundary, not advice: a reviewer
     # that cannot call ``edit`` cannot "helpfully" fix what it was asked to
     # review and thereby end up reviewing its own patch. ``restricted`` itself

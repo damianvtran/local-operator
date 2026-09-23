@@ -170,6 +170,9 @@ RESERVED_KEYS: dict[str, str] = {
     "escape": "esc cancels — it cannot be bound",
     "ctrl+c": "ctrl+c interrupts the agent — it cannot be bound",
     "ctrl+d": "ctrl+d quits — it cannot be bound",
+    # `super+d` is Textual's kitty-protocol spelling of macOS Cmd+D. Reserve it
+    # beside Ctrl+D so remapping another action cannot steal the graceful exit.
+    "super+d": "cmd+d quits — it cannot be bound",
     "ctrl+q": "ctrl+q is Textual's own quit — it cannot be bound",
     "ctrl+m": "ctrl+m is the same byte as enter — it cannot be bound",
     "ctrl+i": "ctrl+i is the same byte as tab — it cannot be bound",

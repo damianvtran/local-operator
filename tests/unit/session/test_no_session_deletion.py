@@ -553,13 +553,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.replace",
-        "temp FILE -> .env",
-    ),
-    # Same shape as the credentials writer above: a temp FILE inside the
-    # secrets directory replacing master.key in that same directory. Both
+    # Same shape as the browser-bridge/keys writers below: a temp FILE inside
+    # the secrets directory replacing master.key in that same directory. Both
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
@@ -700,11 +695,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/secrets/keys.py::discard_staged_wrapped_key",
         "<path>.unlink",
         "master.wrapped.incoming* under config_dir()/secrets, staged by this call",
-    ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.unlink",
-        "temp FILE -> .env",
     ),
     ("local_operator/browser_bridge/daemon.py::_private_write", "os.replace", "temp FILE"),
     ("local_operator/browser_bridge/state.py::publish", "os.replace", "temp FILE"),

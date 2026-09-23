@@ -48,7 +48,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.server import desktop
 from local_operator.server import registry as serve_registry
 from local_operator.server.app import desktop_origin_cors, managed_desktop_boundary
@@ -95,7 +94,6 @@ async def plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.middleware("http")(desktop_origin_cors)
     app.middleware("http")(managed_desktop_boundary)
     app.state.config_manager = ConfigManager(tmp_path)
-    app.state.credential_manager = CredentialManager(tmp_path)
     app.state.instance_id = "instance-under-test"
     app.state.serve_record = SimpleNamespace(claim_key=CLAIM_KEY)
 

@@ -182,6 +182,13 @@ def controller(store, usage_cache):
     return ProviderController(store, login_callbacks=None, usage_cache=usage_cache)
 
 
+def _chat_ids() -> set[str]:
+    """The ids ``_chat_providers`` enumerates — what every catalogue is built from."""
+    from local_operator.providers.controller import _chat_providers
+
+    return {definition.id for definition in _chat_providers()}
+
+
 def test_login_provider_listing(controller) -> None:
     ids = {p.id for p in controller.login_providers()}
     assert {"openai", "anthropic", "openrouter", "alibaba", "google", "deepseek"} <= ids
@@ -3298,19 +3305,33 @@ async def test_neither_document_leaves_the_unknown_sentinel_and_never_fetches(
 
 
 @pytest.mark.asyncio
-async def test_a_login_flavour_is_priced_under_its_canonical_provider(
+async def test_a_login_flavour_contributes_no_catalogue_of_its_own(
     controller, store, monkeypatch
 ) -> None:
-    """``openai-device`` prices as ``openai`` — the same translation the resolver
-    applies — so a ChatGPT account's live rows get the pay-per-token price the
-    projection keys under ``openai``."""
+    """``openai-device`` adds no rows of its own: ``openai`` already carries them.
+
+    This used to assert the opposite shape — a catalogue holding
+    ``openai-device/gpt-5.4`` under the ``openai`` price projection — because the
+    flavour was enumerated as its own provider. It is the SAME credential and the
+    SAME listing (``_listing_credential`` follows ``store_credentials_as`` for the
+    api_key, ``is_oauth`` and account scope alike), so the two labels were one
+    catalogue offered twice; the projection still keys under ``openai``, and the
+    single ``openai`` row is where that translation is exercised now.
+    """
     store.upsert_credential("openai", {"key": "sk", "type": "api_key"})
-    _listing(monkeypatch, {"openai-device": [DiscoveredModel(id="gpt-5.4", context_window=0)]})
+    _listing(
+        monkeypatch,
+        {
+            "openai": [DiscoveredModel(id="gpt-5.4", context_window=0)],
+            "openai-device": [DiscoveredModel(id="gpt-5.4", context_window=0)],
+        },
+    )
     _projection(monkeypatch, _PROJECTION)
 
     entries, _ = await controller.live_catalogue()
 
-    row = _by_selector(entries)["openai-device/gpt-5.4"]
+    assert "openai-device" not in {entry.provider for entry in entries}
+    row = _by_selector(entries)["openai/gpt-5.4"]
     assert (row.input_price, row.output_price) == (2.5, 15.0)
     assert row.context_window == 400_000
 
@@ -3559,6 +3580,136 @@ async def test_usable_providers_suppresses_secondary_flavour_when_oauth_active(
     assert "radient-key" not in usable
 
 
+def test_no_login_flavour_is_in_the_chat_registry() -> None:
+    """Every ``store_credentials_as`` flavour is dropped from the catalogue registry.
+
+    A flavour resolves to the SAME credential and listing as its base
+    (``_listing_credential`` follows the alias), so enumerating it offered one
+    catalogue twice under two labels. Measured 2026-09-22: a key-only install saw
+    444 ``radient/`` rows and 444 ``radient-key/`` rows; the operator's rule is one
+    ``radient/`` namespace whenever the account is usable in either form. This is
+    the general rule, not a Radient special case — the flavour's own row is the
+    defect for every flavour, and ``openai-device`` was already hidden only by the
+    desktop's connected-only filter, never by the catalogue itself.
+    """
+    from local_operator.providers.registry import PROVIDER_REGISTRY
+
+    flavours = {
+        definition.id for definition in PROVIDER_REGISTRY if definition.store_credentials_as
+    }
+    # Guard the guard: if the class ever empties, the assertion below is vacuous.
+    assert flavours == {
+        "openai-device",
+        "xai-oauth",
+        "zai-oauth",
+        "radient-key",
+        "alibaba-token-plan-oauth",
+    }
+    assert flavours & _chat_ids() == set()
+
+
+@pytest.mark.asyncio
+async def test_a_key_only_radient_install_lists_one_namespace_not_two(
+    controller, store, monkeypatch
+) -> None:
+    """The operator's measured defect: a pasted key offered ``radient/`` TWICE.
+
+    ``usable_providers`` only hides a flavour when an OAUTH row exists, so before
+    this fix a key-only install saw 444 ``radient/`` rows AND 444
+    ``radient-key/`` rows — the identical listing under two labels. The requirement
+    is exact: if either the OAuth account or a key is present, the picker offers
+    ``radient/…`` and no ``radient-key/…``. Both spellings stay USABLE (one row
+    makes both answer), so this is a catalogue/label rule, not a credential one.
+    """
+    store.upsert_credential("radient-key", {"key": "rk", "type": "api_key"})
+    _listing(
+        monkeypatch,
+        {
+            "radient": [DiscoveredModel(id="auto"), DiscoveredModel(id="vendor/model")],
+            "radient-key": [DiscoveredModel(id="auto"), DiscoveredModel(id="vendor/model")],
+        },
+    )
+
+    entries, _ = await controller.live_catalogue()
+
+    providers = {entry.provider for entry in entries}
+    assert "radient" in providers
+    assert "radient-key" not in providers, "the duplicated label must not reach a picker"
+    assert "radient/auto" in _by_selector(entries)
+
+
+@pytest.mark.asyncio
+async def test_an_oauth_radient_install_lists_one_namespace_not_two(
+    controller, store, monkeypatch
+) -> None:
+    """The same rule holds for the OAuth form, so the two are ONE rule not two."""
+    store.upsert_credential("radient", {"access": "token", "type": "oauth"})
+    _listing(monkeypatch, {"radient": [DiscoveredModel(id="auto", name="Automatic")]})
+
+    entries, _ = await controller.live_catalogue()
+
+    assert {entry.provider for entry in entries} == {"radient"}
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_providers_argument_served_the_flavour_still_yields_the_base(
+    controller, store, monkeypatch
+) -> None:
+    """A caller naming a flavour AND its base is served the BASE catalogue only.
+
+    The phone's ``providers`` argument is ``persisted_providers()``, whose answer
+    names the flavour for a key-only install (measured: ``['radient',
+    'radient-key']``) but always names the BASE alongside it — the stored row lands
+    under the base id, and the flavour is admitted only because that base row is
+    present. The flavour is dropped from ``_chat_providers`` before the narrowing
+    is applied, so the base provider's one copy of the listing is what comes back
+    — and the flavour is never fetched for its own prefix.
+    """
+    store.upsert_credential("radient-key", {"key": "rk", "type": "api_key"})
+    calls = _listing(
+        monkeypatch,
+        {
+            "radient": [DiscoveredModel(id="auto")],
+            "radient-key": [DiscoveredModel(id="auto")],
+        },
+    )
+
+    entries, statuses = await controller.live_catalogue(providers={"radient", "radient-key"})
+
+    assert "radient-key" not in calls, "the flavour is never fetched for its own prefix"
+    assert {entry.provider for entry in entries} == {"radient"}
+    assert set(statuses) == {"radient"}
+
+
+@pytest.mark.asyncio
+async def test_a_flavour_ONLY_providers_set_yields_nothing_and_that_is_the_contract(
+    controller, store, monkeypatch
+) -> None:
+    """The honest answer for a set that names no chat provider: no rows, no status.
+
+    ``providers`` is a CREDENTIAL-ADMISSION filter — the ids whose accounts a
+    caller may speak for — not a way to request a prefix, and a flavour has already
+    been dropped from the registry by the time the narrowing runs. So a set naming
+    ONLY ``radient-key`` matches no chat provider and the answer is empty, which is
+    the same answer an empty collection gets, honoured literally. The alias is
+    deliberately NOT resolved here: that would put a second spelling of
+    ``store_credentials_as`` on the admission path.
+
+    No in-tree caller passes a flavour-only set (the phone's
+    ``persisted_providers()`` always names the base alongside the flavour), so this
+    pins the CONTRACT rather than a live behaviour — the docstring on
+    ``_chat_providers`` states it, and this test is what keeps the two from
+    drifting apart again.
+    """
+    store.upsert_credential("radient-key", {"key": "rk", "type": "api_key"})
+    _listing(monkeypatch, {"radient": [DiscoveredModel(id="auto")]})
+
+    entries, statuses = await controller.live_catalogue(providers={"radient-key"})
+
+    assert entries == []
+    assert statuses == {}
+
+
 def test_initial_catalogue_layers_cached_aggregators_without_network(
     controller, store, tmp_path, monkeypatch
 ) -> None:
@@ -3709,14 +3860,12 @@ def test_persisted_providers_includes_a_provider_store_row(
     reader consulting only auth.db hides every API-key provider configured by
     hand, and both are sanctioned flows.
     """
-    from local_operator.credentials import CredentialManager
     from local_operator.providers.registry import store_provider_key
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    manager = CredentialManager.readonly(tmp_path)
     store_provider_key(key_name, "row-value", base=tmp_path)
-    controller.credential_manager = manager
+    controller.config_dir = tmp_path
 
     persisted = controller.persisted_providers()
     assert persisted is not None
@@ -3731,11 +3880,10 @@ def test_persisted_providers_ignores_a_provider_with_no_row(
     ``lop credential delete`` removes the row, and treating an absence as a login
     sends the picker fetching anonymously.
     """
-    from local_operator.credentials import CredentialManager
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    controller.credential_manager = CredentialManager.readonly(tmp_path)
+    controller.config_dir = tmp_path
 
     persisted = controller.persisted_providers()
     assert persisted is not None
@@ -3782,7 +3930,15 @@ async def test_live_catalogue_without_a_providers_argument_is_unchanged(
     controller, store, monkeypatch
 ) -> None:
     """The default has to stay byte-identical: every existing caller passes no
-    ``providers``, and the narrowing was added for one new caller only."""
+    ``providers``, and the narrowing was added for one new caller only.
+
+    AND every LOGIN FLAVOUR is absent: a flavour adds no catalogue its base
+    does not already carry (they resolve to one credential and therefore one
+    listing), so the chat registry this method enumerates is the decision-only
+    filter AND the flavour filter — see ``_chat_providers``. The ids below are the
+    five ``store_credentials_as`` flavours; asserting them by name here is what
+    makes a flavour that starts reaching the catalogue again fail loudly.
+    """
     store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
     calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
 
@@ -3792,15 +3948,18 @@ async def test_live_catalogue_without_a_providers_argument_is_unchanged(
     fetched = {provider for provider, _ttl in calls}
     assert len(fetched) > 1, "the whole registry is still enumerated"
     assert "anthropic" in {entry.provider for entry in entries}
-    # Every provider reports a status, including the local ones that resolve a
-    # base URL and return before any listing call — so ``statuses`` is the
-    # CHAT registry, not the subset that made a request. A decision-only
-    # provider (``typesafe``) is not in it, and that is the flag working: it is
-    # filtered before the enumeration, so it has neither rows nor a status line
-    # in a catalogue it can never appear in.
     assert set(statuses) == {
-        definition.id for definition in PROVIDER_REGISTRY if not definition.decision_only
+        definition.id
+        for definition in PROVIDER_REGISTRY
+        if not definition.decision_only and not definition.store_credentials_as
     }
+    assert {
+        "openai-device",
+        "radient-key",
+        "xai-oauth",
+        "zai-oauth",
+        "alibaba-token-plan-oauth",
+    } & set(statuses) == set(), "a login flavour contributes no catalogue of its own"
 
 
 @pytest.mark.asyncio
@@ -3846,7 +4005,6 @@ async def test_a_narrowed_provider_lists_with_its_credential_not_anonymously(
     anonymously, and the phone's sheet showed it empty — with a credential on
     disk the whole time. Narrowing must not be the reason rows disappear.
     """
-    from local_operator.credentials import CredentialManager
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -3856,4 +4014,3 @@ async def test_a_narrowed_provider_lists_with_its_credential_not_anonymously(
     assert [provider for provider, _ttl in calls] == ["openrouter"]
     assert [entry.selector for entry in entries] == ["openrouter/vendor/model"]
     assert all(entry.connected for entry in entries)
-    assert isinstance(CredentialManager, type)

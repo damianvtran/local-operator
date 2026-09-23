@@ -71,7 +71,6 @@ from local_operator import session_factory
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.harness.types import AgentEndEvent, AgentEvent, Message, MessageRole
 from local_operator.jobs import JobContextRecord, JobManager, JobStatus
@@ -119,7 +118,6 @@ class SchedulerService:
         self,
         agent_registry: AgentRegistry,
         config_manager: ConfigManager,
-        credential_manager: CredentialManager,
         env_config: EnvConfig,
         operator_type: "OperatorType",
         verbosity_level: VerbosityLevel,
@@ -128,7 +126,6 @@ class SchedulerService:
     ) -> None:
         self.agent_registry = agent_registry
         self.config_manager = config_manager
-        self.credential_manager = credential_manager
         self.env_config = env_config
         self.operator_type = operator_type
         self.verbosity_level = verbosity_level
@@ -774,7 +771,6 @@ class SchedulerService:
         session = await session_factory.create_session(
             session_args,
             self.config_manager,
-            self.credential_manager,
             self.agent_registry,
             has_ui=False,
             cwd=cwd_override,

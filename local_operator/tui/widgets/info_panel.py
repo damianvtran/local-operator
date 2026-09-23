@@ -219,15 +219,24 @@ _LEAVING_SHORT: dict[str, str] = {
     LEAVING_FOR_BUILD: "leaving for build",
     # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
     # cut of the long phrase: ``no movement`` is the runtime's own observation
-    # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled")
-    # and the bound is what a narrow reader most needs of a departure that has
-    # already spent it. Rendered from the constant, like the signal rung's, so the
-    # compact form cannot disagree with the long one.
+    # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled",
+    # and for why this phrase is HISTORICAL rather than deleted) and the bound is
+    # what a narrow reader most needs of a departure that has already spent it.
+    # Rendered from the constant, like the signal rung's, so the compact form
+    # cannot disagree with the long one.
     LEAVING_FOR_BUILD_OVERDUE: f"no movement {bound_text(BUILD_DRAIN_PROGRESS_S)}",
 }
 
 #: The fallback above: no trigger named, no bound claimed, nothing false.
 _LEAVING_SHORT_OTHER = "leaving"
+
+#: What a row says when its own stall bound fired, dumped every thread and LEFT IT
+#: ALIVE: stalled with the work still inside it, and only ``lop stop`` ends it
+#: (``stall_watchdog.HELD_MARKER``; design review round 1, D1). Short because the
+#: meta ladder sheds from the right and this clause must survive to the narrowest
+#: frame — the state word is what a reader scans first, and "not answering" without
+#: this reads as a runtime that is merely slow to report.
+HELD_STATE_WORD = "bound held"
 
 #: The shelf form of an UPDATE WINDOW, keyed by the PHASE TOKEN rather than by the
 #: sentence — the one structural difference from ``_LEAVING_SHORT`` above, and it is
@@ -864,6 +873,19 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # whether it is not answering must survive to the narrowest frame,
         # while the memory figure is the one a reader can do without.
         bits = ["this session"] if line.is_self else []
+        # THE HELD STATE, AHEAD OF THE STATE WORD AND OUTSIDE ITS BRANCH (design review
+        # round 1, D1 for the placement; round 2, D6 for the gate). "not answering" alone
+        # reads as "still settling", and before this change the bound RESOLVED such a
+        # runtime inside one deadline — now it survives for the life of the process, so
+        # the word has to say that the safety net has already fired and a person is the
+        # remedy. It sat INSIDE the `state != "live"` arm, so a held runtime whose
+        # heartbeat was FRESH — the PROGRESS leg's own shape, since the loop that
+        # re-arms the timer is the loop that publishes the record's beat — rendered
+        # identically to the healthy row beside it, same glyph and same ink, counted
+        # `live` in the header, while ``lop sessions`` named the state and the remedy for
+        # the same record. The listing's cell is not gated on state, and neither is this.
+        if line.stall_held:
+            bits.append(HELD_STATE_WORD)
         if line.state != "live":
             # The STATE token is kept for the machine surface (the export's
             # ``[wedged]``, ``--json``), but a person reads the word: "not
@@ -940,8 +962,18 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # only state reduced to a bare glyph beside a name. The compact form
         # carries the bound where the phrase has one, so the narrow reader is
         # told both that it is leaving and how long that can take.
-        if line.state == "wedged":
-            short_meta = "not answering"
+        # A HELD ROW GETS A SHELF WHATEVER ITS STATE (design review round 2, D6): the
+        # shelf was gated on ``wedged``, so the leg where the runtime is still reporting
+        # — and the panel's only visible state is the one this change added — was the one
+        # leg that fell off the narrowest frame entirely.
+        if line.state == "wedged" or line.stall_held:
+            # THE SWAP IS DELIBERATE (design review round 2, D9): the shelf replaces the
+            # state word rather than accompanying it, because at this width only one of
+            # the two fits and the held clause is the actionable one — it implies "not
+            # answering" (a bound that fired and was held means nothing is reporting) and
+            # it is the fact that tells the reader a person is needed. The wide frame
+            # keeps both, so nothing is lost that fits.
+            short_meta = HELD_STATE_WORD if line.stall_held else "not answering"
         elif phase:
             # The SHELF form, keyed by the PHASE the row is in — the failed phase
             # included, so a fleet whose only news is an abandoned update says so at

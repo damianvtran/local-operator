@@ -71,7 +71,6 @@ if TYPE_CHECKING:
 
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
     from local_operator.clients.radient import RadientListModelsResponse
-    from local_operator.credentials import CredentialManager
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
     from local_operator.providers.auth_store import AuthStore
@@ -1675,9 +1674,9 @@ def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
 
-    ``base`` is threaded from the caller's ``CredentialManager`` (R4), so a
-    catalogue resolve for a manager configured at a non-default root reads the
-    store that manager writes.
+    ``base`` is threaded from the caller's config root (R4), so a catalogue
+    resolve for a host configured at a non-default root reads the store that root
+    holds.
     """
     canonical = "test" if provider == "noop" else provider
     try:
@@ -2685,7 +2684,7 @@ def refresh_model_info_background(provider: str, model_id: str) -> None:
 def configure_model(
     hosting: str,
     model_name: str,
-    credential_manager: CredentialManager | None = None,
+    config_dir: Path | None = None,
     model_info_client: ModelListingClient | None = None,
     env_config: EnvConfig | None = None,
     temperature: Optional[float] = None,
@@ -2726,15 +2725,13 @@ def configure_model(
     # no longer a rung, PR2a). The cascade at
     # stream time re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
     api_key: Optional[SecretStr] = None
-    if credential_manager is not None:
+    if config_dir is not None:
         try:
             from local_operator.providers.registry import provider_env_key
 
-            # The manager's own root (R4): a store the caller configured
-            # elsewhere is the one this key must come from.
-            static_key = provider_env_key(
-                canonical, base=getattr(credential_manager, "config_dir", None)
-            )
+            # The caller's own root (R4): a store configured elsewhere is the
+            # one this key must come from.
+            static_key = provider_env_key(canonical, base=config_dir)
         except Exception:  # noqa: BLE001 - a store failure must not block config
             static_key = None
         if static_key:
@@ -2754,9 +2751,7 @@ def configure_model(
         # compaction sizes itself off a 128k fallback on a 1M model and cost
         # cannot be reported at all. `resolve_model_info` fills the gap from a
         # disk-cached catalogue: one HTTP call a day, and never a blocked start.
-        model_info = resolve_model_info(
-            canonical, model_name, base=getattr(credential_manager, "config_dir", None)
-        )
+        model_info = resolve_model_info(canonical, model_name, base=config_dir)
 
     spec = build_model_spec(canonical, model_name, model_info)
     if definition.local_setup:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,7 +12,6 @@ from pydantic import ValidationError
 from rich.cells import cell_len, set_cell_size
 
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.web_search.io import WebReadIO
 from local_operator.web_search.models import (
     DEFAULT_WEB_SEARCH_CONFIG,
@@ -190,14 +190,17 @@ class WebSearchService:
     def __init__(
         self,
         settings: WebSearchSettings,
-        credentials: CredentialManager,
+        config_dir: Path | None,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         tavily_oauth_search: TavilyOAuthSearch | None = None,
         io: WebReadIO | None = None,
     ) -> None:
         self.settings = settings
-        self.credentials = credentials
+        #: The config root the store-first key readers resolve under. A bare path
+        #: rather than the deleted ``CredentialManager``: the readers only ever
+        #: read ``config_dir`` off it (PR2b).
+        self.config_dir = config_dir
         self.transport = transport
         self.tavily_oauth_search = tavily_oauth_search
         self.io = io
@@ -208,12 +211,12 @@ class WebSearchService:
         NON-rotating on purpose: the singleflight key and every status surface
         need a value that is stable within a call (the rotation offset moves).
         """
-        return resolve_providers(self.settings, self.credentials)
+        return resolve_providers(self.settings, self.config_dir)
 
     def candidates(self, forced_provider: SearchProviderId | None = None) -> list[SearchProviderId]:
         if not self.settings.enabled:
             raise RuntimeError("Web search is disabled. Run `local-operator search on`.")
-        bands = resolve_provider_bands(self.settings, self.credentials)
+        bands = resolve_provider_bands(self.settings, self.config_dir)
         if forced_provider is not None:
             # Allowed iff it is in the resolved chain, so an EXCLUDED provider is
             # still refused (the forced path is also web_read's pin, and a pin must
@@ -230,13 +233,13 @@ class WebSearchService:
             ):
                 raise RuntimeError(
                     f"Search provider "
-                    f"{provider_refusal(forced_provider, self.settings, self.credentials)}"
+                    f"{provider_refusal(forced_provider, self.settings, self.config_dir)}"
                 )
             return [forced_provider]
         # ONE rotating free pool: the listed free legs in their listed order, then
         # the auto-joined free band. Rotating only the auto band pinned the first
         # attempt to providers[0] on every install (round-1 M1/Q1/D2/U1).
-        pool = free_pool(self.settings, self.credentials)
+        pool = free_pool(self.settings, self.config_dir)
         if self.settings.strategy == "round_robin" and len(pool) > 1:
             offset = _next_offset(len(pool))
             pool = pool[offset:] + pool[:offset]
@@ -304,7 +307,7 @@ class WebSearchService:
                             oauth_response.failures = list(failures)
                             return oauth_response
                         failures.append("tavily OAuth MCP: returned no results")
-                if not provider_available(provider_id, self.credentials, self.settings):
+                if not provider_available(provider_id, self.config_dir, self.settings):
                     # Kept INSIDE the loop on purpose: a provider the user LISTED but
                     # that has no usable credential stays in the chain and reports
                     # `not configured` here, rather than being silently dropped from
@@ -314,7 +317,7 @@ class WebSearchService:
                 try:
                     response = await PROVIDERS[provider_id].search(
                         client,
-                        self.credentials,
+                        self.config_dir,
                         self.settings,
                         clean_query,
                         limit,

@@ -19,7 +19,12 @@ from typing import Any
 from local_operator.info.model import format_duration
 from local_operator.resume import SessionRow
 from local_operator.session.archived import archived_ids
-from local_operator.session.creation import session_category, session_created_at
+from local_operator.session.creation import (
+    CREATED_AT_NAME,
+    _stored,
+    session_category,
+    session_created_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +201,26 @@ class CatalogEntry:
             )
         if self.row.live_state == "attached":
             return "attached"
+        # THE ``delegating`` RUNG, below ``attached`` and above the armed wake,
+        # mirroring ``row_state_mark``'s order exactly so the glyph and the words
+        # cannot disagree. It sits here because the rungs above it are all
+        # LOUDER facts about the row rather than about its children: a parked
+        # gate, a wedged or busy runtime, an unread outcome and "a terminal is
+        # watching this" each outrank "work is running one layer down".
+        #
+        # WHY A CODE AND NOT JUST A LABEL. The desktop renderer derives BOTH the
+        # glyph and its ink from this string alone, so a label-only change is
+        # invisible on exactly the surface that was complained about. The count
+        # still rides inside ``status`` (see :meth:`status`), which is what makes
+        # the edge channel publish when a count changes: the dedupe key is
+        # ``(code, label)`` with the clock term removed, so ``0 -> 2`` and
+        # ``2 -> 1`` each publish one ``session_status`` frame while a 15 s
+        # heartbeat rewrite publishes none.
+        #
+        # The predicate is the ROW's (:attr:`resume.SessionRow.delegating`), the
+        # same one ``row_state_mark`` reads — one fact, two renderings.
+        if self.row.delegating is not None:
+            return "delegating"
         if self.row.wakes and not self.row.wakes_dormant:
             return "scheduled"
         if self.row.live_state == "idle":
@@ -337,6 +362,24 @@ class CatalogEntry:
         # schedule drew the wake mark while the tooltip said "Recent").
         if self.row.live_state == "attached":
             return "Open"
+        # The rung's words. Same position as the arm in :attr:`status_code`, and
+        # the same predicate: the COUNT is spelled into the label because that is
+        # what the transport already carries — no new payload field is needed for
+        # a client to show it, and the ``(code, label)`` dedupe key then moves
+        # whenever the count does.
+        #
+        # The noun is "subagent" and not "agent" on purpose, and it is the word
+        # the rest of the product already uses: this row's own record field is
+        # ``subagents_running``, ``/info`` tallies in it (``info/render.py:435``,
+        # ``plural(n, "subagent")``), and the TUI's own stop notice says
+        # "N subagent(s) still running" (``tui/app.py:20950``). "Agent" alone is
+        # ambiguous in this product, which has an "Agents" page of reusable
+        # PROFILES — a different thing entirely. The
+        # label also never leads with "Delegating": that would imply the parent
+        # is acting, and "the parent's own turn is not running" is the one fact
+        # this state asserts.
+        if self.row.delegating is not None:
+            return delegating_label(*self.row.delegating)
         if self.row.wakes and not self.row.wakes_dormant:
             count = self.row.wakes
             return f"Scheduled ({count} wake{'s' if count != 1 else ''})"
@@ -423,6 +466,47 @@ class CatalogEntry:
             # grow a second line for it.
             sentence = sentence[:157].rstrip() + "…"
         return f"{base} — {sentence}"
+
+
+def delegating_label(running: int, queued: int) -> str:
+    """The ``delegating`` row's words, from the two counts the record reported.
+
+    Three shapes, because the two counts answer different questions and either
+    can be the whole of the answer:
+
+    * ``{N} subagent(s) running`` — the complaint's own case, and what the rung
+      reads as when nothing is parked;
+    * ``{N} subagent(s) running · {M} queued`` — the ``·`` addend shape
+      ``/info``'s fleet line already uses (``info/render.py:443``), so a parent
+      at capacity is distinguishable from one that is merely busy;
+    * ``{M} subagent(s) queued`` — children parked with nothing yet spending, a
+      state that must NOT read as idle (the capacity gate parks a child with
+      ``queued=True``: ``harness/subagent.py:663``, ``harness/jobs.py:648``).
+
+    SINGULAR AT ONE (``1 subagent running``), matching ``Scheduled (1 wake)``:
+    a plural here is the kind of small wrongness a reader notices before they
+    notice the state.
+
+    ZERO IS NEVER PRINTED FOR A COUNT THAT WAS NOT REPORTED. The caller passes
+    the normalised pair, so a record that reported only one of the two counts
+    simply does not get that addend — the alternative, printing ``0 queued``,
+    would assert a measurement nobody made. A queued count is also never
+    mentioned at zero even when it WAS reported: "0 queued" is noise on a row
+    whose news is the running children.
+
+    Public rather than private because the words are the wire's: the string this
+    returns lands in ``CatalogEntry.status``, which the desktop row's ``title``
+    and ``sr-only`` carry verbatim, and naming it lets any surface that wants the
+    same sentence ask for it instead of assembling a second vocabulary (U11).
+    """
+    noun = "subagent" if running == 1 else "subagents"
+    if running < 1:
+        queued_noun = "subagent" if queued == 1 else "subagents"
+        return f"{queued} {queued_noun} queued"
+    head = f"{running} {noun} running"
+    if queued >= 1:
+        return f"{head} · {queued} queued"
+    return head
 
 
 def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEntry:
@@ -712,6 +796,13 @@ def decorate_rows(
         pending: str | None = None
         leaving = ""
         kind = ""
+        # Relaxed from the record, never defaulted to zero: a row with no record
+        # (a cold or already-reaped session) has NO count to report, and the
+        # difference between that and "zero children" is what keeps a renderer
+        # from asserting "no subagents" about a session it could not ask. Only
+        # the live branch below can set them, exactly like ``leaving``.
+        subagents_running: int | None = None
+        subagents_queued: int | None = None
         if record_state is not None:
             record, state = record_state
             # ``wedged`` here means the owner has stopped reporting, which is a
@@ -743,6 +834,18 @@ def decorate_rows(
             # record written by an OLDER runtime has no such field, and this
             # runs on the poll loop behind ``/resume``.
             leaving = str(getattr(record, "leaving", "") or "")
+            # THE COUNTS THE READER ALREADY HOLDS. `registry.scan` handed this
+            # function the whole record and the two fields were simply dropped;
+            # they are what makes a parent whose own turn ended while its
+            # children still run distinguishable from an idle one, since
+            # ``live_state`` is deliberately the parent's own lane
+            # (``ServingSessionHandle.is_conversationally_active`` excludes
+            # children from it). Read through ``getattr`` like ``leaving``
+            # above and for the same reason: a record written by an OLDER
+            # runtime has no such field, and this runs on the poll loop behind
+            # ``/resume``.
+            subagents_running = getattr(record, "subagents_running", None)
+            subagents_queued = getattr(record, "subagents_queued", None)
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
         age: float | None = None
@@ -753,6 +856,8 @@ def decorate_rows(
                 live_state=live_state,
                 pending=pending,
                 leaving=leaving,
+                subagents_running=subagents_running,
+                subagents_queued=subagents_queued,
                 wakes=len(schedules),
                 wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
                 kind=kind,
@@ -806,6 +911,86 @@ SUBAGENT_LAYER_CAP = 40
 #: layered on afterwards by `decorate_rows`/attention on every poll, because
 #: caching a live fact would freeze the list.
 _ROW_CACHE: dict[Path, tuple[tuple[float, int], SessionRow]] = {}
+
+#: ``sessions root -> {session_id: ((st_ino, st_mtime_ns, st_size), birth)}`` for
+#: ``created_at.json``. WHY: ``load_catalog`` must stamp EVERY candidate's birth
+#: before ranking (the rank key is ``-created_at``, and no cheaper bound on it is
+#: sound: activity can precede a hand-edited, restored or ``st_birthtime``
+#: fallback birth, and a bounded selection then drops the row from the page --
+#: PR #1470 review round 1, F1/Q-1). The open+read+parse per candidate was
+#: 0.80 s of a 1.47 s desktop list at 9,400 directories (D-F7). The sidecar is
+#: write-once by contract (#800), so a birth read on one poll is still true on
+#: the next unless the file itself changed -- and one ``stat`` says whether it
+#: did. The value served is always ``session_created_at``'s own answer.
+#:
+#: THE KEY is the sidecar's inode, nanosecond mtime and size. The one writer
+#: (``creation.ensure_session_created_at``) publishes through a hard link of a
+#: fresh temp file, so every rewrite is a new inode; a hand edit or replacement
+#: moves mtime (and usually size and inode); a deleted-and-recreated directory
+#: gets a new inode; a renamed directory is a different id. The accepted blind
+#: spot is an in-place rewrite that keeps the same inode, the same size AND
+#: restores the same nanosecond mtime (``touch -r`` after editing) -- served
+#: stale until the process restarts or the file changes again.
+#:
+#: NOT CACHED: a directory with no readable sidecar -- absent, OR present but
+#: unparseable (``null``, a bare string, ``true``, torn JSON). Its birth then
+#: comes from ``origin.json`` or ``st_birthtime`` (``creation.session_created_at``),
+#: files this key does not watch, so it is read every time -- the same cost as
+#: before, for the ~0.4% of directories measured without one (39 of 9,725).
+#: Only a value parsed FROM the watched file is ever cached (PR #1470 review
+#: round 2, F2: caching the fallback served a stale ``origin.json`` birth, and
+#: missed a corrupt sidecar repaired in place to the same inode/size/mtime).
+#:
+#: BOUNDED: each ``load_catalog`` call prunes its root's map to that call's
+#: candidates, so a map holds at most one entry per visible session of the
+#: store (648 on the reporting store; 10,000 on a 10k store of visible
+#: sessions), and deleted or newly hidden sessions drop out on the next call.
+#: At most :data:`_BIRTH_MEMO_ROOTS` roots are kept, oldest evicted first, so a
+#: process that lists many stores (the test suite) cannot grow it without limit.
+_BIRTH_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], float]]] = {}
+_BIRTH_MEMO_ROOTS = 4
+
+
+def _memo_root(sessions: Path) -> dict[str, tuple[tuple[int, int, int], float]]:
+    """This store's birth memo, created (and the oldest root evicted) on first use."""
+    key = str(sessions)
+    memo = _BIRTH_MEMO.get(key)
+    if memo is None:
+        # ``pop(..., None)``: the desktop lists from worker threads, so two
+        # calls can evict the same root; losing a memo only costs a re-read.
+        while len(_BIRTH_MEMO) >= _BIRTH_MEMO_ROOTS:
+            _BIRTH_MEMO.pop(next(iter(_BIRTH_MEMO), ""), None)
+        memo = _BIRTH_MEMO.setdefault(key, {})
+    return memo
+
+
+def _memoized_birth(sessions: Path, session_id: str) -> float:
+    """``session_created_at`` for one candidate, re-read only when its sidecar changed.
+
+    STAT BEFORE READ, deliberately: a sidecar replaced between the two lands its
+    NEW value under the OLD key, so the next call's stat misses and re-reads --
+    the race resolves toward a re-read, never toward serving a stale birth.
+    """
+    memo = _memo_root(sessions)
+    session_dir = os.path.join(sessions, session_id)
+    try:
+        info = os.stat(os.path.join(session_dir, CREATED_AT_NAME))
+    except OSError:
+        memo.pop(session_id, None)
+        return session_created_at(Path(session_dir))
+    key = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = memo.get(session_id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    # ``_stored`` is the sidecar half of ``session_created_at``'s own rule, so
+    # a parsed value is exactly what that function would have returned. When
+    # it does not parse, the answer is the fallback's, which is not cached.
+    born = _stored(Path(session_dir))
+    if born is None:
+        memo.pop(session_id, None)
+        return session_created_at(Path(session_dir))
+    memo[session_id] = (key, born)
+    return born
 
 
 def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
@@ -899,7 +1084,9 @@ def cached_session_rows(
                 mtime,
                 session_name(session_dir),
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
-                created_at=session_created_at(session_dir),
+                # Through the memo ``load_catalog`` has just filled, so hydrating
+                # a page row does not read its birth a second time on a cold call.
+                created_at=_memoized_birth(directory / "sessions", session_id),
                 archived=archived,
             )
         rows.append(row)
@@ -1106,12 +1293,18 @@ def load_catalog(
     # Creation time is the immutable ordering key (#800), so every construction
     # site must stamp it. Rows left at the 0.0 default all tie and fall through
     # to the session-id tie-break, which silently reverses newest-first order.
+    # EVERY candidate, before ranking: see `_BIRTH_MEMO` for why no cheaper
+    # bound is sound, and why a warm call pays one stat here instead of a read.
+    sessions_root = directory / "sessions"
+    birth_memo = _memo_root(sessions_root)
+    for stale in birth_memo.keys() - {candidate[0] for candidate in candidates}:
+        birth_memo.pop(stale, None)
     rows = [
         SessionRow(
             session_id,
             mtime,
             "",
-            created_at=session_created_at(directory / "sessions" / session_id),
+            created_at=_memoized_birth(sessions_root, session_id),
             # Stamped from the scan's own read so a row that never reaches
             # ``cached_session_rows`` below (nothing here guarantees every
             # candidate is hydrated) still states its archive state honestly.
@@ -1229,7 +1422,13 @@ def load_catalog(
     if marker_rows_added and not include_archived:
         rows = [row for row in rows if row.id not in (archived_marker_rows or frozenset())]
     rows = decorate_rows(directory, rows, include_live=True, include_archived=include_archived)
-    identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
+    # The namespace is a property of the PARENT directory, and every row here
+    # shares one, so `conversation_identity` is asked once and its answer reused.
+    # Building a `Path` per row just to ask it was 0.56 s of a 1.9 s list at
+    # 10,000 visible sessions (pure `pathlib` construction). Still the one rule's
+    # own answer, never a second spelling of it.
+    namespace = conversation_identity(directory / "sessions" / "_").partition("/")[0]
+    identities = {row.id: f"{namespace}/{row.id}" for row in rows}
     attention: dict[str, dict[str, Any]] = {}
     try:
         attention = AttentionStore(directory / "attention.db").state_many(identities.values())
