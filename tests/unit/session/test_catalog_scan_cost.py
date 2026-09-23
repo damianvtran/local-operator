@@ -1360,3 +1360,96 @@ class TestAPinnedConversationSurvivesThePage:
 
         assert len(entries) == 3, "fixture: no extra was built"
         assert len(_ROW_CACHE) == 3, "the extras evicted the page rows from the cache"
+
+
+class TestBirthDatesAreReadOnlyForThePage:
+    """``load_catalog`` reads ``created_at.json`` for the rows it RETURNS, not for the store.
+
+    Reading birth for every scan candidate before the slice was 0.80 s of a
+    1.47 s desktop list at 9,400 directories (desktop load report D-F7). The
+    selection now uses each candidate's activity mtime as an upper bound on its
+    birth and resolves births best-first (``catalog._select_page``). These pin
+    both halves: the cost is O(page + contenders), and the answer is the one a
+    full sort over real birth dates gives — including when activity order and
+    birth order disagree, which is the case a naive "rank by mtime" would get
+    wrong.
+    """
+
+    @staticmethod
+    def _opened_births(run: Callable[[], Any]) -> tuple[Any, int]:
+        from local_operator.session import creation
+
+        real = creation.session_created_at
+        calls = [0]
+
+        def counting(directory: Path) -> float:
+            calls[0] += 1
+            return real(directory)
+
+        import local_operator.session.catalog as catalog
+
+        original = catalog.session_created_at
+        catalog.session_created_at = counting
+        try:
+            return run(), calls[0]
+        finally:
+            catalog.session_created_at = original
+
+    def test_a_large_store_reads_births_for_the_page_not_the_store(self, tmp_path: Path) -> None:
+        # Each conversation last active shortly after it was born: the common
+        # shape, where only rows active since the page's oldest birth contend.
+        for index in range(400):
+            _session(
+                tmp_path, f"user{index:08x}", stamp=5_000.0 + index + 0.5, created=5_000.0 + index
+            )
+
+        entries, reads = self._opened_births(lambda: load_catalog(tmp_path, limit=20))
+
+        assert [entry.id for entry in entries] == [f"user{i:08x}" for i in range(399, 379, -1)]
+        # The selection resolves the page plus the one contender whose bound had
+        # to be read to prove the page complete (21); the page's own hydration in
+        # ``cached_session_rows`` reads the page again on a cold row cache (20).
+        # Before the change the selection alone read all 400.
+        assert reads <= 41, reads
+
+    def test_the_page_matches_a_full_sort_when_activity_and_birth_disagree(
+        self, tmp_path: Path
+    ) -> None:
+        """An OLD conversation touched recently must not outrank a newer one, and
+        a young conversation left untouched must still make the page."""
+        import random
+
+        rng = random.Random(1234)
+        births: dict[str, float] = {}
+        for index in range(120):
+            session_id = f"user{index:08x}"
+            born = 1_000.0 + rng.random() * 50_000.0
+            births[session_id] = born
+            _session(
+                tmp_path,
+                session_id,
+                created=born,
+                stamp=born + rng.choice([0.0, 5.0, 60_000.0 * rng.random()]),
+            )
+
+        entries = load_catalog(tmp_path, limit=25, pinned_off_page=["user00000007"])
+        expected = sorted(births, key=lambda session_id: (-births[session_id], session_id))
+
+        page = [entry.id for entry in entries[:25]]
+        assert page == expected[:25]
+        assert [entry.row.created_at for entry in entries[:25]] == [
+            births[session_id] for session_id in page
+        ]
+        if "user00000007" not in page:
+            assert entries[25:] and entries[25].id == "user00000007"
+            assert entries[25].row.created_at == births["user00000007"]
+
+    def test_no_returned_row_carries_the_placeholder_birth(self, tmp_path: Path) -> None:
+        for index in range(30):
+            _session(tmp_path, f"user{index:08x}", stamp=9_000.0 - index, created=1_000.0 + index)
+
+        entries = load_catalog(tmp_path, limit=10, pinned_off_page=["user00000000"])
+
+        assert len(entries) == 11
+        assert all(entry.row.created_at > 0 for entry in entries)
+        assert [entry.id for entry in entries[:10]] == [f"user{i:08x}" for i in range(29, 19, -1)]
