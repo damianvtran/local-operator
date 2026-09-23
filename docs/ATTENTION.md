@@ -62,6 +62,26 @@ schema objects initialize in one transaction; readers of a positively identified
 empty, not-yet-initialized database see no published completion. Corrupt bytes or
 missing tables in an established schema remain errors, never a false read state.
 
+**A publication that lost to a busy store is retried IN THIS PROCESS, not only at
+the next boot.** This store keeps SQLite's default rollback journal, so a reader
+holds a lock that blocks a writer's `COMMIT`, and under the machine-wide
+contention of many concurrent sessions a `publish` can exhaust its bounded retry
+budget and be DEFERRED — the outcome is durable in the transcript journal from
+before the publish, which is what makes deferring honest. What used to follow was
+nothing: the next boot's `bootstrap_transcript` re-imports the journal, and a
+session that finishes a turn and then sits idle — which is what a finished
+session is — never boots again. The completion therefore never reached the store,
+and since that row is what raises the notification and draws the sidebar's
+unread mark, both stayed silent for a turn that had in fact completed. The owning
+session now runs a bounded REPUBLISH LADDER (four rungs, ~86 s of exposure) that
+republishes the journal's LATEST marker, and an attached viewer drains the same
+latch on its next tick, so the ordinary repair lands within about a second of the
+store clearing. A republish is the same token through the same `INSERT OR
+IGNORE`, so it takes no new `sequence`, dedupes against `deliveries` and cannot
+revive a completion the human already read. If the whole ladder is exhausted the
+latch is cleared and the journal is left to the next boot, as it was before, said
+once in the log rather than once per poll.
+
 ## Read APIs and transports
 
 `AttentionStore.state_many(conversations)` returns a consistent map keyed by
