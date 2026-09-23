@@ -186,3 +186,53 @@ describe("the pin gesture", () => {
 		expect(window.location.hash).not.toBe("#/s/a1");
 	});
 });
+
+describe("empty sections cost no heading (design round 1, D1)", () => {
+	it("omits the Active heading when every active row is pinned away", () => {
+		/* A pin LIFTS a row out of its ranked section, so pinning the only
+		   active row leaves Active empty — newly reachable because of pinning.
+		   The sidebar's own rule is that an empty section contributes no
+		   heading, and the ★ Pinned section already followed it. */
+		sessionList = [
+			summary({ session_id: "p1", conversation_name: "Pinned", pinned: true }),
+		];
+		render(<SessionListScreen />);
+		expect(screen.getByText("★ Pinned")).toBeTruthy();
+		expect(screen.queryByText("Active Sessions")).toBeNull();
+		expect(screen.queryByText("Previous Sessions")).toBeNull();
+	});
+
+	it("omits the Previous heading when there are no previous rows", () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		expect(screen.getByText("Active Sessions")).toBeTruthy();
+		expect(screen.queryByText("Previous Sessions")).toBeNull();
+	});
+
+	it("says so when a search matches nothing at all", () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const input = screen.getByPlaceholderText("Search conversations…");
+		fireEvent.change(input, { target: { value: "zzz-no-match" } });
+		expect(screen.getByText("no matching conversations")).toBeTruthy();
+		expect(screen.queryByText("Active Sessions")).toBeNull();
+	});
+});
+
+describe("the list teaches its own pin gesture (design round 1, D2)", () => {
+	it("shows the long-press hint while nothing is pinned", () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		expect(screen.getByText("long-press a row to pin it")).toBeTruthy();
+	});
+
+	it("drops the hint once a pin exists, whose ★ Pinned section is the discoverer", () => {
+		sessionList = [
+			summary({ session_id: "p1", conversation_name: "Pinned", pinned: true }),
+			summary({ session_id: "a1", conversation_name: "Alpha" }),
+		];
+		render(<SessionListScreen />);
+		expect(screen.queryByText("long-press a row to pin it")).toBeNull();
+		expect(screen.getByText("★ Pinned")).toBeTruthy();
+	});
+});

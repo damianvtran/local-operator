@@ -607,6 +607,19 @@ export function SessionListScreen() {
 					placeholder="Search conversations…"
 					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
+				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
+				    round 1, D2). The session view's ☆ is one tap away and does the same
+				    thing, but a reader has to already be in a conversation to find it, so
+				    it cannot teach the list's own long-press. Shown only while the hint is
+				    still TRUE and useful: with nothing pinned, the gesture is invisible;
+				    once anything is pinned the ★ Pinned section is its own discoverer and
+				    the line would be noise. Non-interactive and dim — it is a caption, not
+				    a control. */}
+				{sessions.length > 0 && pinned.length === 0 ? (
+					<p className="mx-2 mb-2 text-meta text-ink-dim">
+						long-press a row to pin it
+					</p>
+				) : null}
 				{sessions.length === 0 ? (
 					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 						<p className="text-body text-ink-muted">
@@ -620,20 +633,39 @@ export function SessionListScreen() {
 					</div>
 				) : (
 					<div className="flex flex-col gap-3">
+						{/* AN EMPTY SECTION COSTS NO HEADING — the sidebar's own rule
+						    (`_display_rows`: "An empty section contributes no header"), and the
+						    ★ Pinned section above already followed it while these two did not.
+						    Newly reachable because of pinning: a pin LIFTS a row out of its
+						    ranked section, so pinning every row (or a search that matches none)
+						    painted two bare headings with nothing under them (design round 1,
+						    D1). */}
 						{pinned.length > 0 ? (
 							<section>
 								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">★ Pinned</h2>
 								{pinned.map(renderCard)}
 							</section>
 						) : null}
-						<section>
-							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
-							{active.map(renderCard)}
-						</section>
-						<section>
-							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
-							{previous.map(renderCard)}
-						</section>
+						{active.length > 0 ? (
+							<section>
+								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
+								{active.map(renderCard)}
+							</section>
+						) : null}
+						{previous.length > 0 ? (
+							<section>
+								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
+								{previous.map(renderCard)}
+							</section>
+						) : null}
+						{/* The case where EVERY section is empty: a query that matched none, or
+						    every row pinned away — pinned rows are not empty, so this arm is the
+						    one where the screen would otherwise be a wordless void. */}
+						{pinned.length + active.length + previous.length === 0 ? (
+							<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
+								no matching conversations
+							</p>
+						) : null}
 						{pinError ? (
 							<p role="alert" className="px-2 text-meta text-danger">
 								Could not save the pin: {pinError}

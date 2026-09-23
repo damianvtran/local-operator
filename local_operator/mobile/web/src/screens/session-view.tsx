@@ -46,6 +46,27 @@ import {
 } from "../store";
 import type { SessionProjection } from "../types";
 
+/** The header strip's control box, and the HIT SLOP that makes it reachable.
+
+    The strip is one compact line, so each control is a 32px box (`min-h-8`
+    `min-w-8`) — the size the back button has always been. 32px is below the
+    44px touch floor the rest of the phone UI honours (the composer's controls
+    are `min-h-11`), and a small target is a real cost on a phone even when the
+    glyph is legible.
+
+    The fix is SLOP, not a bigger box: an absolutely-positioned pseudo-element
+    extends the touchable area 6px each side (`-inset-1.5`; 32 + 12 = 44) while
+    the painted strip keeps its height, so the header does not grow and the
+    layout the composer sits under does not move. Applied to every control in
+    the strip — the back button included — so the three cannot end up with
+    different hit areas (design round 1, D3).
+
+    One constant rather than the classes repeated inline, for the reason every
+    shared class here is shared: three copies drift. */
+const HEADER_CONTROL =
+	"relative flex min-h-8 min-w-8 items-center justify-center rounded-sm " +
+	"before:absolute before:-inset-1.5 before:content-[''] active:bg-elevated";
+
 function Header({
 	projection,
 	sessionId,
@@ -106,7 +127,7 @@ function Header({
 				type="button"
 				onClick={() => navigate("/")}
 				aria-label="back to sessions"
-				className="flex min-h-8 min-w-8 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
+				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
 				‹
 			</button>
@@ -125,7 +146,7 @@ function Header({
 				aria-label={pinned ? "unpin this session" : "pin this session"}
 				aria-pressed={pinned}
 				className={cn(
-					"flex min-h-8 min-w-8 items-center justify-center rounded-sm active:bg-elevated",
+					HEADER_CONTROL,
 					pinned ? "text-accent" : "text-ink-muted",
 				)}
 			>
@@ -142,7 +163,7 @@ function Header({
 				type="button"
 				onClick={() => setGateOpen(true)}
 				aria-label="approvals in this session"
-				className="flex min-h-8 items-center justify-center rounded-sm px-2 text-meta text-ink-muted active:bg-elevated"
+				className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
 			>
 				{projection.pending ? "needs you" : "approvals"}
 			</button>
@@ -253,7 +274,7 @@ export function SessionScreen({
 						type="button"
 						onClick={() => navigate("/")}
 						aria-label="back to sessions"
-						className="flex min-h-8 min-w-8 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
+						className={cn(HEADER_CONTROL, "text-ink-muted")}
 					>
 						‹
 					</button>
