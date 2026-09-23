@@ -252,7 +252,7 @@ async def test_projection_push_does_not_park_the_runtime_loop(monkeypatch) -> No
     from local_operator.session.runtime.server import RuntimeServer, _ClientConn
 
     handle = _FakeHandle(_near_cap_projection())
-    runtime = RuntimeServer(handle, kind="tui")
+    runtime = RuntimeServer(handle, kind="tui")  # type: ignore[arg-type]
     await runtime.start_in_process()
 
     loop = asyncio.get_running_loop()
@@ -265,7 +265,7 @@ async def test_projection_push_does_not_park_the_runtime_loop(monkeypatch) -> No
     # writer is a stub that DISCARDS bytes: what this test measures is the work
     # the loop has to do before the write, and a real socket would add a second
     # drain await whose timing this test must not depend on.
-    conn = _ClientConn(writer=_FakeWriter(), kind="daemon")
+    conn = _ClientConn(writer=_FakeWriter(), kind="daemon")  # type: ignore[arg-type]
     runtime._clients[id(conn.writer)] = conn
 
     # WHERE THE BUILD RAN, as a thread identity: deterministic and completely
