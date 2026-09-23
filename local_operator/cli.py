@@ -4269,8 +4269,15 @@ def sessions_command(args: argparse.Namespace) -> int:
             # The device name is authored by ANOTHER machine (a member row's
             # ``name``), so it is fitted by cells like the other foreign text on
             # this line rather than sliced by characters.
-            held = _fit_cell(peers.get(row["session_id"]) or "?", PEER_COLUMN_WIDTH)
-            line += f" {_pad_cell(held, PEER_COLUMN_WIDTH)}"
+            # NOT ``held``: that name is this function's map of the STALLED column
+            # (``held = {session_id: bool(stall_held)}``, read as ``held.get(...)``
+            # further down the same row). This cell is a fitted string, so reusing
+            # the name silently replaced that map with a str — a column that then
+            # raised on every row carrying both marks. Caught by the fold's
+            # convergence round, not by either side alone: each branch used the
+            # name correctly on its own.
+            peer_cell = _fit_cell(peers.get(row["session_id"]) or "?", PEER_COLUMN_WIDTH)
+            line += f" {_pad_cell(peer_cell, PEER_COLUMN_WIDTH)}"
 
         if show_updating:
             # The cell is RENDERED from the row's pair through the ONE phase reader
