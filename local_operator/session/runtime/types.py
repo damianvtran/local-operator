@@ -1073,6 +1073,25 @@ class SessionRecord:
     #: No front end is attached. A working session with nobody watching is
     #: exactly what this release makes possible, so it is worth naming.
     detached: bool = False
+    #: WHEN this session's last viewer left (``time.time()``), or ``None`` if no
+    #: viewer has ever been attached. Cleared back to ``None`` when one attaches.
+    #:
+    #: WHICH MOMENT, not merely that. The residency policy keeps a runtime a
+    #: viewer has left warm for ``runtime.keep_alive_seconds``, and bounds how
+    #: many such runtimes one machine holds by evicting the least recently
+    #: detached (``process._keep_alive_victim``). That bound needs an ORDER, and
+    #: this is the only field that carries one: ``heartbeat_at`` cannot, because
+    #: a detached idle runtime keeps beating, and ``detached`` is a boolean.
+    #: ``None`` is load-bearing rather than a missing value — it is what tells
+    #: the keep-alive that this runtime is one nobody has looked at, which is the
+    #: population the ordinary 3 s drain was written for.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, exactly like the block above:
+    #: ``from_json`` drops unknown keys, so a mixed-version fleet reads and
+    #: writes records with and without this field interchangeably, and
+    #: ``PROTOCOL_VERSION`` deliberately does not move for it. Nothing is
+    #: required to read it: a runtime without it keeps today's residency.
+    detached_at: float | None = None
     #: This session is WAITING FOR A PERSON: ``"approval"``, ``"ask"``, or
     #: None. A parked gate holds the runtime resident for up to a day, so the
     #: cost has to be findable — this field is what puts it in `lop sessions`

@@ -99,6 +99,64 @@ REAP_CHECK_S = 0.25
 #: quiescent. This is a drain for newly arriving work, not a reconnect grace.
 DEFAULT_GRACE_S = 3.0
 
+#: HOW LONG A RUNTIME A VIEWER HAS LEFT STAYS RESIDENT (``runtime.keep_alive_seconds``).
+#:
+#: The 3 s drain above is deliberately NOT a reconnect grace, and that is the gap
+#: this fills: closing a conversation and opening it a minute later paid a cold
+#: spawn (measured 1.1-1.5 s of wall time and ~0.9-1.0 s of CPU on this fleet)
+#: for session state that was already in a live process's memory. With this
+#: window the re-open is a live attach (measured 16/22 ms p50/p95 on a 0.56 MB
+#: session and 55/101 ms on a 48 MB one at load ~98). The policy it states: a
+#: runtime that has been LOOKED AT is a runtime that will be looked at again.
+#:
+#: IT APPLIES ONLY WHERE A VIEWER HAS LEFT, never to a runtime nobody watched —
+#: an ``exec``, a wake delivery, a phone-only session — because that population
+#: is exactly what the 3 s drain was written for. That is why the window is keyed
+#: on the record's ``detached_at`` (:func:`_detached_at`) rather than on "is this
+#: runtime idle": the two are the same question only for a runtime a person has
+#: looked at.
+#:
+#: 0 DISABLES IT. That is the escape hatch for an operator who would rather pay a
+#: cold start than hold memory, and it is not a special case in the arithmetic: a
+#: window of 0 simply leaves the ordinary drain.
+DEFAULT_KEEP_ALIVE_SECONDS = 300
+
+#: HOW MANY DETACHED IDLE RUNTIMES ONE MACHINE KEEPS WARM
+#: (``runtime.keep_alive_max``).
+#:
+#: The window above is per process and unbounded in aggregate, so a user who
+#: visits eight conversations would hold eight resident processes for five
+#: minutes each. This is the machine-wide bound: a runtime inside its keep-alive
+#: window that is NOT among the ``keep_alive_max`` most recently detached idle
+#: records leaves at once, so the fleet settles at the cap rather than at
+#: "however many the user happened to open". The cost it bounds is measured at
+#: ~73-130 MB of RSS per idle runtime, in ``test_runtime_keep_alive``.
+#:
+#: WHY AN LRU AND NOT A CLOCK OR A QUEUE. The runtime cannot know which
+#: conversation the user will open next, but detach ORDER is the best proxy
+#: available: the session just left is the one most likely to be returned to, and
+#: the one left twenty minutes ago is the least. Oldest-first or FIFO would evict
+#: exactly the wrong one, which is why the record carries WHICH MOMENT a runtime
+#: became detached (``SessionRecord.detached_at``) and not merely that it is.
+#:
+#: ONLY DETACHED IDLE RECORDS COUNT, and that is the cap's scope rather than an
+#: oversight: a runtime held by work in flight is not kept alive by this policy
+#: and must not be charged to it, or a busy fleet would evict the very windows
+#: this exists to create.
+#:
+#: A RACE LEAVES N±1 BRIEFLY, deliberately: two runtimes can each scan before
+#: either sees the other's decision, so one extra idle process can exist for one
+#: scan interval. It is self-correcting on the next tick and costs at most the
+#: memory of one idle runtime on a host that can hold it.
+DEFAULT_KEEP_ALIVE_MAX = 4
+
+#: How often a runtime inside its keep-alive window re-reads the registry to
+#: check its own place in the LRU above. Chosen against the 0.25 s reaper tick,
+#: not against the window: a bound that lands a few seconds late still bounds the
+#: fleet, while a scan on every tick would put a directory read plus a JSON parse
+#: per record on a loop that is otherwise sleeping.
+KEEP_ALIVE_SCAN_S = 5.0
+
 #: HOW LONG A BUSY PROBE THAT CANNOT BE EVALUATED MAY PIN A RUNTIME.
 #:
 #: Deliberately a linear COUNT and not a deadline: the reaper samples
@@ -225,6 +283,59 @@ def _grace_seconds() -> float:
     except ValueError:
         return DEFAULT_GRACE_S
     return value if value > 0 else DEFAULT_GRACE_S
+
+
+def _keep_alive_seconds() -> float:
+    """``runtime.keep_alive_seconds``: the post-viewer residency window.
+
+    A value at or below 0 — or one this process cannot read at all — means NO
+    keep-alive, which leaves the ordinary drain in charge. Zero is therefore a
+    real answer rather than a bad one (see :data:`DEFAULT_KEEP_ALIVE_SECONDS`),
+    and an unreadable setting resolves the same way as an explicit 0 because the
+    alternative is holding a process on the strength of a config file nobody can
+    parse.
+
+    Read through ``get_nested_value`` on the registry's OWN tuple: that is the
+    accessor ``settings_io``'s declared path pairs with, and a consumer reading
+    the flat dotted key instead is the #576 failure (a key nothing ever writes,
+    looking like success from every angle).
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        raw = ConfigManager(config_dir()).get_nested_value(
+            ("runtime", "keep_alive_seconds"), DEFAULT_KEEP_ALIVE_SECONDS
+        )
+        seconds = float(raw)
+    except Exception:  # noqa: BLE001 — an unreadable setting must not pin a runtime
+        logger.debug("could not read runtime.keep_alive_seconds", exc_info=True)
+        return float(DEFAULT_KEEP_ALIVE_SECONDS)
+    return seconds if seconds > 0 else 0.0
+
+
+def _keep_alive_max() -> int:
+    """``runtime.keep_alive_max``: the machine-wide LRU cap, floored at 1.
+
+    A cap below 1 would evict every runtime the instant it detached — the
+    keep-alive window would exist and never be usable — so 0 (and any
+    unusable value) is read as the floor instead. An operator who wants today's
+    residency sets ``keep_alive_seconds`` to 0, which is the honest spelling of
+    "do not keep anything warm": it says so once, rather than making a count of
+    zero silently mean the same thing.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        raw = ConfigManager(config_dir()).get_nested_value(
+            ("runtime", "keep_alive_max"), DEFAULT_KEEP_ALIVE_MAX
+        )
+        cap = int(raw)
+    except Exception:  # noqa: BLE001 — an unreadable setting must not pin a runtime
+        logger.debug("could not read runtime.keep_alive_max", exc_info=True)
+        return DEFAULT_KEEP_ALIVE_MAX
+    return cap if cap > 0 else 1
 
 
 def _idle_for_refresh(handle: object) -> bool:
@@ -659,6 +770,128 @@ def _viewer_attached(runtime: object) -> bool:
         logger.debug("attach_clients failed; treating as no viewer", exc_info=True)
         return False
     return isinstance(live, int) and live > 0
+
+
+def _detached_at(runtime: object) -> float | None:
+    """When this runtime's LAST viewer left, or ``None`` if none ever has.
+
+    Term 3 above asks whether a viewer is attached NOW; this asks whether one
+    ever was, which is the question the keep-alive window is keyed on. The stamp
+    is written by ``RuntimeServer._republish_detached`` at the 1->0 transition
+    and cleared at 0->1, so it is NOT "when this runtime last became idle": a
+    runtime nobody has watched carries ``None`` for its whole life and keeps the
+    ordinary 3 s drain, which is the population that drain was written for.
+
+    Read off the server's own record object, which is where the stamp is
+    written; a reduced runtime (an older host, a test double) has no record and
+    reads as "no viewer ever", which is the conservative direction — it keeps
+    the existing residency behaviour rather than inventing a five-minute window
+    for a process nobody looked at. A non-numeric value is read the same way,
+    for the reason the record's own readers refuse foreign types: arithmetic on
+    a field a foreign writer filled is where cosmetic damage stops being
+    cosmetic.
+    """
+    stamp = getattr(getattr(runtime, "_record", None), "detached_at", None)
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return None
+    return float(stamp)
+
+
+def _keep_alive_candidates() -> list[tuple[float, int]]:
+    """The machine's detached IDLE runtimes as ``(detached_at, pid)`` pairs.
+
+    The one reader of the registry this policy needs, kept separate from the
+    comparison so a test can hand :func:`_keep_alive_victim` a population
+    without a run directory full of live pids.
+
+    ``reap=False`` ON PURPOSE: this runs at 5 s cadence inside every keep-alive
+    runtime, and a sweep would delete another process's unparseable record and
+    move its dead one aside — a READER has no business doing either (the same
+    reason the desktop feed passes ``False``). The classification is still
+    asked for and still used: a record whose owner is gone is not resident and
+    must not hold a slot in the cap.
+
+    ``wedged`` records COUNT. The verdict says the owner is not ANSWERING, not
+    that it is gone (a long turn or a starved scheduler reads the same way), and
+    the process is still resident holding the memory this cap exists to bound —
+    so counting it is the reading that keeps the bound honest. Only ``stale``,
+    where the pid is proven gone, is dropped.
+    """
+    from local_operator.session.runtime import registry
+
+    out: list[tuple[float, int]] = []
+    for record, state in registry.scan(reap=False):
+        if state == "stale" or not getattr(record, "detached", False):
+            continue
+        if getattr(record, "busy", False):
+            continue
+        stamp = getattr(record, "detached_at", None)
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        out.append((float(stamp), record.pid))
+    return out
+
+
+def _keep_alive_victim(runtime: object, cap: int) -> bool:
+    """Is this runtime outside the machine-wide keep-alive LRU?
+
+    True means: another ``cap`` runtimes were detached more recently than this
+    one, so this one gives up its window and exits now. The comparison is on
+    ``detached_at`` descending, with the pid breaking ties so the ordering is
+    total — a tie at the boundary therefore resolves by pid, which is arbitrary
+    but STABLE, and the design accepts the resulting N±1 (see
+    :data:`DEFAULT_KEEP_ALIVE_MAX`).
+
+    EVERY FAILURE TO ANSWER KEEPS THE RUNTIME, including the important one: a
+    scan that does not contain OUR OWN record cannot say we are outside the cap,
+    so it says nothing and we stay. The instrument being blind is not evidence of
+    guilt, and the cost of that direction is bounded — the peers that can see
+    themselves still preempt themselves — while the other direction is a runtime
+    exiting because its record was momentarily unreadable.
+    """
+    mine = _detached_at(runtime)
+    if mine is None:
+        return False
+    try:
+        candidates = _keep_alive_candidates()
+    except Exception:  # noqa: BLE001 — a registry that will not read keeps the runtime
+        logger.debug("keep-alive LRU scan failed; keeping runtime", exc_info=True)
+        return False
+    own_pid = getattr(getattr(runtime, "_record", None), "pid", None)
+    if own_pid is None or all(pid != own_pid for _stamp, pid in candidates):
+        # We are not in the population we just read, so it is not a population we
+        # can be placed in. See the docstring.
+        return False
+    candidates.sort(reverse=True)
+    return own_pid not in {pid for _stamp, pid in candidates[:cap]}
+
+
+def _drain_window_s(base_s: float, runtime: object) -> tuple[float, int]:
+    """``(window_seconds, lru_cap)`` for a drain that is about to start.
+
+    ``base_s`` is the ordinary drain (``DEFAULT_GRACE_S``, or the operator's
+    ``LOP_SESSION_GRACE_S``). It is replaced by the keep-alive window for a
+    runtime a viewer has LEFT, and never shortened by it: an operator who
+    widened the drain gets the wider of the two, because the runtime a person was
+    just looking at is the LAST one that should leave sooner than an unwatched
+    one.
+
+    ``lru_cap`` of 0 means "no LRU check" and is returned exactly when the
+    keep-alive does not apply (no viewer ever left, or the window is disabled),
+    which is what keeps the registry scan off every runtime that has no claim to
+    a window in the first place.
+
+    THE POLICY IS READ HERE, AT THE MOMENT THE WINDOW IS DRAWN, and that is the
+    whole reason this is a function rather than a value captured at reaper
+    start: ``detached_at`` does not exist until a viewer leaves, so a policy
+    read at boot would be a policy about a runtime nobody had looked at yet.
+    """
+    if _detached_at(runtime) is None:
+        return base_s, 0
+    keep_alive_s = _keep_alive_seconds()
+    if keep_alive_s <= 0:
+        return base_s, 0
+    return max(base_s, keep_alive_s), _keep_alive_max()
 
 
 class _ProbeDefers:
@@ -1109,17 +1342,57 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         if not _should_exit(handle, runtime):
             continue
-        deadline = time.monotonic() + grace_s
+        # THE WINDOW IS DRAWN HERE, not once at reaper start: for a runtime a
+        # viewer has LEFT it is the keep-alive window rather than the ordinary
+        # drain, and ``detached_at`` does not exist until that viewer leaves —
+        # see ``_drain_window_s``. An ineligible runtime gets the old grace and
+        # an ``lru_cap`` of 0, which keeps the registry scan off it entirely.
+        window_s, lru_cap = _drain_window_s(grace_s, runtime)
+        deadline = time.monotonic() + window_s
+        next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
         drained = False
+        preempted = False
+        #: One re-draw is allowed per drain; see the tick below.
+        redrawn = False
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
                 return True
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
+            # A VIEWER THAT CAME AND WENT INSIDE ONE TICK leaves this drain
+            # holding a window drawn BEFORE the detach it is meant to serve: the
+            # tick that would have cancelled the drain saw a viewer, and by the
+            # next one the viewer is gone, so ``_should_exit`` never went false
+            # and the window was never drawn again. Measured (a bench whose
+            # viewer attaches and disposes inside 0.25 s): the runtime left on
+            # the 3 s grace ~1 run in 8 instead of holding its keep-alive — the
+            # contract is about the STATE ("a viewer was here and left"), so it
+            # must not depend on a viewer outliving the sampling interval. One
+            # re-draw, and only when this drain is not already the keep-alive's.
+            if not redrawn and lru_cap == 0:
+                redrawn = True
+                window_s, lru_cap = _drain_window_s(grace_s, runtime)
+                deadline = time.monotonic() + window_s
+                next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
+            if next_lru_check is not None and time.monotonic() >= next_lru_check:
+                next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S
+                if _keep_alive_victim(runtime, lru_cap):
+                    # NOT A FAILURE AND NOT A DEADLINE: the machine has ``lru_cap``
+                    # more recently detached runtimes, so this window is the one to
+                    # give up. The exit that follows is the ordinary idle exit
+                    # (the predicate still holds and nothing is in flight); only
+                    # the reason it stopped waiting is different.
+                    logger.info(
+                        "session runtime: not among the %d most recently detached idle "
+                        "runtimes; giving up the keep-alive window",
+                        lru_cap,
+                    )
+                    preempted = True
+                    break
         else:
             drained = True
-        if not drained:
+        if not (drained or preempted):
             continue
         # The LAST instant before the exit, and the reason it is a latch rather
         # than another ``_should_exit`` sample: the grace loop's condition can
@@ -1157,7 +1430,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         logger.info(
             "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
             "exiting cleanly (%s)",
-            grace_s,
+            window_s,
             WARM_WINDOW_S,
             reason,
         )
