@@ -2980,6 +2980,18 @@ class ServingSessionHandle(SessionHandle):
         driver = self._goal_judge_driver()
         if driver is None:
             return
+        # ASK THE PROBE'S OWN QUESTION FIRST, because scheduling is not free:
+        # ``_background_tasks`` is the set ``is_busy`` reads as "work a clean exit
+        # would destroy", and a probe that would immediately find nothing in
+        # flight still puts a task in it. That made an idle runtime report busy
+        # for as long as the no-op took — the commonest boot of all is a session
+        # that never used ``/goal`` — and ``is_busy`` is what ``is_pristine`` and
+        # the reaper read, so an empty conversation could not be recognised as
+        # pristine and retired. Refusing HERE keeps the task set meaning what it
+        # says; a goal that IS in flight is unaffected, because this is the same
+        # ``needs_rearm`` predicate the probe itself applies.
+        if not driver.needs_rearm():
+            return
         task = asyncio.ensure_future(driver.rearm_on_resume())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
