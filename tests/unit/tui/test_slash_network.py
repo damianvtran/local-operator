@@ -817,3 +817,122 @@ def test_a_reason_token_is_said_in_words_and_a_sentence_is_left_alone() -> None:
     # NEVER EMPTY is the contract every caller paints into a clause.
     for token in ("", "  ", "connect_failed:", "unreachable:TimeoutError"):
         assert peer_reason_words(token).strip(), token
+
+
+#: The one prose reason whose body EMBEDS an endpoint, built by its producer so the
+#: case cannot drift out of this file (round 10, MAJOR-1).
+_HANDSHAKE_ANSWERED = (
+    "handshake_not_attempted: 127.0.0.1:39223 answered and the listing budget ran out "
+    "before the handshake"
+)
+
+
+def test_a_sentence_carrying_an_address_is_still_a_sentence() -> None:
+    """Round 10, MAJOR-1, at the shared function: the shape test read prose as a list.
+
+    The relay writes this one reason as a SENTENCE with the winning endpoint inside
+    it, and the winner is by construction a bare ``host:port``. The previous shape
+    test counted any colon-bearing field as a wire token, so this input came back as
+    "no address of it answered" — for an address that answered — which is the
+    inverse of the truth (round 10's own reproduction, at this function).
+
+    The reason is built by the REAL producer, and the two neighbours it must not be
+    confused with are asserted beside it: a machine list is still glossed whole, and
+    a bare endpoint-plus-detail segment with no ``;`` at all is still a list.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import relay
+
+    assert relay.handshake_not_attempted_reason("127.0.0.1:39223") == _HANDSHAKE_ANSWERED
+    words = resume.peer_reason_words(_HANDSHAKE_ANSWERED)
+    assert words == "it answered, and the listing ran out of time before the handshake"
+    # Neither the address nor the stage word survives — and the meaning does.
+    assert "127.0.0.1" not in words and "handshake_not_attempted" not in words, words
+    assert "no address of it answered" not in words, words
+    # THE OTHER DIRECTION. A machine list is a ``;``-separated sequence of
+    # ``<endpoint> <detail>`` pairs, and every one of its segments ends in a code the
+    # probe can write — so a list is glossed WHOLE, including a one-segment list,
+    # which is the shape closest to the prose above.
+    for tail in (
+        "127.0.0.1:39223 connect_failed:ConnectionRefusedError",
+        "10.0.0.1:7 no_answer; 10.0.0.2:7 bad_endpoint",
+        "10.0.0.1:7 not_attempted",
+    ):
+        assert resume.peer_reason_words(f"unreachable: {tail}") == "no address of it answered", tail
+        assert resume.peer_reason_words(f"half_broken: {tail}") == "no address of it answered", tail
+    # THE DISCRIMINATOR ITSELF, both directions, because the arm above would hide a
+    # regression in it: the relay's sentence is NOT a machine list, and a list of
+    # ``<endpoint> <detail>`` pairs IS — whichever stage word prefixes either one.
+    assert (
+        resume._carries_wire_tokens(  # noqa: SLF001 — the rule under test
+            "127.0.0.1:39223 answered and the listing budget ran out before the handshake"
+        )
+        is False
+    )
+    assert (
+        resume._carries_wire_tokens("127.0.0.1:39223 connect_failed:ConnectionRefusedError") is True
+    )
+    assert resume._carries_wire_tokens("10.0.0.1:7 no_answer") is True
+    assert (
+        resume._carries_wire_tokens("the listing budget ran out before this member was probed")
+        is False
+    )
+
+
+def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
+    """Round 10, MAJOR-2: the single-code path's tokens had no table entry.
+
+    A member whose addresses are all black holes and whose budget expires is
+    reported with the bare ``no_answer`` code, and that code — like ``bad_endpoint``
+    and ``not_attempted`` — had no reading, so a human row printed it. The codes are
+    enumerated FROM THE SOURCE here rather than typed: the probe's own vocabulary
+    (``relay.PROBE_DETAIL_CODES`` plus the open ``connect_failed:`` family), the
+    record facts the relay names as reasons, the handshake's refusal constants
+    (``handshake.REASON_*``) and the dial's own phase guard. Every one has a stated
+    reading — a table entry, a stage arm, or one of the two documented fallbacks —
+    so none of them can reach a reader as itself.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import handshake, relay
+
+    codes = set(relay.PROBE_DETAIL_CODES) - {relay.DETAIL_OK}
+    # ``ok`` is a detail an attempt carries, never a reason: a reason exists only
+    # when no candidate connected, so ``probe_reason`` drops it.
+    assert relay.DETAIL_OK not in codes
+    codes |= {
+        f"{relay.CONNECT_FAILED_PREFIX}{name}"
+        for name in ("OSError", "TimeoutError", "ConnectionRefusedError")
+    }
+    codes |= {value for name, value in vars(handshake).items() if name.startswith("REASON_")}
+    codes |= {"pair_phase_requires_the_ceremony", "no_endpoint", "not_a_member", "member_removed"}
+    codes |= {
+        relay.NOT_ATTEMPTED_REASON,
+        relay.handshake_not_attempted_reason("127.0.0.1:39223"),
+        "handshake_refused:OSError",
+        # The one arrival a bare identifier cannot be told apart from: a peer's own
+        # refusal message in a single word. It reads as that peer's refusal, which
+        # is what it is.
+        "denied",
+    }
+    assert len(codes) > 20, codes  # a truncated enumeration is not evidence
+    for code in sorted(codes):
+        words = resume.peer_reason_words(code)
+        assert words.strip(), code
+        # Never the code itself, and never anything that still LOOKS like one: no
+        # stage colon, no snake_case.
+        assert words != code, code
+        assert ":" not in words and "_" not in words, (code, words)
+    # AND THE CODES WHOSE READING IS ALREADY KNOWN HAVE THAT READING, in the table
+    # rather than through the function: "something other than the code" is satisfied
+    # by the bare-code fallback, which is a sentence about a REFUSED link and simply
+    # the wrong one for a dial that produced no answer at all. A probe code added
+    # without an entry fails here, which is the gap this round found.
+    for code in sorted(relay.PROBE_DETAIL_CODES - {relay.DETAIL_OK}):
+        assert code in resume.PEER_REASON_WORDS, code
+    assert resume.PEER_REASON_WORDS["no_answer"] == resume._NO_ADDRESS_ANSWERED
+    assert resume.PEER_REASON_WORDS["not_attempted"] == (
+        "the listing ran out of time before it was tried"
+    )
+    assert resume.PEER_REASON_WORDS["bad_endpoint"] == (
+        "the address it publishes cannot be dialled"
+    )

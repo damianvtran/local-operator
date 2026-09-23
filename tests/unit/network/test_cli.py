@@ -511,6 +511,64 @@ def test_a_peer_row_with_several_addresses_glosses_the_whole_list(
     assert payload["peers"][0]["device_id"] == row["device_id"]
 
 
+def test_a_reason_that_names_an_answer_is_not_read_as_a_machine_list() -> None:
+    """Round 10, MAJOR-1: the shape test inverted the relay's OWN sentence.
+
+    ``handshake_not_attempted`` is prose that embeds the endpoint that ANSWERED
+    (``relay.handshake_not_attempted_reason``; its winner is by construction a bare
+    ``host:port``), so a rule that counted a colon-bearing field as a wire token
+    read that sentence as a machine list and told the reader "no address of it
+    answered" about a device that was talking — the inverse of the truth, in the one
+    state whose remedy differs (a peer that never answered versus a listing that gave
+    up on our side).
+
+    The reason comes from the REAL producer and the line from the REAL renderer, and
+    BOTH directions are asserted here, because the fix that closed this case is the
+    one that could un-close QA round 21's: a machine list of any shape still has to
+    be glossed whole.
+    """
+    reason = relay.handshake_not_attempted_reason("127.0.0.1:39223")
+    # The address is not lost — it is what --json still carries, byte for byte.
+    assert reason == (
+        "handshake_not_attempted: 127.0.0.1:39223 answered and the listing budget ran "
+        "out before the handshake"
+    )
+    row = {
+        "device_id": "d_" + "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+        "name": "device-b",
+        "reachable": False,
+        "reason": reason,
+    }
+    line = net_cli._peer_line(row)  # noqa: SLF001
+    # The device ANSWERED and OUR budget ran out: that, and not silence.
+    assert line == (
+        "device-b cannot be reached from this device right now "
+        "(it answered, and the listing ran out of time before the handshake)"
+    )
+    assert "127.0.0.1" not in line, line
+    assert "no address of it answered" not in line, line
+    assert "handshake_not_attempted" not in line, line
+
+    # The machine list, from the real producer, is still glossed whole — with the
+    # SINGLE-endpoint form of it, which is the case where the list and the prose
+    # reason look most alike.
+    one = relay.probe_reason([relay.CandidateAttempt("10.0.0.1:7", False, "no_answer")])
+    assert one == "no_answer"
+    assert net_cli._peer_line({**row, "reason": one}) == (  # noqa: SLF001
+        "device-b cannot be reached from this device right now (no address of it answered)"
+    )
+    listed = relay.probe_reason(
+        [
+            relay.CandidateAttempt("10.0.0.1:7", False, "no_answer"),
+            relay.CandidateAttempt("10.0.0.2:7", False, "bad_endpoint"),
+        ]
+    )
+    assert listed == "unreachable: 10.0.0.1:7 no_answer; 10.0.0.2:7 bad_endpoint"
+    assert net_cli._peer_line({**row, "reason": listed}) == (  # noqa: SLF001
+        "device-b cannot be reached from this device right now (no address of it answered)"
+    )
+
+
 def test_the_federated_listing_header_lines_up_with_its_rows() -> None:
     """Review round 9, NIT: the header was a two-space list of labels.
 
