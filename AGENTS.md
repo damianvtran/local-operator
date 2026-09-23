@@ -2778,15 +2778,19 @@ variables (denylist-filtered, not secret); and the encrypted long-term store
 get` and the eval library). A change that blurs two of them is a defect even when
 every test passes.
 
-**The plaintext `credentials.env` is RETIRED — a read-only transition leg.**
-`CredentialManager` (`credentials.py`) is kept only until PR2 deletes it: its
-`read_credentials`/`read_key_names` classmethods (non-creating) are the last
-accepted read, and NO module outside `credentials.py` may call `set_credential`
-or `write_to_file` — a test in `tests/unit/secrets/test_provider_namespace.py`
-reads the package AST and fails on any such caller. Every writer
-(`lop credential update`, `lop search setup`, the credentials route's PATCH,
-`prompt_for_credential`) files an encrypted store row instead, and
-`lop secret migrate-env` moves an operator's existing file across.
+**The plaintext `credentials.env` is RETIRED and its module is DELETED.**
+`local_operator/credentials.py` is gone (PR2b): nothing reads the file as a
+credential source, nothing creates it, and no module may import the deleted
+module — `tests/unit/secrets/test_provider_namespace.py` and
+`tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py` read the
+package AST and fail on a writer or an import. Every writer (`lop credential
+update`, `lop search setup`, the credentials route's PATCH,
+`providers.key_prompt.prompt_for_provider_key`) files an encrypted store row
+instead. **One reader survives, deliberately**: `secrets/legacy_env.py`'s
+`read_credentials`, which exists for `lop secret migrate-env` alone and carries
+two policies paid for in review rounds — it must not CREATE the file it is
+emptying (`ENOENT` is `{}`, every other errno raises) and must not print a value
+(values come back as `SecretStr`). It goes away in PR2c with the file.
 
 **Provider keys live in a RESERVED NAMESPACE: `LOP_PROVIDER_<ENV_KEY>`.**
 Provider-owned rows (a built-in API key the harness manages) are named under the

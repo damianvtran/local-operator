@@ -396,12 +396,11 @@ async def test_the_singleflight_key_covers_auto_joined_credentials_and_ignores_r
     first_key = keys[-1]
 
     # Rotation moves `candidates()` between calls but must not move the key.
-    from local_operator.credentials import CredentialManager
 
     reset_round_robin_for_tests()
     rotating = WebSearchService(
         WebSearchSettings(providers=["duckduckgo"], strategy="round_robin"),
-        CredentialManager(tmp_path / "config"),
+        tmp_path / "config",
     )
     ordered_first = rotating.candidates()
     ordered_second = rotating.candidates()

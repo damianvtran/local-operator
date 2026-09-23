@@ -49,10 +49,10 @@ import sys
 from typing import Any
 
 from scripts.mobile_overflow_capture import (
-    PASSWORD,
     VIEWPORTS,
     Chrome,
     Page,
+    fixture_password,
     gesture_scroll_all,
 )
 
@@ -243,7 +243,7 @@ def login(page: Page, base: str) -> None:
     page.goto(f"{base}/login")
     page.js(
         "(() => { const f = document.querySelector('form');"
-        f" f.password.value = {PASSWORD!r}; f.submit(); return true; }})()"
+        f" f.password.value = {fixture_password()!r}; f.submit(); return true; }})()"
     )
     import time
 

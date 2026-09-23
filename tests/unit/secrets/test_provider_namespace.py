@@ -27,9 +27,9 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
 from local_operator.secrets.crypto import RECORD_FORMAT_VERSION
 from local_operator.secrets.errors import IncompatibleStore, InvalidSecretName
+from local_operator.secrets.legacy_env import CREDENTIALS_FILE_NAME, read_credentials
 from local_operator.secrets.store import (
     PROVIDER_SECRET_PREFIX,
     SecretStore,
@@ -323,14 +323,14 @@ def test_the_two_namespaces_are_disjoint_so_shadowing_is_impossible(
 
 
 def test_read_credentials_does_not_create_the_file(sandbox: Path) -> None:
-    """``__init__`` would recreate the very file the migration is retiring."""
+    """The reader must not recreate the very file the migration is retiring."""
     root = sandbox / "config"
     # The config dir EXISTS but the plaintext store does not — the state after an
     # operator has migrated and deleted the file. Reading must leave it exactly
     # that way rather than resurrecting an empty ``credentials.env``.
     root.mkdir()
 
-    assert CredentialManager.read_credentials(root) == {}
+    assert read_credentials(root) == {}
     assert not (root / CREDENTIALS_FILE_NAME).exists()
     assert list(root.iterdir()) == []
 
@@ -340,7 +340,7 @@ def test_read_credentials_returns_values_and_drops_blanks(sandbox: Path) -> None
     root.mkdir()
     (root / CREDENTIALS_FILE_NAME).write_text("DEEPSEEK_API_KEY=sekrit\nEMPTY_KEY=\n")
 
-    values = CredentialManager.read_credentials(root)
+    values = read_credentials(root)
     assert {key: secret.get_secret_value() for key, secret in values.items()} == {
         "DEEPSEEK_API_KEY": "sekrit"
     }
@@ -568,10 +568,10 @@ def test_migrate_env_files_web_search_keys_under_the_provider_prefix(sandbox: Pa
 def test_credential_update_does_not_recreate_the_plaintext_file(sandbox: Path) -> None:
     """The writer that now writes only the store must leave the file absent (R5).
 
-    ``CredentialManager.__init__`` runs ``_ensure_config_exists``, which CREATES an
-    empty ``credentials.env`` — so ``lop credential update`` on a host that had
-    already migrated and deleted the file was resurrecting the very file this
-    consolidation retires. Driven through the real CLI in a subprocess, because
+    The deleted ``CredentialManager.__init__`` ran ``_ensure_config_exists``,
+    which CREATED an empty ``credentials.env`` — so ``lop credential update`` on a
+    host that had already migrated and deleted the file was resurrecting the very
+    file this consolidation retires. Driven through the real CLI in a subprocess, because
     "creates no file" is a property of the process.
     """
     home = sandbox / "home"
@@ -603,16 +603,19 @@ def test_credential_update_does_not_recreate_the_plaintext_file(sandbox: Path) -
     assert provider_secret_name("OPENROUTER_API_KEY") in _stored_names(config)
 
 
-def test_no_plaintext_writer_outside_the_retired_manager() -> None:
-    """The plaintext file must have NO writers left outside ``credentials.py``.
+def test_no_plaintext_writer_anywhere_in_the_package() -> None:
+    """The plaintext file must have NO writers left in the package at all.
 
-    ``credentials.py`` itself keeps ``set_credential``/``write_to_file`` until PR2
-    deletes the module, but every OTHER module in the package must have stopped
-    writing the file: a single surviving call re-creates the greppable plaintext
-    copy the whole consolidation exists to retire. ``prompt_for_credential`` is
-    deliberately NOT in the set — it is a UI prompt whose WRITE now goes to the
-    store, so calling it is fine; it is the file-write primitives that must have
-    no callers.
+    PR2a stopped every module outside ``credentials.py`` from writing the file,
+    and PR2b deletes that module too, so the exclusion it needed is gone: a
+    single surviving write re-creates the greppable plaintext copy this whole
+    consolidation exists to retire. ``prompt_for_provider_key`` is deliberately
+    NOT in the set — it is a UI prompt whose WRITE goes to the store, so calling
+    it is fine; it is the file-write primitives that must have no callers.
+
+    The migration reader (``secrets/legacy_env.py``) is the one module allowed to
+    NAME the file — it opens it for READING — which is why the direct-write half
+    below is scoped to writes and not to mentions.
 
     **Two independent shapes are checked, because a name check alone is not the
     proof the description implies (R7).** The first is the call shape
@@ -640,8 +643,6 @@ def test_no_plaintext_writer_outside_the_retired_manager() -> None:
     plaintext_markers = ("credentials.env", "CREDENTIALS_FILE_NAME")
     offenders: list[str] = []
     for path in sorted(package.rglob("*.py")):
-        if path.name == "credentials.py":
-            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in writers:

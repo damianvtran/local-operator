@@ -19,7 +19,6 @@ import pytest
 import requests
 from pydantic import SecretStr
 
-from local_operator.credentials import CredentialManager
 from local_operator.harness.types import (
     ChatRequest,
     Message,
@@ -44,11 +43,16 @@ from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 
 
 @pytest.fixture
-def mock_credential_manager():
-    manager = MagicMock(spec=CredentialManager)
-    manager.get_credential = MagicMock(return_value=SecretStr("test_key"))
-    manager.prompt_for_credential = MagicMock(return_value=SecretStr("test_key"))
-    return manager
+def mock_credential_manager(tmp_path):
+    """A config ROOT for the store-first key readers.
+
+    Replaces the ``CredentialManager`` MagicMock this used to return: PR2b
+    deleted that class and ``configure_model`` now takes ``config_dir``, the
+    path its readers resolve a provider-class store row under. The tests here
+    assert the resolved SPEC (base URL, sampling defaults), not the key, so an
+    empty isolated root is the honest stand-in.
+    """
+    return tmp_path / "config"
 
 
 @pytest.fixture
@@ -177,7 +181,7 @@ def test_configure_model_alibaba_base_url(mock_credential_manager):
     assert config.spec.base_url == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 
-def test_configure_model_no_credential_manager_yields_no_key():
+def test_configure_model_with_no_config_root_yields_no_key():
     """configure_model never prompts; missing keys resolve at stream time."""
     config = configure_model("deepseek", "deepseek-chat", None)
     assert config.api_key is None

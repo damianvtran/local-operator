@@ -131,12 +131,11 @@ def _isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _store_resolver_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str):
     """A ``CredentialStoreResolver`` over an isolated store holding ``name``."""
-    from local_operator.credentials import CredentialManager
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
 
     store = _isolated_store(tmp_path, monkeypatch)
     store.set(name, value.encode())
-    return CredentialStoreResolver(CredentialManager.readonly(tmp_path / "config"))
+    return CredentialStoreResolver(tmp_path / "config")
 
 
 def test_credential_store_resolver_reads_the_store_and_names_only_the_ref(
@@ -148,13 +147,12 @@ def test_credential_store_resolver_reads_the_store_and_names_only_the_ref(
     (PR2a): a name the store does not hold is honestly missing, and the message
     carries the REF name, never a value or a path a store error might quote.
     """
-    from local_operator.credentials import CredentialManager
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
 
     store = _isolated_store(tmp_path, monkeypatch)
     store.set("PRESENT", CANARY.encode())
 
-    resolver = CredentialStoreResolver(CredentialManager.readonly(tmp_path / "config"))
+    resolver = CredentialStoreResolver(tmp_path / "config")
     assert resolver.resolve(["PRESENT"]) == (ResolvedSecret(name="PRESENT", value=CANARY),)
     for absent in ("ABSENT", "EMPTY"):
         with pytest.raises(MissingSecret) as missing:
@@ -170,7 +168,6 @@ def test_credential_store_resolver_never_falls_back_to_the_environment(
     Serving an ambient variable — or an old ``credentials.env`` value — for it
     would make that claim false in the operator's own proof.
     """
-    from local_operator.credentials import CredentialManager
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
 
     store = _isolated_store(tmp_path, monkeypatch)
@@ -178,7 +175,7 @@ def test_credential_store_resolver_never_falls_back_to_the_environment(
     # A decoy plaintext file must not resurface a value either (PR2a).
     (tmp_path / "config" / "credentials.env").write_text("ONLY_IN_FILE=file-value")
     monkeypatch.setenv("ONLY_IN_ENV", "ambient-value")
-    resolver = CredentialStoreResolver(CredentialManager.readonly(tmp_path / "config"))
+    resolver = CredentialStoreResolver(tmp_path / "config")
     assert resolver.resolve(["IN_STORE"])[0].value == "in-store-value"
     for absent in ("ONLY_IN_ENV", "ONLY_IN_FILE"):
         with pytest.raises(MissingSecret) as raised:

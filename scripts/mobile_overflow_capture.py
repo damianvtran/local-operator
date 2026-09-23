@@ -47,7 +47,35 @@ from websockets.sync.client import connect
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 VIEWPORTS = [(390, 844), (360, 780)]
-PASSWORD = "overflow-demo"
+#: The fixture's password for THIS run, read from the environment.
+#:
+#: WHY THERE IS NO LITERAL HERE. A constant in this file is REUSABLE: it outlives
+#: the run, it lives in the repo, and every capture script that imports it shares
+#: one value — so the login fill below (and the fixture's own startup banner) put a
+#: credential into whatever transcript, log or agent context happens to read this
+#: file. That is exactly what happened, and the value had to be rotated.
+#:
+#: The replacement is per-run and loopback-only: start the fixture with a value you
+#: choose and this script logs in with the same one, without either side ever
+#: printing it. The value is never defaulted to anything, because a default is a
+#: reusable credential again.
+FIXTURE_PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
+
+
+def fixture_password() -> str:
+    """The password the fixture was started with, or a refusal naming the contract.
+
+    Resolved LAZILY, at the moment of the login fill: importing this module stays
+    side-effect-free because other capture scripts import ``Chrome``/``Page`` from
+    it without ever touching a fixture.
+    """
+    value = os.environ.get(FIXTURE_PASSWORD_ENV, "")
+    if not value:
+        raise SystemExit(
+            f"set {FIXTURE_PASSWORD_ENV} to the password you started the fixture with "
+            "(scripts/mobile_overflow_fixture.py takes it as its second argument)"
+        )
+    return value
 
 
 class Chrome:
@@ -373,7 +401,7 @@ def main() -> None:
             page.goto(f"{base}/login")
             page.js(
                 "(() => { const f = document.querySelector('form');"
-                f" f.password.value = {PASSWORD!r}; f.submit(); return true; }})()"
+                f" f.password.value = {fixture_password()!r}; f.submit(); return true; }})()"
             )
             time.sleep(2.0)
             for session, expand in (

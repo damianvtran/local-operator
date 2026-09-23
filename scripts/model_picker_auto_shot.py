@@ -32,7 +32,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _REAL_CACHE = Path(os.environ.get("HOME", "~")).expanduser() / ".local-operator" / "cache"
 
 import scripts.probe_isolation  # noqa: E402,F401  (isolates HOME/config on import)
-from local_operator.credentials import CredentialManager  # noqa: E402
 from local_operator.paths import config_dir  # noqa: E402
 from local_operator.providers.auth_store import AuthStore, default_db_path  # noqa: E402
 from local_operator.providers.controller import ProviderController  # noqa: E402
@@ -73,10 +72,10 @@ def seed() -> ProviderController:
         {"type": "oauth", "access": "capture", "refresh": "capture", "expires": 4102444800000},
     )
     store.upsert_credential("openrouter", {"type": "api_key", "key": "capture"})
-    # ``readonly`` because this script only READS the credential picture: the
-    # plain ``CredentialManager.__init__`` creates and re-tightens the legacy
-    # plaintext file, which a capture must not do (PR2a retired that file).
-    return ProviderController(store, CredentialManager.readonly(config_dir()))
+    # Pass the sandbox root directly: ProviderController's store-first readers
+    # resolve provider settings beneath it, while the retired plaintext file
+    # must never be opened or created by a capture (PR2a).
+    return ProviderController(store, config_dir())
 
 
 async def main() -> None:

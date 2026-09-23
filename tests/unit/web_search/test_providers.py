@@ -8,7 +8,6 @@ import httpx
 import pytest
 from rich.cells import cell_len
 
-from local_operator.credentials import CredentialManager
 from local_operator.web_search.models import (
     PROVIDER_IDS,
     SearchProviderId,
@@ -24,17 +23,19 @@ from local_operator.web_search.providers import (
 )
 
 
-def _credentials(tmp_path) -> CredentialManager:
-    """A read-only manager bound to the test's config root (PR2a).
+def _credentials(tmp_path):
+    """The test's config ROOT (a ``Path``), which the search transports take.
 
-    ``readonly`` so a fixture that only reads never CREATES a
-    ``credentials.env``; keys are armed with ``_store_key`` below, which writes
-    the provider-class store row the transport actually resolves.
+    A bare path rather than the deleted ``CredentialManager`` class (PR2b): the
+    transports only ever read the root, and a path cannot CREATE a
+    ``credentials.env`` the way that class's construction did. Keys are armed
+    with ``_store_key`` below, which writes the provider-class store row the
+    transport actually resolves.
     """
-    return CredentialManager.readonly(tmp_path / "config")
+    return tmp_path / "config"
 
 
-def _store_key(credentials: CredentialManager, env_key: str, value: str) -> None:
+def _store_key(credentials, env_key: str, value: str) -> None:
     """Arm ``env_key`` with a PROVIDER-CLASS STORE ROW under the manager's root.
 
     The plaintext ``credentials.env`` leg is gone (PR2a), so the store row (or an
@@ -42,7 +43,7 @@ def _store_key(credentials: CredentialManager, env_key: str, value: str) -> None
     """
     from local_operator.providers.registry import store_provider_key
 
-    store_provider_key(env_key, value, base=credentials.config_dir)
+    store_provider_key(env_key, value, base=credentials)
 
 
 def test_duckduckgo_parser_unwraps_links_and_inline_markup() -> None:

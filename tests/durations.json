@@ -433,7 +433,6 @@
   "tests/unit/test_config_watch.py": 1.394,
   "tests/unit/test_console.py": 1.091,
   "tests/unit/test_context_files.py": 1.0,
-  "tests/unit/test_credentials.py": 2.973,
   "tests/unit/test_daemon_plist_refresh.py": 1.0,
   "tests/unit/test_e2e_death_witnesses.py": 1.638,
   "tests/unit/test_ecosystem_instructions.py": 1.0,

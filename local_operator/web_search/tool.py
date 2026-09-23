@@ -13,7 +13,6 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -413,10 +412,9 @@ async def execute_web_search(
     # use, so no new parse cost and no new malformed-file exposure.
     if not settings.enabled:
         return _result(tool_call_id, WEB_SEARCH_DISABLED_MESSAGE, error=True)
-    credentials = CredentialManager.readonly(config_dir())
     service = WebSearchService(
         settings,
-        credentials,
+        config_dir(),
         tavily_oauth_search=_tavily_oauth_delegate(context, signal, on_update),
         io=context.web_io if context is not None else None,
     )

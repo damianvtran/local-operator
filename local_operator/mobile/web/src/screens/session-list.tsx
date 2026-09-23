@@ -26,6 +26,51 @@ import { MARK_DATA_URI } from "../lib/mark";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
 
+/** The shared noun for a delegated child, in the singular at one.
+
+    "subagent" and not "agent": that is the record's own field name, the word
+    `/info` tallies in and the word the TUI's own stop notice uses. "Agent"
+    alone is ambiguous in a product with an "Agents" page of reusable PROFILES.
+    Singular at 1 matches the `Scheduled (1 wake)` style the rest of the product
+    uses. */
+function subagentNoun(n: number): string {
+	return n === 1 ? "subagent" : "subagents";
+}
+
+/** Past this, the chip stops spelling the count and CAPS it.
+
+    A `shrink-0` chip is paid for by the row's name, and the name is the row's
+    identity while the count is context (UX round 1, U4 — the 360px frame shows
+    `Parent at capacity, twelve parked …` truncated to ~31 cells beside a
+    12-cell chip). Three digits is where that trade stops being worth making,
+    and the exact figure is one tap away in the session view's roster header. */
+const COUNT_CAP = 99;
+
+/** The right-cluster chip for a session's delegated children.
+
+    IT COUNTS `running + queued` BY DESIGN, which is deliberately NOT how the
+    catalogue label counts: `CatalogEntry.status` prints `2 subagents running ·
+    1 queued`, the precise form for a row with room for a sentence. This chip
+    has room for a number, and the number it must agree with is the one the
+    SESSION VIEW shows after a tap — the roster header prints
+    `{running}/{direct.length} running`, and both sides of that come from the
+    folded projection, where a parked child is drawn as running
+    (`mobile/projection.py` maps `queued` to the `running` mobile status).
+
+    So `1 running + 1 queued` reads `2 subagents` here and `2/2 running` there:
+    one number for one population across the tap (UX round 1, U2, which caught
+    the two disagreeing). The fold itself — queued drawn as running — is a
+    pre-existing presentation in a different subsystem, recorded on the PR as a
+    deferred finding rather than changed here.
+
+    The noun is always present, including for a parent with nothing running,
+    where the count-only form would have read `3 queued` and left the reader to
+    guess WHAT was queued (UX round 1, U3). */
+function delegatedChip(children: number): string {
+	const shown = children > COUNT_CAP ? `${COUNT_CAP}+` : String(children);
+	return `${shown} ${subagentNoun(children)}`;
+}
+
 /** The right-cluster word `new`. It lingers through a 120ms opacity fade when
     the mark clears (session opened) instead of blinking out — but it MUST
     unmount once the fade lands: an opacity-0 `shrink-0` span would keep
@@ -98,6 +143,34 @@ function SessionCard({
 	   marks COMPLETED unviewed activity, never in-flight work. */
 	const decision = Boolean(s.needs_attention && pendingLabel);
 	const unread = Boolean(s.unseen) && !decision && !s.streaming;
+	/* The delegated-work counts, normalised once, and the derived state the slot
+	   ladder and the chip both read.
+
+	   `null` (or a field an older daemon never sent) means THE DAEMON DID NOT
+	   REPORT A COUNT, which is not the same fact as zero children: a durable-only
+	   row has no live record to read, and a pre-field record has no field. Both
+	   arms below stay silent about it — no mark, no chip — rather than rendering
+	   "0", which would tell the operator there are no subagents on a session the
+	   phone never managed to ask.
+
+	   "Queued with nothing running" COUNTS as delegating. A child parked waiting
+	   for a capacity slot is not spending anything, but the parent is certainly
+	   not idle, and that is the one shape a reader cannot infer from the running
+	   count alone.
+
+	   A LEAVING SESSION ADVERTISES NOTHING (UX round 1, U1). A signalled runtime
+	   is still working — that is what makes it leave politely — and its children
+	   are still running, but the phrase the list itself prints for that row is
+	   "Leaving…", so a mark drawn from the counts alone would say two things at
+	   once. The daemon already refuses to REPORT counts for an entry it cannot
+	   vouch for (a degraded dial, a stopped heartbeat, a runtime on its way out —
+	   `_advertisable_counts`); this gate is what covers a client talking to a
+	   build that predates that refusal. */
+	const leaving = Boolean(s.leaving);
+	const running = typeof s.subagents_running === "number" ? s.subagents_running : null;
+	const queued = typeof s.subagents_queued === "number" ? s.subagents_queued : null;
+	const children = (running ?? 0) + (queued ?? 0);
+	const delegating = !leaving && children >= 1;
 	return (
 		<button
 			ref={ref}
@@ -142,13 +215,36 @@ function SessionCard({
 						   loading wheel, not just the text sweep — the sweep alone
 						   was too subtle to catch at a glance. */
 						<Spinner />
+					) : unread ? (
+						<span className="inline-block size-1.5 rounded-full bg-accent" />
+					) : delegating ? (
+						/* DELEGATING — the parent's own turn is not running but it still
+						   owns children. BELOW unread on purpose: the unread dot is a
+						   receipt for an outcome the operator has not seen yet, and a
+						   receipt must never be masked by live activity (the same rule
+						   the desktop and TUI ladders follow). ABOVE plain idle, which
+						   is the whole point of the state.
+
+						   TWO 4px DOTS rather than one, because this package carries no
+						   icon dependency and a single dot would be indistinguishable
+						   from the unread mark sitting one rung above it in the same
+						   slot and the same accent ink. The pair reads as "more than
+						   one thing moving", and the SHAPE is what separates the two
+						   states — the TUI's own reasoning for putting `⇉` in its
+						   column instead of recolouring `●`.
+
+						   2 × 4px + 2px gap = 10px inside the existing 12px slot, so the
+						   ladder's geometry and the title's start x are untouched. The
+						   dots are aria-hidden (the slot already is): the COUNT is
+						   carried as text by the chip below, which is what a screen
+						   reader should hear — a decorative mark is the wrong place
+						   for a number. */
+						<span className="flex items-center gap-[2px]">
+							<span className="inline-block size-1 rounded-full bg-accent" />
+							<span className="inline-block size-1 rounded-full bg-accent" />
+						</span>
 					) : (
-						<span
-							className={cn(
-								"inline-block size-1.5 rounded-full",
-								unread ? "bg-accent" : "bg-transparent",
-							)}
-						/>
+						<span className="inline-block size-1.5 rounded-full bg-transparent" />
 					)}
 				</span>
 				{decision && s.streaming ? (
@@ -184,11 +280,22 @@ function SessionCard({
 				    (spec §1): `new` truncates the title only, row height never
 				    changes. */}
 				<NewMark visible={unread} />
-				{s.subagents_running > 0 ? (
-					/* ⟳ and ☐ render as tofu boxes on phones whose system font lacks
-					   those codepoints. Text marks survive every font. */
+				{delegating ? (
+					/* The delegated-work chip. It keeps its place in the right cluster (the
+					   state word `new` rides before it) and its own geometry; what it says
+					   is `delegatedChip`'s business — the shared noun, one number for the
+					   population the session view counts, and a cap past three digits so a
+					   wide count cannot shrink-0 the name away (UX round 1, U2/U3/U4).
+
+					   `subagents` and not `agents`: the record's own field name, the word
+					   `/info` tallies in, and the word the TUI's own stop notice uses.
+					   `agents` alone is ambiguous here — this product has an "Agents" page of
+					   reusable profiles.
+
+					   Text, not a glyph: ⟳ and ☐ render as tofu boxes on phones whose
+					   system font lacks those codepoints. Text marks survive every font. */
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						{s.subagents_running} agent{s.subagents_running === 1 ? "" : "s"}
+						{delegatedChip(children)}
 					</span>
 				) : null}
 				{s.todos_open ? (

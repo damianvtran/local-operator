@@ -3860,14 +3860,12 @@ def test_persisted_providers_includes_a_provider_store_row(
     reader consulting only auth.db hides every API-key provider configured by
     hand, and both are sanctioned flows.
     """
-    from local_operator.credentials import CredentialManager
     from local_operator.providers.registry import store_provider_key
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    manager = CredentialManager.readonly(tmp_path)
     store_provider_key(key_name, "row-value", base=tmp_path)
-    controller.credential_manager = manager
+    controller.config_dir = tmp_path
 
     persisted = controller.persisted_providers()
     assert persisted is not None
@@ -3882,11 +3880,10 @@ def test_persisted_providers_ignores_a_provider_with_no_row(
     ``lop credential delete`` removes the row, and treating an absence as a login
     sends the picker fetching anonymously.
     """
-    from local_operator.credentials import CredentialManager
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    controller.credential_manager = CredentialManager.readonly(tmp_path)
+    controller.config_dir = tmp_path
 
     persisted = controller.persisted_providers()
     assert persisted is not None
@@ -4008,7 +4005,6 @@ async def test_a_narrowed_provider_lists_with_its_credential_not_anonymously(
     anonymously, and the phone's sheet showed it empty — with a credential on
     disk the whole time. Narrowing must not be the reason rows disappear.
     """
-    from local_operator.credentials import CredentialManager
 
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -4018,4 +4014,3 @@ async def test_a_narrowed_provider_lists_with_its_credential_not_anonymously(
     assert [provider for provider, _ttl in calls] == ["openrouter"]
     assert [entry.selector for entry in entries] == ["openrouter/vendor/model"]
     assert all(entry.connected for entry in entries)
-    assert isinstance(CredentialManager, type)

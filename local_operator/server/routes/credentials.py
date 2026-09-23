@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from local_operator.credentials import CredentialManager
-from local_operator.server.dependencies import get_credential_manager
+from local_operator.config import ConfigManager
+from local_operator.server.dependencies import get_config_manager
 from local_operator.server.models.schemas import (
     CredentialListResult,
     CredentialUpdate,
@@ -47,7 +47,7 @@ logger = logging.getLogger("local_operator.server.routes.credentials")
     },
 )
 async def list_credentials(
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
 ):
     """
     Retrieve a list of credential keys (without their values).
@@ -64,7 +64,7 @@ async def list_credentials(
         # Provider-class store rows first, keyed by env-key name.
         from local_operator.providers.registry import stored_provider_env_keys
 
-        keys = set(stored_provider_env_keys(credential_manager.config_dir))
+        keys = set(stored_provider_env_keys(config_manager.config_dir))
         # Namespace-scoped plain agent secrets too — `lop secret set
         # OPENAI_API_KEY` is a value this endpoint's PATCH would list.
         from local_operator.secrets.access import open_store
@@ -72,7 +72,7 @@ async def list_credentials(
         from local_operator.secrets.keys import store_path
         from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
 
-        if store_path(credential_manager.config_dir).exists():
+        if store_path(config_manager.config_dir).exists():
             try:
                 # The provider-class rows are STRIPPED here exactly as the
                 # docstring promises. Adding the raw name made every provider
@@ -88,7 +88,7 @@ async def list_credentials(
                         if record.name.startswith(PROVIDER_SECRET_PREFIX)
                         else record.name
                     )
-                    for record in open_store(credential_manager.config_dir).list()
+                    for record in open_store(config_manager.config_dir).list()
                 )
             except (SecretStoreError, OSError):
                 logger.warning("credential store unavailable", exc_info=True)
@@ -145,7 +145,7 @@ async def list_credentials(
 )
 async def update_credential(
     credential_data: CredentialUpdate,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
 ) -> JSONResponse:
     """
     Update an existing credential or create a new one.
@@ -165,7 +165,7 @@ async def update_credential(
         from local_operator.providers.registry import store_provider_key
 
         store_provider_key(
-            credential_data.key, credential_data.value, base=credential_manager.config_dir
+            credential_data.key, credential_data.value, base=config_manager.config_dir
         )
 
         # A key is exactly the reason model metadata resolves poorly: without one

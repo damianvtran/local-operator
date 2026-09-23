@@ -1166,9 +1166,7 @@ def test_non_interactive_preflight_still_fails_fast_without_a_model(
     args = argparse.Namespace(hosting=None, model=None)
 
     # Non-interactive: fatal, with the message that names concrete model ids.
-    result = _preflight_hosting_model(
-        config, cast(Any, None), cast(Any, None), None, cast(Any, args)
-    )
+    result = _preflight_hosting_model(config, cast(Any, None), None, cast(Any, args))
     assert result == 1
     assert "no default is known" in capsys.readouterr().err
 
@@ -1176,7 +1174,6 @@ def test_non_interactive_preflight_still_fails_fast_without_a_model(
     assert (
         _preflight_hosting_model(
             config,
-            cast(Any, None),
             cast(Any, None),
             None,
             cast(Any, args),

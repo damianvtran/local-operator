@@ -64,7 +64,7 @@ async def test_the_local_path_is_far_under_the_budget(manager, install_legs) -> 
     behaviours = install_legs(radient={"script": [choice_response("recommend_skill", "skill-0")]})
     from local_operator.classification.service import ClassificationService
 
-    subject = ClassificationService(manager=manager, settings=settings())
+    subject = ClassificationService(config_dir=manager, settings=settings())
     await subject.recommend_resources(request("warm up the memos"))  # credential + roster memos
 
     started = time.perf_counter()
@@ -84,7 +84,7 @@ async def test_a_cache_hit_is_much_cheaper_than_the_budget(manager, install_legs
     behaviours = install_legs(radient={"script": [choice_response("recommend_skill", "skill-0")]})
     from local_operator.classification.service import ClassificationService
 
-    subject = ClassificationService(manager=manager, settings=settings())
+    subject = ClassificationService(config_dir=manager, settings=settings())
     warm = request("deploy core to qa")
     await subject.recommend_resources(warm)  # fills the cache
 
@@ -116,7 +116,7 @@ async def test_the_roster_is_serialized_once_per_roster_not_per_message(
         return real(candidate, limit)
 
     monkeypatch.setattr(context_module, "candidate_line", counting)
-    subject = ClassificationService(manager=manager, settings=settings())
+    subject = ClassificationService(config_dir=manager, settings=settings())
     for index in range(5):
         await subject.recommend_resources(request(f"message {index}"))
 

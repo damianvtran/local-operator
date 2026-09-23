@@ -17,12 +17,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from local_operator.credentials import CredentialManager
 from local_operator.web_search.cost import estimate_search_cost
 from local_operator.web_search.models import (
     PROVIDER_IDS,
@@ -37,7 +37,7 @@ from local_operator.web_search.models import (
 from local_operator.web_search.pages import PAGE_CONTEXTS
 
 ProviderSearch = Callable[
-    [httpx.AsyncClient, CredentialManager, WebSearchSettings, str, int],
+    [httpx.AsyncClient, Path | None, WebSearchSettings, str, int],
     Awaitable[SearchResponse],
 ]
 
@@ -54,7 +54,7 @@ class ProviderDefinition:
     search: ProviderSearch
 
 
-def _credential(manager: CredentialManager, *keys: str) -> str:
+def _credential(config_dir: Path | None, *keys: str) -> str:
     """First configured value across the provider store, then the environment.
 
     Store-first: a ``LOP_PROVIDER_<key>`` row the operator saved (via ``lop
@@ -66,9 +66,8 @@ def _credential(manager: CredentialManager, *keys: str) -> str:
     """
     from local_operator.providers.registry import provider_secret_value
 
-    base = getattr(manager, "config_dir", None)
     for key in keys:
-        stored = provider_secret_value(key, base=base)
+        stored = provider_secret_value(key, base=config_dir)
         if stored:
             return stored
     for key in keys:
@@ -186,7 +185,7 @@ def parse_duckduckgo_html(page: str, limit: int) -> list[SearchSource]:
 
 async def _search_duckduckgo(
     client: httpx.AsyncClient,
-    _credentials: CredentialManager,
+    _config_dir: Path | None,
     _settings: WebSearchSettings,
     query: str,
     limit: int,
@@ -248,12 +247,12 @@ def tavily_response_from_payload(
 
 async def _search_tavily(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     _settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = _credential(credentials, "TAVILY_API_KEY")
+    key = _credential(config_dir, "TAVILY_API_KEY")
     headers = {"Content-Type": "application/json"}
     auth_mode = "api-key"
     if key:
@@ -502,12 +501,12 @@ def _perplexity_authwall(payload: dict[str, Any]) -> str | None:
 
 async def _search_perplexity(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     _settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = _credential(credentials, "PERPLEXITY_API_KEY")
+    key = _credential(config_dir, "PERPLEXITY_API_KEY")
     if key:
         response = await client.post(
             "https://api.perplexity.ai/chat/completions",
@@ -810,14 +809,14 @@ def _deepseek_login_present() -> bool:
         return False
 
 
-async def _resolve_deepseek_key(credentials: CredentialManager) -> str:
+async def _resolve_deepseek_key(config_dir: Path | None) -> str:
     """The key the search will bill: the store/env tier first, then the login.
 
     ``read_only=True`` because a search must never decide model routing: it must
     not consume an OAuth rotation slot, clear session stickiness, or flip the
     auth tier the conversation's next request will resolve from.
     """
-    key = _credential(credentials, "DEEPSEEK_API_KEY")
+    key = _credential(config_dir, "DEEPSEEK_API_KEY")
     if key:
         return key
     try:
@@ -1011,13 +1010,13 @@ async def _deepseek_evidence_pass(
     return parse_deepseek_evidence(text), usage, truncated
 
 
-async def resolve_deepseek_key(credentials: CredentialManager) -> str:
+async def resolve_deepseek_key(config_dir: Path | None) -> str:
     """Public entry point for the DeepSeek key, for the page reader.
 
     A thin wrapper rather than a rename so the private resolver keeps its
     monkeypatchable name in tests while the reader gets a documented entry point.
     """
-    return await _resolve_deepseek_key(credentials)
+    return await _resolve_deepseek_key(config_dir)
 
 
 def _deepseek_usage(payload: object) -> SearchUsage:
@@ -1054,12 +1053,12 @@ def _deepseek_usage(payload: object) -> SearchUsage:
 
 async def _search_deepseek(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = await _resolve_deepseek_key(credentials)
+    key = await _resolve_deepseek_key(config_dir)
     if not key:
         raise RuntimeError("DeepSeek search needs an API key; run `local-operator login deepseek`")
 
@@ -1250,12 +1249,12 @@ def _apply_deepseek_evidence(
 
 async def _search_brave(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     _settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = _credential(credentials, "BRAVE_API_KEY")
+    key = _credential(config_dir, "BRAVE_API_KEY")
     response = await client.get(
         "https://api.search.brave.com/res/v1/web/search",
         headers={"Accept": "application/json", "X-Subscription-Token": key},
@@ -1471,7 +1470,7 @@ def parse_parallel_mcp_text(text: str, limit: int) -> list[SearchSource]:
 
 async def _search_exa(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     settings: WebSearchSettings,
     query: str,
     limit: int,
@@ -1479,7 +1478,7 @@ async def _search_exa(
     # A stored key keeps the REST transport deliberately: it returns a
     # query-grounded ``summary`` as structured JSON, where MCP returns a text blob.
     # Routing keyed traffic to MCP would regress the keyed experience for nothing.
-    if provider_auth_mode("exa", credentials, settings) != "api-key":
+    if provider_auth_mode("exa", config_dir, settings) != "api-key":
         payload = await _mcp_call(
             client,
             EXA_MCP_ENDPOINT,
@@ -1495,7 +1494,7 @@ async def _search_exa(
             # ledger would charge the keyed $5/1,000 rate for an anonymous search.
             usage=SearchUsage(keyless=True),
         )
-    key = _credential(credentials, "EXA_API_KEY")
+    key = _credential(config_dir, "EXA_API_KEY")
     response = await client.post(
         "https://api.exa.ai/search",
         headers={"Content-Type": "application/json", "x-api-key": key},
@@ -1530,7 +1529,7 @@ async def _search_exa(
 
 async def _search_parallel(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     _settings: WebSearchSettings,
     query: str,
     limit: int,
@@ -1549,7 +1548,7 @@ async def _search_parallel(
     ever wants the vendor's meter surfaced, it belongs in ``SearchUsage`` -- never
     in ``usd``.
     """
-    key = _credential(credentials, "PARALLEL_API_KEY")
+    key = _credential(config_dir, "PARALLEL_API_KEY")
     payload = await _mcp_call(
         client,
         PARALLEL_MCP_ENDPOINT,
@@ -1573,12 +1572,12 @@ async def _search_parallel(
 
 async def _search_serpapi(
     client: httpx.AsyncClient,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     _settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
-    key = _credential(credentials, "SERPAPI_API_KEY", "SERP_API_KEY")
+    key = _credential(config_dir, "SERPAPI_API_KEY", "SERP_API_KEY")
     response = await client.get(
         "https://serpapi.com/search.json",
         params={"q": query, "engine": "google", "api_key": key, "num": limit},
@@ -1612,7 +1611,7 @@ async def _search_serpapi(
 
 async def _search_searxng(
     client: httpx.AsyncClient,
-    _credentials: CredentialManager,
+    _config_dir: Path | None,
     settings: WebSearchSettings,
     query: str,
     limit: int,
@@ -1763,7 +1762,7 @@ class ProviderBands(NamedTuple):
 
 def provider_auth_mode(
     provider_id: SearchProviderId,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     settings: WebSearchSettings,
 ) -> str:
     """The transport this provider would use HERE, or "" when it cannot serve.
@@ -1776,7 +1775,7 @@ def provider_auth_mode(
     N3 (round 1) asked whether Tavily's OAuth MCP transport belongs here. It does
     not, deliberately: the delegate that serves it is injected by the harness
     (``WebSearchService.tavily_oauth_search``) and the MCP server entry lives in
-    ``mcp.json``, so neither is visible to a function that reads credentials and
+    ``mcp.json``, so neither is visible to a function that reads config_dir and
     search settings -- and reading ``mcp.json`` per call would put a filesystem
     probe inside the status loop. It also cannot change the tier: Tavily's OAuth
     MCP is the user's own free tier, so it classifies ``rotate`` either way. If a
@@ -1786,43 +1785,43 @@ def provider_auth_mode(
     if provider_id == "duckduckgo":
         return "credential-free"
     if provider_id == "tavily":
-        return "api-key" if _credential(credentials, "TAVILY_API_KEY") else "keyless"
+        return "api-key" if _credential(config_dir, "TAVILY_API_KEY") else "keyless"
     if provider_id == "perplexity":
-        return "api-key" if _credential(credentials, "PERPLEXITY_API_KEY") else "anonymous"
+        return "api-key" if _credential(config_dir, "PERPLEXITY_API_KEY") else "anonymous"
     if provider_id == "exa":
         # Both modes exist and BOTH serve without a key, so this is a mode choice
         # rather than an availability one.
-        return "api-key" if _credential(credentials, "EXA_API_KEY") else "keyless-mcp"
+        return "api-key" if _credential(config_dir, "EXA_API_KEY") else "keyless-mcp"
     if provider_id == "parallel":
-        return "api-key" if _credential(credentials, "PARALLEL_API_KEY") else "keyless-mcp"
+        return "api-key" if _credential(config_dir, "PARALLEL_API_KEY") else "keyless-mcp"
     if provider_id == "deepseek":
         # The search key IS the model key, and ``login`` writes it to the auth
         # store rather than to ``credentials.env``. Both tiers are checked, or
         # `search list` would report "setup needed" for a provider whose calls
         # would in fact succeed -- and, worse, the reverse for a keyless branch
         # that has no key at all.
-        if _credential(credentials, "DEEPSEEK_API_KEY"):
+        if _credential(config_dir, "DEEPSEEK_API_KEY"):
             return "api-key"
         return "login" if _deepseek_login_present() else ""
     if provider_id == "searxng":
         endpoint = settings.searxng_endpoint
         return "self-hosted" if endpoint.startswith(("http://", "https://")) else ""
     definition = PROVIDERS[provider_id]
-    return "api-key" if _credential(credentials, *definition.credential_keys) else ""
+    return "api-key" if _credential(config_dir, *definition.credential_keys) else ""
 
 
 def provider_available(
     provider_id: SearchProviderId,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     settings: WebSearchSettings,
 ) -> bool:
     """Whether the provider can make a request with current local configuration."""
-    return provider_auth_mode(provider_id, credentials, settings) != ""
+    return provider_auth_mode(provider_id, config_dir, settings) != ""
 
 
 def provider_tier(
     provider_id: SearchProviderId,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     settings: WebSearchSettings,
 ) -> ProviderTier | None:
     """The automatic band ``provider_id`` joins on this install, or None.
@@ -1831,7 +1830,7 @@ def provider_tier(
     use a credential here is metered even where the table says ``rotate``. That is
     what keeps a keyed exa/tavily out of the free rotation.
     """
-    mode = provider_auth_mode(provider_id, credentials, settings)
+    mode = provider_auth_mode(provider_id, config_dir, settings)
     if not mode:
         return None
     if mode in METERED_AUTH_MODES:
@@ -1841,7 +1840,7 @@ def provider_tier(
 
 def resolve_provider_bands(
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
 ) -> ProviderBands:
     """Split this install's provider chain into its bands.
 
@@ -1867,7 +1866,7 @@ def resolve_provider_bands(
         # stays in the prefix: trying it costs nothing, and the search loop reports
         # `not configured` for it rather than silently dropping what the user asked
         # for. Only a provider that WOULD spend is held back.
-        if provider_auth_mode(provider_id, credentials, settings) in METERED_AUTH_MODES:
+        if provider_auth_mode(provider_id, config_dir, settings) in METERED_AUTH_MODES:
             listed_metered.append(provider_id)
         else:
             prefix.append(provider_id)
@@ -1885,7 +1884,7 @@ def resolve_provider_bands(
             # (because it is metered) has already been placed in the paid band and
             # must not also be auto-joined there.
             continue
-        tier = provider_tier(provider_id, credentials, settings)
+        tier = provider_tier(provider_id, config_dir, settings)
         if tier is None:
             continue
         bands[tier].append(provider_id)
@@ -1897,7 +1896,7 @@ def resolve_provider_bands(
 
 def free_pool(
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
 ) -> list[SearchProviderId]:
     """The legs `round_robin` spreads its first attempt across: prefix + rotate.
 
@@ -1908,16 +1907,16 @@ def free_pool(
     M1/Q1/D2/U1). Metered and best-effort legs are never in the pool: they do not
     rotate.
     """
-    bands = resolve_provider_bands(settings, credentials)
+    bands = resolve_provider_bands(settings, config_dir)
     return [*bands.prefix, *bands.rotate]
 
 
 def resolve_providers(
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
 ) -> list[SearchProviderId]:
     """The chain as a search will walk it, before rotation."""
-    bands = resolve_provider_bands(settings, credentials)
+    bands = resolve_provider_bands(settings, config_dir)
     return [*bands.prefix, *bands.rotate, *bands.fallback, *bands.metered]
 
 
@@ -2029,7 +2028,7 @@ def provider_setup_hint(provider_id: SearchProviderId) -> str:
 def provider_refusal(
     provider_id: SearchProviderId,
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
 ) -> str:
     """Why this session will not use ``provider_id``, and the command that fixes it.
 
@@ -2133,7 +2132,7 @@ def _chain_legs(statuses: list[ProviderStatus]) -> list[tuple[ProviderStatus, st
 def provider_order_note(
     provider_ids: list[SearchProviderId],
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
 ) -> str:
     """The tail of the `search order` receipt, derived from where each id LANDS.
 
@@ -2145,7 +2144,7 @@ def provider_order_note(
     the code reviewer). The sentence is therefore read off the resolver, and it
     keeps both halves: the ids that DO lead, and the ones that are held back.
     """
-    bands = resolve_provider_bands(settings, credentials)
+    bands = resolve_provider_bands(settings, config_dir)
     leads = [provider_id for provider_id in provider_ids if provider_id not in bands.metered]
     held = [provider_id for provider_id in provider_ids if provider_id in bands.metered]
     clauses: list[str] = []
@@ -2164,7 +2163,7 @@ def provider_order_note(
 
 def provider_statuses(
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
 ) -> list[ProviderStatus]:
     """Every provider: the chain in TRY order first, then the rest by catalogue.
 
@@ -2177,20 +2176,20 @@ def provider_statuses(
     Perplexity row while the chain put it last (round-1 D1). A provider outside the
     chain keeps its catalogue position, which is the only order left for it.
     """
-    chain = resolve_providers(settings, credentials)
+    chain = resolve_providers(settings, config_dir)
     position = {provider_id: index for index, provider_id in enumerate(chain)}
     statuses = [
         ProviderStatus(
             id=provider_id,
             label=PROVIDERS[provider_id].label,
             enabled=provider_id in position,
-            available=provider_available(provider_id, credentials, settings),
+            available=provider_available(provider_id, config_dir, settings),
             access=PROVIDERS[provider_id].access,
             detail=PROVIDERS[provider_id].detail,
             listed=provider_id in settings.providers,
             excluded=provider_id in settings.excluded_providers,
-            tier=provider_tier(provider_id, credentials, settings) or "",
-            mode=provider_auth_mode(provider_id, credentials, settings),
+            tier=provider_tier(provider_id, config_dir, settings) or "",
+            mode=provider_auth_mode(provider_id, config_dir, settings),
         )
         for provider_id in PROVIDER_IDS
     ]
