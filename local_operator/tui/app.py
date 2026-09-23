@@ -1695,6 +1695,20 @@ class _PagingLease:
         return getattr(view, "parent", object()) is not None
 
 
+def _viewport_message_budget(height: int) -> int:
+    """Messages that fill one screen of a ``height``-row app: ``max(12, height // 2)``.
+
+    ONE SPELLING for one question — "enough messages for a screenful" — which
+    the sidebar's prepared window, its re-projection, the pending-tail pages and
+    the viewport-first resume all ask. It was written out as a literal at each
+    of them, so a change to one silently disagreed with the others (review
+    round 1, F4). A message averages about two rows at the widths this app is
+    measured at, hence half the height, floored so a short terminal still paints
+    a real turn or two.
+    """
+    return max(12, height // 2)
+
+
 def _resume_tail_start(history: list[Any], bound: int) -> int:
     """Index of the first message the initial resume frame should paint.
 
@@ -2352,6 +2366,34 @@ RESUME_CONNECT_WALL_S, RESUME_CONNECT_BOUND_S = _resume_connect_limits()
 #: have to survive — the transient it must survive is `COLD_FALLBACK_S`.
 RESUME_CONNECT_ATTEMPTS = _attempts_outlasting(RESUME_CONNECT_WALL_S)
 
+#: When a paint-first open's ATTACH is narrated, and when it is judged.
+#:
+#: Paint-first (`/resume` and `lop --resume` onto a live owner with the
+#: conversation on disk) opens a cold viewer and lets the ordinary background
+#: engage bind it behind the paint. That engage is silent until it FAILS, and
+#: against a frozen owner it fails only when the registry ages the heartbeat out
+#: (~45 s): measured in UX round 1 (U1), the band read `starting…` alone for
+#: 42.2 s and the first account of why nothing was arriving came at ~45 s, where
+#: the dialling arm this replaced had explained itself at ~18 s. The redial loop's
+#: own narration and 27 s budget were unreachable on this path, because the
+#: paint-first branch leaves that loop before it narrates.
+#:
+#: So the attach gets the redial's schedule back, on the engage it now rides:
+#: the redial's own "still trying, about N s in total" row once the wait is long
+#: enough to be watched (the same 10 s `START_ENGAGE_PATIENCE_S` calls watched;
+#: every healthy attach measured here lands in well under a second, so a merely
+#: slow one stays quiet), and a verdict at the redial's wall clock. Separate
+#: names rather than reuses because the tests that shorten the patience filter
+#: must not arm this narration as a side effect.
+ATTACH_BEHIND_NARRATE_S = 10.0
+ATTACH_BEHIND_BOUND_S = RESUME_CONNECT_WALL_S
+#: The verdict, and its restatement once the owner answers after all. "session",
+#: never "runtime": it is the user's word for what they opened (UX round 1, U5).
+ATTACH_BEHIND_VERDICT = (
+    "session {session_id} is not answering — the conversation is here; " "send a message to retry"
+)
+ATTACH_BEHIND_RECOVERED = "session {session_id} is answering again"
+
 
 def _resume_redial_clock() -> float:
     """The redial's clock reading, as a SEAM rather than a direct call.
@@ -2694,6 +2736,112 @@ class _HeldAnswerKey:
     def still_aimed_at(self, live: "AskPickerScreen | None") -> bool:
         """Whether the question this key was meant for is still the live one."""
         return live is self.prompt and self.prompt.question_index == self.question_index
+
+
+class _AttachBehindWatch:
+    """The narration + bound of ONE paint-first attach; see ``_watch_attach_behind``.
+
+    Two timers and one row, owned together so a settle can end all three. A
+    plain object rather than a worker: the attach itself is the engage worker,
+    and this must not become a second thing that can outlive it or be cancelled
+    without it.
+    """
+
+    def __init__(self, app: "OperatorApp", binding: tuple[int, str]) -> None:
+        self._app = app
+        self._token = binding
+        self._row: NoticeBlock | None = None
+        #: The row is showing the verdict (not the "still trying" narration).
+        self._judged = False
+        self._settled = False
+        self._concrete = binding[1]
+        self._narrate_timer = app.set_timer(ATTACH_BEHIND_NARRATE_S, self._narrate)
+        self._bound_timer = app.set_timer(ATTACH_BEHIND_BOUND_S, self._judge)
+
+    def _current(self) -> bool:
+        app = self._app
+        return (
+            not self._settled
+            and (app._binding_epoch, str(getattr(app._session, "session_id", "") or ""))
+            == self._token
+        )
+
+    def _post(self, text: str) -> None:
+        row = self._row
+        if row is not None and row.is_attached:
+            row.restate(text, "warning")
+            return
+        self._row = self._app._system_notice_block(text, "warning")
+
+    def _narrate(self) -> None:
+        if not self._current():
+            return
+        # The dialling arm's own sentence and bound, verbatim: the user is on the
+        # same wait with the same owner, only now behind a painted conversation.
+        self._post(
+            f"reconnecting to session {self._concrete} — still trying, about "
+            f"{RESUME_CONNECT_BOUND_S:g}\u00a0s in total"
+        )
+
+    def _judge(self) -> None:
+        if not self._current():
+            return
+        self._judged = True
+        # `not answering`, never `no runtime yet`: an owner exists, holds a live
+        # record and was dialled; what it has not done is answer (UX round 1,
+        # U2). "session", not "runtime" — the user's word for what they opened
+        # (U5). The conversation is already here, which is the one thing the
+        # user can rely on, so the sentence says that too.
+        self._post(ATTACH_BEHIND_VERDICT.format(session_id=self._concrete))
+        # The pending cue ends WITH the verdict: an optimistic `starting…` next
+        # to a sentence saying the owner is not answering would contradict it.
+        # The engage keeps its own envelope; a bind that lands after this still
+        # attaches and settles the row below.
+        self._app._set_starting(False)
+
+    def absorb_failure(self) -> bool:
+        """The engage FAILED: restate an already-posted row as the verdict.
+
+        ``True`` when this watch owns the user's account of the wait (it posted
+        a row for the current binding), so the caller does not add the engage's
+        own failure sentence underneath it. ``False`` leaves the ordinary report
+        path in charge: a failure faster than the narration has said nothing
+        yet, and the patience filter decides whether it is worth a line.
+        """
+        row = self._row
+        if not self._current() or row is None or not row.is_attached:
+            return False
+        if not self._judged:
+            self._judge()
+        self._app._start_engage_reported_for = self._token
+        return True
+
+    def settle(self) -> None:
+        """The attach finished (or was abandoned): end the timers, settle the row."""
+        if self._settled:
+            return
+        was_current = self._current()
+        self._settled = True
+        self._narrate_timer.stop()
+        self._bound_timer.stop()
+        row = self._row
+        self._row = None
+        if row is None or not row.is_attached or not was_current:
+            return
+        session = self._app._session
+        if session is not None and not getattr(session, "is_cold", True):
+            if self._judged:
+                # Restated rather than removed: the reader may have read the
+                # verdict, and a row that silently vanished would leave them
+                # unsure which statement was the true one.
+                row.restate(ATTACH_BEHIND_RECOVERED.format(session_id=self._concrete), "info")
+            else:
+                self._app._transcript_view().remove_block(row)
+        elif self._judged:
+            # Still cold with the verdict on screen: whatever binds this viewer
+            # NEXT (the user's message, whose foreground bind is what the verdict
+            # invited) must be able to retire it (UX round 1, U3).
+            self._app._attach_behind_verdict = (self._token, row)
 
 
 RESIZE_REFIT_DELAY_S = 0.05
@@ -4729,6 +4877,14 @@ class OperatorApp(App[None]):
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
+        #: A paint-first attach's verdict row still on screen, with the binding
+        #: it was posted for; see :meth:`_retire_attach_behind_verdict`.
+        self._attach_behind_verdict: tuple[tuple[int, str], NoticeBlock] | None = None
+        #: Prompts sent while their viewer was cold, keyed by a per-send marker,
+        #: valued by the binding they were sent on; see :meth:`_push_starting_band`.
+        self._prompts_awaiting_bind: dict[object, tuple[int, str]] = {}
+        #: What the band was last told, so a re-push is free.
+        self._starting_shown = False
         self._subagent_focus_restore: Any | None = None
         # The org-chart mode (``/team chart``), a sibling of the subagent view
         # with its own open/close and the same MODE contract: it hides the
@@ -6239,7 +6395,7 @@ class OperatorApp(App[None]):
             # `running`.
             replay.prepare(
                 history,
-                bound=max(12, self.size.height // 2),
+                bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
             )
@@ -7770,7 +7926,9 @@ class OperatorApp(App[None]):
                 self._resume_mounted_ids.clear()
                 self._resume_head_notice = None
                 self._resume_tail_notice = None
-                self._project_settled_rows(history, bound=max(12, self.size.height // 2))
+                self._project_settled_rows(
+                    history, bound=_viewport_message_budget(self.size.height)
+                )
             if incoming.needs_live_projection and self._controller is not None:
                 self._controller.restore_live_projection(
                     session.frontend_state, self._resume_mounted_ids, set(self._resume_results)
@@ -10877,8 +11035,8 @@ class OperatorApp(App[None]):
         # always ran from. That identity is what makes the settled frame the
         # frame main paints, rather than a lookalike built by a second rule.
         #
-        # `max(12, height // 2)` is the viewport budget the sidebar's prepared
-        # window already uses for the same question ("enough messages for one
+        # `_viewport_message_budget` is the budget the sidebar's prepared window
+        # already uses for the same question ("enough messages for one
         # screen"). The split is skipped when it would not paint less than the
         # full window — a short conversation, or a terminal tall enough that one
         # screen IS the window.
@@ -10887,11 +11045,8 @@ class OperatorApp(App[None]):
             if len(history) > RESUME_RENDER_MESSAGES
             else 0
         )
-        first_cut = (
-            _resume_tail_start(history, max(12, self.size.height // 2))
-            if len(history) > max(12, self.size.height // 2)
-            else 0
-        )
+        screenful = _viewport_message_budget(self.size.height)
+        first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
         if first_cut <= full_cut:
             self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
             # A message budget is a PROXY for height, and a poor one. Whether the
@@ -11990,7 +12145,9 @@ class OperatorApp(App[None]):
             # Live output (or an earlier End) already supplies the true tail.
             # The middle gap stays reachable without moving it after that tail.
             return
-        start = _resume_tail_start(self._resume_pending_tail, max(12, self.size.height // 2))
+        start = _resume_tail_start(
+            self._resume_pending_tail, _viewport_message_budget(self.size.height)
+        )
         page, self._resume_pending_tail = (
             self._resume_pending_tail[start:],
             self._resume_pending_tail[:start],
@@ -12022,7 +12179,7 @@ class OperatorApp(App[None]):
             view.restore_navigation_anchor(
                 anchor.navigation_anchor_id, anchor.navigation_anchor_part, top - anchor.region.y
             )
-        count = min(len(self._resume_pending_tail), max(12, self.size.height // 2))
+        count = min(len(self._resume_pending_tail), _viewport_message_budget(self.size.height))
         page, self._resume_pending_tail = (
             self._resume_pending_tail[:count],
             self._resume_pending_tail[count:],
@@ -14967,6 +15124,11 @@ class OperatorApp(App[None]):
                                 cwd=str(record.cwd or os.getcwd()),
                                 takeover_factory=takeover_factory,
                             )
+                            # Read by the engage that binds behind this paint,
+                            # so the wait is narrated and bounded on the redial's
+                            # own schedule (`_watch_attach_behind`) rather than
+                            # left as a bare `starting…` (UX round 1, U1).
+                            remote.attach_behind = True
                             attach_behind = True
                             settled = True
                             break
@@ -19017,6 +19179,7 @@ class OperatorApp(App[None]):
         # "whose" survive a re-bind of the SAME conversation.
         binding_token = (self._binding_epoch, str(getattr(session, "session_id", "") or ""))
         self._set_starting(True)
+        watchdog = self._watch_attach_behind(session, binding_token)
 
         async def run() -> None:
             try:
@@ -19044,6 +19207,11 @@ class OperatorApp(App[None]):
                 # Same reason as the skip above: nothing bound, so there is no
                 # change to name and the pending stamp must not outlive it.
                 self._refreshed_from = None
+                # A paint-first attach that has already told the user something
+                # restates THAT row with its verdict rather than adding a second
+                # sentence under it (UX round 1, U2/U3).
+                if watchdog is not None and watchdog.absorb_failure():
+                    return
                 self._report_start_engage_failure(
                     reason=reason,
                     error=error,
@@ -19053,6 +19221,8 @@ class OperatorApp(App[None]):
                 return
             finally:
                 self._set_starting(False)
+                if watchdog is not None:
+                    watchdog.settle()
             # AFTER a successful bind, which is the only moment the OWNER's
             # build is knowable: the pre-spawn check above runs while the
             # facade is still cold, so its C branch always returns at the
@@ -19062,6 +19232,7 @@ class OperatorApp(App[None]):
             # binding to it without spawning, i.e. an ordinary first prompt
             # against a stale runtime (review round 1, R1-4).
             self._check_build_skew(reason=f"{reason}-bound")
+            self._retire_attach_behind_verdict()
             # A pending self-refresh resolves HERE and nowhere else: this is
             # the first moment the successor's stamp is readable, which is
             # what makes the announcement a statement of fact rather than of
@@ -19082,6 +19253,64 @@ class OperatorApp(App[None]):
                 self._settle_handed_over_queues(interaction)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _watch_attach_behind(
+        self, session: Any, binding_token: tuple[int, str]
+    ) -> "_AttachBehindWatch | None":
+        """Narrate and bound a paint-first open's attach (UX round 1, U1).
+
+        Only for a viewer that was opened cold IN FRONT OF a live owner
+        (``session.attach_behind``): an ordinary cold open is waiting on nothing
+        that exists yet, and its failures are the patience filter's business. A
+        paint-first attach waits on an owner that DOES exist, and the engage
+        that carries it is silent until it fails — against a frozen owner, not
+        until the registry ages its heartbeat out, ~45 s later. So this posts
+        the redial's own row on the redial's own schedule:
+
+        * at :data:`ATTACH_BEHIND_NARRATE_S`, "reconnecting to session <id> —
+          still trying, about N s in total" — the exact sentence the dialling
+          arm narrated with before paint-first took the common case off it;
+        * at :data:`ATTACH_BEHIND_BOUND_S`, the row restates as the owner not
+          answering, in the product's words for this case, and the pending
+          state ends. Nothing is torn down: the conversation is already on
+          screen, the engage keeps its own (longer) envelope, and a bind that
+          lands late still attaches — the row then says so.
+
+        The row is RETIRED when the bind lands inside the bound (removed, as
+        the redial removes its own on success), and RESTATED when it lands after
+        the verdict, so a returning reader is never told the session was not
+        answering while they look at its live conversation (UX round 1, U3).
+        Fenced to its binding: a swap cancels the timers (``settle`` from the
+        engage's ``finally`` runs for a cancelled worker too), and a row that
+        outlives its binding is left for the transcript that owns it.
+        """
+        if not getattr(session, "attach_behind", False):
+            return None
+        return _AttachBehindWatch(self, binding_token)
+
+    def _retire_attach_behind_verdict(self) -> None:
+        """Restate a paint-first verdict once this binding is live after all.
+
+        The verdict ("session <id> is not answering") is posted while the
+        viewer is still cold, and nothing the engage does afterwards owns it:
+        the bind the user then triggers is a PROMPT's foreground bind, a
+        different code path. Both paths that land a bind call this, and it acts
+        only for the binding the verdict was posted for and only while the row
+        is still in the transcript, so a swap leaves the departed row alone.
+        """
+        pending = self._attach_behind_verdict
+        if pending is None:
+            return
+        token, row = pending
+        current = (self._binding_epoch, str(getattr(self._session, "session_id", "") or ""))
+        if token != current:
+            self._attach_behind_verdict = None
+            return
+        if getattr(self._session, "is_cold", True):
+            return
+        self._attach_behind_verdict = None
+        if row.is_attached:
+            row.restate(ATTACH_BEHIND_RECOVERED.format(session_id=token[1]), "info")
 
     def _report_start_engage_failure(
         self, *, reason: str, error: Exception, elapsed: float, binding_token: tuple[int, str]
@@ -19190,9 +19419,9 @@ class OperatorApp(App[None]):
             # ``HEARTBEAT_TIMEOUT_S``. "not answering" is the honest register
             # for it, and it is the one verb that stays true of the no-record
             # ceiling too.
-            body = "the runtime is not answering yet — send a message to retry"
+            body = "the session is not answering yet — send a message to retry"
         else:
-            body = "no runtime yet — it may still be starting; send a message to retry"
+            body = "the session may still be starting — send a message to retry"
         self._start_engage_reported_for = binding_token
         # INFO, not DEBUG: this line is the one record that the user was told
         # something, and the two ceilings it covers are exactly what an operator
@@ -19539,13 +19768,33 @@ class OperatorApp(App[None]):
         engage runs at mount, and again on the first keystroke after a failed
         one), and a band that said nothing would read as half-loaded.
         """
-        if self._starting_runtime == starting:
-            return
         self._starting_runtime = starting
+        self._push_starting_band()
+
+    def _push_starting_band(self) -> None:
+        """Show ``starting…`` while the engage runs OR a prompt waits on the bind.
+
+        Two sources, one cue (UX round 1, U4). The engage alone ended it too
+        early: the moment a prompt is accepted the background engage SURRENDERS
+        its place to the prompt's foreground bind (``_BACKGROUND_YIELD_BUDGET_S``)
+        and clears its flag, and the band read ``working`` for the whole frozen
+        window while nothing had reached the owner — the not-attached cue gone at
+        exactly the moment the user acted on it. A prompt dispatched against a
+        cold viewer therefore holds the cue until its own send returns, which is
+        the bind landing (or the send failing and reporting itself).
+
+        Counted per BINDING, so a prompt left in flight by a swap cannot hold
+        the cue up over the conversation that replaced it.
+        """
+        current = (self._binding_epoch, str(getattr(self._session, "session_id", "") or ""))
+        shown = self._starting_runtime or current in self._prompts_awaiting_bind.values()
+        if shown == self._starting_shown:
+            return
+        self._starting_shown = shown
         if self._status is not None:
             setter = getattr(self._status, "set_starting", None)
             if callable(setter):
-                setter(starting)
+                setter(shown)
         self._refresh_band()
 
     def on_editor_draft_started(self, message: EditorDraftStarted) -> None:
@@ -25603,6 +25852,16 @@ class OperatorApp(App[None]):
         # subject. Reload still cancels: see `_cancel_naming_attempt`.
         if self._is_current(source):
             self._status.update(streaming=True)
+        # NOT YET ATTACHED: the send below binds first, and until it returns the
+        # band keeps saying so rather than `working` (UX round 1, U4).
+        awaiting_bind: object | None = None
+        if self._is_current(source) and getattr(session, "is_cold", False):
+            awaiting_bind = object()
+            self._prompts_awaiting_bind[awaiting_bind] = (
+                self._binding_epoch,
+                str(getattr(session, "session_id", "") or ""),
+            )
+            self._push_starting_band()
 
         source.active_workers += 1
 
@@ -25612,6 +25871,13 @@ class OperatorApp(App[None]):
             try:
                 async with source.turn.provider_lock:
                     receipt = await session.prompt(text, images, **echo.prompt_kwargs())
+                # A prompt that went through is a BIND that landed, so a
+                # paint-first verdict still claiming the owner is not answering
+                # is now false (UX round 1, U3).
+                self._retire_attach_behind_verdict()
+                if awaiting_bind is not None:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._push_starting_band()
                 # DELIVERED — so if the transport had to shrink an attachment to
                 # get it here, this is the moment the user can be told. See
                 # `_report_wire_refit_for`.
@@ -25785,6 +26051,9 @@ class OperatorApp(App[None]):
                 # the entry.
                 self._discard_user_echo_for(source, echo)
             finally:
+                if awaiting_bind is not None and awaiting_bind in self._prompts_awaiting_bind:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._push_starting_band()
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
                 # The echo is only withdrawable while the send's outcome is
@@ -44081,7 +44350,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 126
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 127
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

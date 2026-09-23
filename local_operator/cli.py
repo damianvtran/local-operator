@@ -8924,7 +8924,10 @@ def main() -> int:
 
                 from local_operator.harness.types import ModelSpec
                 from local_operator.mobile.attach_client import find_runtime_record
-                from local_operator.session.attached import AttachedSession
+                from local_operator.session.attached import (
+                    AttachedSession,
+                    frontend_attach_refusal,
+                )
                 from local_operator.session_factory import resolve_hosting_model
 
                 config_directory = config_manager.config_dir
@@ -8996,8 +8999,18 @@ def main() -> int:
                 # override is still sent through the live attach below, which is
                 # the one path that can hand it to an existing owner; a cold
                 # viewer's override is consumed by its bind.
+                #
+                # A STATICALLY REFUSED record (an owner on an older build) keeps
+                # the dial below, mirroring the TUI's `/resume` branch: `connect`
+                # raises that refusal, and it is the only thing that sets
+                # `degraded_reason`, i.e. the "opened without live session state
+                # — needs protocol >= N" sentence. Painting first there would
+                # open an inert conversation with no word about why (review
+                # round 1, F1), and the dial costs nothing: it refuses before
+                # any socket is opened.
                 if (
                     record is not None
+                    and frontend_attach_refusal(record) is None
                     and not (initial_model is not None and (birth_args.hosting or birth_args.model))
                     and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
                 ):
@@ -9065,6 +9078,12 @@ def main() -> int:
                 )
                 if degraded_reason:
                     viewer.degraded_reason = degraded_reason
+                if paint_first_cwd:
+                    # Tells the TUI that a live owner is being attached behind
+                    # this paint, so it narrates and bounds that wait rather than
+                    # leaving `starting…` as the only account of it (UX round 1,
+                    # U1).
+                    viewer.attach_behind = True
                 return viewer
 
             async def session_factory():

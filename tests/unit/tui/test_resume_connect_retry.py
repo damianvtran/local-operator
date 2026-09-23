@@ -1435,3 +1435,154 @@ async def test_a_resume_onto_a_live_owner_paints_first_and_binds_behind(monkeypa
         assert app._session is cold_viewer
         assert engaged == ["engage"], "the bind behind the paint was never started"
         assert _notices(app) == [], "a paint-first open narrates no redial"
+
+
+# --- The paint-first attach's own narration and bound (UX round 1, U1-U5) ---
+#
+# Paint-first opens a REAL cold viewer and the ordinary background engage binds
+# it behind the paint. Against a frozen owner that engage says nothing until it
+# fails (~45 s), so these drive the real `/resume` arm with a real
+# `AttachedSession.cold` and a stand-in `engage_runtime` that parks until the
+# test releases it — the frozen owner, without a process — and shortened
+# narrate/bound timers.
+
+
+class _FrozenOwner:
+    """`engage_runtime` for an owner that does not answer until ``thaw()``."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._gate = asyncio.Event()
+        self.fail: BaseException | None = None
+
+    def thaw(self, *, fail: BaseException | None = None) -> None:
+        self.fail = fail
+        self._gate.set()
+
+    async def __call__(self, *_args, **_kwargs) -> None:
+        self.calls += 1
+        await self._gate.wait()
+        if self.fail is not None:
+            raise self.fail
+
+
+async def _paint_first(monkeypatch, tmp_path, frozen: _FrozenOwner) -> OperatorApp:
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir=tmp_path).update_config({"hosting": "test", "model_name": "mock"})
+    directory = tmp_path / "sessions" / "frozen-1"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (_record(90909, "frozen"), 90909),
+    )
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_NARRATE_S", 0.2)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 0.6)
+    return _app(monkeypatch, tmp_path)
+
+
+async def _pump(pilot, predicate, *, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await pilot.pause()
+        if predicate():
+            return True
+        await asyncio.sleep(0.02)
+    return predicate()
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_owner_is_narrated_then_judged_not_left_starting(monkeypatch, tmp_path):
+    """U1: the wait is told something true, on a schedule, and ends in a verdict.
+
+    Before: the band read `starting…` alone for 42 s and the first sentence came
+    at ~45 s (measured in a real pty). The redial's own "still trying, about N s"
+    row now arrives at the narrate mark, and the bound restates it as the owner
+    not answering and ends the pending state rather than staying optimistic.
+    """
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        # The engage is a worker: it reaches `engage_runtime` a loop turn later.
+        assert await _pump(pilot, lambda: frozen.calls == 1), "the attach never started"
+        assert app._starting_shown, "the band did not say the attach is pending"
+        assert await _pump(
+            pilot, lambda: any("still trying" in n for n in _notices(app))
+        ), _notices(app)
+        assert await _pump(
+            pilot, lambda: any("is not answering" in n for n in _notices(app))
+        ), _notices(app)
+        rows = [n for n in _notices(app) if "frozen-1" in n]
+        assert len(rows) == 1, ("the verdict must restate the narration, not add a row", rows)
+        assert "no runtime yet" not in rows[0]
+        assert not app._starting_shown, "`starting…` outlived the verdict"
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+@pytest.mark.asyncio
+async def test_a_bind_landing_inside_the_bound_retires_the_narration(monkeypatch, tmp_path):
+    """U3: the "still trying" row does not outlive the attach it described."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 30.0)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        # The owner answers: the facade leaves cold the way a real bind does.
+        monkeypatch.setattr(type(app._session), "is_cold", property(lambda _self: False))
+        frozen.thaw()
+        assert await _pump(pilot, lambda: not app._starting_shown)
+        assert not [n for n in _notices(app) if "frozen-1" in n], _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_bind_landing_after_the_verdict_restates_it(monkeypatch, tmp_path):
+    """U3: a late answer restates the verdict rather than leaving it standing."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("is not answering" in n for n in _notices(app)))
+        monkeypatch.setattr(type(app._session), "is_cold", property(lambda _self: False))
+        frozen.thaw()
+        assert await _pump(
+            pilot, lambda: any("is answering again" in n for n in _notices(app))
+        ), _notices(app)
+        assert not any("is not answering" in n for n in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_sent_before_the_attach_keeps_the_pending_cue(monkeypatch, tmp_path):
+    """U4: `starting…` survives the prompt being accepted, until its send returns.
+
+    The background engage yields to the prompt's foreground bind and clears its
+    own flag; the band used to flip to `working` in that frame while nothing had
+    reached the owner.
+    """
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 30.0)
+    release = asyncio.Event()
+
+    async def parked_prompt(self, *_args, **_kwargs):  # noqa: ANN001
+        await release.wait()
+        return ""
+
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        monkeypatch.setattr(type(app._session), "prompt", parked_prompt)
+        # The engage surrenders, which is what cleared the cue before.
+        app._set_starting(False)
+        app._start_turn_for(app._interaction, "sent while attaching")
+        await pilot.pause()
+        assert app._starting_shown, "the pending cue vanished when the prompt was accepted"
+        band = app._status
+        assert band is not None and band._starting and band._streaming
+        assert "starting…" in band.render_text(100).plain
+        release.set()
+        assert await _pump(pilot, lambda: not app._starting_shown)
+        frozen.thaw(fail=ConnectionError("gone"))
