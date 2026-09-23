@@ -74,12 +74,10 @@ class _Harness:
         # The receipts journal behind the control routes resolves its store
         # through app state; ``host()`` still prefers the pool above.
         from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
 
+        # The catalogue routes resolve slash-command AUTH through app state; the
+        # isolated manager above keeps them off the operator's own credentials.
         self.app.state.config_manager = ConfigManager(config_dir=root)
-        # The catalogue routes resolve slash-command AUTH through app state; an
-        # isolated store keeps them off the operator's own credentials.
-        self.app.state.credential_manager = CredentialManager(root)
         self.session_id = ""
         self.client: AsyncClient | None = None
 

@@ -737,13 +737,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.replace",
-        "temp FILE -> .env",
-    ),
-    # Same shape as the credentials writer above: a temp FILE inside the
-    # secrets directory replacing master.key in that same directory. Both
+    # Same shape as the browser-bridge/keys writers below: a temp FILE inside
+    # the secrets directory replacing master.key in that same directory. Both
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
@@ -884,11 +879,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/secrets/keys.py::discard_staged_wrapped_key",
         "<path>.unlink",
         "master.wrapped.incoming* under config_dir()/secrets, staged by this call",
-    ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.unlink",
-        "temp FILE -> .env",
     ),
     ("local_operator/browser_bridge/daemon.py::_private_write", "os.replace", "temp FILE"),
     ("local_operator/browser_bridge/state.py::publish", "os.replace", "temp FILE"),
@@ -1682,12 +1672,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/runtime/stall_watchdog.py::arm",
         "<path>.unlink",
-        "log_dir()+pid FILE this call just created; a header-only survivor reads as armed",
+        "log_dir()+pid FILEs of THIS pid: the header this call just created (a header-only "
+        "survivor reads as armed) and a deadline sibling an EARLIER holder of the pid left, "
+        "which would otherwise read as a beat of the life being armed (QA round 1, Q1)",
+        2,
     ),
     (
         "local_operator/session/runtime/stall_watchdog.py::disarm",
         "<path>.unlink",
         "log_dir()+pid FILE of a CLEAN exit; surviving means the process died disarmed",
+        2,
+    ),
+    # The deadline sibling is written THROUGH a sidecar temp so a concurrent reader
+    # never sees a truncated file (QA round 1, Q4). Both paths are the same
+    # `log_dir()` + int-pid pair the rows above argue for, in the same directory, so
+    # neither can name a session file; and the temp is this process's own pid-keyed
+    # name, written and consumed under `_LOCK`.
+    (
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        "os.replace",
+        "Atomic replace of this pid's OWN runtime-stall-<pid>.deadline from its pid-keyed temp",
+    ),
+    (
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        "<path>.unlink",
+        "Removes only its own pid-keyed temp file after a failed atomic replacement",
     ),
 )
 
@@ -1900,6 +1909,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
+        # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
+        # pid and nothing else (see the allow-list rows above): no session id, no
+        # caller input, so neither can name a path under sessions/.
+        "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
         # The mesh's session stamp: a tmp FILE -> mesh.json inside that session's

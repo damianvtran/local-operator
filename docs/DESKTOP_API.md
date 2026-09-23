@@ -1111,22 +1111,25 @@ build 200 cold facades and 200 SQLite poll loops, and would take the
 
 The envelope's SHAPE is the session stream's (`epoch`, `seq`, `type`, `payload`,
 plus `session_id` on the types that concern one session) so the relay needs no
-new parser. `session_id` is absent on `open` and `catalogue`: the feed is not a
-session, and a fabricated id would make `observe(sessionId, frame)` look like it
-had one to attribute a catalogue event to.
+new parser. `session_id` is absent on `open`, `catalogue` and `authoring`: the
+feed is not a session, and a fabricated id would make
+`observe(sessionId, frame)` look like it had one to attribute a catalogue event
+to.
 
 ```jsonc
 {"epoch":"…","seq":12,"type":"open",
  "payload":{"subscription_id":"…","heartbeat_seconds":15,"lease_seconds":45,
             "watch_ttl_seconds":45,"catalogue_revision":98123,
+            "authoring_revision":7,
             "attention":{"session/<id>":{ /* AttentionState */ }}}}
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
-{"epoch":"…","seq":16,"type":"session_status","session_id":"<12 hex>",
+{"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
+{"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
-{"epoch":"…","seq":17,"type":"heartbeat","payload":{"ts":1699999999.5}}
-{"epoch":"…","seq":18,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
+{"epoch":"…","seq":18,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
 - **`notification.payload` is the per-session payload**, built by the SAME
@@ -1241,6 +1244,37 @@ had one to attribute a catalogue event to.
   fleet starting, a batch finishing — costs one refetch, not N: the causes
   collapse into a single bump per tick and anything arriving later in the same
   tick is carried by the next one (~100 ms).
+- **`authoring`** is the same shape for the two AUTHORING registries —
+  `agents/<id>/agent.yml` (the profiles and roles the `agent` tool writes) and
+  `teams/<id>/team.yml` — on the same 1 s cadence, with the same monotone
+  `revision` that `open` reports as `authoring_revision`. It exists because
+  nothing in this feed used to mention either: a session could create a team or a
+  profile and the sidebar's Teams/Agents lists kept showing the state they were
+  mounted with until a refresh or a tab switch re-mounted them. As with
+  `catalogue`, the frame says only "your lists are stale" — the client's existing
+  fetch is the answer — and at most one frame is published per tick, so four
+  profiles authored by one plan cost one refetch.
+
+  **Its trigger is the CONTENT of the rows, projected onto the lines a user
+  AUTHORED.** The token is the row name set of each registry plus a `crc32` of
+  each row's authored lines; the per-turn keys an ordinary turn rewrites in place
+  (`last_message`, `last_message_datetime`, `current_working_directory`) are
+  dropped before the digest. That projection is load-bearing rather than tidy:
+  `update_agent_state` dumps the whole row to `agent.yml` on every turn, so a
+  digest of the raw bytes would publish on every turn of every chat and refetch
+  the sidebar's two lists once a turn — the exact defect this channel removes.
+  Pinned both ways in `tests/unit/server/test_desktop_feed.py`: a turn that
+  rewrites `agent.yml`, and a `save_agent_state` that rewrites `system_prompt.md`
+  with identical bytes, must publish NOTHING; an edit to what a row SAYS must
+  publish exactly one frame. A profile's `system_prompt.md` — where the `agent`
+  tool keeps its instructions — is deliberately not a term, since it is not what
+  either list renders.
+
+  **A same-size in-place edit whose `mtime_ns` does not move is missed** — the
+  per-row term is guarded by a stat, exactly like the catalogue token, and the
+  refetch on window focus and on mount is the backstop for both. What a row's
+  file being READ costs is bounded the same way: a probe re-reads a row only when
+  that row's stat moved.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
@@ -1288,6 +1322,24 @@ app's first `GET /v1/desktop/sessions` creates `run/mobile` 0700 on a machine th
 has never run a session. That is pre-existing at the base commit and unchanged
 here, and it is why an absent run directory is not a statement that no runtime has
 ever published.
+
+### The cost of the authoring probe, stated rather than discovered
+
+The `authoring` token is the one term on this feed whose cost is **O(profiles +
+teams)**, and saying so here is deliberate: a reader who finds an O(n) probe
+unstated will read it as a regression of the four-stat tick and "fix" it by
+deleting the per-row term — re-opening the defect the channel closes.
+
+The shape of the cost is one `readdir` per registry plus **one `os.stat` per
+row**; a row's metadata file is READ only when that row's stat moved, so an idle
+probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
+is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
+its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
+on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
+other probe here. The projection is a line filter rather than a YAML parse for
+the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,
+which is not affordable once a second beside the doorbell.
 
 ### The burst ceiling
 

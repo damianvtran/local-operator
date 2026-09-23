@@ -1387,7 +1387,6 @@ async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: 
 
     # Patch credential and config managers, and upload method
     with (
-        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
         patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
         patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
@@ -1396,7 +1395,6 @@ async def test_upload_agent_to_radient_success(test_app_client, dummy_registry: 
         ),
     ):
 
-        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
         mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
         mock_radient_client.return_value = MagicMock()
 
@@ -1454,7 +1452,6 @@ async def test_upload_agent_to_radient_reclaims_the_export_temp_dir(
     uploaded: list[object] = []
 
     with (
-        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
         patch.object(
             dummy_registry,
@@ -1465,7 +1462,6 @@ async def test_upload_agent_to_radient_reclaims_the_export_temp_dir(
             side_effect=lambda _client, _id, zip_path: uploaded.append(zip_path.exists()),
         ),
     ):
-        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
         mock_radient_client.return_value = MagicMock()
         response = await test_app_client.post(f"/v1/agents/{agent.id}/upload")
 
@@ -1576,15 +1572,22 @@ async def test_upload_agent_to_radient_missing_api_key(
         patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
         patch.object(dummy_registry, "upload_agent_to_radient") as mock_upload_agent_to_radient,
     ):
-        # Temporarily override the app's credential_manager to simulate missing API key
-        orig_get_credential = app.state.credential_manager.get_credential
-        app.state.credential_manager.get_credential = lambda key: None
+        # PR2a: the key lives as a provider-class STORE ROW now, so "missing"
+        # is expressed by removing the row rather than by swapping a legacy
+        # getter that no longer exists. Restored in the finally block.
+        from local_operator.providers.registry import (
+            remove_provider_key,
+            store_provider_key,
+        )
+
+        root = app.state.config_manager.config_dir
+        remove_provider_key("RADIENT_API_KEY", base=root)
         try:
             response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")
             # Ensure upload_agent_to_radient is not called when API key is missing
             mock_upload_agent_to_radient.assert_not_called()
         finally:
-            app.state.credential_manager.get_credential = orig_get_credential
+            store_provider_key("RADIENT_API_KEY", "test-credential", base=root)
 
     assert response.status_code == 401 or response.status_code == 400
     data = response.json()
@@ -1611,11 +1614,7 @@ async def test_upload_agent_to_radient_agent_not_found(
         AssertionError: If the response does not indicate not found.
     """
     non_existent_id = "nonexistent"
-    with (
-        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
-        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
-    ):
-        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
+    with (patch("local_operator.config.ConfigManager") as mock_cfg_mgr,):
         mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
 
         response = await test_app_client.post(f"/v1/agents/{non_existent_id}/upload")
@@ -1664,14 +1663,12 @@ async def test_upload_agent_to_radient_error(test_app_client, dummy_registry: Ag
     agent_id = agent.id
 
     with (
-        patch("local_operator.server.routes.agents.CredentialManager") as mock_cred_mgr,
         patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch.object(dummy_registry, "export_agent", return_value=(MagicMock(), None)),
         patch.object(
             dummy_registry, "upload_agent_to_radient", side_effect=Exception("Upload failed")
         ),
     ):
-        mock_cred_mgr.return_value.get_credential.return_value = "dummy-api-key"
         mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
 
         response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")

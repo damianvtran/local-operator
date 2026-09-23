@@ -134,6 +134,12 @@ _HARMLESS: dict[str, str] = {
         "reach a child. An inherited SMALLER bound could only make a spawned runtime die "
         "earlier — loudly, never a silent pass"
     ),
+    "LOP_RUNTIME_BOOT_STALL_SECONDS": (
+        "the same bound's BOOT phase; a duration, and the same class as the steady knob "
+        "above (a real-runtime cell reads the value it armed with out of the child's own "
+        "dump header, and every LOP_* variable is stripped before a spawn). It can only "
+        "move the deadline a runtime fires at, never what a test asserts"
+    ),
     "LO_MOBILE_NO_DIAL": "disables the mobile dial-out; safer ON",
     "LOP_TUNNEL_NO_REARM": (
         "disables the re-arm on a credential write; it can only withhold starting a "

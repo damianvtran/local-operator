@@ -77,6 +77,10 @@
     "model_picker_shot.py": [
       "default"
     ],
+    "model_picker_auto_shot.py": [
+      "100x30",
+      "150x40"
+    ],
     "nerd_glyph_shot.py": [
       "nerd",
       "plain"

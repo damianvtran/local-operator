@@ -221,7 +221,7 @@ the one the desktop client reads): nothing is rolled back, the
   Record<secretId, SecretStr>, confirmed_replace: string[]}`. It is deliberately a
   SEPARATE route from `POST /credentials` above, which is the provider/session
   credential surface: this one stores into the encrypted secret store and never
-  touches `credentials.env`, never enters the `/credential` variable store, and
+  touches the retired plaintext file, never enters the `/credential` variable store, and
   therefore never joins the environment of every unrelated `bash` child. Every
   submitted ID is validated against the named server's own declared `${NAME}`
   references BEFORE any write, so an unknown server, a config FIELD name
@@ -427,9 +427,9 @@ POST the same path accepts the closed `MCPControl` schema:
 
 - `add`: name, scope global/project, either command+args[] or url; optional env,
   headers and oauth boolean. Env/header values must be `${NAME}` references,
-  resolved at connect time from the encrypted secret store; a legacy
-  `credentials.env` value is used ONLY when the reference is definitively absent
-  from that store (never on a denied, locked, corrupt or empty entry). A reference
+  resolved at connect time from the encrypted secret store, and the legacy
+  `credentials.env` value once used when the reference was definitively absent
+  from that store is GONE (PR2b deleted the module that read it). A reference
   that cannot be resolved fails the connect naming the key; it never
   reaches the server as text. A doubled `$` (`$${HOME}`) escapes one to literal
   text. URLs reject inline credentials, query and fragment.
@@ -442,7 +442,7 @@ POST the same path accepts the closed `MCPControl` schema:
   fragment and no value. `environment_keys`/`header_keys` remain as INFORMATIONAL
   map keys and are never secret IDs — writing their values as credentials is the
   bug this metadata exists to prevent. `probe` additionally answers
-  `secret_refs`, `credential_state: [{id, source: encrypted|legacy|missing|
+  `secret_refs`, `credential_state: [{id, source: encrypted|missing|
   unavailable}]` and `key_submission_supported`; a server declaring no reference
   gets an honest setup sentence rather than a guessed field binding.
 - `remove`: name, exact owned scope, confirmed=true. The existing ownership resolver

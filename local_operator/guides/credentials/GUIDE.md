@@ -90,6 +90,11 @@ left the harness entirely.
 `secret` tool, `op="store"` — or `lop secret set NAME` from bash. Storing is
 your decision to make.
 
+**List before asking.** When you need a credential, `list` the store (or `lop
+secret list`) before asking the user for something they may have already given
+you — re-asking for a value already stored is the friction this store exists to
+remove.
+
 **Store it when:** you have just minted a token that will be needed after this
 session; the user pasted a credential they will clearly need again; a setup step
 produced a key. Prefer this store over writing to a plaintext `.env`.
@@ -185,6 +190,11 @@ the default mode the master key is a file beside the store, so an attacker who
 knows to look for it reads both and decrypts; the opt-in passphrase mode holds
 the key only in a running broker's memory, where reading it needs a macOS
 authorization prompt the user would see.
+
+A credential the user hands you (an API key for a service, a token for a
+script) is a NORMAL thing to `store`, with a good `description` so it is findable
+later — and a non-technical user hands one over through the `/credential`
+gesture rather than a shell command.
 
 **But anything running as the user that is willing to run `lop` can read these
 secrets**, exactly as you do — `lop` is on `PATH` and a script that spawns a

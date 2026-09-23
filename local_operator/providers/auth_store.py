@@ -10,8 +10,9 @@ First match wins:
 2. config override (``models.yml``/gateway pointer)
 3. OAuth credential (auto-refresh + stickiness/round-robin)
 4. API key persisted by ``login`` (``source="login"``)
-5. env var — including the legacy ``credentials.env`` file read through
-   ``local_operator.credentials.CredentialManager`` when importable
+5. env var — the process environment. After PR2a the plaintext
+   ``credentials.env`` file is no longer read on this tier (the store's
+   provider-class rows are, above), so an export is the only ambient source
 6. stored API key without ``source="login"``
 7. fallback resolver (custom providers)
 
@@ -75,11 +76,10 @@ from local_operator.providers.registry import (
     RefreshFn,
     credential_provider_id,
     get_provider_definition,
-    resolve_env_key,
+    provider_env_key,
 )
 
-if TYPE_CHECKING:  # the legacy reader stays an optional, import-guarded tier
-    from local_operator.credentials import CredentialManager
+if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
     from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
@@ -650,10 +650,17 @@ class _SerializedConnection:
 class AuthStore:
     """Credential persistence + the 7-step cascade.
 
-    ``credential_manager`` (legacy ``CredentialManager``) feeds the env tier
-    from ``credentials.env``. ``config_overrides`` seeds the config-override
-    tier. All DB access is local and synchronous; async methods only exist
-    where refresh/network happens.
+    ``config_dir`` supplies the config ROOT the env tier resolves its
+    provider-class store rows under. It no longer feeds a plaintext leg: the env
+    tier reads store rows then the process environment, and the legacy
+    ``credentials.env`` rung is GONE (PR2a).
+    ``config_stored_values`` seeds the config-derived tier. All DB access is
+    local and synchronous; async methods only exist where refresh/network
+    happens.
+
+    ``config_dir`` is a bare PATH, not a manager: PR2b deleted the
+    ``CredentialManager`` that used to carry it, and every caller already has the
+    path (``ConfigManager.config_dir``) or can take ``None`` for the HOME default.
 
     .. note::
         Refresh is single-flight per process (``asyncio.Lock``) and across
@@ -665,12 +672,12 @@ class AuthStore:
         self,
         db_path: str | Path | None = None,
         *,
-        credential_manager: "CredentialManager | None" = None,
+        config_dir: Path | None = None,
         config_overrides: dict[str, str] | None = None,
         usage_cache: "UsageCacheStore | None" = None,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
-        self._credential_manager = credential_manager
+        self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
@@ -3093,7 +3100,8 @@ class AuthStore:
         # step 5, regardless of which later tier ends up winning).
         pin(None)
 
-        # 5. Env var tier (process env, then legacy credentials.env).
+        # 5. Env var tier (the process environment; the plaintext credentials.env
+        # file is no longer read here, PR2a).
         env_key = self._env_api_key(provider)
         if env_key:
             return env_key, None
@@ -3158,33 +3166,21 @@ class AuthStore:
         return None, None
 
     def _env_api_key(self, provider: str) -> str | None:
-        # The env leg is the SAME reader every other surface uses —
-        # ``registry.resolve_env_key`` is alias-aware (a flavour authenticates
-        # with its base provider's var), so the cascade, ``is_usable`` and the
-        # catalogue enrichment cannot disagree about whether an env key runs a
-        # flavour. The store adds only the legacy ``credentials.env`` tier on
-        # top, which predates the store and no other reader sees.
-        definition = get_provider_definition(provider)
-        if definition is None or definition.env_keys is None:
-            definition = get_provider_definition(credential_provider_id(provider))
-        value = resolve_env_key(provider)
-        if value:
-            return value
-        # Legacy credentials.env tier via CredentialManager (lazy import so a
-        # missing legacy module degrades to env-only).
-        if self._credential_manager is None:
-            self._credential_manager = _load_legacy_credential_manager()
-        manager = self._credential_manager
-        if manager is not None and definition is not None and isinstance(definition.env_keys, str):
-            try:
-                secret = manager.get_credentials().get(definition.env_keys)
-            except Exception:
-                secret = None
-            if secret is not None:
-                value = secret.get_secret_value()
-                if value:
-                    return value
-        return None
+        # The env leg resolves through the SHARED store-first reader
+        # (``registry.provider_env_key``), which is alias-aware (a flavour
+        # authenticates with its base provider's var) so the cascade,
+        # ``is_usable`` and the catalogue enrichment cannot disagree about
+        # whether a key runs a flavour. It reads the provider-class store row
+        # first and the process environment second; the legacy ``credentials.env``
+        # file leg is GONE (PR2a).
+        #
+        # The cascade ORDER is untouched: this is still step 5, still one value,
+        # still before the stored-api_key and fallback-resolver rungs.
+        #
+        # ``base`` is the manager's own config root, so a store the caller
+        # configured elsewhere is the one consulted; unset means the
+        # HOME-derived default, which is what a CLI invocation wants.
+        return provider_env_key(provider, base=self._config_dir)
 
     # -- failover support --------------------------------------------------------
 
@@ -3331,16 +3327,3 @@ class AuthStore:
             if self._row_matches_key(row, api_key):
                 return row.id
         return None
-
-
-def _load_legacy_credential_manager() -> "CredentialManager | None":
-    """Best-effort legacy ``credentials.env`` reader (import-guarded)."""
-    try:
-        from local_operator.credentials import CredentialManager
-
-        base = config_dir()
-        if (base / "credentials.env").exists():
-            return CredentialManager(base)
-    except Exception:
-        pass
-    return None

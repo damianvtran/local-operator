@@ -145,7 +145,9 @@ from local_operator.scratchpad import (
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
+    ScratchpadContentError,
     ScratchpadPathError,
+    check_scratchpad_write,
     ensure_scratchpad_dir,
     parse_scratchpad_url,
     scratchpad_dir_of,
@@ -2898,6 +2900,122 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     return redacted if isinstance(redacted, str) else text
 
 
+#: The most text the settled `bash` path PUBLISHES per stream: the cap the
+#: masked result and the spill are elided to.
+#:
+#: **Why a cap at all.** The pass costs CPU proportional to its input — measured
+#: on this tree at ~0.2 microseconds per byte when the shape gate stays shut and
+#: ~3-4 when every line carries an anchor, i.e. 1-16 seconds of synchronous work
+#: for a 4 MB stream, all of it on the event loop before the thread hop landed.
+#: The bash settled path hands the pass the whole retained stream (`_BashOutput`
+#: keeps up to :data:`SPILL_ENTRY_LIMIT_BYTES` per pipe) while the model's
+#: display budget is 8 KiB :data:`TOOL_OUTPUT_LIMIT_CHARS`, so the cost of the
+#: pass and the size of what the model reads are two different numbers.
+#:
+#: **It is NOT a bound on the pass input, and the round-1 review measured why.**
+#: An earlier revision elided at this cap BEFORE masking, to hand the pass only
+#: what survives. Two things were wrong with that. (1) It saved nothing: the cap
+#: is the retention limit and ``_BashOutput.decode()`` is the only way past it
+#: — the retention notice, 39 characters for a 4 KiB omission and 42 for a
+#: 4 MiB one — so the pass was handed 4,194,343 characters either way. (2) It
+#: LEAKED: an elision runs before the mask, its cuts snap inward to line
+#: boundaries, and a cut inside a multi-line match publishes the kept side as an
+#: incomplete block the table cannot match — raw key material in the result and
+#: in the spill the model can ``read``. The pass is therefore handed everything
+#: retention kept (the mask must see every byte that can be published) and this
+#: constant caps the PUBLISHED text only. It is deliberately NOT the 8 KiB
+#: display budget either: the same text is what gets spilled, which the model can
+#: `read` later, so capping at the display budget would drop bytes that are still
+#: published — and a bound may only ever drop what the mask has already been
+#: applied to.
+_REDACT_STREAM_LIMIT_CHARS = SPILL_ENTRY_LIMIT_BYTES
+
+
+def _redact_settled_stream(text: str, context: ToolContext | None) -> str:
+    """Redact one settled `bash` stream, THEN cap what is published.
+
+    **The mask runs first, and the order is load-bearing.** :func:`truncate_output`
+    cuts the head and tail of its input and snaps both cuts INWARD to a line
+    boundary (:func:`_clip_head_tail`), so an elision applied BEFORE the mask can
+    land inside a multi-line match and publish its kept side as an incomplete
+    block the table cannot match: a PEM header plus its first body lines with no
+    ``END`` is published RAW — in the result, and in the spill the model can
+    ``read`` afterwards. Measured at the shipped cap on the reviewer's
+    construction (a block whose END line is the last line of the retained head,
+    so the snapped cut falls inside it): a raw key body line in the call-site
+    spill under the elide-first order, none under this one. Masking first means
+    a cut inside a match can only publish ``[redacted]``.
+
+    **Why this costs nothing.** The cap is the retention limit itself and
+    ``_BashOutput.decode()`` is the only way past it — the retention notice is
+    appended to the retained head and tail, so an over-cap stream decodes to
+    ``limit + len(notice)`` and the elision's whole saving is that notice.
+    Measured: the pass was handed 4,194,343 characters either way (a 4 KiB
+    omission, notice 39). So the cap is kept as a bound on what is
+    PUBLISHED (the result and the spill), never as a bound on the pass input —
+    the only text the pass may safely be denied is text that is not published,
+    and a tighter cap here would deny it text that is.
+    """
+    return truncate_output(_redact_tool_text(text, context), _REDACT_STREAM_LIMIT_CHARS)
+
+
+def _decode_and_redact_streams(
+    stdout_chunks: "_BashOutput",
+    stderr_chunks: "_BashOutput",
+    context: ToolContext | None,
+) -> tuple[str, str]:
+    """Decode both captured streams and redact them, in ONE off-loop call.
+
+    **The NAME is load-bearing: it is the settled bash tail's off-loop seam.**
+    ``tests/unit/tools/test_loop_liveness.py`` names this symbol in its
+    ``OffLoopSpy``, which resolves the name on the module and fails with an
+    ``AttributeError`` rather than quietly asserting nothing when it moves —
+    the shape this helper was renamed into cost one round of a red gate for
+    exactly that reason. A rename therefore has to carry that spy with it.
+    Its pair, ``_bash_oversized_streams``, is watched the same way.
+
+    **Why the pass is in here rather than beside the decode.** The comment at
+    the foreground call site already moved the multi-MB decode, join and elision
+    into a thread because a batch of concurrent `bash` calls finishing together
+    froze the TUI frame. The redaction moved with it only for the streams that
+    are small: it is the other multi-MB synchronous step, so leaving it on the
+    event loop kept the freeze for exactly the commands the thread was added
+    for. The work is byte-for-byte the same; only the thread it runs on changes.
+
+    ``asyncio.to_thread`` copies the current context, so the tool-source and
+    shape-hit reporters the pass publishes through are the same ones the calling
+    task would have seen — the incident a hit files is unchanged.
+
+    **A cancelled call does NOT cancel the pass, and that is accepted rather
+    than handled.** ``asyncio.to_thread`` has no cancellation: an abort, a
+    timeout or a steer that lands while this runs discards the result and leaves
+    the work running to completion on the pool thread (worst case measured at
+    ~16 s for 4 MiB of anchor-bearing text). Nothing here can interrupt it: the
+    pass is a pure function of (text, values) with no abort channel, and giving
+    it one would put a signal into the shape table every caller shares, for a
+    case whose only cost is one worker thread that the event loop is not waiting
+    on. The alternative — checking for cancellation between streams — would leak
+    a partial scrub, which is the one outcome this path exists to prevent.
+
+    **It also makes the shape-hit sink cross-thread, which is new here.** The
+    registered-value sink the pass reads and writes
+    (``VariableStore.redaction_values`` / ``_register_shape_hits``) was until now
+    only ever touched from the loop thread, where two concurrent `bash` calls
+    serialised; two calls settling together now run it in two worker threads, so
+    a read of the value set can interleave with a write to it. Bounded and
+    fail-closed, measured by the round-1 QA pass: 20,000 concurrent probes with
+    no failure, and every failing route lands on the withheld-result placeholder
+    (``_redact_tool_text`` resolves all three routes to the same full pass, so a
+    raise is caught and the output is withheld), never on an unmasked
+    credential. Recorded rather than locked: a mutex here would serialise the
+    pass this change exists to move off the loop.
+    """
+    return (
+        _redact_settled_stream(stdout_chunks.decode(), context),
+        _redact_settled_stream(stderr_chunks.decode(), context),
+    )
+
+
 def _bash_output_summary(stdout: str, stderr: str) -> str:
     """The shared 'stdout/stderr' body used by updates and the final result."""
     parts = [
@@ -3616,9 +3734,9 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out, err = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-            out = _redact_tool_text(out, context)
-            err = _redact_tool_text(err, context)
+            out, err = await asyncio.to_thread(
+                _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+            )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
             if memory_exceeded_bg:
@@ -3886,15 +4004,17 @@ async def execute_bash(
             + (f"\n{aborted_missing}" if aborted_missing else ""),
         )
 
-    # Decoding and, for oversized output, spilling/eliding run in a thread:
-    # a command that printed megabytes turns this tail into a multi-MB
-    # decode, a multi-MB join, a disk write of the spill and string slicing
-    # to elide it — all synchronous, all on the loop that renders the TUI,
-    # and the reason a batch of concurrent bash calls used to freeze the
-    # frame at the moment they finished together.
-    stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-    stdout_raw = _redact_tool_text(stdout_raw, context)
-    stderr_raw = _redact_tool_text(stderr_raw, context)
+    # Decoding, redaction and (for oversized output) spilling/eliding run in a
+    # thread: a command that printed megabytes turns this tail into a multi-MB
+    # decode, a multi-MB credential pass, a multi-MB join, a disk write of the
+    # spill and string slicing to elide it — all synchronous, all on the loop
+    # that renders the TUI, and the reason a batch of concurrent bash calls used
+    # to freeze the frame at the moment they finished together. The redaction is
+    # in the thread with the decode (`_decode_and_redact_streams`) rather than
+    # beside it, because it is one of those multi-MB steps.
+    stdout_raw, stderr_raw = await asyncio.to_thread(
+        _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+    )
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -4001,14 +4121,6 @@ def _bash_partial_summary(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput
     return _bash_output_summary(
         truncate_output(stdout_chunks.decode()),
         truncate_output(stderr_chunks.decode()),
-    )
-
-
-def _decode_chunks(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> tuple[str, str]:
-    """Join and decode both captured streams off the event loop."""
-    return (
-        stdout_chunks.decode(),
-        stderr_chunks.decode(),
     )
 
 
@@ -5416,6 +5528,47 @@ _PLATFORM = sys.platform
 #: to state it cannot drift apart.
 _SYSTEM_TMP_IS_PRUNED = _PLATFORM == "darwin"
 
+#: The trap the temp-root arm names, as a noun phrase. A name rather than an inline
+#: literal because the line's ROOT arm (``is_root``) spells the trap out in full —
+#: there is no concrete target beside it for "the same trap" to refer back to — so
+#: the phrase appears twice in one line and a second copy is how it drifts.
+_TEMP_ROOT_TRAP = "a temp root"
+
+#: The DIRECTORY NAMES that are the same trap as a temp root wherever they appear.
+#: That is the whole of the second arm's trigger: no extension gate, and no
+#: location gate either, because the NAME is the convention the session was already
+#: following when it wrote there.
+#:
+#: What is wrong with one of these is NOT what is wrong with a temp root: it is not
+#: that nothing prunes it, and the line's reason is deliberately neutral about WHERE
+#: the directory sits — see ``_SCRATCH_DIR_WHY`` for what it does say and why. What
+#: is measured 2026-09-22 on this host: one such directory held 634 files / 193 MB,
+#: with two of the same shape beside it at 356 MB and 239 MB — none of them pruned
+#: by anything, and none of them tellable apart from the operator's own work.
+_SCRATCH_DIR_NAMES = frozenset(
+    {"tmp", ".tmp", "temp", "scratch", ".scratch", "scratchpad", ".scratchpad"}
+)
+
+#: The trap the scratch-named-directory arm names, the sibling of
+#: ``_TEMP_ROOT_TRAP``.
+_SCRATCH_DIR_TRAP = "a scratch-named directory"
+
+#: Why a scratch-named directory is the wrong place for scratch. Deliberately NOT
+#: the temp arm's macOS prune: a workspace ``tmp/`` is on no cleaner's list, so
+#: saying that would be a false statement about the machine reading it.
+#:
+#: It is also deliberately LOCATION-NEUTRAL, which is a correctness property rather
+#: than a style choice. The arm fires in a workspace, in a repo, under the user's
+#: home and at ANOTHER session's pad root — containment exempts only this session's
+#: own pad — and the wording this replaced claimed the file was "in the user's own
+#: tree", which is false at a foreign pad and was false under a temp root until the
+#: guard in ``_in_scratch_named_dir`` closed that class off (round 1, R1/R2).
+#:
+#: Shorter than the wording it replaced (75 characters against 116), which the design
+#: round asked for in as many words: the card clips this clause at realistic widths,
+#: so a reworded clause must not buy visibility by lengthening the line (D2).
+_SCRATCH_DIR_WHY = "it is outside this session, and nothing clears it up when this session ends"
+
 
 def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
     """``(resolved root, why it is a trap)`` for the temp dirs ``write``/``edit`` watch.
@@ -5472,9 +5625,119 @@ def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
     return tuple(roots)
 
 
+def _resolved_scratchpad_root(scratchpad_root: Path | None) -> Path | None:
+    """``scratchpad_root`` resolved, or ``None`` when there is none or it cannot be.
+
+    Resolved because every containment test below compares against a real target:
+    an unresolved spelling of a symlinked pad, or of a temp root reached through
+    one, is a silent miss.
+
+    ``None`` on failure rather than the unresolved path, because a pad root the OS
+    refuses to resolve cannot be advised about. Measured on the round-1 base
+    (``5f347f03``): with a pad root whose ``resolve()`` raises, BOTH arms emitted a
+    line — the tool one with the scheme remedy, the shell one with the PATH remedy —
+    so the session was told, on both channels, to move a file into a pad that had
+    just failed to resolve. ``None`` (no pad at all) was silent on both, but crashed
+    the tool arm with ``AttributeError``. Silence is the safe answer to both shapes,
+    and one predicate is how the two channels cannot answer differently again.
+    (Round 1's rationale claimed an asymmetry between the channels; the measured
+    base had none, and R5's real content is firing on an unresolvable pad at all.)
+    """
+    if scratchpad_root is None:
+        return None
+    try:
+        return scratchpad_root.resolve()
+    except OSError:  # pragma: no cover - the OS refusing to resolve the pad
+        return None
+
+
+def _in_scratch_named_dir(
+    resolved: Path,
+    scratchpad_root: Path | None,
+    temp_roots: tuple[tuple[Path, str], ...],
+) -> bool:
+    """True when ``resolved`` sits DIRECTLY in a scratch-named directory.
+
+    The second arm of the same advisory (see :func:`_temp_scratch_hint`), and the
+    predicate BOTH channels call so the two cannot disagree about what counts.
+    ``resolved`` must already be resolved — every caller resolves first, because
+    the comparison is against a NAME and an unresolved spelling of a symlinked
+    parent is a silent miss — and ``temp_roots`` is the same
+    ``_temp_scratch_roots()`` table the caller already holds, passed in rather than
+    looked up again so the two arms cannot be reading different sets.
+
+    Four parts, each load-bearing:
+
+    * The parent must BE such a directory: ``<x>/tmp/sub/y.md`` does not fire. The
+      same depth-1 rule the temp arm documents, for the same reason — a nested
+      path under a scratch-named directory is a plausible deliverable (this
+      fleet's own ``tmp/`` and ``scratch/`` worktrees live there) and a false
+      positive on real work costs more than the miss.
+    * The name is compared CASE-INSENSITIVELY: ``TMP/`` is the same convention
+      spelled by a different hand, and a name is not a case-sensitive identifier.
+    * The TEMP-ROOT family owns everything INSIDE a temp root. ``/tmp`` and
+      ``$TMPDIR`` are themselves scratch-named directories, so the name arm would
+      otherwise claim paths the shipped arm deliberately leaves alone: at depth 1
+      the temp arm's own reason is the true one (and its loop runs first), and
+      deeper is the "plausible deliverable" case that arm exempts on purpose. It
+      asserted a location fact that is false inside a temp root and re-fired on
+      that exempt class — ``$TMPDIR/scratch/x.md``, ``$TMPDIR/tmp/x.md``,
+      ``/private/tmp/build/tmp/x.o`` (round 1, R1).
+
+      Two consequences of this bullet are CHOSEN, not incidental, and round 2 asked
+      for both to be stated rather than left to be discovered:
+
+      * The containment compare is an EXACT-path compare, inherited from the temp
+        arm's own root match (``resolved.parent == temp_root``). So
+        ``/private/TMP/x.md`` — the same path on a case-insensitive filesystem —
+        still reaches the name arm while ``/private/tmp/x.md`` does not. The line it
+        gets there is not false, only less specific than the prune; making this
+        compare case-insensitive while the temp arm's stays exact would create an
+        asymmetry rather than remove one, so the inherited compare is kept and named
+        here.
+      * A FOREIGN session's pad that sits under a temp root is silent too. A pad is
+        somebody's pad wherever it lives: the temp arm's reason would be false about
+        it (a pad is exactly a session's own area) and this arm's advice — your
+        scratch belongs in the pad — would be wrong about a pad. Reachable through
+        this fleet's own ``ISO=$(mktemp -d)`` rigs.
+    * Nothing inside the session's own pad counts. This is not a refinement: a pad
+      root is commonly named ``scratchpad`` and an agent may well make a ``tmp/``
+      inside it, so without containment EVERY write into the pad would be told to
+      move itself into the pad. Containment, not the name, is what decides it — a
+      subdirectory of the pad is session-scoped exactly as the root is — and a pad
+      root that cannot be resolved counts as no pad at all (see
+      :func:`_resolved_scratchpad_root`).
+    """
+    if resolved.parent.name.lower() not in _SCRATCH_DIR_NAMES:
+        return False
+    for temp_root, _why in temp_roots:
+        if resolved.is_relative_to(temp_root):
+            return False
+    root = _resolved_scratchpad_root(scratchpad_root)
+    if root is None:
+        return False
+    return not resolved.is_relative_to(root)
+
+
 def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad: bool) -> str:
-    """One advisory line when ``write``/``edit`` lands a file DIRECTLY under a temp
-    root, else ``""``.
+    """One advisory line when ``write``/``edit`` lands a file DIRECTLY in a temp
+    root or in a scratch-named directory, else ``""``.
+
+    Two arms, one advisory. The temp-root arm is the shipped contract (below).
+    The second arm fires on the parent's NAME (``tmp``, ``.tmp``, ``temp``,
+    ``scratch``, ``.scratch``, ``scratchpad``, ``.scratchpad``, any case, any
+    location) and exists because the same funnel runs through the tree the session is
+    working IN — a workspace or repo ``tmp/``, which is the user's filesystem, not the
+    system's temp area: the incident it was built for (2026-09-22) wrote an interface
+    spec to a ``minervaai/tmp/`` file with no deliberation at all — it followed the
+    workspace's ambient convention — and handed the path to two subagents that then
+    read and wrote it. Nothing prunes that directory and no session teardown touches
+    it, so it is indistinguishable from the user's own work forever.
+    ``_in_scratch_named_dir`` owns the trigger and its four constraints.
+
+    The two arms share the builder, the word order (remedy first) and the
+    one-line-per-result rule, and they differ in the reason clause: the temp arm
+    states the macOS prune, and a workspace ``tmp/`` is not on any cleaner's list.
 
     Why a hint and not a refusal: a session doing image or tooling work outside a
     repo can legitimately need a real temp path, and the rule this nudges is
@@ -5500,7 +5763,10 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
     * No scratchpad on this host (the ``SCRATCHPAD_UNAVAILABLE`` contract) means
       no nudge — there is nowhere better to point the session.
     * Never for a ``scratchpad://`` target: the session's own store is the
-      destination, not the trap.
+      destination, not the trap. The second arm needs this too and gets it from
+      containment rather than the target's spelling, because a path INSIDE the pad
+      can reach the tools as a plain absolute path (a shell prints one, and the
+      receipt teaches it).
     """
     if is_scratchpad:
         return ""
@@ -5508,7 +5774,8 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
     if root is None:
         return ""
     resolved = path.resolve()
-    for temp_root, why in _temp_scratch_roots():
+    temp_roots = _temp_scratch_roots()
+    for temp_root, why in temp_roots:
         if resolved.parent == temp_root:
             # WORD ORDER IS A CONSTRAINT HERE, not a preference. The tool card
             # paints an output line into a lane (``width - 2 - OUTPUT_INDENT`` of
@@ -5524,30 +5791,63 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
             # The ``write(path=…)`` example is gone too: taught by
             # ``system.md``, the guide and the tool description.
             return _temp_scratch_line(resolved, why, SCRATCHPAD_SCHEME)
+    # The temp roots are tried FIRST on purpose: ``/tmp`` is itself a
+    # scratch-named directory, and the prune reason is the more specific true
+    # statement about that one. Everything INSIDE a temp root is theirs too — at
+    # depth 1 by the loop above, and deeper by the containment guard inside the
+    # predicate — so a scratch-named directory under one is never claimed here.
+    if _in_scratch_named_dir(resolved, root, temp_roots):
+        return _temp_scratch_line(
+            resolved,
+            _SCRATCH_DIR_WHY,
+            SCRATCHPAD_SCHEME,
+            trap=_SCRATCH_DIR_TRAP,
+            relation="in",
+        )
     return ""
 
 
-def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool = False) -> str:
-    """The one advisory line BOTH temp-root nudges emit, verbatim in one place.
+def _temp_scratch_line(
+    resolved: Path,
+    why: str,
+    remedy: str,
+    *,
+    is_root: bool = False,
+    trap: str = _TEMP_ROOT_TRAP,
+    relation: str = "under",
+) -> str:
+    """The one advisory line EVERY nudge arm emits, verbatim in one place.
 
-    ``remedy`` is what the two channels can actually act on and it is the only
-    thing that differs between them: ``write``/``edit`` take the
-    ``scratchpad://`` scheme, while a shell cannot resolve a scheme at all and is
-    given the exported path variable instead. The reason clauses and the word
-    order are shared, because the word order is the load-bearing part (see
-    :func:`_temp_scratch_hint`) and a second hand-written copy is how it would
-    quietly stop being true of one of the two lines.
+    Four arms now reach it — the two temp-root ones (``write``/``edit`` and the
+    shell) and the two scratch-named-directory ones — so "one place" is doing more
+    work than it did when there were two.
 
-    ``is_root`` swaps the SUBJECT from a created target to the temp root itself,
+    ``remedy`` is what the two CHANNELS can actually act on and it is the only
+    thing that differs between them: ``write``/``edit`` take the ``scratchpad://``
+    scheme, while a shell cannot resolve a scheme at all and is given the exported
+    path variable instead. The reason clauses and the word order are shared,
+    because the word order is the load-bearing part (see :func:`_temp_scratch_hint`)
+    and a second hand-written copy is how it would quietly stop being true of one
+    of the lines.
+
+    ``trap`` and ``relation`` are how a second TRAP joins without a second
+    builder: ``trap`` is the noun phrase the line names (``a temp root`` /
+    ``a scratch-named directory``) and ``relation`` is the preposition the subject
+    sits in it by (``under`` a root, ``in`` a directory). Both default to the
+    shipped temp-root values, so the contract those two arms pinned is byte-for-byte
+    unchanged — and the reason stays a separate argument, because the two traps
+    need DIFFERENT reasons (the prune is a fact about one of them only).
+
+    ``is_root`` swaps the SUBJECT from a created target to the directory itself,
     for the bash side's unexpanded targets (``> /tmp/f$i``): the sentence shape,
     the remedy and the reason are unchanged, because the advice is the same and
     only the thing being NAMED changes. The root arm names the trap in full
-    ("puts scratch in a temp root") rather than referring back to it — there is no
-    antecedent to refer to, since the reader has not been shown the concrete
-    target the other arm talks about, and the clause is visible only when the
-    whole line fits anyway.
+    ("puts scratch in a temp root", or "…in a scratch-named directory") rather
+    than referring back to it — there is no antecedent to refer to, since the
+    reader has not been shown the concrete target the other arm talks about, and
+    the clause is visible only when the whole line fits anyway.
 
-    KNOWN LIMIT, recorded here because this is the one builder both advisories
+    KNOWN LIMIT, recorded here because this is the one builder all the advisories
     share (design review round 1, D1). The line is rendered in a TUI card whose
     lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
     behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
@@ -5561,9 +5861,9 @@ def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool =
     the edge ever matters, is a shorter prologue rather than a shorter remedy.
     """
     subject = (
-        f"writing directly under {resolved} puts scratch in a temp root"
+        f"writing directly under {resolved} puts scratch in {trap}"
         if is_root
-        else f"{resolved} sits directly under a temp root"
+        else f"{resolved} sits directly {relation} {trap}"
     )
     return f"[scratch] Your own scratch belongs in {remedy} — {subject}: {why}."
 
@@ -5910,7 +6210,7 @@ def _missing_tool_notice(stderr: str, context: ToolContext | None) -> str:
 
 def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
     """One advisory line when ``command`` CREATES a path directly under a temp
-    root, else ``""``.
+    root OR directly in a scratch-named directory, else ``""``.
 
     Same voice, same reason clauses and the same word order as the
     ``write``/``edit`` nudge (:func:`_temp_scratch_hint`); the remedy differs
@@ -5924,6 +6224,15 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
       real worktrees at ``/private/tmp/<name>``, so a deeper path is a plausible
       deliverable and nudging it would be a false positive on real work — the
       same narrowness ``write``/``edit`` already document and accept.
+    * The SECOND arm is the same scan over the same candidates with a different
+      predicate — ``_scratch_dir_target`` — and it is why this channel matters:
+      an audit of 400 transcripts measured the shell creating scratch in a temp
+      root 8,766 times against 44 calls into the pad, so a name-only arm that
+      reached ``write``/``edit`` alone would cover roughly a tenth of the
+      behaviour it was written for. The two arms cannot both fire on one
+      candidate, and the temp roots are tried first because ``/tmp`` IS a
+      scratch-named directory and the prune is the more specific true statement
+      about that one.
     * Exempt: a template-less ``mktemp -d`` (the guide's escape hatch) and every
       ``mktemp`` template that does not carry the ``X`` run — neither produces a
       candidate.
@@ -5941,28 +6250,48 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
       arrive at job-settle time, which can be long after the file was created and
       acted on, so buying it costs more surface than it returns. The foreground
       path is where the volume is (``nohup … > log`` is a foreground shell).
+      The second arm inherits that gap unchanged.
     """
     if not command:
         return ""
-    if _scratchpad_root(context) is None:
+    pad = _scratchpad_root(context)
+    if pad is None:
         return ""
-    roots = dict(_temp_scratch_roots())
+    # ONE read of the table, handed to the name arm rather than looked up again:
+    # the temp arm and the name arm's containment guard must be answering from the
+    # same set, and a second call is how they would drift.
+    pairs = _temp_scratch_roots()
+    roots = dict(pairs)
     if not roots:
         return ""
     for candidate in _bash_created_paths(command):
         resolved = _temp_root_target(candidate, roots)
-        if resolved is None:
-            continue
+        if resolved is not None:
+            why, trap, relation = roots[resolved.parent], _TEMP_ROOT_TRAP, "under"
+        else:
+            resolved = _scratch_dir_target(candidate, pad, pairs)
+            if resolved is None:
+                continue
+            why, trap, relation = _SCRATCH_DIR_WHY, _SCRATCH_DIR_TRAP, "in"
         # A target the shell has yet to expand does not NAME a path, and printing
         # its resolved form would invent one (``> /tmp/f$i`` is not
-        # ``/private/tmp/f$i``). The temp root is the honest subject there, and it
-        # is a directory that really exists.
-        unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
+        # ``/private/tmp/f$i``). The directory is the honest subject there, and it
+        # is a directory that really exists. The two expansions first are the
+        # spellings that DO name a path: the home spelling, which only counts in
+        # the LEADING position, and ``$TMPDIR``, which rewrites anywhere. What still
+        # carries a ``$`` or a backtick after them is what this scan cannot
+        # resolve — ``~/rig-x/f$i`` names no file either.
+        unexpanded = (
+            _UNEXPANDED_SHELL.search(_expand_home_spellings(_expand_tmpdir_spellings(candidate)))
+            is not None
+        )
         return _temp_scratch_line(
             resolved.parent if unexpanded else resolved,
-            roots[resolved.parent],
+            why,
             f"${SCRATCHPAD_PATH_ENV}",
             is_root=unexpanded,
+            trap=trap,
+            relation=relation,
         )
     return ""
 
@@ -6060,17 +6389,82 @@ def _expand_tmpdir_spellings(candidate: str) -> str:
     return candidate
 
 
+#: The shell's two spellings of the home directory, longest first — the same
+#: ordering constraint as the temp spellings above, so `${HOME}` can never be
+#: rewritten to a leftover `${}`.
+_HOME_SPELLINGS = ("${HOME}", "$HOME")
+
+
+def _expand_home_spellings(candidate: str) -> str:
+    """``candidate`` with a LEADING ``~/``, ``$HOME`` or ``${HOME}`` expanded.
+
+    The shell channel's counterpart of ``Path.expanduser()``, which the
+    ``write``/``edit`` channel already applies in ``_resolve_workspace_path``. A
+    home path is NEITHER of the two shapes this scan refuses: it is not the bare
+    relative target that has no cwd to resolve against, and it is not a scheme.
+    ``~/workspace/…`` is how a session spells a home path all day, so leaving it
+    in the silent bucket is how the SAME write gets advised when spelled
+    absolutely and not when spelled with a tilde — measured on the released
+    v0.62.3, where ``> /Users/<u>/workspace/scratch-a/tmp/x.md`` fired and
+    ``> ~/workspace/scratch-a/tmp/x.md`` was silent.
+
+    Normalising in ONE place, before the absolute test both predicates share, is
+    what keeps a single rule for what names an absolute target: the temp-root arm
+    and the scratch-name arm then read the same expanded string, and neither
+    learns a second shape.
+
+    Three shapes only, and LEADING only: ``~/…``, ``~`` alone, and the two
+    variable spellings followed by ``/`` or standing alone. ``~other/tmp/x`` names
+    ANOTHER user's home, which this scan cannot resolve, so it is left alone — the
+    same refusal a relative path gets, and for the same reason. A ``~`` outside
+    the leading position (``/tmp/~/x``) is a literal directory name, and so is
+    ``$HOMEfoo``, whose expansion is the shell's business rather than this scan's.
+
+    A host the OS will not name a home directory for raises ``RuntimeError`` out
+    of ``expanduser``; the candidate is handed on UNCHANGED then, which leaves it
+    failing the absolute test and so silent, rather than inventing a path.
+    ``os.environ["HOME"]`` is deliberately not read directly: ``Path`` is what the
+    other channel resolves through, so the two cannot disagree about whose home
+    ``~`` means.
+
+    Quoting is not visible here — ``_bash_tokens`` has already dequoted the token,
+    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. The dequoting
+    is inherited from the temp spelling next door; what is NEW here is the REACH,
+    because ``'~/x'`` could not fire at all before this helper existed. It errs
+    toward one advisory line about a path the command did not create, never toward
+    a wrong subject or a refusal, and the GUIDE says so — a session reading the
+    line needs to know which spelling produced it.
+    """
+    if candidate == "~" or candidate.startswith("~/"):
+        try:
+            return str(Path(candidate).expanduser())
+        except RuntimeError:  # pragma: no cover - a host with no home directory
+            return candidate
+    for spelling in _HOME_SPELLINGS:
+        if candidate == spelling or candidate.startswith(spelling + "/"):
+            try:
+                home = str(Path.home())
+            except RuntimeError:  # pragma: no cover - a host with no home directory
+                return candidate
+            return home + candidate[len(spelling) :]
+    return candidate
+
+
 def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
 
     The root spellings a shell writes are the point of the expansion below:
     ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
     literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
-    shells on this fleet spell it. Every other form is left alone: a relative
-    path, a ``~`` path and anything carrying a scheme are not temp-root targets
-    and must not be guessed at.
+    shells on this fleet spell it. ``~`` and ``$HOME`` spellings are normalised
+    here too (:func:`_expand_home_spellings`) so ``~/…`` reaches this predicate
+    exactly as its absolute spelling does — the home arm of the same hole.
+
+    What is left alone is a RELATIVE path and anything carrying a scheme: neither
+    names a temp-root target, and the scan has no cwd to resolve the relative one
+    against.
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
@@ -6080,6 +6474,43 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     except OSError:  # pragma: no cover - a path that cannot be resolved
         return None
     return resolved if resolved.parent in roots else None
+
+
+def _scratch_dir_target(
+    candidate: str,
+    scratchpad_root: Path | None,
+    temp_roots: tuple[tuple[Path, str], ...],
+) -> Path | None:
+    """``candidate`` resolved, when it sits DIRECTLY in a scratch-named directory.
+
+    The shell side of the second arm, and the sibling of :func:`_temp_root_target`
+    above — same expansions, same refusals, a different predicate. The refusals are
+    shared for the same reason they exist there: a relative path and anything
+    carrying a scheme are not guessed at, because the scan has no cwd to resolve
+    them against and a path the command never names is worse than the miss. A home
+    spelling is not in that class — ``~``/``$HOME`` name a directory the OS can
+    resolve without a cwd, and the ``write``/``edit`` channel has always resolved
+    them — so :func:`_expand_home_spellings` normalises them rather than letting
+    the two channels disagree about the same path.
+
+    That refusal is also the honest limit of this arm on the shell channel: a bare
+    ``> tmp/x.md`` is RELATIVE and goes unnoticed, while the same write through
+    ``write``/``edit`` is resolved against the workspace cwd and does fire. The
+    two channels are not equally covered, and the shape the incident took
+    (an absolute path handed to a subagent) is the one they both catch. The GUIDE
+    states this, because it is the copy an agent reads before choosing where to
+    write (round 1, R4).
+    """
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        resolved = Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
+    return resolved if _in_scratch_named_dir(resolved, scratchpad_root, temp_roots) else None
 
 
 def _strip_heredoc_bodies(command: str) -> str:
@@ -6349,15 +6780,24 @@ def _scratchpad_listing(
 
 
 def _scratchpad_target(
-    tool_call_id: str, tool_name: str, url: str, context: ToolContext | None
+    tool_call_id: str,
+    tool_name: str,
+    url: str,
+    context: ToolContext | None,
+    size: int | None = None,
 ) -> Path | ToolResult:
     """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
 
     Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
-    cannot forget part of: no scratchpad root, a malformed URL, and a URL that
-    names a directory. A scratchpad file needs a file name —
-    ``write(path="scratchpad://")`` is a refusal, not a silent write to the
-    directory's own path.
+    cannot forget part of: no scratchpad root, a malformed URL, a URL that
+    names a directory, and material a pad does not keep
+    (:func:`~local_operator.scratchpad.check_scratchpad_write`). A scratchpad
+    file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
+    silent write to the directory's own path.
+
+    ``size`` is the payload's length in bytes for the caller that has one
+    (``write``); it is optional because ``edit`` sees only its hunks and so is
+    judged on the name alone.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -6384,6 +6824,15 @@ def _scratchpad_target(
             f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. '{example}'; "
             f'read(path="{url}") lists what is already there.',
         )
+    # The content rules run LAST, after the address is settled: by here the URL
+    # is known to be well formed and to name a file inside the root, so a
+    # refusal can be about the material rather than about the address. A content
+    # refusal is the model's own argument at fault, exactly like a malformed
+    # URL, so it carries the same ``invalid arguments`` marker.
+    try:
+        check_scratchpad_write(target.path, root, url, size)
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
     # The root is created lazily by the write itself (``path.parent``), so a
     # scratchpad directory that does not exist yet is a normal first write.
     return target.path
@@ -8097,7 +8546,16 @@ async def execute_write(
         return refusal
     url = raw.strip()
     if _has_scratchpad_scheme(url):
-        scratchpad_target = _scratchpad_target(tool_call_id, "write", url, context)
+        # The payload is measured in BYTES, not characters: the ceiling is about
+        # what this write puts on a disk shared with every other session, and a
+        # multi-byte character costs more than one byte there.
+        scratchpad_target = _scratchpad_target(
+            tool_call_id,
+            "write",
+            url,
+            context,
+            size=len(params.content.encode("utf-8")),
+        )
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
         path = scratchpad_target
@@ -8116,13 +8574,20 @@ async def execute_write(
     # (``scratchpad://runs/deep.csv``) needs no special case here.
     is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
-    # The lifetime is a PERSON's concern — the agent is told once, in the guide —
-    # so it is stated where a person reads it: the receipt that announces a NEW
-    # file to whoever is watching the transcript or the Files panel. Only on the
-    # create, because the store is session-scoped: every file in it was created
-    # in this session, so the create receipt already covers all of them, and an
-    # overwrite receipt would restate the same fact on every edit (UX round 1, U1).
-    lifetime = " — deleted with the session" if is_scratchpad and not existed else ""
+    # The lifetime is stated where the highest-frequency reader sees it. It used
+    # to say " — deleted with the session", and a measured session read exactly
+    # that as "ephemeral, like a temp directory" and kept a duplicate copy of its
+    # state outside the pad for an hour (2026-09-22). The receipt fires on every
+    # pad CREATE, so it is the surface that phrase was repeated on most — both
+    # review streams flagged leaving it (round 1, R3/Q1) — and it now carries the
+    # one fact that reading got wrong. Kept short on purpose: it rides a receipt
+    # whose shape the UX round pinned. Only on the create, because the store is
+    # session-scoped: every file in it was created in this session, so the create
+    # receipt already covers all of them, and an overwrite receipt would restate
+    # the same fact on every edit (UX round 1, U1).
+    lifetime = (
+        " — kept for this session (survives restarts)" if is_scratchpad and not existed else ""
+    )
     text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
@@ -8269,12 +8734,19 @@ def _load_ignore_rules(directory: Path, rel_dir: str) -> list[_IgnoreRule]:
     return rules
 
 
-def _ignored(
-    rel: str,
-    is_dir: bool,
-    rules: list[tuple[str, list[_IgnoreRule]]],
-) -> bool:
-    """gitignore last-match-wins evaluation over the ancestor rule stack."""
+def _ignored(rel: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> bool:
+    """gitignore last-match-wins evaluation over the ancestor rule stack.
+
+    THE DIRECTORY QUESTION IS NOT A PARAMETER, and it used to be: every caller passed
+    an ``is_dir`` that this function never read — the directory-only distinction
+    lives in the COMPILED rule (``_IgnoreRule.dir_only`` appends ``(/.*)?``), so a
+    ``dist/`` rule matches the file under it whether or not the caller knew it was a
+    directory. Three call sites computed that value, and one of them paid a ``stat``
+    per candidate per ancestor to do it (the ancestor loop in the glob walk) — a
+    syscall whose result was then discarded. Removed rather than documented because the
+    alternative keeps inviting a future reader to branch on a value that does not
+    change the answer.
+    """
     ignored = False
     for _base, base_rules in rules:
         for rule in base_rules:
@@ -8330,11 +8802,11 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
             if is_dir:
                 if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
                     continue
-                if respect_ignore and _ignored(rel, True, local_rules):
+                if respect_ignore and _ignored(rel, local_rules):
                     continue
                 _walk(Path(entry.path), rel, local_rules)
             elif is_file:
-                if respect_ignore and _ignored(rel, False, local_rules):
+                if respect_ignore and _ignored(rel, local_rules):
                     continue
                 files.append(Path(entry.path))
 
@@ -8404,33 +8876,104 @@ def _literal_prefix(pattern: str) -> str:
     return "".join(out).rstrip("/")
 
 
-def _path_is_ignored(root: Path, path: Path) -> bool:
-    """Evaluate root + nested ignore files for one glob candidate.
+class _IgnoreWalk:
+    """One glob walk's cache of the ignore rules, and of the paths they prune.
 
-    Unlike grep's walker, pathlib.glob materializes candidates without walking
-    through our rule stack. Rebuild the ancestor stack here so a
-    packages/a/.gitignore has the same authority over `**/*.py` as it does in
-    grep. The caller still bypasses this for an explicitly named literal
-    prefix ("dist/*.js" means the ignored dist on purpose).
+    WHY IT EXISTS, AS A MEASUREMENT RATHER THAN A HUNCH. The implementation it
+    replaces rebuilt the ENTIRE ancestor rule stack from disk for EVERY candidate, so a
+    glob's cost was candidates x depth x (two stats + a read + a parse + a compile)
+    before a single regex was run. Measured on a 15,620-file tree of depth 5 with a
+    ``.gitignore`` at every level (``**/*.py``): **89,840 rule loads and 2,052,120 rule
+    searches, 13.4 s of CPU** — against 3,906 directories, i.e. the same walk needs one
+    load per DIRECTORY. Cached, measured on the same tree: **3,906 loads, 671,265
+    searches, 3.9 s of CPU**, one load per directory and the same 15,620 results.
+
+    SEMANTICS ARE UNCHANGED, and the shape of the cache is what keeps them so:
+
+    * ``stack`` for a directory is its ``PARENT``'s stack plus its own file, in that
+      order, so ``_ignored``'s last-match-wins evaluation reads the same list in the
+      same order the old code rebuilt;
+    * an entry is evaluated against the rules of the directory that CONTAINS it,
+      which is what the old loop did at the same step (it loaded a directory's rules
+      and then judged that directory's child);
+    * ``pruned`` memoizes "this directory, or one of its ancestors, is ignored", which
+      is the early-return the old loop made as soon as any prefix matched — so an
+      ignored directory still prunes its whole subtree and a ``!`` rule still cannot
+      re-enter it;
+    * nothing outside the root is ever consulted (the old loop started AT the root).
+
+    One instance per WALK, not per process, and deliberately: the rules come off disk
+    and a long-lived cache would answer for a tree that has changed under it, which is
+    the one thing a search pruning tool must not do.
     """
-    try:
-        rel_parts = path.relative_to(root).parts
-    except ValueError:
-        return False
-    rules: list[tuple[str, list[_IgnoreRule]]] = []
-    current = root
-    rel_dir = ""
-    for index, part in enumerate(rel_parts):
-        found = _load_ignore_rules(current, rel_dir)
-        if found:
-            rules.append((rel_dir, found))
-        rel = "/".join(rel_parts[: index + 1])
-        candidate = current / part
-        if _ignored(rel, candidate.is_dir(), rules):
+
+    __slots__ = ("_root", "_stacks", "_pruned")
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        #: The root's own stack, loaded here rather than lazily: a child of the root
+        #: is judged by the root's rule file, and the old loop loaded it on its FIRST
+        #: iteration with the empty relative directory (``rel_dir=""``), which is the
+        #: label kept here so the stack a rule sits in is byte-identical to before.
+        rules = _load_ignore_rules(root, "")
+        self._stacks: dict[Path, list[tuple[str, list[_IgnoreRule]]]] = {
+            root: [("", rules)] if rules else []
+        }
+        #: The root itself is never pruned: nothing above it has authority inside it.
+        self._pruned: dict[Path, bool] = {root: False}
+
+    def _stack(self, directory: Path) -> list[tuple[str, list[_IgnoreRule]]]:
+        """The ancestor rule stack THROUGH ``directory`` (its own file included)."""
+        found = self._stacks.get(directory)
+        if found is not None:
+            return found
+        try:
+            rel_dir = directory.relative_to(self._root).as_posix()
+        except ValueError:
+            return []
+        stack = self._stack(directory.parent)
+        rules = _load_ignore_rules(directory, rel_dir)
+        if rules:
+            stack = stack + [(rel_dir, rules)]
+        self._stacks[directory] = stack
+        return stack
+
+    def _is_pruned(self, directory: Path) -> bool:
+        """Is this DIRECTORY itself ignored (by its own rules or an ancestor's)?"""
+        found = self._pruned.get(directory)
+        if found is not None:
+            return found
+        try:
+            rel = directory.relative_to(self._root).as_posix()
+        except ValueError:
+            pruned = False
+        else:
+            # ``rel`` is non-empty here: the root is seeded above, and anything else
+            # that resolves to "" would be the root under another spelling.
+            pruned = self._is_pruned(directory.parent) or _ignored(
+                rel, self._stack(directory.parent)
+            )
+        self._pruned[directory] = pruned
+        return pruned
+
+    def ignores(self, path: Path) -> bool:
+        """Whether ``path`` (a file OR a directory) is declared ignored.
+
+        The leaf is judged against its PARENT's stack (the ancestors' rules), and its
+        parent's own pruned verdict is consulted first — which is what makes an
+        ignored directory hide its whole subtree without walking it, and what stops a
+        ``!`` rule from re-entering one.
+        """
+        try:
+            rel = path.relative_to(self._root).as_posix()
+        except ValueError:
+            return False
+        if not rel:
+            return False
+        parent = path.parent
+        if parent != path and self._is_pruned(parent):
             return True
-        current = candidate
-        rel_dir = rel
-    return False
+        return _ignored(rel, self._stack(parent))
 
 
 def _glob_walk(root: Path, pattern: str) -> list[str]:
@@ -8441,11 +8984,12 @@ def _glob_walk(root: Path, pattern: str) -> list[str]:
     the pattern's literal prefix names them, because an author who writes
     'dist/index.html' into a repo that ignores dist/ means that file."""
     prefix = _literal_prefix(pattern)
+    cache = _IgnoreWalk(root)
     out = []
     for p in root.glob(pattern):
         rel = p.relative_to(root).as_posix()
         explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
-        if not explicitly_named and _path_is_ignored(root, p):
+        if not explicitly_named and cache.ignores(p):
             continue
         out.append(rel + ("/" if p.is_dir() else ""))
     return sorted(out)
@@ -18039,6 +18583,20 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
+        # WHY it stopped, when it was not a clean completion: a child the loop
+        # cut off carries a cause token (``ChildInfo.cut_off_cause``) and without
+        # this line the roster printed only ``failed — resumable``, so a parent
+        # scanning the list could not tell a cut-off child from an ordinary
+        # provider failure — the recorded cause reached no surface (design D4).
+        # Rendered through the same ``render_cut_off_reason`` every other
+        # surface uses, so the words cannot drift.
+        if row.cut_off_cause:
+            # FUNCTION-LOCAL import: this module is a denied-module boundary and
+            # must not import ``incidents`` at module scope (see the denied-module
+            # note above). ``update.py`` reaches the same helper the same way.
+            from local_operator.incidents import render_cut_off_reason
+
+            lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
         # The session id only where it can be acted on. It is the id
         # ``--resume`` takes (NOT the job id on the line above), and this
         # roster is the only surface that shows it now that children are kept

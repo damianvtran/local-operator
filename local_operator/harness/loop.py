@@ -95,7 +95,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
-from local_operator.incidents import REASONING_ECHO_MARKERS
+from local_operator.incidents import CONTINUATION_LIMIT_CAUSE, REASONING_ECHO_MARKERS
 from local_operator.model.effort import real_rungs
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -1104,7 +1104,7 @@ class AgentLoop:
         context.messages.extend(initial_messages)
         pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
-        reentries = 0  # outer-loop re-entries; capped by config
+        reentries: dict[str, int] = {}  # per-producer outer-loop re-entries
         # A reasoning model can spend its ENTIRE output budget thinking and be
         # cut off at ``length`` with nothing visible to show for it — the user
         # then watches minutes of "thinking" end in silence (session f3c058d1:
@@ -1328,7 +1328,7 @@ class AgentLoop:
                                     # model learns the call did not run and may
                                     # re-issue it, which is strictly more
                                     # information than the call having vanished.
-                                    self._append_results(
+                                    await self._append_results(
                                         context,
                                         [
                                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
@@ -1668,7 +1668,7 @@ class AgentLoop:
                             self._synthetic_result(call, ABORTED_RESULT_TEXT)
                             for call in assistant.tool_calls
                         ]
-                        self._append_results(
+                        await self._append_results(
                             context,
                             placeholders,
                             new_messages,
@@ -1867,7 +1867,7 @@ class AgentLoop:
                                     },
                                 )
                             )
-                        self._append_results(
+                        await self._append_results(
                             context,
                             placeholders,
                             new_messages,
@@ -1878,7 +1878,7 @@ class AgentLoop:
                             assistant.tool_calls, context, config, signal, tool_results
                         ):
                             yield event
-                        self._append_results(
+                        await self._append_results(
                             context,
                             tool_results,
                             new_messages,
@@ -1989,26 +1989,82 @@ class AgentLoop:
 
                 late = await self._collect_yield_injections(config)
                 if late:
-                    reentries += 1
-                    if reentries > config.max_paused_turn_continuations:
-                        # MAX_PAUSED_TURN_CONTINUATIONS guard: a producer
-                        # that never stops (follow-ups arriving faster than
-                        # they are consumed) must not re-enter forever.
+                    # PER-PRODUCER BUDGETS, and the tag is what makes them
+                    # possible: the collector hands back (source, message) pairs,
+                    # and the source decides whose budget this re-entry charges.
+                    # A COUNTER CANNOT RECOVER THIS AFTER THE FACT — once three
+                    # producers' messages share one list, "which budget does this
+                    # increment charge" is unanswerable, and charging all three
+                    # to one budget IS the defect: a parent's hub note consumed a
+                    # child's todo allowance, and a child with open todos was cut
+                    # off after eight of them.
+                    #
+                    # A batch can MIX producers: two drains fire in the same
+                    # yield. The charge must follow the producer whose budget
+                    # actually bounds this re-entry, or the fix re-opens the
+                    # defect it closes. Taking ``late[0][0]`` charged an
+                    # aside+still-moving-follow-up batch to the 8-budget (the
+                    # collector appends steering, then asides, then follow-ups),
+                    # so a parent's hub note could STILL spend a child's todo
+                    # allowance (review MAJOR-1, reproduced: a cut-off on the
+                    # aside budget with todos still moving). A FOLLOW-UP in the
+                    # batch WINS, because the follow-up producer is the one that
+                    # keeps the run alive and is charged the larger budget; only
+                    # a pipeline with no follow-up (steering and/or asides, both
+                    # new instructions that are not self-limiting) charges the
+                    # bounded steering/aside budget.
+                    source = (
+                        "follow-up" if any(tag == "follow-up" for tag, _ in late) else late[0][0]
+                    )
+                    budget = (
+                        config.max_follow_up_continuations
+                        if source == "follow-up"
+                        else config.max_paused_turn_continuations
+                    )
+                    reentries[source] = reentries.get(source, 0) + 1
+                    if reentries[source] > budget:
+                        # The continuation guard: a producer that never stops
+                        # (messages arriving faster than they are consumed) must
+                        # not re-enter forever. Named as an INVOLUNTARY CUT-OFF
+                        # rather than the bare end it used to be, because a bare
+                        # end reads as a completed answer on every surface.
                         logger.warning(
-                            "paused-turn continuation limit (%d) reached; ending run",
-                            config.max_paused_turn_continuations,
+                            "continuation limit (%d) reached for %s; ending run",
+                            budget,
+                            source,
                         )
+                        # COPY IS USER-FACING and must be TRUE: the old
+                        # sentence named an internal budget and producer tag
+                        # ("(8, aside)") a reader cannot act on, and claimed
+                        # "work is still queued" when the code DISCARDS this
+                        # batch (``_discard_pending_custom`` below, which fails
+                        # an aside's question with "withdrawn unasked"). Say what
+                        # happened and what it means, in words that do not
+                        # depend on knowing the loop's vocabulary.
                         yield NoticeEvent(
                             text=(
-                                f"Continuation limit reached "
-                                f"({config.max_paused_turn_continuations}); stopping."
+                                "This turn was stopped because it kept being asked to "
+                                "keep going; the pending message was dropped. Reply with "
+                                "what to do next."
                             ),
                             kind="warning",
                         )
-                        self._discard_pending_custom(late)
-                        yield AgentEndEvent(messages=new_messages, generation=generation)
+                        # The pending batch is dropped (as today), and the end
+                        # NAMES the cause: ``aborted=True`` is what the taxonomy
+                        # reads as involuntary, and ``cut_off_cause`` is the token
+                        # every surface already renders (``AgentEndEvent`` carries
+                        # both). ``Session._classify_cut_off`` turns the pair into
+                        # an error outcome whose cause is this token, so a stalled
+                        # child is never mistaken for one that finished.
+                        self._discard_pending_custom([m for _, m in late])
+                        yield AgentEndEvent(
+                            messages=new_messages,
+                            aborted=True,
+                            cut_off_cause=CONTINUATION_LIMIT_CAUSE,
+                            generation=generation,
+                        )
                         return
-                    pending = late
+                    pending = [m for _, m in late]
                     has_more_tool_calls = True
                     continue
                 break
@@ -3117,19 +3173,20 @@ class AgentLoop:
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
-                        with tool_source(name, planned.args):
-                            result = result.model_copy(
-                                update={
-                                    "content": [
-                                        (
-                                            TextContent(text=config.redact_tool_result(block.text))
-                                            if isinstance(block, TextContent)
-                                            else block
-                                        )
-                                        for block in result.content
-                                    ]
-                                }
-                            )
+                        # The same off-loop seam the history path uses: this
+                        # result crosses back into arbitrary Python, and the
+                        # scan over it is C-level work that must not run on the
+                        # loop thread (see ``_redact_content``).
+                        result = result.model_copy(
+                            update={
+                                "content": await self._redact_content(
+                                    list(result.content),
+                                    config.redact_tool_result,
+                                    name,
+                                    planned.args,
+                                )
+                            }
+                        )
                     result.duration_s = time.monotonic() - started
                     queue.put_nowait(
                         ToolExecutionEndEvent(
@@ -3928,7 +3985,7 @@ class AgentLoop:
             details={**(details or {}), "__synthetic": True},
         )
 
-    def _append_results(
+    async def _append_results(
         self,
         context: LoopContext,
         results: list[ToolResult],
@@ -3941,20 +3998,12 @@ class AgentLoop:
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
-                # Publish WHICH call these bytes belong to for the duration of
-                # the hook. The hook is called with text alone (see
-                # ``harness/redaction.py``), and a host that has to report a
-                # shape-masked result needs the tool name and the arguments it
-                # was given — neither of which can be read off the text.
-                with tool_source(result.tool_name, _call_arguments(context, result.tool_call_id)):
-                    content = [
-                        (
-                            TextContent(text=redact(item.text))
-                            if isinstance(item, TextContent)
-                            else item
-                        )
-                        for item in content
-                    ]
+                content = await self._redact_content(
+                    content,
+                    redact,
+                    result.tool_name,
+                    _call_arguments(context, result.tool_call_id),
+                )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results
@@ -3975,6 +4024,57 @@ class AgentLoop:
             message = Message.tool_result(result.model_copy(update={"content": content}))
             context.messages.append(message)
             new_messages.append(message)
+
+    @staticmethod
+    async def _redact_content(
+        content: list[Content],
+        redact: Callable[[str], str],
+        tool_name: str,
+        arguments: Mapping[str, Any] | None,
+    ) -> list[Content]:
+        """Mask one result's text blocks OFF the event loop.
+
+        The host's hook is a pure function of text for the whole duration of the
+        call — ``Session._redact_tool_result_text`` reads the store and queues a
+        report, and neither is observable to anyone else until this returns — so
+        the STALL is the only thing the loop thread owns here, and it is 300 ms
+        to 5 s per multi-MB result (measured). Moving it to a worker thread is
+        the whole change: the numbers do not move, the OTHER children and the
+        TUI do. This is C-level work under the GIL, so while it ran on the loop
+        every concurrent child and the frame were parked.
+
+        The tool identity rides ``tool_source`` EXPLICITLY rather than relying on
+        the context being inherited: ``asyncio.to_thread`` does copy the calling
+        context (verified — the worker sees the published name), but that copy is
+        an implementation detail of that one helper, and a switch to
+        ``run_in_executor`` would silently drop it (verified — a bare executor
+        call reads ``("", "")``). Publishing INSIDE the worker makes the seam
+        correct for either spelling.
+
+        Cancellation is deliberately NOT plumbed through: ``asyncio.to_thread``
+        has no cancellation, so an abort mid-scan leaves one pool thread
+        finishing a pure function the loop is no longer waiting on. PR #1422
+        accepted exactly this cost for the same function on the bash stream; an
+        abort channel here would put a signal into a table every caller shares.
+        """
+        texts = [item.text for item in content if isinstance(item, TextContent)]
+        if not texts:
+            return content  # decided ON THE LOOP: imagery/empty pays no hop
+
+        def _run() -> list[str]:
+            with tool_source(tool_name, arguments):
+                return [redact(text) for text in texts]
+
+        masked = await asyncio.to_thread(_run)
+        out: list[Content] = []
+        index = 0
+        for item in content:
+            if isinstance(item, TextContent):
+                out.append(TextContent(text=masked[index]))
+                index += 1
+            else:
+                out.append(item)
+        return out
 
     @staticmethod
     def _drain_pending(pending: list[AgentMessage], context: LoopContext) -> int:
@@ -4007,15 +4107,27 @@ class AgentLoop:
         return pending
 
     @staticmethod
-    async def _collect_yield_injections(config: LoopConfig) -> list[AgentMessage]:
-        """Steering + asides + follow-ups at the yield boundary."""
-        pending: list[AgentMessage] = []
+    async def _collect_yield_injections(
+        config: LoopConfig,
+    ) -> list[tuple[str, AgentMessage]]:
+        """Steering + asides + follow-ups at the yield boundary, each TAGGED
+        with the producer that supplied it.
+
+        The tag is what lets the outer-loop guard budget the producers
+        separately (see ``_run``). It cannot be recovered later from the
+        messages themselves: a ``CustomMessage`` and an aside are both plain
+        ``AgentMessage``s by the time they are drained, and the producers are
+        the only place that knows which drain a message came from.
+        """
+        pending: list[tuple[str, AgentMessage]] = []
         if config.get_steering_messages is not None:
-            pending.extend(await config.get_steering_messages())
+            pending.extend(("steering", m) for m in await config.get_steering_messages())
         if config.get_aside_messages is not None:
-            pending.extend(_materialize_asides(await config.get_aside_messages()))
+            pending.extend(
+                ("aside", m) for m in _materialize_asides(await config.get_aside_messages())
+            )
         if config.get_follow_up_messages is not None:
-            pending.extend(await config.get_follow_up_messages())
+            pending.extend(("follow-up", m) for m in await config.get_follow_up_messages())
         return pending
 
     @staticmethod

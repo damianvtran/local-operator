@@ -274,3 +274,73 @@ def test_a_record_without_the_fields_reads_back_as_unreported() -> None:
     assert record.beat_lag_s is None
     assert record.cpu_since_beat_s is None
     assert "beat_lag_s" in record.to_json()
+
+
+@pytest.mark.asyncio
+async def test_a_raising_beat_does_not_end_the_serving_planes_reporter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE SERVING PLANE'S OWN TICK SURVIVES ITSELF, and its death is recorded.
+
+    ``_watch_stall_beats`` exists because a REPORTER that dies takes its plane's
+    evidence with it: the stamp freezes, the bound fires one deadline later on a
+    runtime that is working, and a ``faulthandler`` dump cannot settle it (a dead
+    TASK has no thread and no frame, so the dump shows what an idle healthy process
+    shows). The WORKLOAD tick got that supervision in #1419. This tick — the serving
+    plane's only sign of life, started as a bare ``ensure_future`` — had the stamp
+    OUTSIDE the loop's own guard, so one raise from ``beat`` ended the reporter for
+    the life of the process with nothing observed and nothing recorded.
+
+    Three properties are asserted, and they are the whole fix: the loop KEEPS
+    RUNNING (later stamps land), the tick stamps NOTHING on the failure path (a stamp
+    would claim this plane reported when it did not), and the death is RECORDED in
+    the dump through ``note_tick_death`` — which is the instrument a reader needs to
+    tell a dead reporter from a silent plane at all.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    real_beat = server_module.stall_watchdog.beat
+    stamps: list[str] = []
+    raised = {"n": 0}
+
+    def flaky_beat(plane: str) -> None:
+        raised["n"] += 1
+        if raised["n"] == 1:
+            raise RuntimeError("the first stamp fails")
+        stamps.append(plane)
+        return real_beat(plane)
+
+    monkeypatch.setattr(server_module.stall_watchdog, "beat", flaky_beat)
+    monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL_S", BEAT_INTERVAL_S)
+    logs = tmp_path / "logs"
+    assert stall_watchdog.arm(seconds=600.0, directory=logs, busy=lambda: True) is True
+    try:
+        await _boot(tmp_path)
+        assert await _wait_for(
+            lambda: len(stamps) >= 3, BEAT_DEADLINE_S
+        ), "the serving plane's tick died with its first stamp, so nothing re-reports"
+        assert all(plane == stall_watchdog.SERVING for plane in stamps), stamps
+        deaths = stall_watchdog.tick_deaths(directory=logs)
+        assert stall_watchdog.SERVING in deaths, (
+            f"the dead tick was not recorded, so a reader cannot tell it from a silent "
+            f"plane: {deaths}"
+        )
+    finally:
+        stall_watchdog.disarm()
+
+
+async def _wait_for(predicate: Any, timeout: float) -> bool:
+    """Poll ``predicate`` until it holds, bounded by ``timeout``.
+
+    Local to this file's newest cell rather than imported: the loop under test is a
+    THREAD-hosted asyncio loop, so the only place that can observe its stamps is
+    this process's own callback (``flaky_beat``), and a plain sleep-and-check is the
+    honest rig for "did the reporter keep running" — no event to wait on exists.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False

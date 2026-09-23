@@ -4,7 +4,6 @@ from dataclasses import replace
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.web_search.models import (
     PROVIDER_IDS,
     SearchProviderId,
@@ -20,8 +19,8 @@ from local_operator.web_search.service import (
 )
 
 
-def _credentials(tmp_path) -> CredentialManager:
-    return CredentialManager(tmp_path / "config")
+def _credentials(tmp_path):
+    return tmp_path / "config"
 
 
 def _chain(*ids: SearchProviderId) -> WebSearchSettings:

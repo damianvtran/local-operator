@@ -144,7 +144,7 @@ from local_operator.classification.vendors import build_vendor
 from local_operator.settings_io import strict_bool
 
 if TYPE_CHECKING:
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -277,10 +277,10 @@ class ClassificationService:
     def __init__(
         self,
         *,
-        manager: "CredentialManager",
+        config_dir: "Path | None",
         settings: Mapping[str, Any] | None = None,
     ) -> None:
-        self._manager = manager
+        self._config_dir = config_dir
         self._settings = settings
         self._cache: OrderedDict[str, Recommendation] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Recommendation]] = {}
@@ -336,7 +336,7 @@ class ClassificationService:
         pin = pinned_vendor(self._settings)
         if pin != DEFAULT_VENDOR:
             return pin
-        for name, available in vendor_status(self._manager, self._settings):
+        for name, available in vendor_status(self._config_dir, self._settings):
             if available:
                 return name
         return None
@@ -626,7 +626,7 @@ class ClassificationService:
         """
         if self._legs is not None:
             return self._legs
-        first = await resolve_vendor(self._manager, self._settings, client=self._client())
+        first = await resolve_vendor(self._config_dir, self._settings, client=self._client())
         if first is None:
             self._legs = ()
             return self._legs
@@ -728,7 +728,7 @@ class ClassificationService:
         vendor = self._vendors.get(name)
         if vendor is None:
             vendor = build_vendor(
-                name, self._manager, model=model_override(self._settings), client=self._client()
+                name, self._config_dir, model=model_override(self._settings), client=self._client()
             )
             self._vendors[name] = vendor
         return vendor

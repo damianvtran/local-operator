@@ -5,7 +5,6 @@ import time
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
     resolve_radient_credential,
@@ -17,10 +16,14 @@ URL = "https://api.radienthq.com/v1"
 
 @pytest.mark.asyncio
 async def test_canonical_precedence_and_explicit_gateway_fallback(tmp_path, monkeypatch):
-    manager = CredentialManager(tmp_path)
-    manager.set_credential("RADIENT_API_KEY", "legacy-fixture", write=False)
+    from local_operator.providers.registry import store_provider_key
+
+    # ``readonly`` + a provider-class store row (PR2a): the plaintext file leg is
+    # gone, so a static key lives in the store or in the environment.
+    manager = tmp_path
+    store_provider_key("RADIENT_API_KEY", "legacy-fixture", base=tmp_path)
     monkeypatch.setenv("RADIENT_API_KEY", "environment-fixture")
-    store = AuthStore(tmp_path / "auth.db", credential_manager=manager)
+    store = AuthStore(tmp_path / "auth.db", config_dir=manager)
     try:
         key = store.upsert_credential(
             "radient", {"type": "api_key", "source": "login", "key": "login-fixture"}
@@ -46,21 +49,32 @@ async def test_canonical_precedence_and_explicit_gateway_fallback(tmp_path, monk
             await resolve_radient_credential(manager, URL, store=store)
         ).get_secret_value() == "login-fixture"
         store.delete_credential(key.id)
+        # Store-first: with both login rows gone the provider store row still
+        # outranks the exported variable (the order every reader shares).
+        assert (
+            await resolve_radient_credential(manager, URL, store=store)
+        ).get_secret_value() == "legacy-fixture"
+        from local_operator.providers.registry import remove_provider_key
+
+        remove_provider_key("RADIENT_API_KEY", base=tmp_path)
         assert (
             await resolve_radient_credential(manager, URL, store=store)
         ).get_secret_value() == "environment-fixture"
         monkeypatch.delenv("RADIENT_API_KEY")
+        # Nothing stored and nothing exported: the leg reports no credential.
         assert (
             await resolve_radient_credential(manager, URL, store=store)
-        ).get_secret_value() == "legacy-fixture"
+        ).get_secret_value() == ""
     finally:
         store.close()
 
 
 def test_cli_sync_reader_uses_same_store_and_preserves_legacy_key(tmp_path, monkeypatch):
+    from local_operator.providers.registry import store_provider_key
+
     monkeypatch.delenv("RADIENT_API_KEY", raising=False)
-    manager = CredentialManager(tmp_path)
-    manager.set_credential("RADIENT_API_KEY", "legacy-fixture", write=False)
+    manager = tmp_path
+    store_provider_key("RADIENT_API_KEY", "legacy-fixture", base=tmp_path)
     store = AuthStore(tmp_path / "auth.db")
     row = store.upsert_credential(
         "radient", {"type": "api_key", "source": "login", "key": "central-fixture"}
@@ -70,7 +84,9 @@ def test_cli_sync_reader_uses_same_store_and_preserves_legacy_key(tmp_path, monk
         resolve_radient_credential_sync(manager, "https://api.radienthq.com").get_secret_value()
         == "central-fixture"
     )
-    assert manager.get_credential("RADIENT_API_KEY").get_secret_value() == "legacy-fixture"
+    from local_operator.providers.registry import provider_secret_value
+
+    assert provider_secret_value("RADIENT_API_KEY", base=tmp_path) == "legacy-fixture"
     store = AuthStore(tmp_path / "auth.db")
     store.delete_credential(row.id)
     store.close()
@@ -81,8 +97,8 @@ def test_cli_sync_reader_uses_same_store_and_preserves_legacy_key(tmp_path, monk
 async def test_parallel_legacy_readers_share_one_refresh_lock(tmp_path, monkeypatch):
     from local_operator.providers.oauth import radient
 
-    manager = CredentialManager(tmp_path)
-    store = AuthStore(tmp_path / "auth.db", credential_manager=manager)
+    manager = tmp_path
+    store = AuthStore(tmp_path / "auth.db", config_dir=manager)
     row = store.upsert_credential(
         "radient",
         {"type": "oauth", "access": "expired-fixture", "refresh": "refresh-fixture", "expires": 1},

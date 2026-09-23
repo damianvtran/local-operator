@@ -445,27 +445,33 @@ def test_cli_import_pulls_no_engine_modules() -> None:
 
 
 def test_credential_update_command(tmp_home: Path) -> None:
-    manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    """The command prompts for the key and stores it via the provider writer.
+
+    The prompt is a MODULE FUNCTION now (``prompt_for_provider_key``): PR2b
+    deleted the ``CredentialManager`` class this used to be patched on, and its
+    construction was the thing that recreated the plaintext ``credentials.env``
+    (PR2a stopped every writer; the class is gone, so the file cannot come back).
+    """
+    with patch("local_operator.providers.key_prompt.prompt_for_provider_key") as prompt_for_key:
         args = argparse.Namespace(key="TEST_API_KEY")
         assert credential_update_command(args) == 0
-    manager.prompt_for_credential.assert_called_once_with("TEST_API_KEY", reason="update requested")
+    prompt_for_key.assert_called_once_with("TEST_API_KEY", reason="update requested")
 
 
 def test_credential_delete_command(tmp_home: Path) -> None:
-    manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.providers.registry.remove_provider_key") as remove:
         args = argparse.Namespace(key="TEST_API_KEY")
         assert credential_delete_command(args) == 0
-    manager.set_credential.assert_called_once_with("TEST_API_KEY", "")
+    remove.assert_called_once_with("TEST_API_KEY")
 
 
 def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
     """Ctrl-C at the prompt is a cancel, not a crash: exit 130 (SIGINT
     convention), one quiet line, no stack-trace panel (item 4)."""
-    manager = MagicMock()
-    manager.prompt_for_credential.side_effect = KeyboardInterrupt
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch(
+        "local_operator.providers.key_prompt.prompt_for_provider_key",
+        side_effect=KeyboardInterrupt,
+    ):
         args = argparse.Namespace(key="OPENAI_API_KEY")
         assert credential_update_command(args) == 130
     err = capsys.readouterr().err
@@ -475,11 +481,10 @@ def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
 
 def test_credential_update_empty_input_exits_1_plain(tmp_home: Path, capsys) -> None:
     """Empty/EOF input exits 1 with one plain line, ANSI stripped (item 4)."""
-    manager = MagicMock()
-    manager.prompt_for_credential.side_effect = ValueError(
-        "\033[1;31mOPENAI_API_KEY is required for this step.\033[0m"
-    )
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch(
+        "local_operator.providers.key_prompt.prompt_for_provider_key",
+        side_effect=ValueError("\033[1;31mOPENAI_API_KEY is required for this step.\033[0m"),
+    ):
         args = argparse.Namespace(key="OPENAI_API_KEY")
         assert credential_update_command(args) == 1
     err = capsys.readouterr().err
@@ -491,8 +496,7 @@ def test_credential_update_empty_input_exits_1_plain(tmp_home: Path, capsys) -> 
 def test_credential_update_unknown_key_warns(tmp_home: Path, capsys) -> None:
     """A key the registry does not know gets a difflib suggestion but is still
     stored (custom providers are legitimate) (item 8)."""
-    manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.providers.key_prompt.prompt_for_provider_key"):
         args = argparse.Namespace(key="OPENAI_API_KY")  # typo
         assert credential_update_command(args) == 0
     err = capsys.readouterr().err
@@ -1391,7 +1395,6 @@ def test_viewer_birth_config_and_model_resolution_run_off_the_event_loop(
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(factory_module, "resolve_hosting_model", resolve_model)
     monkeypatch.setattr("local_operator.cli.ConfigManager", config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
     monkeypatch.setattr(
         "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
@@ -1440,7 +1443,6 @@ def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", unconfigured)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
     monkeypatch.setattr(
         "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
@@ -1514,7 +1516,6 @@ def test_main_interactive_tty_uses_tui(
         return manager
 
     monkeypatch.setattr("local_operator.cli.ConfigManager", _theme_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--hosting", "test", "--model", "m"]):
@@ -1546,7 +1547,6 @@ def test_main_no_tui_flag_uses_headless_repl(
     # EOF on the first prompt exits the REPL cleanly.
     monkeypatch.setattr("builtins.input", _raise_eof)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--no-tui", "--hosting", "test", "--model", "m"]):
@@ -1556,16 +1556,6 @@ def test_main_no_tui_flag_uses_headless_repl(
 
 def _raise_eof(prompt: str = "") -> str:
     raise EOFError
-
-
-def _bare_credential_manager(*args, **kwargs) -> MagicMock:
-    """CredentialManager stand-in with no resolvable secrets: get_credential
-    returns None and the credentials.env view is empty — preflight must see
-    exactly the same view a keyless install has."""
-    manager = MagicMock()
-    manager.get_credential.return_value = None
-    manager.get_credentials.return_value = {}
-    return manager
 
 
 # --- CL-04: --yolo reachable from subcommands ----------------------------------
@@ -1659,7 +1649,6 @@ def test_main_preflight_missing_hosting_headless(
     # Non-tty: no setup state is possible, so this stays fail-fast.
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program"]):
@@ -1716,7 +1705,6 @@ def test_main_preflight_missing_hosting_tty_enters_setup(
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program"]):
@@ -1772,7 +1760,6 @@ def test_main_preflight_unknown_hosting_tty_enters_setup(
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _bad_hosting_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program"]):
@@ -1799,7 +1786,6 @@ def test_main_preflight_unknown_hosting_non_tty_fails_fast_naming_the_value(
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _bad_hosting_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program"]):
@@ -1865,7 +1851,6 @@ def test_main_interactive_missing_api_key_warns_and_starts(
     )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
@@ -1889,7 +1874,7 @@ def test_preflight_api_key_fatal_by_default(
     somewhere harder to read.
     """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert cli._preflight_api_key("openai", _bare_credential_manager()) == 1
+    assert cli._preflight_api_key("openai", tmp_home / ".local-operator") == 1
     err = capsys.readouterr().err
     assert "OPENAI_API_KEY" in err and "Error" in err
 
@@ -1922,7 +1907,7 @@ def test_preflight_accepts_stored_oauth_under_temporary_backoff(
     store.block_credential(credential.id, "anthropic")
     store.close()
 
-    assert cli._preflight_api_key("anthropic", _bare_credential_manager()) is None
+    assert cli._preflight_api_key("anthropic", tmp_home / ".local-operator") is None
     assert capsys.readouterr().err == ""
 
 
@@ -1968,7 +1953,6 @@ def test_main_preflight_env_key_passes(
     )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--hosting", "openai", "--model", "gpt-4o"]):
@@ -2007,7 +1991,6 @@ def test_tui_flag_forces_tui_on_non_tty(
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)  # NOT a tty
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
-    monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
 
     with patch("sys.argv", ["program", "--tui", "--hosting", "test", "--model", "m"]):

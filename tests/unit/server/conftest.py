@@ -11,12 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from pydantic import SecretStr
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.model.configure import ModelConfiguration
@@ -192,8 +190,6 @@ def test_app_client(temp_dir):
     # These clients bypass lifespan. A shared provider store must follow this
     # fixture's config root rather than survive into the next test's managers.
     app.state.desktop_auth = None
-    if hasattr(app.state, "credential_manager"):
-        original_state["credential_manager"] = app.state.credential_manager
     if hasattr(app.state, "config_manager"):
         original_state["config_manager"] = app.state.config_manager
     if hasattr(app.state, "agent_registry"):
@@ -206,7 +202,6 @@ def test_app_client(temp_dir):
         original_state["env_config"] = app.state.env_config
 
     # Set up test-specific state
-    mock_credential_manager = CredentialManager(config_dir=temp_dir)
     mock_config_manager = ConfigManager(config_dir=temp_dir)
     # Use a shorter refresh interval for tests to ensure changes are quickly reflected
     mock_agent_registry = AgentRegistry(config_dir=temp_dir, refresh_interval=1.0)
@@ -223,16 +218,22 @@ def test_app_client(temp_dir):
         agent_registry=mock_agent_registry,
         job_manager=mock_job_manager,
         config_manager=mock_config_manager,
-        credential_manager=mock_credential_manager,
         env_config=mock_env_config,
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
     )
     _ = mock_scheduler_service.start()
 
-    mock_credential_manager.get_credential = lambda key: SecretStr("test-credential")
+    # PR2a: the plaintext/legacy getter is gone, so the fixture arms a
+    # provider-class STORE ROW for RADIENT_API_KEY — the tier the Radient
+    # resolver actually reads now. Written through the production writer so
+    # the row name and namespace cannot drift from the reader.
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.access import open_store
 
-    app.state.credential_manager = mock_credential_manager
+    open_store(temp_dir, create=True)
+    store_provider_key("RADIENT_API_KEY", "test-credential", base=temp_dir)
+
     app.state.config_manager = mock_config_manager
     app.state.agent_registry = mock_agent_registry
     app.state.job_manager = mock_job_manager
@@ -279,22 +280,6 @@ def mock_create_operator(monkeypatch):
 
 
 @pytest.fixture
-def mock_credential_manager(temp_dir):
-    """Create a mock credential manager for testing.
-
-    Args:
-        temp_dir: pytest fixture that provides a temporary directory
-
-    Returns:
-        CredentialManager: A credential manager instance using the temporary directory
-    """
-    credential_manager = CredentialManager(config_dir=temp_dir)
-    app.state.credential_manager = credential_manager
-    yield credential_manager
-    app.state.credential_manager = None
-
-
-@pytest.fixture
 def mock_config_manager(temp_dir):
     """Create a mock config manager for testing.
 
@@ -308,6 +293,42 @@ def mock_config_manager(temp_dir):
     app.state.config_manager = config_manager
     yield config_manager
     app.state.config_manager = None
+
+
+@pytest.fixture
+def mock_credential_manager(temp_dir):
+    """The config manager the store-first readers resolve their root through.
+
+    The fixture name is kept because the server tests depend on it by name; what
+    it yields is the ``ConfigManager`` whose ``config_dir`` the readers take,
+    now that PR2b deleted the ``CredentialManager`` this used to hand back (and
+    the ``app.state.credential_manager`` slot it used to fill).
+
+    ``temp_dir`` and NOT the HOME-derived ``paths.config_dir()``: the tests arm
+    their rows through this manager (``_store_key``) and the app under test is
+    given ``ConfigManager(config_dir=temp_dir)``, so the same root has to be on
+    both sides or a row is written under one root and looked up under another.
+    A HOME-derived root is the worse failure of the two — an unisolated run then
+    writes into the operator's real store.
+
+    IT ALSO FILLS ``app.state.config_manager``, and that is not decoration
+    (review round 2, M2). On the base the model route read
+    ``app.state.credential_manager`` — the slot this fixture used to fill — and
+    after PR2b it takes its root through ``Depends(get_config_manager)``, which
+    reads ``app.state.config_manager``. Not filling it left the slot to whatever
+    an EARLIER test in the same worker had seeded, so
+    ``test_server_models.py`` passed only in a shared run and failed 9/11 when
+    run alone (``KeyError: 'config_manager'``). The previous value is restored
+    rather than cleared to ``None``, so a test that composes both this and
+    ``mock_config_manager`` does not tear down the other's slot.
+    """
+    config_manager = ConfigManager(config_dir=temp_dir)
+    previous = getattr(app.state, "config_manager", None)
+    app.state.config_manager = config_manager
+    try:
+        yield config_manager
+    finally:
+        app.state.config_manager = previous
 
 
 @pytest.fixture

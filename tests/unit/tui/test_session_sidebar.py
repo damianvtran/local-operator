@@ -1431,7 +1431,9 @@ def test_the_tooltip_never_names_a_different_state_from_the_glyph():
     """
     from local_operator.tui.widgets.session_picker import (
         ATTACHED_MARKER,
+        DELEGATING_MARKER,
         IDLE_MARKER,
+        NEEDS_YOU_MARKER,
         WAKE_MARKER,
         row_state_mark,
     )
@@ -1475,6 +1477,38 @@ def test_the_tooltip_never_names_a_different_state_from_the_glyph():
     )
     assert gate.status == "Approval needed"
 
+    # A parent that owns running children. The mark says the state; the WORDS are
+    # the only place the count can appear, because the column is one cell and the
+    # ladder is its contract — so this is the pairing that has to hold, and the
+    # sentence the desktop row's ``title`` and the phone's chip are built from.
+    delegating = CatalogEntry(
+        SessionRow("deg000000001", now, "parent", live_state="idle", subagents_running=2)
+    )
+    assert row_state_mark(delegating.row, 0)[0] == DELEGATING_MARKER
+    assert delegating.status == "2 subagents running"
+
+    # ...and it must not steal the glyph from the two rows above it: an attached
+    # session ("where am I?") or a parked gate (a person is blocked). Masking
+    # either would be a worse bug than the one this state fixes.
+    watching = CatalogEntry(
+        SessionRow("att000000002", now, "watched", live_state="attached", subagents_running=2)
+    )
+    assert row_state_mark(watching.row, 0)[0] == ATTACHED_MARKER
+    assert watching.status == "Open"
+
+    blocked = CatalogEntry(
+        SessionRow(
+            "gate00000002",
+            now,
+            "blocked",
+            live_state="idle",
+            pending="ask",
+            subagents_running=3,
+        )
+    )
+    assert row_state_mark(blocked.row, 0)[0] == NEEDS_YOU_MARKER
+    assert blocked.status == "Answer needed"
+
 
 def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     """The invariant itself, over EVERY reachable combination.
@@ -1487,18 +1521,29 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     enumerates the product of every live state, wake count and dormancy and
     asserts the two renderings agree by construction.
 
-    ``unseen`` is a fourth dimension and is covered SEPARATELY, below, rather
-    than folded in here (code review round 1, M2). It short-circuits ``status``
-    ahead of every branch this function enumerates, and the sidebar likewise
-    overrides the glyph for an unseen row — so the pair that actually reaches a
-    user is neither the one ``row_state_mark`` returns nor the one this table
-    describes. Enumerating it here would assert a pairing no surface renders;
-    the companion test drives the real render path instead.
+    THE TWO SUBAGENT COUNTS ARE A FIFTH AND SIXTH DIMENSION, added with the
+    ``delegating`` rung. They are exactly the kind of state this table exists
+    for: the glyph now depends on a fact the words spell into a COUNT, so a
+    pairing no hand-picked row covers is the way this mark goes wrong —
+    ``⇉`` beside "Ready" if the two ladders ever diverge, or beside the
+    wake's "Scheduled" if the new rung is inserted one position too low. Each
+    count is enumerated at ``None`` (never reported), ``0`` and ``2``, which
+    are the three answers that can disagree: absent, nothing running, and
+    work running. The product is now 675.
+
+    ``unseen`` is a seventh dimension and is covered SEPARATELY, below,
+    rather than folded in here (code review round 1, M2). It short-circuits
+    ``status`` ahead of every branch this function enumerates, and the sidebar
+    likewise overrides the glyph for an unseen row — so the pair that actually
+    reaches a user is neither the one ``row_state_mark`` returns nor the one
+    this table describes. Enumerating it here would assert a pairing no surface
+    renders; the companion test drives the real render path instead.
     """
     from local_operator.session.catalog import WEDGED_STATUS
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
         ATTACHED_MARKER,
+        DELEGATING_MARKER,
         IDLE_MARKER,
         NEEDS_YOU_MARKER,
         WAKE_MARKER,
@@ -1512,6 +1557,11 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
         NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
         WEDGED_MARKER: {WEDGED_STATUS},
         ATTACHED_MARKER: {"Open"},
+        # The sentences ``catalog.delegating_label`` builds for the counts
+        # enumerated below. ``2 subagents running`` is a PREFIX of the two-count
+        # form, which is what the matcher uses; ``queued``-only is a different
+        # sentence and has to be listed.
+        DELEGATING_MARKER: {"2 subagents running", "2 subagents queued"},
         IDLE_MARKER: {"Ready"},
         WAKE_MARKER: {"Scheduled", "Stopped"},
         "": {"Recent"},
@@ -1521,27 +1571,156 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     for state in ("", "idle", "attached", "busy", "wedged"):
         for pending in (None, "approval", "ask"):
             for wakes, dormant in ((0, False), (1, False), (3, False), (1, True), (2, True)):
-                row = SessionRow(
-                    "x" * 12,
+                for running in (None, 0, 2):
+                    for queued in (None, 0, 2):
+                        row = SessionRow(
+                            "x" * 12,
+                            now,
+                            "a conversation",
+                            live_state=state,
+                            pending=pending,
+                            wakes=wakes,
+                            wakes_dormant=dormant,
+                            subagents_running=running,
+                            subagents_queued=queued,
+                        )
+                        glyph = row_state_mark(row, 0)[0]
+                        status = CatalogEntry(row).status
+                        if glyph in SPINNER_FRAMES:
+                            assert status == "Working", (state, pending, wakes, dormant, status)
+                        else:
+                            allowed = ALLOWED[glyph]
+                            assert any(status.startswith(prefix) for prefix in allowed), (
+                                f"glyph {glyph!r} paired with {status!r} "
+                                f"(state={state!r} pending={pending!r} wakes={wakes} "
+                                f"dormant={dormant} running={running} queued={queued})"
+                            )
+                        checked += 1
+    assert checked == 675, checked
+
+
+def test_the_delegating_marker_is_one_cell() -> None:
+    """One cell, verified rather than assumed — the column's contract.
+
+    ``STATE_COL_CELLS`` reserves glyph plus separator, so a two-cell glyph eats
+    the separator and the name starts flush against it. That is not hypothetical:
+    ``WAKE_MARKER``'s first spelling was a two-cell emoji and rendered
+    ``⏰Morning standup notes`` against every other row's spaced name, seen in a
+    frame and in no test. ``⇉`` is a NEW codepoint in this column, so its width is
+    checked by ``cell_len`` here and by a rendered frame in the PR's evidence.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        DELEGATING_MARKER,
+        STATE_COL_CELLS,
+    )
+
+    assert cell_len(DELEGATING_MARKER) == 1
+    assert STATE_COL_CELLS == 2, "glyph plus separator; the marker must fit the first"
+
+
+def test_a_delegating_row_pairs_the_arrow_with_the_count_it_owns() -> None:
+    """The pairing, asserted where a user reads it: the glyph and the tooltip.
+
+    The mark carries no count (one cell, one ladder), so the count reaches the
+    user through ``status`` — the same sentence the desktop row's ``title`` and
+    the phone's chip are built from. A row whose mark says "work is running"
+    while its words say "Ready" is the failure this pins.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        DELEGATING_MARKER,
+        IDLE_MARKER,
+        row_state_mark,
+    )
+
+    now = time.time()
+    running = CatalogEntry(
+        SessionRow("run000000001", now, "parent", live_state="idle", subagents_running=2)
+    )
+    assert row_state_mark(running.row, 0) == (DELEGATING_MARKER, "accent")
+    assert running.status == "2 subagents running"
+
+    # Parked with nothing running is the state that used to read as idle.
+    parked = CatalogEntry(
+        SessionRow(
+            "park00000001",
+            now,
+            "parent",
+            live_state="idle",
+            subagents_running=0,
+            subagents_queued=2,
+        )
+    )
+    assert row_state_mark(parked.row, 0) == (DELEGATING_MARKER, "accent")
+    assert parked.status == "2 subagents queued"
+
+    # And the two counts together, which is the sentence with the addend.
+    both = CatalogEntry(
+        SessionRow(
+            "both00000001",
+            now,
+            "parent",
+            live_state="idle",
+            subagents_running=1,
+            subagents_queued=1,
+        )
+    )
+    assert both.status == "1 subagent running · 1 queued"
+
+    # An unreported count is not the state: the row is simply idle.
+    unknown = CatalogEntry(SessionRow("unk000000001", now, "parent", live_state="idle"))
+    assert row_state_mark(unknown.row, 0)[0] == IDLE_MARKER
+    assert unknown.status == "Ready"
+
+
+@pytest.mark.asyncio
+async def test_a_delegating_row_owns_the_mark_column_without_moving_the_title():
+    """The arrow in a RENDERED row, and the layout claim beside it.
+
+    Two things a call to ``row_state_mark`` cannot show. First, that the mark
+    actually reaches the painted row: the widget draws its own prefixes to the
+    left of that column (the caret, the pin) and substitutes a completion mark
+    over the state mark, so the helper's answer is not by itself the cell a user
+    reads — the same reason the ``unseen`` pairing test below is a pilot. Second,
+    that a ONE-CELL arrow does not reflow the name: ``WAKE_MARKER``'s first
+    spelling (a two-cell emoji) ate the separator and started the title flush
+    against the glyph, which was caught in a rendered frame and in no test.
+
+    The assertion is RELATIVE — the title's own index in two rows with different
+    marks — because the absolute start column depends on the sidebar's docked
+    padding, which another test already pins.
+    """
+    from local_operator.tui.widgets.session_picker import DELEGATING_MARKER, IDLE_MARKER
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        now = time.time()
+        entries = [
+            CatalogEntry(
+                SessionRow(
+                    "parent000001",
                     now,
-                    "a conversation",
-                    live_state=state,
-                    pending=pending,
-                    wakes=wakes,
-                    wakes_dormant=dormant,
+                    "Delegating parent",
+                    live_state="idle",
+                    subagents_running=2,
                 )
-                glyph = row_state_mark(row, 0)[0]
-                status = CatalogEntry(row).status
-                if glyph in SPINNER_FRAMES:
-                    assert status == "Working", (state, pending, wakes, dormant, status)
-                else:
-                    allowed = ALLOWED[glyph]
-                    assert any(status.startswith(prefix) for prefix in allowed), (
-                        f"glyph {glyph!r} paired with {status!r} "
-                        f"(state={state!r} pending={pending!r} wakes={wakes} dormant={dormant})"
-                    )
-                checked += 1
-    assert checked == 75, checked
+            ),
+            CatalogEntry(SessionRow("quiet0000002", now - 1, "Quiet neighbour", live_state="idle")),
+        ]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        lines = sidebar.render().plain.splitlines()
+        parent = next(line for line in lines if "Delegating parent" in line)
+        quiet = next(line for line in lines if "Quiet neighbour" in line)
+        # The mark column is the cell two to the left of the name: glyph, then
+        # its separator.
+        assert parent[parent.index("Delegating parent") - 2] == DELEGATING_MARKER
+        assert quiet[quiet.index("Quiet neighbour") - 2] == IDLE_MARKER
+        assert parent.index("Delegating parent") == quiet.index("Quiet neighbour")
+        # And the words behind the glyph, on the real widget: the tooltip the
+        # user hovers is `CatalogEntry.status`, the same sentence the desktop
+        # row's `title` carries.
+        tooltip = sidebar._describe(entries[0])
+        assert tooltip is not None and "2 subagents running" in tooltip
 
 
 @pytest.mark.asyncio
