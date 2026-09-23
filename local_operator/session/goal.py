@@ -141,6 +141,23 @@ def goal_done_receipt(done: str) -> str:
     return f"goal done: {text}"
 
 
+def goal_done_answer(text: str, entry: "GoalHistoryEntry | None") -> str:
+    """The ``/goal --done`` answer: three cases, and it must say WHICH happened.
+
+    ``mark_done`` returns ``None`` both when there is no goal and when the goal
+    is already settled, and printing a second "goal done: <text>" for the latter
+    would report a settle that did not happen — the same class of false report
+    the dismissal receipt exists to avoid. So the caller passes the fact it has
+    (was there an entry) and the text, and the wording lives here, once, for all
+    four hosts.
+    """
+    if entry is not None:
+        return goal_done_receipt(text)
+    if text:
+        return "goal already done — /goal --dismiss clears it"
+    return goal_done_receipt("")
+
+
 def _now_iso() -> str:
     """A fixed-width ISO-8601 UTC stamp (``2026-09-22T11:04:07Z``).
 

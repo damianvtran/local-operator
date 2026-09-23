@@ -1344,18 +1344,10 @@ async def test_a_goal_cut_by_the_cap_says_so() -> None:
     """Cap the standing objective, not the ordinary user message or its echo."""
 
     class _CappingSession(FakeSession):
-        """`FakeSession.set_goal` only strips — this applies the real cap."""
+        """The inherited record applies the real cap; this only names the case."""
 
         def __init__(self) -> None:
             super().__init__()
-            self._state = GoalState()
-
-        @property
-        def goal(self) -> str:
-            return self._state.text
-
-        def set_goal(self, text: str) -> str:
-            return self._state.set(text)
 
     session = _CappingSession()
     app = OperatorApp(lambda: _factory(session))

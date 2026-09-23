@@ -31,6 +31,7 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
+from local_operator.session.goal import GoalState
 from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
@@ -413,6 +414,15 @@ class FakeSession:
         #: How many times ``clear_agent_profile`` was called, so a `/agent
         #: clear` test can assert the detach reached the session.
         self.cleared_agents: int = 0
+        #: The REAL judged-goal record, not a bare string: the five flag forms
+        #: change what the session state IS (active/done, a settled history, a
+        #: judge state), and a fake that only echoed text could not tell
+        #: `/goal --done` from `/goal <text>` — so every flag assertion would
+        #: pass against a fake that had not implemented the feature.
+        self._goal_state = GoalState()
+        #: How many times ``refresh_frontend_state`` was asked for, so a test can
+        #: say a mutation PUBLISHED without standing up a real store.
+        self.publishes = 0
 
     @property
     def session_id(self) -> str:
@@ -449,11 +459,46 @@ class FakeSession:
 
     @property
     def goal(self) -> str:
-        return getattr(self, "_goal", "")
+        return self._goal_state.text
 
     def set_goal(self, text: str) -> str:
-        self._goal = (text or "").strip()
-        return self._goal
+        return self._goal_state.set(text)
+
+    def arm_goal(self, text: str) -> str:
+        return self._goal_state.arm(text)
+
+    @property
+    def goal_status(self) -> str:
+        return self._goal_state.status
+
+    @property
+    def goal_judge(self) -> Any:
+        return None if not self._goal_state.text else self._goal_state.judge.to_wire()
+
+    @property
+    def goal_history(self) -> list[Any]:
+        return self._goal_state.history_view()
+
+    def history_view(self, limit: int | None = None) -> list[Any]:
+        return self._goal_state.history_view(limit)
+
+    def mark_goal_done(self, reason: str = "") -> Any:
+        return self._goal_state.mark_done(reason)
+
+    def delete_goal(self) -> str:
+        return self._goal_state.delete()
+
+    def dismiss_goal(self) -> bool:
+        return self._goal_state.dismiss()
+
+    def note_goal_judge(self, **changes: Any) -> None:
+        judge = self._goal_state.judge
+        for name, value in changes.items():
+            setattr(judge, name, value)
+        self.refresh_frontend_state()
+
+    def refresh_frontend_state(self) -> None:
+        self.publishes += 1
 
     def attach_team(self, team: Any) -> None:
         self.attached_teams.append(team)
@@ -5551,11 +5596,10 @@ async def test_run_tui_forwards_provider_controller(monkeypatch) -> None:
 
 
 class GoalSession(FakeSession):
-    """FakeSession with the goal surface and a recording prompt()."""
+    """FakeSession with a recording prompt() (the goal record is inherited)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self._goal = ""
         self.fail_on_prompt = False
         #: Verdicts the goal-mode judge returns, consumed one per call. Default
         #: (empty list) => after the staged verdicts run out, answer ACHIEVED,
@@ -5577,14 +5621,6 @@ class GoalSession(FakeSession):
         #: it, because the completion toast fires from `on_turn_ended` off that
         #: queued event, not synchronously from `prompt`.
         self.post_turn_ended_to: Any = None
-
-    @property
-    def goal(self) -> str:
-        return self._goal
-
-    def set_goal(self, text: str) -> str:
-        self._goal = (text or "").strip()
-        return self._goal
 
     async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
         if self.fail_on_prompt:

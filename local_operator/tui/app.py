@@ -33745,7 +33745,7 @@ class OperatorApp(App[None]):
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
             goal_dismissed_receipt,
-            goal_done_receipt,
+            goal_done_answer,
             goal_flag_form,
             goal_history_items,
             goal_history_notice,
@@ -33780,11 +33780,7 @@ class OperatorApp(App[None]):
             return
         if form == "done":
             entry = session.mark_goal_done()
-            notice(
-                goal_done_receipt(session.goal)
-                if entry is not None
-                else "goal already done — /goal --dismiss clears it"
-            )
+            notice(goal_done_answer(session.goal, entry))
             return
         if form == "dismiss":
             notice(goal_dismissed_receipt(session.dismiss_goal()))
@@ -33828,8 +33824,13 @@ class OperatorApp(App[None]):
 
         Read off the session rather than off the command, because every one of
         these flags is a no-op outside its own state — a row the state cannot
-        honour is a dead end taught by the palette. ``--clear`` is authoritatively
-        LAST so that a single pre-selected match on the bare command is never the
+        honour is a dead end taught by the palette. Gated on the RECORD's status
+        (``active``/``done``) exactly as the flag forms are specified: a goal
+        with no record (a pre-lifecycle restore, or one set through the mobile
+        relay's plain ``set_goal``) is still ACTIVE to the fold and still
+        markable by typing ``--done`` — the palette just does not advertise an
+        action whose record it cannot see. ``--clear`` is authoritatively LAST so
+        that a single pre-selected match on the bare command is never the
         destructive row (see the caller's note); it is also the only row carrying
         ``alert=True``, since it is the one acceptance that cannot be undone.
         """
@@ -33840,7 +33841,7 @@ class OperatorApp(App[None]):
         choices: list[ArgumentChoice] = []
         if history:
             choices.append(ArgumentChoice("--history", "List the settled goals"))
-        if goal and status != "done":
+        if goal and status == "active":
             choices.append(ArgumentChoice("--done", "Mark the standing goal done"))
         if status == "done":
             choices.append(ArgumentChoice("--dismiss", "Clear the done goal chip"))
@@ -39244,7 +39245,7 @@ class OperatorApp(App[None]):
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
             goal_dismissed_receipt,
-            goal_done_receipt,
+            goal_done_answer,
             goal_flag_form,
             goal_history_items,
             goal_history_notice,
@@ -39273,11 +39274,7 @@ class OperatorApp(App[None]):
             entry = session.mark_goal_done()
             return SlashResult(
                 kind="notice",
-                text=(
-                    goal_done_receipt(session.goal)
-                    if entry is not None
-                    else "goal already done — /goal --dismiss clears it"
-                ),
+                text=goal_done_answer(session.goal, entry),
                 style="info",
             )
         if form == "dismiss":
