@@ -23,7 +23,6 @@ from .test_slash_goal_loop_flags import (
     _draft,
     _notice_texts,
     _row_names,
-    _settle,
     _submit,
 )
 
@@ -196,10 +195,14 @@ async def test_the_picker_offers_only_the_acts_the_record_allows() -> None:
         # the destructive row (round 1: design D1, UX U1, reviewer MAJOR-1).
         assert _row_names(editor) == ["--done", "--clear"]
 
-        session.mark_goal_done("done")
-        editor.load_text("/goal ")
-        editor.move_cursor(editor._end_of_buffer())
-        await _settle(pilot, app)
-        # A DONE goal offers the dismissal and the record, and no longer offers
-        # a mark-done it cannot perform.
+    # A DONE goal offers the dismissal and the record, and no longer offers a
+    # mark-done it cannot perform. Built as its own session rather than mutated
+    # mid-test so the rows are derived from the state the app booted with, which
+    # is what the reported path does.
+    settled = _armed()
+    settled.mark_goal_done("done")
+    app2 = OperatorApp(lambda: _factory(settled))
+    async with app2.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app2)
+        editor = await _draft(app2, pilot, "/goal ")
         assert _row_names(editor) == ["--history", "--dismiss", "--clear"]

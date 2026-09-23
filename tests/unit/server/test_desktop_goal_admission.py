@@ -1056,3 +1056,69 @@ def test_the_client_declares_every_action_receipt_this_route_claims() -> None:
         "``slash_consumers=list(ATTACHED_SLASH_CONSUMERS)``; a second literal "
         "here is a declaration the route reads but the client does not send"
     )
+
+
+# ---------------------------------------------------------------------------
+# the new flag forms: state changes that must NOT become turns
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_goal_flags_start_no_turn_through_the_route(desktop) -> None:
+    """``--done``/``--dismiss``/``delete`` are state changes, not submissions.
+
+    The route is thin by design — it validates, routes, and admits iff the
+    receipt is an ACTION receipt the viewer declared — so the property to pin is
+    that these answers carry no ``request`` at all. A mark-done that opened a
+    turn would spend a provider call on a goal the user has just finished.
+    """
+    client, remote, _bridge = desktop
+    for args in ("--done", "--dismiss", "delete"):
+        remote.receipt = {
+            "kind": "notice",
+            "text": "goal done: Preserve one identity",
+            "style": "info",
+            "data": {"stored": "Preserve one identity", "status": "done"},
+        }
+        response = await _goal(client, args)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["result"]["admission"] is None, args
+    assert remote.admissions == []
+
+
+@pytest.mark.asyncio
+async def test_a_goal_history_block_starts_no_turn(desktop) -> None:
+    """``/goal --history`` answers with ROWS, and rows are not an action.
+
+    The rows ride ``data.items`` (the ``team_list`` shape) and the one-line
+    notice rides ``text``: neither carries a ``request``, so nothing here can be
+    admitted even with images staged — the same trap the status notice has.
+    """
+    client, remote, _bridge = desktop
+    remote.receipt = {
+        "kind": "block",
+        "text": "1 settled goal — newest first",
+        "style": "info",
+        "data": {
+            "type": "goal_history",
+            "items": [["Preserve one identity", "done · 2026-09-22T00:00:00Z"]],
+        },
+    }
+
+    response = await _goal(client, "--history", images=_wire_images())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["result"]["admission"] is None
+    assert remote.admissions == []
+
+
+def test_the_goal_flags_do_not_join_the_action_receipt_vocabulary() -> None:
+    """A pin, so a later "helpful" addition has to argue with this test.
+
+    ``SLASH_ACTION_RECEIPTS`` means "this receipt carries a request the invoking
+    client must submit". The goal's flag forms deliberately carry none: they are
+    state changes the OWNER has already made by the time a viewer reads the
+    answer, and admitting them would submit the empty string as a user turn.
+    """
+    assert SLASH_ACTION_RECEIPTS == ("team_attached", "agent_attached", "goal_set")

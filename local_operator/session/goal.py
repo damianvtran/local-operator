@@ -32,7 +32,10 @@ MAX_GOAL_CHARS = 2000
 #: host and stored as a goal body on another is the worst of the two outcomes:
 #: the user's intent is executed in one window and silently becomes the standing
 #: objective in another. The bare words predate the flag; ``--clear`` is the
-#: discoverable form the palette and the argument picker now teach.
+#: discoverable form the palette and the argument picker now teach, and ``delete``
+#: joins it because a user reaching for the destructive act types either word
+#: (RULINGS R7) — it is an ALIAS of ``--clear``, so it records nothing, which is
+#: what makes it different from ``--done`` rather than a second spelling of it.
 #:
 #: The flag is matched as the WHOLE argument, never as a prefix: ``/goal --clear``
 #: is a flag, while ``/goal --clear the flaky job`` is still free text the user
