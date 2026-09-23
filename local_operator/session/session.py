@@ -62,6 +62,7 @@ from local_operator.compaction.cutpoint import (
     ELISION_INJECTION_COUNT_KEY,
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
+    RENDERED_INJECTION_KEY,
 )
 from local_operator.compaction.marker import (
     COMPACTION_MARKER_TYPE,
@@ -5449,6 +5450,7 @@ class Session:
         message_id: str | None = None,
         producer_command_id: str | None = None,
         admitted: asyncio.Future[None] | None = None,
+        harness_injected: bool = False,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -5457,6 +5459,16 @@ class Session:
         marked user row is on disk, while the model turn may continue afterward.
         ``message_id`` remains independent conversation identity; ordinary local
         prompts omit producer provenance even if a host supplies a message id.
+
+        ``harness_injected`` says the row this call mints was NOT typed by a
+        person — it is harness chrome (the goal judge's continuation prompt is
+        the first caller). It stamps the STRUCTURAL provenance marker on the row
+        (:data:`RENDERED_INJECTION_KEY`), which is the only provenance signal
+        that survives a change to the chrome's wording: the row is still
+        persisted as a ``role="user"`` message, because the transcript has to
+        record why the conversation continued, and it is still announced to
+        every front end — the surfaces suppress it by the shared decision, not
+        by not being told. Defaults ``False`` so no existing caller changes.
 
         ``images`` are attachments the user pasted into their prompt; they
         ride the same message as the text so the model sees them as one
@@ -5591,6 +5603,16 @@ class Session:
                     ),
                 )
             user = Message.user(text, images, **({"id": message_id} if message_id else {}))
+            if harness_injected:
+                # The stamp goes on the row THIS call mints, at the one place
+                # the row is born, so no caller can mint a chrome row without
+                # it. `provider_payload` is invisible to the model and to every
+                # provider, and it already rides BOTH wires — the live
+                # `message_start` event (`MessageStartEvent.message`) and the
+                # durable journal row (`encode_message_payload` keeps a non-None
+                # payload) — so this needs no new field and no protocol bump.
+                # See `docs/DESKTOP_API.md` for what a viewer does with it.
+                user.provider_payload = {RENDERED_INJECTION_KEY: True}
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
             await self._run_turn_pipeline(
                 initial,
@@ -8638,6 +8660,14 @@ class Session:
             signal.abort("interrupted")
         try:
             await self._ensure_selected_model()
+            # Imported HERE, once per real turn, rather than at module scope:
+            # `harness.rows` gathers the chrome prompts from
+            # `session.goal_loop`/`session.session` behind a function precisely
+            # to avoid importing the session at module scope, and importing
+            # rows from the session's own module is the direction that keeps
+            # that arrangement working.
+            from local_operator.harness.rows import is_harness_chrome
+
             for message in initial:
                 await self._transcript.append_message(
                     message,
@@ -8656,19 +8686,25 @@ class Session:
                 # prompt invisible in the TUI. Emitting here, at the append
                 # point, is the single source both read. Wake/continuation
                 # internals are CustomMessage, so this stays user-authored only.
-                # The auto-continuation prompt is the one user-shaped Message
-                # that is harness chrome, not the user's words: announcing it
-                # would stack "context was just compacted" user rows on every
-                # front end for prompts the human never typed (the same
-                # exemption LOOP_PROMPT gets in the TUI). Matching is by text
-                # equality, so a user who typed the continuation sentence
-                # verbatim would lose their announcement — vanishingly
-                # unlikely, and the TUI registry documents its equivalent
-                # inherent limit.
+                #
+                # HARNESS CHROME IS EXEMPT, through the ONE shared decision
+                # (`harness.rows.is_harness_chrome`) rather than by comparing
+                # against one prompt: a chrome row is a user-shaped Message that
+                # no person typed, so announcing it asks every front end to paint
+                # the harness's words as the operator's own — which is exactly
+                # what a desktop viewer did with the loop prompt before this.
+                # The row is still PERSISTED (the append above is what makes it
+                # durable, and the transcript must record why the conversation
+                # continued); only the live announcement is withheld. Matching is
+                # on the shared predicate, so a fourth chrome prompt is covered
+                # here in the same commit that teaches the predicate about it,
+                # and a user who typed one of these strings verbatim would lose
+                # their announcement — vanishingly unlikely, and the limit the
+                # TUI's own echo registry documents.
                 if (
                     isinstance(message, Message)
                     and message.role == "user"
-                    and message.text != _CONTINUATION_PROMPT
+                    and not is_harness_chrome(message.text)
                 ):
                     await self._emit(MessageStartEvent(message=message))
 
