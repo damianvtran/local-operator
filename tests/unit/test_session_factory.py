@@ -4022,6 +4022,195 @@ sf._run_store_maintenance(SimpleNamespace(), root, None)
     assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback", "callback"]
 
 
+def test_store_maintenance_thread_retries_after_lock_owner_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock loser keeps its one daemon alive until owner crash releases it."""
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+
+    real_acquire = session_factory._acquire_store_maintenance_lock
+    busy = [3]
+    attempts = 0
+
+    def released_after_owner_exit(config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        if busy[0]:
+            busy[0] -= 1
+            return None
+        return real_acquire(config_dir)
+
+    monkeypatch.setattr(
+        session_factory, "_acquire_store_maintenance_lock", released_after_owner_exit
+    )
+    stop = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "single maintenance worker did not retry to completion"
+    assert done.is_set()
+    assert attempts == 4, "worker abandoned lock retries after its initial contention"
+    assert calls == [
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+        "analytics-names",
+        "analytics-daily",
+    ]
+
+
+def test_store_maintenance_thread_exits_retry_on_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+    attempted = threading.Event()
+    calls = 0
+
+    def remains_busy(_config_dir: Path) -> int | None:
+        nonlocal calls
+        calls += 1
+        attempted.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", remains_busy)
+    stop = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
+        daemon=True,
+    )
+    worker.start()
+    assert attempted.wait(5)
+    stop.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "reset did not stop bounded contender backoff"
+    assert done.is_set()
+    assert calls < 10, "contender spun instead of backing off"
+
+
+def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+
+    # Keep a real flock held while a separate thread publishes completion.
+    # The contender must keep one retry thread until the owner releases the lock,
+    # then observe the fresh stamp while holding that lock and skip the passes.
+    owner_fd = session_factory._acquire_store_maintenance_lock(tmp_path)
+    assert owner_fd is not None
+    published = threading.Event()
+    release_owner = threading.Event()
+
+    def publish_after_wait() -> None:
+        assert release_owner.wait(5)
+        session_factory._write_store_maintenance_stamp(
+            tmp_path, list(session_factory._STORE_MAINTENANCE_PASS_NAMES)
+        )
+        published.set()
+        session_factory._release_store_maintenance_lock(owner_fd)
+
+    publisher = threading.Thread(target=publish_after_wait, daemon=True)
+    publisher.start()
+    attempts = 0
+    real_acquire = session_factory._acquire_store_maintenance_lock
+
+    def count_attempts(config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        return real_acquire(config_dir)
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", count_attempts)
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, threading.Event(), done),
+        daemon=True,
+    )
+    worker.start()
+    deadline = time.monotonic() + 5
+    while attempts == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert attempts > 0, "contender never attempted the root lock"
+    assert not done.is_set(), "contender abandoned a busy owner instead of retrying"
+    release_owner.set()
+    worker.join(timeout=5)
+    publisher.join(timeout=5)
+
+    assert not worker.is_alive() and not publisher.is_alive()
+    assert done.is_set() and published.is_set()
+    assert attempts >= 2, "contender did not retry after the original busy lock"
+    assert calls == [], "fresh owner stamp should suppress every maintenance pass"
+
+
+def test_store_maintenance_retry_stops_on_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+    attempts = 0
+    entered = threading.Event()
+
+    def lock_stays_busy(_config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        entered.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", lock_stays_busy)
+    stop_event = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop_event, done),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(5)
+    stop_event.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "reset did not stop the bounded retry wait"
+    assert done.is_set()
+    assert attempts < 10, "retry loop spun instead of backing off"
+
+
+def test_store_maintenance_malformed_stamp_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    stamp.write_text("{ incomplete", encoding="utf-8")
+
+    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+
+    assert len(calls) == 6
+    assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
+        session_factory._STORE_MAINTENANCE_STAMP_VERSION
+    )
+
+
 def test_store_maintenance_lock_errors_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4037,6 +4226,27 @@ def test_store_maintenance_lock_errors_fail_closed(
 
     assert calls == [], "maintenance ran without its config-root lock"
     assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+
+def test_store_maintenance_stamp_read_error_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    stamp_path = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    stamp_path.write_text("not json", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def unreadable_stamp(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == stamp_path:
+            raise OSError("stamp cannot be read")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_stamp)
+    session_factory._run_store_maintenance(FakeConfigManager(), tmp_path, None)
+
+    assert calls == [], "a stamp I/O error ran the passes without proving completion state"
 
 
 def test_store_maintenance_failed_pass_retries_without_completion_stamp(

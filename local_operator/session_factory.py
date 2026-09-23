@@ -3054,11 +3054,21 @@ _STORE_MAINTENANCE_DONE: threading.Event | None = None
 #: walks begin. The delay is inside the daemon, not the default executor, whose
 #: shutdown can otherwise hold Runner.close for Python's 300-second bound.
 _STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0.75
+_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS = 0.05
+_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS = 1.0
 _STORE_MAINTENANCE_LOCK_NAME = ".store-maintenance.lock"
 _STORE_MAINTENANCE_STAMP_NAME = ".store-maintenance.json"
 _STORE_MAINTENANCE_STAMP_SCHEMA = 1
 _STORE_MAINTENANCE_STAMP_VERSION = 1
 _STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
+_STORE_MAINTENANCE_PASS_NAMES = (
+    "session cleanup policy",
+    "orphan process-group sweep",
+    "session origin backfill",
+    "session title backfill",
+    "analytics session-name backfill",
+    "analytics session-daily rollup backfill",
+)
 
 
 def _wait_for_store_maintenance_idle_window(stop_event: threading.Event) -> bool:
@@ -3138,10 +3148,10 @@ def _store_maintenance_stamp_is_fresh(config_dir: Path, pass_names: list[str]) -
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        # An unreadable stamp cannot prove completion; the caller skips work
-        # rather than rerunning without trustworthy singleflight state.
-        raise
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        # A malformed record cannot prove completion; because the caller holds
+        # the exclusive root lock, a conservative rerun is safe.
+        return False
     if not isinstance(payload, dict):
         return False
     completed_at = payload.get("completed_at")
@@ -3188,7 +3198,7 @@ def _run_store_maintenance(
     live_dir: Path | None,
     *,
     stop_event: threading.Event | None = None,
-) -> None:
+) -> bool:
     """Run the six idempotent store passes under one daemon-owned lock.
 
     Separate runtime processes can start more than the 0.75-second idle delay
@@ -3207,17 +3217,20 @@ def _run_store_maintenance(
     worker that ``Runner.close`` waits to join for up to five minutes.
     """
     stop = stop_event or threading.Event()
-    if not _wait_for_store_maintenance_idle_window(stop):
-        return
-
+    if stop.is_set():
+        return True
     try:
         lock_fd = _acquire_store_maintenance_lock(config_dir)
     except OSError:
+        # A lock I/O error cannot establish mutual exclusion. Unlike a busy
+        # peer, it is not retryable evidence of an owner that may soon exit.
         logger.debug("store maintenance lock unavailable; skipping", exc_info=True)
-        return
+        return True
     if lock_fd is None:
-        logger.debug("store maintenance already running in another process")
-        return
+        # A competing runtime owns the persistent lock inode. Only that owner
+        # may inspect or publish the stamp; this one daemon returns a retry
+        # signal and will check after it acquires the same lock.
+        return False
 
     try:
         from local_operator.analytics.backfill import (
@@ -3253,12 +3266,16 @@ def _run_store_maintenance(
             ),
         ]
         pass_names = [label for label, _ in passes]
+        if tuple(pass_names) != _STORE_MAINTENANCE_PASS_NAMES:
+            raise RuntimeError("store maintenance pass names differ from the stamp schema")
         try:
             if _store_maintenance_stamp_is_fresh(config_dir, pass_names):
-                return
+                return True
         except OSError:
+            # Malformed records are retried, but a real I/O failure leaves the
+            # completion state unknown, so fail closed without running passes.
             logger.debug("store maintenance completion stamp unreadable; skipping", exc_info=True)
-            return
+            return True
 
         all_passes_succeeded = True
         for label, work in passes:
@@ -3280,6 +3297,7 @@ def _run_store_maintenance(
                 logger.debug(
                     "store maintenance completion stamp write failed; skipping", exc_info=True
                 )
+        return True
     finally:
         _release_store_maintenance_lock(lock_fd)
 
@@ -3291,11 +3309,33 @@ def _store_maintenance_thread_main(
     stop_event: threading.Event,
     done_event: threading.Event,
 ) -> None:
-    """Own worker failures and signal completion without touching an event loop."""
+    """Own one bounded retry loop without touching an event loop.
+
+    One process owns at most this single daemon thread. A lock loser waits with
+    capped exponential backoff, then retries. Once an owner completes, the next
+    successful acquire checks its fresh completion stamp under the same lock and
+    exits without another scan. Reset signals ``stop_event`` and wakes the waits.
+    """
     try:
-        _run_store_maintenance(config_manager, config_dir, live_dir, stop_event=stop_event)
-    except Exception:  # noqa: BLE001 — housekeeping never fails session start
-        logger.debug("store maintenance worker failed", exc_info=True)
+        if not _wait_for_store_maintenance_idle_window(stop_event):
+            return
+        retry_delay = _STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS
+        while not stop_event.is_set():
+            try:
+                acquired = _run_store_maintenance(
+                    config_manager, config_dir, live_dir, stop_event=stop_event
+                )
+            except Exception:  # noqa: BLE001 — housekeeping never fails session start
+                logger.debug("store maintenance worker failed", exc_info=True)
+                return
+            if acquired:
+                return
+            # Another process owns the lock. Back off rather than abandon retry
+            # or spin. The next successful acquire checks the stamp while
+            # holding the lock, and reset wakes this bounded wait immediately.
+            if stop_event.wait(retry_delay):
+                return
+            retry_delay = min(retry_delay * 2, _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS)
     finally:
         done_event.set()
 
