@@ -8934,17 +8934,114 @@ def _ignored(rel: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> bool:
     return ignored
 
 
-def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
+#: Wall-clock cap for ONE search WALK — the tree traversal behind ``grep`` and
+#: ``glob`` — measured from the moment the walk starts. It bounds the WALK only:
+#: the scan side has its own ``GREP_SCAN_DEADLINE_S``, and before this constant
+#: existed neither bound covered the traversal at all.
+#:
+#: WHY, MEASURED. A delegated child walked the session store
+#: (``~/.local-operator/sessions``) inside ONE ``grep`` call and spent
+#: **2315.8 s** (38.6 min) there — 39.2 of that job's 40.1 min was tool time
+#: against 0.8 min of model time, with nothing emitted until the call returned,
+#: which is exactly what the operator saw as "subagents stuck between turns".
+#: The cost was the walk, not the regex: on that store (10,120 dirs / 43,553
+#: files, disk at 94% with ~25 sessions live) a scandir-only pass measured
+#: **110.7 s** and a stat-per-file pass **207.7 s**, and the ripgrep path paid
+#: the tree TWICE (a second walk merely to count oversized files) before its
+#: 30 s scan. Minutes of wall clock therefore pass before any regex runs, so
+#: the walk needs its own budget — 30 s mirrors ``GREP_SCAN_DEADLINE_S``
+#: deliberately: one number for "how long one search's filesystem work may
+#: take" is easier to reason about than two.
+#:
+#: A walk that hits it returns what it has, and the caller MUST render that as
+#: partial (see the search tools' honesty contract): a truncated walk can never
+#: be reported as "no matches", because the matches may be in the part of the
+#: tree that was never read.
+SEARCH_WALK_DEADLINE_S = 30.0
+
+#: How many walk ENTRIES may pass between two reads of the clock. The deadline
+#: is also consulted at every directory boundary; inside one directory the check
+#: is amortized this way because a ``time.monotonic()`` per entry is real cost
+#: on the hottest loop of these tools (60k-entry trees are normal here, and the
+#: walk runs in a worker thread precisely because it is syscall-bound), while
+#: 256 entries of slack cannot re-introduce the stall this bounds.
+_WALK_DEADLINE_CHECK_EVERY = 256
+
+
+class _WalkOutcome(NamedTuple):
+    """One walk's files, whether its budget stopped it, and its stat total.
+
+    ``files`` is what the walk REACHED — a prefix of what an unbounded walk
+    would have returned, never an estimate of the whole tree. ``truncated``
+    means the deadline fired, so the caller owes the reader a partial-result
+    note instead of an answer.
+    """
+
+    files: list[Path]
+    truncated: bool = False
+    #: Files above ``GREP_FILE_LIMIT_BYTES``, counted during the SAME pass and
+    #: only when the caller asked (``count_oversized``): that stat per file is
+    #: exactly what the removed second walk paid, so it is opt-in for the
+    #: callers that need the number (``_count_oversized_files`` discards
+    #: ``files`` — the ripgrep engine never needs the list — and one walk
+    #: implementation is worth the few hundred bytes per file it holds).
+    oversized: int = 0
+
+
+def _cut_short_note(stopped: str) -> str:
+    """The ONE truncation sentence the search tools render.
+
+    WHY A SHARED FUNCTION rather than a literal at each site: ``grep`` and
+    ``glob`` answer "does this pattern exist?" questions, and a partial answer
+    rendered as a complete one IS the lie this pair of tools must never tell.
+    One function keeps the two tools — and both grep engines, Python and
+    ripgrep — from drifting into describing the same condition differently, and
+    gives the tests a single phrase to pin.
+    """
+    return f"the search was cut short by {stopped}"
+
+
+def _budget_cut_note(*, seconds: float, constant: str, stage: str, reached: str) -> str:
+    """``_cut_short_note`` for the common shape: a named wall-clock budget."""
+    return _cut_short_note(f"the {seconds:g} s {stage} budget ({constant}) after {reached}")
+
+
+def _walk_entries(
+    root: Path,
+    *,
+    respect_ignore: bool = True,
+    deadline: float | None = None,
+    count_oversized: bool = False,
+) -> _WalkOutcome:
     """Depth-first walk pruning VCS/vendor/build trees, dotdirs, symlinks and
     (when ``respect_ignore``) gitignore-declared paths. Files only.
 
     Git semantics for directories are honored structurally: an ignored
     directory's subtree is skipped outright, so a ``!`` rule cannot re-include
     inside it — exactly git's own behaviour.
+
+    BOUNDED: ``deadline`` is a ``time.monotonic()`` instant (None means "no
+    budget", which only tests and the evidence probe use) and is consulted at
+    every directory boundary and, inside a directory, every
+    ``_WALK_DEADLINE_CHECK_EVERY`` entries. On expiry the walk stops where it
+    is and reports it through ``_WalkOutcome.truncated`` — see
+    ``SEARCH_WALK_DEADLINE_S`` for the measurement that made this necessary.
     """
     files: list[Path] = []
+    oversized = 0
+    truncated = False
+    seen = 0
 
     def _walk(directory: Path, rel_dir: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> None:
+        nonlocal oversized, seen, truncated
+        if truncated:
+            return
+        # The directory boundary is the coarsest and cheapest checkpoint, and
+        # it is the one that makes an ALREADY-EXPIRED deadline stop the walk
+        # before the first scandir rather than after the first directory.
+        if deadline is not None and time.monotonic() > deadline:
+            truncated = True
+            return
         local_rules = rules
         if respect_ignore:
             found = _load_ignore_rules(directory, rel_dir)
@@ -8967,6 +9064,18 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
         except OSError:
             return
         for entry in entries:
+            seen += 1
+            # Inside a directory the clock is read every
+            # ``_WALK_DEADLINE_CHECK_EVERY`` entries: the deadline still bounds
+            # a single huge directory, without paying a monotonic() call per
+            # entry on the walk's hottest loop.
+            if (
+                deadline is not None
+                and seen % _WALK_DEADLINE_CHECK_EVERY == 0
+                and time.monotonic() > deadline
+            ):
+                truncated = True
+                return
             try:
                 if entry.is_symlink():
                     continue  # never follow links: cycles and out-of-tree escapes
@@ -8984,22 +9093,34 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
                 if respect_ignore and _ignored(rel, local_rules):
                     continue
                 _walk(Path(entry.path), rel, local_rules)
+                if truncated:
+                    return
             elif is_file:
                 if respect_ignore and _ignored(rel, local_rules):
                     continue
                 files.append(Path(entry.path))
+                if count_oversized:
+                    try:
+                        # The stat happens on the entry THIS pass is already
+                        # holding, which is the whole point: the count used to
+                        # be recovered by a second traversal of the same tree
+                        # whose only job was to stat these files.
+                        if entry.stat(follow_symlinks=False).st_size > GREP_FILE_LIMIT_BYTES:
+                            oversized += 1
+                    except OSError:
+                        continue
 
     _walk(root, "", [])
-    return files
+    return _WalkOutcome(files=files, truncated=truncated, oversized=oversized)
 
 
-def _walk_files(root: Path) -> list[Path]:
-    """The grep file set: the ignore-aware walk."""
-    return _walk_entries(root)
+def _walk_files(root: Path) -> _WalkOutcome:
+    """The grep file set: the ignore-aware walk under the shipped walk budget."""
+    return _walk_entries(root, deadline=time.monotonic() + SEARCH_WALK_DEADLINE_S)
 
 
-def _grep_file_set(target: Path) -> tuple[list[Path], Path]:
-    """``(files, base)`` for one grep target, file or directory.
+def _grep_file_set(target: Path) -> tuple[_WalkOutcome, Path]:
+    """``(walk, base)`` for one grep target, file or directory.
 
     Synchronous by design: the walk is tens of thousands of scandir/stat
     calls on a large tree, so every caller reaches this through
@@ -9010,30 +9131,38 @@ def _grep_file_set(target: Path) -> tuple[list[Path], Path]:
     greps put every tree walk back-to-back on the render loop before the
     first frame of the batch could paint (sampled live: 100% of main-thread
     samples inside os_lstat/os_scandir/os_stat under task_eager_start).
+
+    A single NAMED file is its own file set and cannot be truncated: there is
+    no tree to walk, so the budget does not apply.
     """
     if target.is_file():
-        return [target], target.parent
+        return _WalkOutcome(files=[target]), target.parent
     return _walk_files(target), target
 
 
-def _count_oversized_files(target: Path) -> int:
-    """How many files in the grep set exceed ``GREP_FILE_LIMIT_BYTES``.
+def _count_oversized_files(target: Path) -> tuple[int, str]:
+    """``(skipped, cut_note)`` for the files over ``GREP_FILE_LIMIT_BYTES``.
 
     The ripgrep engine applies ``--max-filesize`` silently, and the footer
-    contract promises the skipped count either way — this recovers it. It
-    re-walks the tree, which is exactly the filesystem load described on
-    ``_grep_file_set``, so it is synchronous and thread-hosted for the same
-    reason.
+    contract promises the skipped count either way — this recovers it. ONE
+    PASS, and that is the fix rather than a detail: the ripgrep engine needs
+    only the COUNT, never the file list, so this walk stats each file as it
+    reaches it (``count_oversized``) instead of walking the tree once for a
+    file list it discards and then stat-ing every one of those files in a
+    second full traversal. On the measured store that second traversal was
+    another 110.7 s of scandir before the stats even started.
+
+    An empty ``cut_note`` means the count is complete. Anything else says the
+    walk ran out of ``SEARCH_WALK_DEADLINE_S`` first, which makes the count a
+    LOWER BOUND — the caller must say so rather than print it as the total.
     """
-    files, _base = _grep_file_set(target)
-    skipped = 0
-    for file_path in files:
-        try:
-            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
-                skipped += 1
-        except OSError:
-            continue
-    return skipped
+    walked = _walk_entries(
+        target,
+        deadline=time.monotonic() + SEARCH_WALK_DEADLINE_S,
+        count_oversized=True,
+    )
+    note = _walk_cut_note(len(walked.files)) if walked.truncated else ""
+    return walked.oversized, note
 
 
 class GlobParams(BaseModel):
@@ -9155,23 +9284,143 @@ class _IgnoreWalk:
         return _ignored(rel, self._stack(parent))
 
 
-def _glob_walk(root: Path, pattern: str) -> list[str]:
+class _GlobWalk(NamedTuple):
+    """One glob walk: the paths it collected, whether the budget stopped it,
+    and how many candidates pathlib handed it (the number the truncation note
+    reports, since a glob's own match count says nothing about how far the
+    walk got).
+
+    ``paths`` is a partial list when ``truncated`` — a prefix of the sorted
+    result an unbounded walk would have produced, never the whole answer.
+    """
+
+    paths: list[str]
+    truncated: bool = False
+    examined: int = 0
+
+
+class _WalkBudgetExceeded(Exception):
+    """Internal signal: a supervised walk's budget is spent.
+
+    Never escapes ``_glob_walk``. It exists because the stop has to unwind
+    through pathlib's own generator frames, which a flag cannot reach.
+    """
+
+
+class _GlobBudget:
+    """The deadline supervisor for a walk that ``Path.glob`` drives.
+
+    ``_walk_entries`` checks the clock inline because it owns its loop.
+    ``Path.glob`` does not hand us one, and a ``**`` pattern is precisely the
+    shape whose traversal must be bounded: measured on CPython 3.12,
+    ``Path.glob("**/*.py")`` over a tree with no ``.py`` file in it yields
+    **zero** items while still scanning every directory under the root. So a
+    stop condition written as "stop consuming the iterator" never fires for it,
+    which is why the checkpoint sits instead on the items pathlib DOES hand
+    back (one per directory scan in a ``**`` enumeration — see
+    ``_bounded_glob``) and why the stop is an exception.
+    """
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        #: Items pathlib has handed back, reported in the truncation note: a
+        #: glob's own match count says nothing about how far the walk got, and
+        #: the walk is what the budget stopped.
+        self.examined = 0
+        self.truncated = False
+
+    def consume(self, iterator: Iterator[Path]) -> Iterator[Path]:
+        for item in iterator:
+            self.examined += 1
+            # First item and every ``_WALK_DEADLINE_CHECK_EVERY`` after it: an
+            # already-expired budget stops before the second scan, and a long
+            # walk pays one ``monotonic()`` per 256 items rather than per item.
+            if self.examined == 1 or self.examined % _WALK_DEADLINE_CHECK_EVERY == 0:
+                if time.monotonic() > self.deadline:
+                    self.truncated = True
+                    raise _WalkBudgetExceeded
+            yield item
+
+
+def _bounded_glob(root: Path, pattern: str, budget: _GlobBudget) -> Iterator[Path]:
+    """pathlib's glob, with its traversal supervised by ``budget``.
+
+    WHY A DECOMPOSITION rather than a plain ``root.glob(pattern)`` call: the
+    budget has to be consulted *inside* pathlib's traversal (see
+    ``_GlobBudget``), and the one moment pathlib hands control back per
+    directory is a ``**`` component's enumeration, which yields exactly one
+    item per scandir. So a pattern containing a ``**`` component is split at
+    its FIRST one: the head enumerates candidate DIRECTORIES through pathlib
+    itself (``<head>/**``), and each of those directories is matched against the
+    tail — again through pathlib. Every matching rule therefore stays pathlib's
+    (case sensitivity from the platform flavour, hidden names, symlinks, ``**``
+    depth) instead of becoming a second glob implementation to keep in sync.
+
+    Equivalence with the plain call was checked over a tree carrying wildcards,
+    a nested ``docs``, a hidden directory and multi-``**`` patterns: identical
+    output on CPython 3.12 and 3.14 — which disagree with EACH OTHER about
+    ``src/**`` (3.14 yields the files below it, 3.12 only the directories) and
+    both behaviours are preserved here, because pathlib still does the matching.
+    """
+    parts = pattern.split("/")
+    if "**" not in parts:
+        # Non-recursive: pathlib walks at most one level per pattern component, so
+        # this call cannot descend an unbounded tree — its work is proportional to
+        # the directories the pattern names, and every item it hands back is a
+        # checkpoint. (A wildcard level that matches nothing between yields still
+        # scans that level; that cost is bounded by the pattern's depth, which is
+        # exactly why the ``**`` case below needs the decomposition.)
+        yield from budget.consume(root.glob(pattern))
+        return
+    head_end = parts.index("**")
+    head = "/".join(parts[:head_end])
+    tail = parts[head_end + 1 :]
+    for directory in budget.consume(root.glob(f"{head}/**" if head else "**")):
+        if not tail:
+            yield directory
+        elif "**" in tail:
+            # A second ``**`` (e.g. '**/x/**'): recurse so the supervision is
+            # re-established inside it rather than handing pathlib an unbounded
+            # sub-pattern. The tail shrinks every time, so this terminates.
+            yield from _bounded_glob(directory, "/".join(tail), budget)
+        else:
+            yield from budget.consume(directory.glob("/".join(tail)))
+
+
+def _glob_walk(root: Path, pattern: str) -> _GlobWalk:
     """The walk half of execute_glob, run in a worker thread.
 
     Matching still uses pathlib (so explicit hidden/vendor components in the
     pattern work), then gitignore-declared paths are filtered out — unless
     the pattern's literal prefix names them, because an author who writes
-    'dist/index.html' into a repo that ignores dist/ means that file."""
+    'dist/index.html' into a repo that ignores dist/ means that file.
+
+    BOUNDED: a ``**`` pattern used to walk everything below the working
+    directory with no budget at all — measured as 39.2 h of subagent tool time
+    over 24 h across the fleet, the largest single share of it. The deadline is
+    consulted as ``_bounded_glob`` walks (see ``_GlobBudget`` for why an
+    exception is what stops it) and a stopped walk reports itself through
+    ``_GlobWalk.truncated`` so the caller can never render a partial listing as
+    "no paths matched".
+    """
     prefix = _literal_prefix(pattern)
     cache = _IgnoreWalk(root)
-    out = []
-    for p in root.glob(pattern):
-        rel = p.relative_to(root).as_posix()
-        explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
-        if not explicitly_named and cache.ignores(p):
-            continue
-        out.append(rel + ("/" if p.is_dir() else ""))
-    return sorted(out)
+    budget = _GlobBudget(time.monotonic() + SEARCH_WALK_DEADLINE_S)
+    out: set[str] = set()
+    try:
+        for path in _bounded_glob(root, pattern, budget):
+            rel = path.relative_to(root).as_posix()
+            explicitly_named = bool(prefix) and (
+                rel == prefix or rel.startswith(prefix + "/")
+            )
+            if not explicitly_named and cache.ignores(path):
+                continue
+            out.add(rel + ("/" if path.is_dir() else ""))
+    except _WalkBudgetExceeded:
+        # The partial set is the answer we have; ``budget.truncated`` carries the
+        # rest of what the caller must say about it.
+        pass
+    return _GlobWalk(paths=sorted(out), truncated=budget.truncated, examined=budget.examined)
 
 
 @_guard("glob")
@@ -9240,15 +9489,43 @@ async def execute_glob(
 
     root = Path(_safe_cwd(context))
     # An unbounded ``**`` walk is filesystem work that can freeze the session;
-    # off the event loop and raced against abort like the grep scan.
-    matches, aborted = await _run_with_abort(
+    # off the event loop and raced against abort like the grep scan, and under
+    # the same wall-clock budget as every other search walk.
+    walked, aborted = await _run_with_abort(
         asyncio.to_thread(_glob_walk, root, pattern),
         signal,
         lambda: None,
     )
     if aborted:
         return _error(tool_call_id, "glob", "Glob aborted.")
+    # ``None`` only on abort, which already returned; the assert documents it
+    # for the type checker the same way the grep path does.
+    assert walked is not None
+    matches = walked.paths
+    # The one truncation clause, rendered once and reused by both glob answers:
+    # a budget-stopped walk must never be reported as "no paths matched",
+    # because the paths may be in the part of the tree that was never read.
+    cut_note = ""
+    if walked.truncated:
+        cut_note = _budget_cut_note(
+            seconds=SEARCH_WALK_DEADLINE_S,
+            constant="SEARCH_WALK_DEADLINE_S",
+            stage="walk",
+            reached=f"{walked.examined} path(s) examined",
+        )
     if not matches:
+        if cut_note:
+            return _text(
+                tool_call_id,
+                "glob",
+                f"Partial search: {cut_note}. No path matched pattern "
+                f"'{params.pattern}' among the {walked.examined} path(s) the walk had "
+                "examined, and the rest of the tree was never read — so this is not "
+                "an absence of matches in the tree you asked about. Narrow the "
+                "pattern and re-run: a literal directory prefix such as 'src/**/*.py' "
+                "is only descended into, where '**/*.py' walks everything below the "
+                "working directory.",
+            )
         return _text(
             tool_call_id,
             "glob",
@@ -9269,6 +9546,8 @@ async def execute_glob(
     header = f"{len(shown)} match(es) for '{params.pattern}'"
     if total > len(shown):
         header += f" of {total} (capped at {GLOB_RESULT_LIMIT})"
+    if cut_note:
+        header += f" — {cut_note}; these results are partial, narrow the pattern"
     return _text(tool_call_id, "glob", header + ":\n" + body, details=spill_details)
 
 
@@ -9380,28 +9659,69 @@ def _match_record(rel: str, lineno: int, line: str, kind: str) -> tuple[str, int
     return (rel, lineno, line, kind)
 
 
+def _walk_cut_note(files_walked: int) -> str:
+    """The walk stop, in the shared truncation vocabulary.
+
+    Every walker in this module (grep's file set, the oversized-file count,
+    glob's traversal) reports a spent ``SEARCH_WALK_DEADLINE_S`` through this
+    sentence, so one condition cannot be described three ways.
+    """
+    return _budget_cut_note(
+        seconds=SEARCH_WALK_DEADLINE_S,
+        constant="SEARCH_WALK_DEADLINE_S",
+        stage="walk",
+        reached=f"{files_walked} file(s)",
+    )
+
+
+class _GrepScan(NamedTuple):
+    """One grep engine's scan: the records it collected, and any early stop.
+
+    ``cut_note`` is the shared truncation sentence and is empty ONLY when the
+    engine scanned everything it was handed. Both engines stop early for two
+    reasons: their wall-clock deadline, which nothing else discloses, and the
+    match cap feeding the spill, which the header's ``N+`` already discloses.
+    ``files_searched``/``files_skipped`` are the Python engine's counters; the
+    ripgrep engine leaves them at 0 because rg reports neither — its skipped
+    count is recovered separately by ``_count_oversized_files``.
+    """
+
+    records: list[tuple[str, int, str, str]]
+    cut_note: str = ""
+    files_searched: int = 0
+    files_skipped: int = 0
+
+
 def _python_grep_scan(
     files: list[Path],
     base: Path,
     regex: re.Pattern[str],
     include: str | None,
     context_lines: int,
-) -> tuple[list[tuple[str, int, str, str]], int, int]:
+) -> _GrepScan:
     """The pure-Python scan, run in a worker thread.
 
-    Returns ``(records, files_searched, files_skipped)`` where a record is
-    ``(rel, lineno, text, kind)`` and kind is ``'m'`` (match) or ``'c'``
-    (context). Context records are only produced when ``context_lines`` > 0.
+    Returns ``_GrepScan``, whose records are ``(rel, lineno, text, kind)`` with
+    kind ``'m'`` (match) or ``'c'`` (context; only when ``context_lines`` > 0).
     Kept synchronous and self-contained so ``asyncio.to_thread`` can carry it
     off the event loop; the deadline bounds a backtracking pattern without
-    touching the loop.
+    touching the loop, and because it can stop the scan mid-tree it reports
+    itself in ``cut_note`` rather than letting a partial record set be rendered
+    as an absence of matches.
     """
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     records: list[tuple[str, int, str, str]] = []
     files_searched = 0
     files_skipped = 0
+    cut_note = ""
     for file_path in files:
         if time.monotonic() > deadline:
+            cut_note = _budget_cut_note(
+                seconds=GREP_SCAN_DEADLINE_S,
+                constant="GREP_SCAN_DEADLINE_S",
+                stage="scan",
+                reached=f"{files_searched} file(s) searched",
+            )
             break
         rel = (
             file_path.relative_to(base).as_posix()
@@ -9439,8 +9759,16 @@ def _python_grep_scan(
             kind = "m" if n in hit_lines else "c"
             records.append(_match_record(rel, n, lines[n - 1], kind))
         if sum(1 for r in records if r[3] == "m") >= GREP_SPILL_MATCH_LIMIT:
+            # A deliberate collector cap, not a budget stop: the header renders
+            # it as ``N+`` (see the ``GREP_SPILL_MATCH_LIMIT`` comment), so it
+            # needs no note of its own.
             break
-    return records, files_searched, files_skipped
+    return _GrepScan(
+        records=records,
+        cut_note=cut_note,
+        files_searched=files_searched,
+        files_skipped=files_skipped,
+    )
 
 
 _RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<text>.*)$")
@@ -9455,7 +9783,7 @@ async def _ripgrep_scan(
     case: bool,
     context_lines: int,
     signal: AbortSignal | None,
-) -> tuple[list[tuple[str, int, str, str]], int] | None:
+) -> _GrepScan | None:
     """Native ripgrep scan; None means "fall back to the Python engine".
 
     rg's defaults already match this tool's contract — hidden files skipped,
@@ -9463,7 +9791,17 @@ async def _ripgrep_scan(
     fixed vendor prune list the Python walker enforces. The subprocess is
     raced against the abort signal and the same 30s wall clock; output is
     capped well past the spill limit so a pathological tree cannot stream
-    forever."""
+    forever.
+
+    The two stops this function performs ITSELF — the deadline and the output
+    cap — return the records rg had already produced, flagged in ``cut_note``,
+    because they are not rg-side failures. ``None`` is reserved for what the
+    docstring has always claimed: rg missing, or rg erroring out. Conflating
+    the two is what made a 30 s bound cost 2315.8 s (see
+    ``SEARCH_WALK_DEADLINE_S``): the killed rg exited non-0/1, the caller read
+    that as "rg errored", discarded every record, and walked the store in
+    Python instead.
+    """
     rg = _rg_binary()
     if rg is None:
         return None
@@ -9495,6 +9833,7 @@ async def _ripgrep_scan(
     records: list[tuple[str, int, str, str]] = []
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     output_cap = (GREP_SPILL_MATCH_LIMIT + 1) * 3 + 1000
+    cut_note = ""
     try:
         assert proc.stdout is not None
         while len(records) < output_cap:
@@ -9503,6 +9842,12 @@ async def _ripgrep_scan(
                 return None
             if time.monotonic() > deadline:
                 proc.kill()
+                cut_note = _budget_cut_note(
+                    seconds=GREP_SCAN_DEADLINE_S,
+                    constant="GREP_SCAN_DEADLINE_S",
+                    stage="ripgrep scan",
+                    reached=f"{len(records)} record(s)",
+                )
                 break
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
@@ -9530,6 +9875,14 @@ async def _ripgrep_scan(
                 records.append(
                     _match_record(path, int(context.group("line")), context.group("text"), "c")
                 )
+        if len(records) >= output_cap:
+            # The collector cap, not a budget stop. It is disclosed in the
+            # header as ``N+``, but it still has to mark the result as stopped:
+            # otherwise the non-0/1 exit check below reads rg's kill as an
+            # rg-side failure and the caller throws these records away.
+            cut_note = _cut_short_note(
+                f"ripgrep's {output_cap}-record output cap after {len(records)} record(s)"
+            )
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except (TimeoutError, asyncio.TimeoutError):
@@ -9538,12 +9891,20 @@ async def _ripgrep_scan(
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-    # exit 0 = matches, 1 = none; anything else is an rg-side error (bad
-    # flag, unreadable cwd) the caller should not inherit.
-    if proc.returncode not in (0, 1):
+    # exit 0 = matches, 1 = none. Anything else is an rg-side error (bad flag,
+    # unreadable cwd) the caller should not inherit — EXCEPT the signal WE sent
+    # to enforce the scan's own budget, which is not an rg fault and whose
+    # records are a partial answer. A negative code means a signal ended rg and
+    # the only signal this function sends is the budget kill, keyed on
+    # ``cut_note``. Returning ``None`` for it is what turned a 30 s bound into
+    # the measured 2315.8 s call: rg was killed, its records were discarded, and
+    # ``execute_grep`` fell through to the Python engine's tree walk instead
+    # (see ``SEARCH_WALK_DEADLINE_S``).
+    returncode = proc.returncode
+    killed_on_our_budget = cut_note and returncode is not None and returncode < 0
+    if returncode not in (0, 1) and not killed_on_our_budget:
         return None
-    match_count = sum(1 for r in records if r[3] == "m")
-    return records, match_count
+    return _GrepScan(records=records, cut_note=cut_note)
 
 
 def _render_grep_body(
@@ -9645,6 +10006,14 @@ async def execute_grep(
     files_searched = 0
     files_skipped = 0
     engine_note = ""
+    # Shared-vocabulary notes for every stop that makes this answer partial —
+    # an engine's own scan budget, the file-set walk, ripgrep's output cap. An
+    # EMPTY list is the only state in which "no matches" is an answer, and that
+    # is the entire reason they are carried to the render sites below.
+    cut_notes: list[str] = []
+    # The oversized-file count's own stop, kept separate on purpose: a truncated
+    # COUNT does not make the records partial, it makes the count a lower bound.
+    count_cut_note = ""
 
     # Engine choice needs only a stat of an explicitly named file, never the
     # tree walk: the walk is deferred into the worker threads below so the
@@ -9664,7 +10033,7 @@ async def execute_grep(
         except OSError:
             use_rg = False
 
-    scan_result = None
+    scan_result: _GrepScan | None = None
     if use_rg:
         scan_result = await _ripgrep_scan(
             params.pattern,
@@ -9676,17 +10045,20 @@ async def execute_grep(
             signal,
         )
     if scan_result is not None:
-        records, _count = scan_result
+        records = scan_result.records
         engine_note = " (ripgrep)"
+        if scan_result.cut_note:
+            cut_notes.append(scan_result.cut_note)
         # rg applies --max-filesize silently; recover the count the footer
-        # contract promises. The walk+stat pass is the same filesystem load
-        # as the scan itself, so it rides a thread raced against abort.
-        # Skipped for a single named file: the engine gate above only keeps
-        # rg when that file is already under the cap, so the count is
-        # definitionally zero and a worker-thread hop to confirm it would be
-        # pure overhead on the most common grep shape (review F2).
+        # contract promises. ONE bounded walk+stat pass, not the two passes
+        # this used to cost (a full walk for a file list nothing else wanted,
+        # then a stat of every file in it). Skipped for a single named file:
+        # the engine gate above only keeps rg when that file is already under
+        # the cap, so the count is definitionally zero and a worker-thread hop
+        # to confirm it would be pure overhead on the most common grep shape
+        # (review F2).
         if not target_is_file:
-            skipped_count, aborted = await _run_with_abort(
+            counted, aborted = await _run_with_abort(
                 asyncio.to_thread(_count_oversized_files, target),
                 signal,
                 lambda: None,
@@ -9695,11 +10067,11 @@ async def execute_grep(
                 return _error(tool_call_id, "grep", "Search aborted.")
             # Non-None whenever aborted is False: _run_with_abort returns the
             # coroutine's result on the non-abort arms, and the counter always
-            # returns an int. The assert states that contract for the type
+            # returns a tuple. The assert states that contract for the type
             # checker instead of an `or 0` that would silently launder a
             # future internal failure into a zero (review N1).
-            assert skipped_count is not None
-            files_skipped = skipped_count
+            assert counted is not None
+            files_skipped, count_cut_note = counted
     else:
         if signal and signal.aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
@@ -9710,9 +10082,19 @@ async def execute_grep(
         # unprocessable. Both run in one worker-thread hop raced against the
         # abort signal, with a wall-clock cap bounding the
         # pathological-regex case (regexes are not classified).
-        def _walk_and_scan() -> tuple[list[tuple[str, int, str, str]], int, int]:
-            files, scan_base = _grep_file_set(target)
-            return _python_grep_scan(files, scan_base, regex, params.include, params.context_lines)
+        def _walk_and_scan() -> _GrepScan:
+            file_set, scan_base = _grep_file_set(target)
+            scanned = _python_grep_scan(
+                file_set.files, scan_base, regex, params.include, params.context_lines
+            )
+            # One note, both hops: a file set the walk budget cut short makes the
+            # scan's own completeness claim false, so the two stops are joined
+            # here rather than letting the scan render as if it had decided the
+            # answer on its own.
+            notes = [_walk_cut_note(len(file_set.files))] if file_set.truncated else []
+            if scanned.cut_note:
+                notes.append(scanned.cut_note)
+            return scanned._replace(cut_note="; ".join(notes))
 
         py_result, aborted = await _run_with_abort(
             asyncio.to_thread(_walk_and_scan),
@@ -9727,18 +10109,53 @@ async def execute_grep(
         # _run_with_abort — assert, never mislabel it "Search aborted."
         # (review F1).
         assert py_result is not None
-        records, files_searched, files_skipped = py_result
+        records = py_result.records
+        files_searched = py_result.files_searched
+        files_skipped = py_result.files_skipped
+        if py_result.cut_note:
+            cut_notes.append(py_result.cut_note)
 
     matches = [r for r in records if r[3] == "m"]
+    cut_note = "; ".join(cut_notes)
+
+    def _skipped_clause() -> str:
+        """The footer's ``file(s) skipped`` suffix, or "" when there is none.
+
+        Byte-identical to the inline string it replaces whenever the count is
+        complete. A count produced by a truncated walk is a LOWER BOUND, so it
+        says so: printing it bare would claim a total the walk never took.
+        """
+        if not (files_skipped or count_cut_note):
+            return ""
+        clause = f" ({files_skipped} file(s) skipped over the 1MB cap"
+        if count_cut_note:
+            clause += f"; a lower bound, {count_cut_note}"
+        return clause + ")"
+
     if not matches:
-        skipped_note = (
-            f" ({files_skipped} file(s) skipped over the 1MB cap)" if files_skipped else ""
-        )
-        where = f"in {files_searched} file(s)" if not engine_note else ""
+        if cut_note:
+            # The honesty contract, and the reason this change exists: "no
+            # matches" is only true of what was READ, and a budget stop means
+            # the rest of the tree was never read. So the result says it is
+            # partial, says which stop caused that, and says how to narrow it —
+            # the two ways this tool offers, a subdirectory or an include glob.
+            # ``useless`` stays unset: this is not an answer, so a caller must
+            # not treat it as one that closes the question.
+            where = "" if engine_note else f" in the {files_searched} file(s) searched"
+            return _text(
+                tool_call_id,
+                "grep",
+                f"Partial search: {cut_note}. No match for '{params.pattern}' was "
+                f"found{where}, but the part of the tree the search never reached "
+                "was not read, so this is not an absence of matches. Narrow the "
+                "search with path=<subdirectory> or include=<glob> and re-run"
+                f"{_skipped_clause()}{engine_note}.",
+            )
+        where = f" in {files_searched} file(s)" if not engine_note else ""
         return _text(
             tool_call_id,
             "grep",
-            f"No matches for '{params.pattern}'{where}{skipped_note}{engine_note}.",
+            f"No matches for '{params.pattern}'{where}{_skipped_clause()}{engine_note}.",
             useless=True,
             details={"useless": True},
         )
@@ -9760,8 +10177,13 @@ async def execute_grep(
         header += f" (use skip={params.skip + shown} for the next page)"
     if params.skip:
         header += f" (skipped {params.skip})"
-    if files_skipped:
-        header += f" ({files_skipped} file(s) skipped over the 1MB cap)"
+    header += _skipped_clause()
+    if cut_note:
+        # Additive to the header contract above, never a replacement for it: the
+        # non-truncated spellings ('N match(es)', 'of M', 'skipped over the 1MB
+        # cap', 'capped at 500', '(ripgrep)') are unchanged, and this clause
+        # only ever appears when a budget actually stopped something.
+        header += f" — {cut_note}; these results are partial, narrow path= or include="
     return _text(
         tool_call_id, "grep", header + ":\n" + body_text + engine_note, details=spill_details
     )
