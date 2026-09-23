@@ -3341,3 +3341,129 @@ def test_the_pass_children_mirrors_the_registry_children(target) -> None:
         ]
     if target is None:
         assert [node.job_id for node in comms.roster_pass().children(target)] == ["job-0000"]
+
+
+def test_a_child_that_dies_before_attaching_keeps_its_handle_and_its_reason() -> None:
+    """A pre-attach failure must be ENUMERABLE and DIAGNOSABLE, not invisible.
+
+    Measured defect: a child that failed before ``attach`` ran (job
+    ``f6ed760e3449``, "No package metadata was found for local-operator",
+    spawned inside an install swap) had ``session_dir is None``, and
+    ``snapshot()`` DROPPED such a record outright. So the parent could not name
+    it (``hub op=list`` omitted it), could not peek it by id or label, and could
+    not resume it — the only recovery was to re-dispatch from scratch and lose
+    whatever it had done. Nothing on any surface said WHY it failed.
+
+    What such a child can and cannot promise: it has no transcript, so it is
+    NOT resumable, and the roster must say so honestly rather than offer a
+    resume that would fail. But its outcome and its error text ARE durable
+    facts, so the record survives a snapshot/restore and the roster reports the
+    reason.
+    """
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("dead", "remediate-ud1426-r2", agent_role="coder")
+    # Never attached: no transcript directory, and the settle path recorded the
+    # failure. This is the exact shape the writer produces.
+    assert comms._records["dead"].session_dir is None
+    comms.record_outcome(
+        "dead", "failed", error_text="No package metadata was found for local-operator"
+    )
+
+    # The record survives the round trip that carries it across a restart.
+    payload = comms.snapshot()
+    assert any(row["job_id"] == "dead" for row in payload), (
+        "a pre-attach failure was dropped from the snapshot, so it cannot be "
+        "named or diagnosed after a restart"
+    )
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(payload)
+
+    row = next(r for r in restored.roster() if r.job_id == "dead")
+    assert row.status == "failed"
+    assert row.error_text == "No package metadata was found for local-operator"
+    # Honest refusal, not a promise: no transcript means no resume.
+    assert row.resumable is False
+    assert row.session_id is None
+    # ...and the ROW says why it is not resumable, carrying the recorded reason.
+    assert (
+        row.detail and "No package metadata was found for local-operator" in row.detail
+    ), row.detail
+
+
+def test_a_live_and_a_clean_child_are_unaffected_by_the_pre_attach_path() -> None:
+    """The negative arm: keeping no-transcript records must not change the rest.
+
+    A child WITH a transcript is untouched by this change — it still snapshots,
+    restores and reports as before — and a clean completion still carries no
+    error text. Without this, a fix that simply kept every record and labelled
+    every unattached child "failed" would pass the test above.
+    """
+    from pathlib import Path
+
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("ok", "reviewer", agent_role="reviewer")
+    comms._records["ok"].session_dir = Path("/tmp/definitely-a-transcript-dir")
+    comms.record_outcome("ok", "completed", result_text="done")
+
+    payload = comms.snapshot()
+    row_payload = next(r for r in payload if r["job_id"] == "ok")
+    assert row_payload["session_dir"] == "/tmp/definitely-a-transcript-dir"
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(payload)
+    row = next(r for r in restored.roster() if r.job_id == "ok")
+    assert row.status == "completed"
+    assert row.error_text is None
+    assert row.session_id == "definitely-a-transcript-dir"
+
+
+def test_an_unattached_child_with_no_outcome_is_still_not_snapshotted() -> None:
+    """R2-2: the negative arm must exercise an UNATTACHED record.
+
+    The sibling negative arm uses an ATTACHED child, so it would pass even if a
+    fix kept every unattached record and the change were wrong. This arm is the
+    parked/queued case the pinning contract is about: no transcript AND no
+    outcome, so it must NOT be snapshot — otherwise a restart with the job row
+    swept plants a ``gone — never started`` ghost row.
+    """
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("parked", "queued behind the gate")
+    assert comms._records["parked"].session_dir is None
+    assert comms._records["parked"].outcome is None
+    assert comms.snapshot() == [], (
+        "an unattached child with no outcome was snapshot — a parked child must "
+        "leave no durable record"
+    )
+
+
+def test_resume_names_a_pre_attach_failure_rather_than_saying_never_started() -> None:
+    """QA round 2, Q-3: the last surface still mislabelling a child that DID run.
+
+    ``resume`` refused a settled pre-attach failure with "never started" — the
+    same wrong sentence the roster and peek were fixed off. The verdict is
+    right (there is no transcript to replay); the reason was not.
+    """
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("dead", "remediate-ud1426-r2", agent_role="coder")
+    comms.record_outcome("dead", "failed", error_text="No package metadata was found")
+
+    result, reason = comms.resume("dead", "carry on")
+    assert result is None
+    assert reason is not None
+    assert "ended before it attached" in reason
+    assert "No package metadata was found" in reason
+    assert "never started" not in reason
+
+    # ...and a PARKED child still gets the original wording.
+    comms.record_launch("parked", "queued behind the gate")
+    result2, reason2 = comms.resume("parked", "carry on")
+    assert result2 is None
+    assert reason2 is not None and "never started" in reason2
