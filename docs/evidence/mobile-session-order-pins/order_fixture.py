@@ -8,6 +8,7 @@ and it is the case the shared-key fix makes agree.
 
 Run: PYTHONPATH=. .venv/bin/python THIS PORT
 """
+
 from __future__ import annotations
 
 import asyncio
