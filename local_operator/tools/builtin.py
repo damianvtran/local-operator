@@ -138,6 +138,9 @@ from local_operator.redaction_shapes import (
     ShapeReport,
     credential_dump_notice,
     has_shape_anchor,
+    pem_body_line,
+    pem_end_line,
+    pem_header_line_end,
     scrub_secrets_with_hits,
     shape_report,
 )
@@ -2250,9 +2253,23 @@ MEMORY_EXCEEDED_FALLBACK = (
 # between the two classifiers is a silent leak — which is exactly what happened when the
 # table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
 # published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+#: The patterns, kept under their historical names: they are the DEFINITION of the three
+#: languages, and #1445's arms (`_pem_grammar_is_live`, the body-floor pin) read them
+#: through these names to check that a literal is still armour and that the grammar's floor
+#: is the hold's. Nothing at runtime reached them after the deciders landed, which is what
+#: these aliases say rather than leaving a reader to find out.
 _PEM_HEADER_LINE = PEM_HEADER_LINE_RE
 _PEM_BODY_LINE = PEM_BODY_LINE_RE
 _PEM_END_LINE = PEM_END_LINE_RE
+
+#: The SAME three languages, decided in linear time rather than by the patterns'
+#: own backtracking walk — the three call sites below are where that walk was
+#: measured, and the arms in `tests/unit/secrets/test_credential_shapes.py` pin each
+#: decider to its pattern. Bound at module level so a test can stand in for one, which
+#: is how "the classifier was not reached" is asserted as a fact rather than a duration.
+_pem_body_line = pem_body_line
+_pem_end_line = pem_end_line
+_pem_header_line_end = pem_header_line_end
 
 #: NECESSARY CONDITIONS of the header pattern above, checked BEFORE it wherever the
 #: pattern would otherwise run over text this filter did not shape. Both literals are
@@ -2263,6 +2280,11 @@ _PEM_END_LINE = PEM_END_LINE_RE
 #: #1427 puts in front of the mask's own search (``_PEM_HEADER_HINTS`` in that branch),
 #: so a merge of the two keeps ONE gate instead of two that can drift apart; on this
 #: branch the cap-split hold below is the reader.
+#: The other literal a classifier needs: `END `, a necessary condition of the END
+#: pattern, kept as a gate at the call site below because a line without it cannot
+#: be an END line and so must not run the prefix grammar at all.
+_PEM_END_HINT = "END "
+
 _PEM_HEADER_HINTS = ("BEGIN ", "PRIVATE KEY")
 
 #: The line terminator that ends a PEM header's own line. Consumed by the mask at
@@ -2634,12 +2656,14 @@ class _PipeRedactor:
         if self._in_key_block:
             out: list[str] = []
             for line in ready.splitlines(keepends=True):
-                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                # Stripped ONCE: the gate and the classifier must see the same bytes.
+                stripped = line.rstrip("\r\n")
+                if _PEM_END_HINT in stripped and _pem_end_line(stripped):
                     self._in_key_block = False
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_HEADER_LINE.match(line.rstrip("\r\n")):
+                if _pem_header_line_end(stripped) is not None:
                     # A SECOND block's header inside an open block is armour, not prose.
                     # The prose rule below closed the state on it, and because a header
                     # is released with the body lines that follow it (the hold keeps a
@@ -2664,7 +2688,7 @@ class _PipeRedactor:
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                if _pem_body_line(stripped):
                     if not self._key_block_marker_sent:
                         self._key_block_marker_sent = True
                         out.append(REDACTION_MARKER + "\n")
@@ -2674,7 +2698,15 @@ class _PipeRedactor:
                 self._key_block_marker_sent = False
                 out.append(line)
             return "".join(out)
-        begin = _PEM_HEADER_LINE.search(ready)
+        # GATED SEARCH, and the gate is what makes an ORDINARY read free: this is
+        # the one place the ambiguous prefix grammar runs over arbitrary text, and
+        # both literals are necessary conditions of the pattern, so a read carrying
+        # neither skips the search entirely (see `_PEM_HEADER_HINTS`).
+        begin = (
+            _pem_header_line_end(ready)
+            if all(hint in ready for hint in _PEM_HEADER_HINTS)
+            else None
+        )
         if begin is None:
             return ready
         self._in_key_block = True
@@ -2693,18 +2725,21 @@ class _PipeRedactor:
         # as an earlier round did) changes the bytes the shape table is about to read, and
         # a rewritten separator is a shape the table cannot match. The remainder is
         # passed through exactly as read.
-        tail = ready[begin.end() :]
+        # The DECIDER answers with the offset the pattern's match ENDS at (the same
+        # number `_PEM_HEADER_LINE.search(ready).end()` gave), so the split below is by
+        # an int and not by a match object.
+        tail = ready[begin:]
         break_match = _PEM_LINE_BREAK.match(tail)
         if break_match is None:
             # The header is the last thing in this release: the terminator arrives
             # with the next one, and the block is open across that boundary.
-            return ready[: begin.end()]
+            return ready[:begin]
         # The terminator is emitted BYTE-IDENTICAL (no rewriting — see above) and
         # never offered to the line loop, which read it as prose and closed the
         # block. This is also where an escaped `\\n` (no real break) keeps its
         # behaviour: it is not a separator, so it stays in the masked remainder.
         return (
-            ready[: begin.end()]
+            ready[:begin]
             + break_match.group()
             + self._mask_open_key_block(tail[break_match.end() :])
         )
@@ -2813,7 +2848,7 @@ class _PipeRedactor:
         length — so an alignment that puts the cap inside the header line splits the
         MARKER: ``-----BEGIN RSA PRI`` goes out as a bare armour fragment and the rest
         of the marker stays in ``pending``, where its line no longer STARTS with the
-        marker, so ``_PEM_HEADER_LINE`` can never match it again. The state never
+        marker, so no header line can start there any more. The state never
         opens, the carried-state masking below never engages, and every later release
         is body that nothing masks. Measured on the shape of ``head -c 8210 key.pem``:
         138 raw body lines published, and the alignment is fixed per stream — a session
@@ -2849,7 +2884,7 @@ class _PipeRedactor:
         line = text[line_start : break_match.start()]
         if not all(hint in line for hint in _PEM_HEADER_HINTS):
             return cut
-        if _PEM_HEADER_LINE.match(line) is None:
+        if _pem_header_line_end(line) is None:
             return cut
         return break_match.end()
 
