@@ -419,9 +419,7 @@ def _query_version(query: str, model_id: str) -> float | None:
     # `anthropic/claude-opus-5.5`; that namespace is not the model-family term
     # whose number this filter constrains.
     model_part = model_id.partition("/")[2] or model_id
-    model_words = [
-        word for word in _match_key(model_part).split() if not word.isdigit()
-    ]
+    model_words = [word for word in _match_key(model_part).split() if not word.isdigit()]
     decimals = list(re.finditer(r"(?<!\d)(\d+)[.-](\d{1,2})(?!\d)", query))
     for match in reversed(decimals):
         preceding = _match_key(query[: match.start()]).split()
