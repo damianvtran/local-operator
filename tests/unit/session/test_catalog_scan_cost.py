@@ -57,6 +57,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
+
 import local_operator.session.retention as retention
 from local_operator.resume import _recent_sessions_with_origin
 from local_operator.session.catalog import load_catalog
@@ -1569,3 +1571,53 @@ class TestBirthDatesAreMemoizedNotBounded:
             _session(other, "user00000001", created=1.0, stamp=2.0)
             load_catalog(other)
         assert len(catalog._BIRTH_MEMO) == catalog._BIRTH_MEMO_ROOTS
+
+    @pytest.mark.parametrize("corrupt", ["null", '"1700000000"', "true", "{torn", ""])
+    def test_an_unparseable_sidecar_is_answered_from_the_fallback_and_not_cached(
+        self, tmp_path: Path, corrupt: str
+    ) -> None:
+        """Review round 2, F2: a sidecar that is PRESENT but does not parse gets
+        its birth from ``origin.json`` (or ``st_birthtime``), which the memo key
+        does not watch. Caching that answer served a stale fork birth after the
+        origin changed; the answer must match an uncached read every time."""
+        from local_operator.session.creation import session_created_at
+
+        self._fresh_process()
+        _session(tmp_path, "user00000001", created=5_000.0, stamp=10_000.0)
+        directory = tmp_path / "sessions" / "user00000001"
+        (directory / "created_at.json").write_text(corrupt, encoding="utf-8")
+        origin = directory / "origin.json"
+        origin.write_text(json.dumps({"origin": "fork", "forked_at": 2_000.0}), encoding="utf-8")
+
+        assert load_catalog(tmp_path)[0].row.created_at == 2_000.0
+        origin.write_text(json.dumps({"origin": "fork", "forked_at": 9_000.0}), encoding="utf-8")
+
+        served = load_catalog(tmp_path)[0].row.created_at
+        assert served == session_created_at(directory) == 9_000.0
+
+    def test_a_corrupt_sidecar_repaired_in_place_is_seen_at_once(self, tmp_path: Path) -> None:
+        """QA round 2: repair a corrupt sidecar to the SAME inode, size and
+        nanosecond mtime. The corrupt read was never cached, so the repair is
+        seen on the next call -- exactly as an uncached read sees it."""
+        from local_operator.session.creation import session_created_at
+
+        self._fresh_process()
+        _session(tmp_path, "user00000001", created=5_000.0, stamp=10_000.0)
+        sidecar = tmp_path / "sessions" / "user00000001" / "created_at.json"
+        sidecar.write_text("nul", encoding="utf-8")  # same length as the repair below
+        before = os.stat(sidecar)
+        fallback = load_catalog(tmp_path)[0].row.created_at
+
+        with open(sidecar, "r+", encoding="utf-8") as handle:
+            handle.write("7.0")
+        os.utime(sidecar, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(sidecar)
+        assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ), "fixture: the repair must be invisible to the memo key"
+
+        repaired = load_catalog(tmp_path)[0].row.created_at
+        assert fallback != 7.0
+        assert repaired == session_created_at(sidecar.parent) == 7.0

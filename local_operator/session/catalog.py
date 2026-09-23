@@ -21,6 +21,7 @@ from local_operator.resume import SessionRow
 from local_operator.session.archived import archived_ids
 from local_operator.session.creation import (
     CREATED_AT_NAME,
+    _stored,
     session_category,
     session_created_at,
 )
@@ -931,10 +932,14 @@ _ROW_CACHE: dict[Path, tuple[tuple[float, int], SessionRow]] = {}
 #: restores the same nanosecond mtime (``touch -r`` after editing) -- served
 #: stale until the process restarts or the file changes again.
 #:
-#: NOT CACHED: a directory with no readable sidecar. Its birth comes from
-#: ``origin.json`` or ``st_birthtime`` (``creation.session_created_at``), which
-#: this key cannot validate, so it is read every time -- the same cost as before,
-#: for the ~0.4% of directories measured without one (39 of 9,725).
+#: NOT CACHED: a directory with no readable sidecar -- absent, OR present but
+#: unparseable (``null``, a bare string, ``true``, torn JSON). Its birth then
+#: comes from ``origin.json`` or ``st_birthtime`` (``creation.session_created_at``),
+#: files this key does not watch, so it is read every time -- the same cost as
+#: before, for the ~0.4% of directories measured without one (39 of 9,725).
+#: Only a value parsed FROM the watched file is ever cached (PR #1470 review
+#: round 2, F2: caching the fallback served a stale ``origin.json`` birth, and
+#: missed a corrupt sidecar repaired in place to the same inode/size/mtime).
 #:
 #: BOUNDED: each ``load_catalog`` call prunes its root's map to that call's
 #: candidates, so a map holds at most one entry per visible session of the
@@ -977,7 +982,13 @@ def _memoized_birth(sessions: Path, session_id: str) -> float:
     cached = memo.get(session_id)
     if cached is not None and cached[0] == key:
         return cached[1]
-    born = session_created_at(Path(session_dir))
+    # ``_stored`` is the sidecar half of ``session_created_at``'s own rule, so
+    # a parsed value is exactly what that function would have returned. When
+    # it does not parse, the answer is the fallback's, which is not cached.
+    born = _stored(Path(session_dir))
+    if born is None:
+        memo.pop(session_id, None)
+        return session_created_at(Path(session_dir))
     memo[session_id] = (key, born)
     return born
 
