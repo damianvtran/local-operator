@@ -86,13 +86,16 @@ GOAL_CONTINUATION_TAIL = (
 
 GOAL_CONTINUATION_PROMPT = GOAL_CONTINUATION_HEAD + "{goal}" + GOAL_CONTINUATION_TAIL
 
-#: What an unreadable verdict says on the frame when the parser produced no
-#: reason of its own. A surface reading `reason` must never see "" beside a
-#: `stalled`, or it renders a stall with no cause.
+#: What an unreadable verdict says in ``reason`` when the judge is still being
+#: asked to continue. A surface reading `reason` must never find it empty beside a
+#: judge state that is about to spend tokens again.
 NO_VERDICT_REASON = "judge returned no verdict"
 
-#: The state the judge settles a goal in when it stops WITHOUT the goal being
-#: met: the consecutive-failure breaker, or the continuation cap.
+#: The two sentences a STALL carries, one per cause, and they are constants for
+#: the same reason: what a surface needs from a stall is WHICH bound stopped it,
+#: and the judge's own words — an unreadable answer, or a CONTINUE — do not say
+#: that. A surface that reported one cause for the other would send the user
+#: looking for a provider problem that does not exist.
 STALLED_BREAKER_REASON = "judge could not decide"
 STALLED_CAP_REASON = f"stopped after {MAX_GOAL_CONTINUATIONS} continuations"
 
@@ -121,18 +124,18 @@ def is_goal_continuation_instruction(text: str) -> bool:
     Matched on the fixed head and the fixed tail, never as a substring search
     over the goal: a user message that merely OPENS with the head, or that quotes
     the goal text in a sentence of their own, is the user's own words and must
-    paint. The one thing it cannot tell apart is a user who types the whole
-    template verbatim — the same inherent limit the text-equality exemption for
-    ``_CONTINUATION_PROMPT`` documents, and vanishingly unlikely.
+    paint. The empty-goal shape is accepted too, because this recognises a
+    FAMILY and not a well-formedness constraint — the drive that calls the
+    producer is what refuses a goal with no text, and a recogniser that second-
+    guessed it would leave one member of the family paintable. The one thing it
+    cannot tell apart is a user who types the whole template verbatim — the same
+    inherent limit the text-equality exemption for ``_CONTINUATION_PROMPT``
+    documents, and vanishingly unlikely.
     """
     stripped = text.strip()
-    if not stripped.startswith(GOAL_CONTINUATION_HEAD):
-        return False
-    if not stripped.endswith(GOAL_CONTINUATION_TAIL):
-        return False
-    # A non-empty goal: the head and the tail alone are the edges with nothing
-    # between them, which is not a shape this module produces.
-    return len(stripped) > len(GOAL_CONTINUATION_HEAD) + len(GOAL_CONTINUATION_TAIL)
+    return stripped.startswith(GOAL_CONTINUATION_HEAD) and stripped.endswith(
+        GOAL_CONTINUATION_TAIL
+    )
 
 
 def _never() -> bool:
@@ -345,6 +348,11 @@ class GoalJudge:
         """
         rearms = 0
         while True:
+            if self.token() != token:
+                # The goal was replaced or deleted before this iteration: the run
+                # is over, and the record now belongs to a DIFFERENT goal, so this
+                # driver must not write its state onto the new one.
+                return
             # Captured IMMEDIATELY before the call, so the comparison below is
             # against the context this verdict is about.
             captured = self.serial()
@@ -379,7 +387,12 @@ class GoalJudge:
                 # "settled, with no model verdict recorded yet", the second adds
                 # the verdict the model gave.
                 self.settled(reason)
-                self._publish(state="done", verdict="achieved", reason=reason)
+                # `failures=0` rides along because a readable verdict is what
+                # clears the strike count, and ACHIEVED is the most readable
+                # verdict there is: leaving two strikes on a settled goal would
+                # hand the next arming a breaker that is already two thirds spent
+                # (the record is the authority `_drive` reads its counters from).
+                self._publish(state="done", verdict="achieved", reason=reason, failures=0)
                 return
             if verdict is False:
                 # A readable verdict clears the strike counter: the breaker is
@@ -394,14 +407,19 @@ class GoalJudge:
                 # work continues — and the STRIKE is what stops a broken judge
                 # from spending indefinitely.
                 if failures >= GOAL_JUDGE_FAILURES:
+                    # The BREAKER's own sentence, and NOT the parser's words:
+                    # this verdict was unreadable, so quoting it as the reason a
+                    # surface shows would present a misreading as the judge's
+                    # opinion. The state and the reason together are what let a
+                    # surface tell this stall from the cap's.
                     self._publish(
                         state="stalled",
                         verdict="unknown",
                         failures=failures,
-                        reason=reason or NO_VERDICT_REASON,
+                        reason=STALLED_BREAKER_REASON,
                     )
                     return
-                self._publish(verdict="unknown", failures=failures, reason=reason)
+                self._publish(verdict="unknown", failures=failures, reason=NO_VERDICT_REASON)
             if int(self._mirror["run"]) >= MAX_GOAL_CONTINUATIONS:
                 # The cap, NOT the breaker, and the reason says which: a surface
                 # that reported one for the other would send the user looking at
