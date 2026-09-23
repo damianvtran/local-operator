@@ -936,3 +936,23 @@ def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
     assert resume.PEER_REASON_WORDS["bad_endpoint"] == (
         "the address it publishes cannot be dialled"
     )
+    # AND THE FAMILIES THAT ARE ONLY EVER WRITTEN AFTER A CONNECT HAVE THE RIGHT
+    # READING, which is the assertion "not the code" cannot make: the silence default
+    # satisfies it too, which is how ``handshake_refused:`` — the one arrival whose
+    # own name says the peer ANSWERED — shipped reading as silence, and how the bare
+    # refusal codes could regress to it (round 24, Q-R24-1).
+    refused = {value for name, value in vars(handshake).items() if name.startswith("REASON_")} | {
+        "pair_phase_requires_the_ceremony"
+    }
+    # ``not_a_member`` is the one refusal with a DIAGNOSIS rather than the refusal
+    # reading (the peer answered, refused, and said WHICH way this device is wrong),
+    # so it keeps its table entry; the assertion below it covers that.
+    refused -= {"not_a_member"}
+    refused |= {
+        relay.handshake_refused_reason(exc)
+        for exc in (TimeoutError(), ConnectionResetError("the peer closed it"))
+    }
+    assert len(refused) >= 11, refused  # a truncated enumeration is not evidence
+    for reason in sorted(refused):
+        assert resume.peer_reason_words(reason) == resume._BARE_CODE_WORDS, reason  # noqa: SLF001
+    assert resume.peer_reason_words("not_a_member") == resume.PEER_REASON_WORDS["not_a_member"]

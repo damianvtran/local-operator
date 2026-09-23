@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator import resume
 from local_operator.network import cli as net_cli
 from local_operator.network import relay, store, types, wire
 from tests.unit.network import conftest as net_fixtures
@@ -566,6 +567,130 @@ def test_a_reason_that_names_an_answer_is_not_read_as_a_machine_list() -> None:
     assert listed == "unreachable: 10.0.0.1:7 no_answer; 10.0.0.2:7 bad_endpoint"
     assert net_cli._peer_line({**row, "reason": listed}) == (  # noqa: SLF001
         "device-b cannot be reached from this device right now (no address of it answered)"
+    )
+
+
+def test_a_peer_that_answered_and_refused_never_reads_as_silence() -> None:
+    """QA round 24, Q-R24-1 — round 10's MAJOR-1, one state over.
+
+    ``relay.dial`` writes ``handshake_refused:<ExceptionClass>`` in the ``except`` arm
+    AFTER ``probe.sock`` was handed in as ``connected=``, so this reason always means
+    the peer's ADDRESS ANSWERED and the link was not made. QA arranged both forms for
+    real: a relay in the same network at a later epoch that answers and closes the
+    handshake (``ConnectionError``), and a listener that accepts the dial and never
+    speaks (``TimeoutError``) — in both, the human line read "it did not answer".
+
+    The bare refusal codes were given "the link was refused" in round 10 for exactly
+    this reason; this stage — the ONE arrival in the field whose own NAME says the
+    peer answered — was left falling through to the silence default. The reasons are
+    built by the REAL producer and the line by the REAL renderer, and the READING is
+    asserted: "something other than the code" is what the silence default satisfied.
+    """
+    row = {
+        "device_id": "d_" + "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+        "name": "device-b",
+        "reachable": False,
+    }
+    for exc in (ConnectionResetError("the peer closed the link"), TimeoutError("no welcome")):
+        reason = relay.handshake_refused_reason(exc)
+        # The wire shape, and the ``--json`` string, unchanged: the class name is
+        # what was OBSERVED (a close versus a peer that never spoke).
+        assert reason == f"handshake_refused:{exc.__class__.__name__}", reason
+        words = resume.peer_reason_words(reason)
+        assert words == "the link was refused", (reason, words)
+        assert words != "it did not answer", reason
+        assert exc.__class__.__name__ not in words, words
+        assert ":" not in words and "_" not in words, words
+        line = net_cli._peer_line({**row, "reason": reason})  # noqa: SLF001
+        assert line == (
+            "device-b cannot be reached from this device right now (the link was refused)"
+        ), line
+        assert "handshake_refused" not in line and "Error" not in line, line
+    # The bare refusals answer the same way, which is the point of the arm: the
+    # families differ in what was observed, not in whether the peer answered.
+    for code in ("epoch_stale", "untrusted", "malformed_frame", "protocol_mismatch"):
+        assert resume.peer_reason_words(code) == "the link was refused", code
+    assert "it did not answer" not in (
+        net_cli._peer_line({**row, "reason": "pair_phase_requires_the_ceremony"})  # noqa: SLF001
+    )
+
+
+def test_the_doctor_row_a_person_reads_carries_no_code_and_no_address(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 24, Q-R24-2: doctor's human rows printed the raw vocabulary.
+
+    The rows QA captured from the real binary — ``connect_failed:TimeoutError``,
+    ``bad_endpoint`` and, on the state the listing's own fix exists for, ``not_attempted:
+    127.0.0.1:64994 answered and the doctor budget ran out before the handshake`` —
+    carried a stage word, a Python class name AND the endpoint address on a line a
+    person reads. The rows are rendered through ``resume.doctor_detail_words`` now
+    and the raw strings stay where the machine reads them: ``checks[].detail`` in
+    ``--json``, byte for byte.
+    """
+    checks = [
+        {"check": "identity", "ok": True, "detail": "present"},
+        {
+            "check": "reachability",
+            "ok": False,
+            "device_id": "d_" + "6" * 32,
+            "endpoint": "10.255.255.1:9",
+            "latency_ms": 3000.0,
+            "detail": f"{relay.CONNECT_FAILED_PREFIX}TimeoutError",
+        },
+        {
+            "check": "reachability",
+            "ok": False,
+            "device_id": "d_" + "b" * 32,
+            "endpoint": "127.0.0.1:64996",
+            "latency_ms": 0.2,
+            "detail": f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError",
+        },
+        {
+            "check": "reachability",
+            "ok": False,
+            "device_id": "d_" + "f" * 32,
+            "endpoint": "not-a-host-port",
+            "detail": "bad_endpoint",
+        },
+        {
+            "check": "handshake",
+            "ok": False,
+            "device_id": "d_" + "1" * 32,
+            "endpoint": "127.0.0.1:64994",
+            # The producer's own string: an address ANSWERED while the doctor's budget
+            # expired, which is the state this whole line of work is about.
+            "detail": relay.handshake_not_attempted_reason("127.0.0.1:64994", budget="doctor"),
+        },
+    ]
+    payload = {"ok": False, "identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 1  # noqa: SLF001
+    human = capsys.readouterr().out
+    for token in (
+        "connect_failed",
+        "bad_endpoint",
+        "handshake_not_attempted",
+        "not_attempted",
+        "TimeoutError",
+        "ConnectionRefusedError",
+        "the doctor budget ran out",
+    ):
+        assert token not in human, (token, human)
+    # What a person is told instead, per row: the stage the dial reached.
+    assert "nothing answered at that address" in human
+    assert "the address it publishes cannot be dialled" in human
+    assert "it answered, and the doctor ran out of time before the handshake" in human
+    # The ADDRESS stays in the row's own column once — and only once, which is what
+    # the repeated endpoint inside the sentence broke.
+    assert human.count("127.0.0.1:64994") == 1, human
+    # ``--json`` is the register the raw detail belongs to, and it keeps it whole.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert [row["detail"] for row in machine["checks"]] == [row["detail"] for row in checks]
+    assert relay.handshake_not_attempted_reason("127.0.0.1:64994", budget="doctor") in (
+        machine["checks"][4]["detail"]
     )
 
 

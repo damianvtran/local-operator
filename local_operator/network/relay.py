@@ -376,6 +376,35 @@ def is_probe_detail(detail: str) -> bool:
     return detail in PROBE_DETAIL_CODES or detail.startswith(CONNECT_FAILED_PREFIX)
 
 
+#: The CLOSED set of colon-free codes ``lop network doctor`` itself writes into a
+#: check's ``detail`` (the probe's own codes ride along: a doctor reachability row
+#: IS one probe attempt).
+#:
+#: ONE HOME FOR A SECOND READER, for the reason ``PROBE_DETAIL_CODES`` has one: a
+#: doctor row's ``detail`` is a field with a HUMAN RENDERER
+#: (``resume.doctor_detail_words``), so a code written here without a reading ships
+#: a bare wire word to a person — the leak rounds 10 and 24 were both about, one
+#: surface over. A test enumerates this set against the renderer's table, so a code
+#: added here with no stated reading fails rather than prints.
+#:
+#: DELIBERATELY NOT THE WHOLE FIELD. The doctor also fills ``detail`` from the
+#: record (a membership sentence), from the peer's build (``handshake.REASON_*``, a
+#: family this side cannot enumerate) and from the dial's prefixed reasons
+#: (``connect_failed:``, ``handshake_refused:``), and each of those is recognised by
+#: its own producer rather than by membership here. What this set pins is the
+#: doctor's OWN words — the ones a reader would otherwise meet as a token.
+DOCTOR_DETAIL_CODES: frozenset[str] = frozenset(
+    {
+        "identity_missing",
+        "present",
+        "no_endpoint",
+        "unreachable",
+        "refused_by_peers",
+        *PROBE_DETAIL_CODES,
+    }
+)
+
+
 @dataclass(frozen=True)
 class CandidateAttempt:
     """What ONE declared address did, so a report can say which address and why.
@@ -633,17 +662,75 @@ def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
 HANDSHAKE_NOT_ATTEMPTED = "handshake_not_attempted"
 
 
-def handshake_not_attempted_reason(winner: str) -> str:
+def handshake_not_attempted_reason(winner: str, *, budget: str = "listing") -> str:
     """Why a member is unreachable when its address DID answer, in the relay's words.
 
     A wrapper rather than an f-string at the call site so this sentence has one
     home: its stage word is what the human surfaces key on and its tail is what
     they must drop, so the two halves are read by code that does not otherwise meet.
+
+    ``budget`` NAMES WHOSE CLOCK EXPIRED, and it is a parameter because the same
+    state is reachable from two commands with two budgets: a listing's
+    (:data:`NOT_ATTEMPTED_REASON`'s counterpart, the 12 s probe budget) and a
+    ``lop network doctor`` run's own. The state — an address ANSWERED and OUR clock
+    ran out — is one state and keeps one stage word (QA round 24, Q-R24-2); only the
+    clock differs, and a sentence that named the wrong one would send the operator to
+    the wrong command.
     """
     return (
-        f"{HANDSHAKE_NOT_ATTEMPTED}: {winner} answered and the listing "
+        f"{HANDSHAKE_NOT_ATTEMPTED}: {winner} answered and the {budget} "
         "budget ran out before the handshake"
     )
+
+
+#: The stage word for the handshake's OWN refusal: the socket CONNECTED and the
+#: handshake did not complete (round 24, Q-R24-1).
+#:
+#: A STAGE rather than a bare code because its tail is the exception the far side's
+#: close (or its silence) raised — and that tail is exactly what a human renderer
+#: must not print. It is also the ONE arrival in this field whose NAME says the peer
+#: ANSWERED, which is why the "nothing answered" fall-through mis-describes it on
+#: every human surface that renders a peer's reason (:func:`handshake_refused_reason`
+#: writes it; ``resume.peer_reason_words`` reads it).
+HANDSHAKE_REFUSED = "handshake_refused"
+
+
+def handshake_refused_reason(exc: BaseException) -> str:
+    """Why a dial that CONNECTED produced no link, in the wire's own words.
+
+    A wrapper rather than an f-string at the call site for the same reason
+    :func:`handshake_not_attempted_reason` is one: its stage word is what the human
+    surfaces key on, so the spelling of the stage and its reading must not drift —
+    a test builds this string from this function and asserts what a person reads.
+
+    THE SUFFIX IS OBSERVED, NOT EXPLAINED: this wire never says why a handshake was
+    refused (an open port that answered "that token is not mine" would let a
+    stranger enumerate what is real, ``GUIDE.md``), so ``ConnectionError`` is a peer
+    that closed and ``TimeoutError`` one that never spoke. It stays in the ``--json``
+    register; the human register has the sentence that is true of both — the link
+    was refused.
+    """
+    return f"{HANDSHAKE_REFUSED}:{exc.__class__.__name__}"
+
+
+#: The stage word a ``lop network doctor`` reachability row carries when its
+#: address ANSWERED and the link was established at ANOTHER address the member
+#: publishes: one dial, one winner, and this row is the loser that is not a
+#: failure.
+DOCTOR_LINK_ELSEWHERE = "connected"
+
+
+def doctor_link_elsewhere_detail(winner: str) -> str:
+    """Why a doctor row is ``ok`` beside an address that is not the winner's.
+
+    A wrapper for the same reason its siblings are: the winning endpoint is in the
+    ``--json`` detail and must NOT survive into the row a person reads (the row
+    already carries ITS OWN address in its own column, and round 24's finding was
+    an endpoint on a human line). ``resume.doctor_detail_words`` reads this
+    sentence by its stage word, and a test builds the string here and asserts the
+    reading, so the two spellings cannot drift.
+    """
+    return f"{DOCTOR_LINK_ELSEWHERE}; the link was established at {winner}"
 
 
 def _row_for_id(record: NetworkRecord, device_id: str) -> MemberRecord | None:
@@ -5897,7 +5984,7 @@ class RelayServer:
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
             self._note_refused_handshake(record.network_id, host, mode)
-            return None, f"handshake_refused:{exc.__class__.__name__}"
+            return None, handshake_refused_reason(exc)
 
     def _clear_refusal_mark(self, network_id: str) -> None:
         """A COMPLETED handshake clears a ``refused_by_peers`` mark.
@@ -7013,10 +7100,14 @@ class RelayServer:
                     member,
                     probe.winner,
                     ok=False,
-                    detail=(
-                        f"not_attempted: {probe.winner} answered and the doctor budget "
-                        "ran out before the handshake"
-                    ),
+                    # THE SAME STATE THE LISTING REPORTS, and so the same stage word
+                    # and the same producer (round 24, Q-R24-2): an address ANSWERED
+                    # and OUR budget expired. It used to be spelled ``not_attempted:``
+                    # here, which is the probe's code for the OPPOSITE state (nothing
+                    # was dialled) in the same field — one token meaning two things,
+                    # told apart only by shape. Only the clock differs, so only the
+                    # clock is a parameter.
+                    detail=handshake_not_attempted_reason(probe.winner, budget="doctor"),
                 )
             else:
                 winner_row = self._handshake(record, member, probe.winner, probe.sock, remaining)
@@ -7032,7 +7123,7 @@ class RelayServer:
                         "endpoint": attempt.endpoint,
                         "ok": True,
                         "latency_ms": attempt.latency_ms,
-                        "detail": f"connected; the link was established at {probe.winner}",
+                        "detail": doctor_link_elsewhere_detail(probe.winner),
                     }
                 )
             else:

@@ -437,3 +437,43 @@ def test_the_agent_digest_carries_a_removed_devices_own_standing() -> None:
     body = "\n".join(lines)
     assert "no longer a member of devmesh (removed by d_9)" in body
     assert "re-pair as a new device" in body
+
+
+def test_the_agent_digest_of_a_doctor_run_reads_in_words() -> None:
+    """QA round 24, Q-R24-2, at the agent's own surface.
+
+    This tool's ``doctor`` digest is a human surface too — the model reads it the way
+    a person reads ``lop network doctor`` — and it rendered ``checks[].detail``
+    verbatim, so the same stage words, Python class names and endpoint address reached
+    it. It goes through ``resume.doctor_detail_words`` now; the raw strings are
+    unchanged in the payload this digest is rendered FROM, which is what the diff's
+    ``--json`` half of the finding is about.
+    """
+    checks = [
+        {
+            "check": "reachability",
+            "ok": False,
+            "device_id": "d_" + "b" * 32,
+            "endpoint": "127.0.0.1:64996",
+            "detail": "connect_failed:ConnectionRefusedError",
+        },
+        {
+            "check": "handshake",
+            "ok": False,
+            "device_id": "d_" + "1" * 32,
+            "endpoint": "127.0.0.1:64994",
+            "detail": "not_attempted: 127.0.0.1:64994 answered and the doctor budget "
+            "ran out before the handshake",
+        },
+    ]
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "doctor", {"ok": False, "identity_present": True, "checks": checks}
+    )
+    body = "\n".join(lines)
+    for token in ("connect_failed", "not_attempted", "ConnectionRefusedError"):
+        assert token not in body, (token, body)
+    assert "nothing answered at that address" in body
+    assert "it answered, and the doctor ran out of time before the handshake" in body
+    # The row's own address is kept once, in its own column; the sentence that
+    # repeated it does not.
+    assert body.count("127.0.0.1:64994") == 1, body
