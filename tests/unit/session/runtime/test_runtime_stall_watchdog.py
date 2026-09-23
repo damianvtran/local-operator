@@ -1807,10 +1807,14 @@ def test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD(
         row.startswith(stall_watchdog.HELD_MARKER) for row in text.splitlines()
     ), f"the dump does not say the boot-phase fire was held: {text[:900]!r}"
     assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
-    assert "THIS IS THE BOOT BOUND" in text, (
-        "the header does not say that this value means the runtime never engaged, which "
-        f"is the whole reading this class needs: {text[:400]!r}"
-    )
+    boot_note = text.split("THIS IS THE BOOT BOUND", 1)[1].split(
+        stall_watchdog.OBSERVATION_NOT_VERDICT, 1
+    )[0]
+    assert f"When re-arming succeeds, a fired value of {boot:g}s" in boot_note, boot_note
+    assert "means the runtime never engaged" in boot_note, boot_note
+    assert "If engagement could not re-arm the timer" in boot_note, boot_note
+    assert "see the re-arm-failed message above" in boot_note, boot_note
+    assert "the timer may still fire at the boot bound" in boot_note, boot_note
     assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
         "a never-engaged held fire left a deadline sibling, so presence no longer "
         "answers 'did anything ever re-arm this timer'"
@@ -1862,14 +1866,78 @@ def test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut(
         "the header does not name the bound the timer was armed for, so the fired value "
         f"cannot be attributed: {text[:400]!r}"
     )
-    assert "THIS IS THE BOOT BOUND" in text, (
-        "the header does not say that this value means the runtime never engaged, which "
-        f"is the whole reading this class needs: {text[:400]!r}"
-    )
+    boot_note = text.split("THIS IS THE BOOT BOUND", 1)[1].split(
+        stall_watchdog.OBSERVATION_NOT_VERDICT, 1
+    )[0]
+    assert f"When re-arming succeeds, a fired value of {boot:g}s" in boot_note, boot_note
+    assert "means the runtime never engaged" in boot_note, boot_note
+    assert "If engagement could not re-arm the timer" in boot_note, boot_note
+    assert "see the re-arm-failed message above" in boot_note, boot_note
+    assert "the timer may still fire at the boot bound" in boot_note, boot_note
     assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
         "a never-engaged fire left a deadline sibling, so presence no longer answers "
         "'did anything ever re-arm this timer'"
     )
+
+
+# This child proves the counterexample to an unconditional reading of the boot value:
+# engage moves the in-memory bound, but an unsuccessful timer replacement leaves the
+# original C timer in force and records why the boot value may still fire.
+_ENGAGE_REARM_FAILURE_CHILD = """
+import ctypes
+import os
+import sys
+
+from local_operator.session.runtime import stall_watchdog
+
+boot = float(sys.argv[1])
+steady = float(sys.argv[2])
+assert stall_watchdog.arm(boot_seconds=boot, seconds=steady), "the child could not arm the bound"
+armed = stall_watchdog._ARMED
+print(f"armed:{os.getpid()} bound:{armed.seconds:g}", flush=True)
+real_arm_timer = stall_watchdog._arm_timer
+def refuse_rearm(*args, **kwargs):
+    raise OSError("timer re-arm refused by test")
+stall_watchdog._arm_timer = refuse_rearm
+try:
+    moved = stall_watchdog.engage()
+finally:
+    stall_watchdog._arm_timer = real_arm_timer
+print(f"engage:{moved} bound:{armed.boot_seconds:g}->{armed.seconds:g}", flush=True)
+ctypes.PyDLL(None).sleep(600)
+"""
+
+
+def test_engagement_rearm_failure_qualifies_a_boot_bound_fire(
+    tmp_path: Path,
+) -> None:
+    """A failed re-arm after engage can leave a later fire at the boot value.
+
+    The child runs the REAL C timer with a four-second boot value, calls the real
+    ``engage`` path after arming, and refuses only the replacement timer. Because
+    faulthandler retains the original timer on failure, it fires at the boot value
+    even though the in-memory bound moved to steady; both the failure marker and the
+    qualified boot note must explain that exception to the normal never-engaged case.
+    """
+    boot, steady = 4 * SHORT_BOUND_S, SHORT_BOUND_S
+    result = _run_script(_ENGAGE_REARM_FAILURE_CHILD, tmp_path, args=(str(boot), str(steady)))
+    assert result.returncode == 1, (
+        f"the original timer did not fire after engage's failed re-arm: "
+        f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert f"engage:True bound:{boot:g}->{steady:g}" in result.stdout, result.stdout
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+    assert _fired_seconds(text) == pytest.approx(float(boot)), text[:900]
+    assert stall_watchdog.REARM_FAILED_MARKER in text, text[-800:]
+    boot_note = text.split("THIS IS THE BOOT BOUND", 1)[1].split(
+        stall_watchdog.OBSERVATION_NOT_VERDICT, 1
+    )[0]
+    assert f"When re-arming succeeds, a fired value of {boot:g}s" in boot_note, boot_note
+    assert "means the runtime never engaged" in boot_note, boot_note
+    assert "If engagement could not re-arm the timer" in boot_note, boot_note
+    assert "see the re-arm-failed message above" in boot_note, boot_note
+    assert "the timer may still fire at the boot bound" in boot_note, boot_note
 
 
 def test_engagement_moves_the_bound_to_the_steady_one_and_stamps_both_planes(

@@ -1644,8 +1644,10 @@ def arm(
                 f"THIS IS THE BOOT BOUND, covering the stretch before the runtime has a "
                 f"session to judge: nothing can stamp a plane in it, so the value above is "
                 f"the whole of what a fire in that stretch measured. The runtime's first "
-                f"engagement moves the bound to {steady:g}s and stamps BOTH planes, so a "
-                f"fired value of {bound:g}s -- this number -- means it never engaged.\n"
+                f"engagement moves the bound to {steady:g}s and stamps BOTH planes. "
+                f"When re-arming succeeds, a fired value of {bound:g}s — this number — means "
+                f"the runtime never engaged. If engagement could not re-arm the timer, see the "
+                f"re-arm-failed message above; the timer may still fire at the boot bound.\n"
             )
         target = dump_path(pid, directory)
         inherited = deadline_path(pid, directory)
