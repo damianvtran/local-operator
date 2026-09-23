@@ -362,6 +362,100 @@ def test_match_key_normalises_punctuation_and_case_to_words():
     assert _match_key("x-ai/grok-4.7") == "x ai grok 4 7"
     assert _match_key("  grok   4.7 ") == "grok 4 7"
     assert _match_key("GPT-6 Luna") == "gpt 6 luna"
+    assert _match_key("Opus5") == "opus 5"
+
+
+def test_opus_query_versions_include_compact_forms_and_exact_decimal_matches():
+    """The selector version governs numeric queries; token order is flexible."""
+    rows = [
+        _row("anthropic/claude-opus-5"),
+        _row("anthropic/claude-opus-5.4"),
+        _row("anthropic/claude-opus-5.5"),
+        _row("anthropic/claude-opus-4-5-20251101"),
+        _row("openrouter/anthropic/claude-opus-5.5", aggregated=True),
+        _row("radient/anthropic/claude-opus-5.5", aggregated=True, routed=True),
+    ]
+    expected_major = [
+        "anthropic/claude-opus-5.5",
+        "anthropic/claude-opus-5.4",
+        "anthropic/claude-opus-5",
+    ]
+    for query in ("opus 5", "opus-5", "opus5"):
+        selectors = [row.selector for row in rank_rows(rows, query)]
+        assert selectors[:3] == expected_major, (query, selectors)
+        assert "anthropic/claude-opus-4-5-20251101" not in selectors
+
+    exact = [row.selector for row in rank_rows(rows, "opus 5.5")]
+    assert exact == [
+        "anthropic/claude-opus-5.5",
+        "openrouter/anthropic/claude-opus-5.5",
+        "radient/anthropic/claude-opus-5.5",
+    ], exact
+    for query, selector in (
+        ("openrouter opus 5.5", "openrouter/anthropic/claude-opus-5.5"),
+        ("radient opus 5.5", "radient/anthropic/claude-opus-5.5"),
+    ):
+        assert [row.selector for row in rank_rows(rows, query)] == [selector]
+
+
+def test_provider_or_display_digits_do_not_override_selector_version():
+    """Version gating follows query/model identity, not unrelated label digits."""
+    rows = [
+        ModelRow(
+            "openrouter5.5",
+            "anthropic/claude-opus-5",
+            "OpenRouter 5.5 Claude Opus 5",
+            500_000,
+            15,
+            75,
+            True,
+            aggregated=True,
+        ),
+        ModelRow(
+            "openrouter",
+            "anthropic/claude-opus-5.5",
+            "OpenRouter 5.4 Claude Opus 5.5",
+            500_000,
+            15,
+            75,
+            True,
+            aggregated=True,
+        ),
+    ]
+    # A provider qualifier followed by a number alone is not a model-version
+    # constraint. Existing strong-selector hits retain their two-pool behavior,
+    # so this query leads with the row whose selector spells that exact text.
+    from local_operator.model.ranking import _query_version
+
+    assert _query_version("openrouter 5.5", rows[1].model_id) is None
+    assert [row.selector for row in rank_rows(rows, "openrouter 5.5")] == [
+        "openrouter5.5/anthropic/claude-opus-5"
+    ]
+    # A requested model minor, by contrast, follows the selector even if the
+    # display label has a conflicting incidental number.
+    assert [row.selector for row in rank_rows(rows, "opus 5.5")] == [
+        "openrouter/anthropic/claude-opus-5.5"
+    ]
+
+
+def test_a_non_opus_minor_query_keeps_its_model_family():
+    rows = [
+        _row("xai/grok-4.7"),
+        _row("xai/grok-4.5"),
+        _row("xai/grok-3.5"),
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok 4.7")] == ["xai/grok-4.7"]
+
+
+def test_an_explicit_opus_minor_never_matches_5_only_or_other_model_rows():
+    rows = [
+        _row("anthropic/claude-opus-5"),
+        _row("anthropic/claude-opus-5.4"),
+        _row("anthropic/claude-opus-5.5"),
+        _row("anthropic/claude-opus-5-20250101"),
+        _row("anthropic/claude-sonnet-5.5"),
+    ]
+    assert [row.selector for row in rank_rows(rows, "opus 5.5")] == ["anthropic/claude-opus-5.5"]
 
 
 def test_adding_a_name_target_cannot_evict_a_row_the_selector_matched():

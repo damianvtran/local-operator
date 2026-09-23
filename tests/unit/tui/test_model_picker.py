@@ -1323,6 +1323,64 @@ def test_the_pickers_price_column_reads_the_rows_own_schedule(
     assert picker._price(flat) == "$0.27/1.1"
 
 
+def test_the_picker_matches_opus_version_and_provider_spellings() -> None:
+    """The actual widget path shares numeric and order-independent matching."""
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [
+            ModelRow("anthropic", "claude-opus-5", "Claude Opus 5", 500_000, 15, 75, True),
+            ModelRow("anthropic", "claude-opus-5.4", "Claude Opus 5.4", 500_000, 15, 75, True),
+            ModelRow("anthropic", "claude-opus-5.5", "Claude Opus 5.5", 500_000, 15, 75, True),
+            ModelRow(
+                "anthropic", "claude-opus-4-5-20251101", "Claude Opus 4.5", 500_000, 15, 75, True
+            ),
+            ModelRow(
+                "openrouter",
+                "anthropic/claude-opus-5.5",
+                "Claude Opus 5.5",
+                500_000,
+                15,
+                75,
+                True,
+                aggregated=True,
+            ),
+            ModelRow(
+                "radient",
+                "anthropic/claude-opus-5.5",
+                "Claude Opus 5.5",
+                500_000,
+                15,
+                75,
+                True,
+                aggregated=True,
+                routed=True,
+            ),
+        ]
+    )
+    for query in ("opus 5", "opus-5", "opus5"):
+        picker.open(query)
+        selectors = [row.selector for row in picker.suggestions()]
+        assert selectors[:3] == [
+            "anthropic/claude-opus-5.5",
+            "anthropic/claude-opus-5.4",
+            "anthropic/claude-opus-5",
+        ], (query, selectors)
+        assert "anthropic/claude-opus-4-5-20251101" not in selectors
+
+    picker.open("opus 5.5")
+    assert [row.selector for row in picker.suggestions()] == [
+        "anthropic/claude-opus-5.5",
+        "openrouter/anthropic/claude-opus-5.5",
+        "radient/anthropic/claude-opus-5.5",
+    ]
+    for query, selector in (
+        ("openrouter opus 5.5", "openrouter/anthropic/claude-opus-5.5"),
+        ("radient opus 5.5", "radient/anthropic/claude-opus-5.5"),
+    ):
+        picker.set_query(query)
+        assert [row.selector for row in picker.suggestions()] == [selector]
+
+
 def test_the_picker_filters_on_the_listings_human_name() -> None:
     """REPRODUCTION (D2) through the WIDGET, not the ranker alone.
 
