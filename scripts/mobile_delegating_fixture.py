@@ -92,9 +92,46 @@ ROWS: list[tuple[str, int, str, dict[str, int], dict[str, bool]]] = [
         910009,
         "Parent with nested descendants",
         {"subagents_running": 4},
-        {"nested": True},
+        {},
+    ),
+    # THE ONE-RUNNING-ONE-WAITING ROW (UX round 3). The list chip counts both
+    # (``2 subagents``); the session view must agree on the children AND keep the
+    # waiting one out of the running lane, which is what the projection's status
+    # mapping decides.
+    (
+        "mixed",
+        910010,
+        "Parent with one running, one waiting",
+        {"subagents_running": 1, "subagents_queued": 1},
+        {},
     ),
 ]
+
+#: The child trees the SESSION VIEW must draw, keyed by session id, in the MOBILE
+#: vocabulary the fold emits. ``mobile/projection.py`` maps the runtime's lifecycle
+#: status onto these, and the mapping is the thing UX round 3 changed: a
+#: capacity-parked child arrives here as ``queued`` and must NOT be drawn as
+#: running, because the roster header counts this field. (This fixture serves an
+#: ``entry.projection`` directly, which is what the daemon serves for a session it
+#: has no relay for — the mapping itself is pinned by its own test in
+#: ``tests/unit/mobile/test_projection.py``, not by these frames.)
+TREES: dict[str, list[SubagentRow]] = {
+    "mixed": [
+        SubagentRow(job_id="job-r", label="running child"),
+        SubagentRow(job_id="job-q", label="waiting child", status="queued"),
+    ],
+    "parked": [
+        SubagentRow(job_id="job-p1", label="waiting one", status="queued"),
+        SubagentRow(job_id="job-p2", label="waiting two", status="queued"),
+        SubagentRow(job_id="job-p3", label="waiting three", status="queued"),
+    ],
+    "nested": [
+        SubagentRow(job_id="job-a", label="first child"),
+        SubagentRow(job_id="job-b", label="second child"),
+        SubagentRow(job_id="job-a1", label="nested one", parent_job_id="job-a"),
+        SubagentRow(job_id="job-a2", label="nested two", parent_job_id="job-a"),
+    ],
+}
 
 
 def _seed_unread(session_id: str) -> None:
@@ -156,19 +193,14 @@ async def main() -> None:
                 streaming=True,
                 activity="working",
             )
-        elif flags.get("nested"):
+        elif session_id in TREES:
             entry.projection = SessionProjection(
                 session_id=session_id,
                 pid=pid,
                 kind="tui",
                 conversation_name=name,
                 activity="waiting",
-                subagents=[
-                    SubagentRow(job_id="job-a", label="first child"),
-                    SubagentRow(job_id="job-b", label="second child"),
-                    SubagentRow(job_id="job-a1", label="nested one", parent_job_id="job-a"),
-                    SubagentRow(job_id="job-a2", label="nested two", parent_job_id="job-a"),
-                ],
+                subagents=TREES[session_id],
             )
         daemon.table.entries[pid] = entry
         if flags.get("unseen"):

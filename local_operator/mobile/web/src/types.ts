@@ -46,7 +46,10 @@ export type SubagentStatus =
 	| "completed"
 	| "failed"
 	| "cancelled"
-	| "parked";
+	| "parked"
+	/** Waiting for a free slot in the parent's capacity. NOT running: a parked
+	    child spends nothing, and the roster header counts the running lane. */
+	| "queued";
 
 export interface TranscriptEntryDetails {
 	/* The fold serializes these in the shape the tool produced, NOT always

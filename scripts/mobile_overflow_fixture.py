@@ -2,7 +2,9 @@
 defects under review, for before/after capture at a phone viewport.
 
 Run:  PYTHONPATH=. .venv/bin/python scripts/mobile_overflow_fixture.py [PORT]
-Login at http://127.0.0.1:<port> with password `overflow-demo`.
+Login at http://127.0.0.1:<port>. The password is NOT fixed and never printed:
+export `LOP_MOBILE_FIXTURE_PASSWORD` (or pass it as the second argument) and give
+the capture scripts the same variable; with neither, one is generated for the run.
 
 Three sessions, each one shaped to isolate one surface:
 
@@ -37,6 +39,8 @@ LOCAL_OPERATOR_CONFIG_DIR are re-homed by ``scripts.probe_isolation`` on import.
 from __future__ import annotations
 
 import asyncio
+import os
+import secrets
 import sys
 
 import uvicorn
@@ -54,7 +58,27 @@ from local_operator.mobile.types import (
     TranscriptEntry,
 )
 
-PASSWORD = "overflow-demo"
+#: The daemon's password for THIS run: the caller's second argument, or a value
+#: generated here.
+#:
+#: WHY THERE IS NO LITERAL. A fixed password is REUSABLE: it outlives the fixture,
+#: it lives in the repo, and every script that imports it shares one value — so it
+#: ended up in transcripts that merely READ this file, and it had to be rotated.
+#: The replacement is per-run and loopback-only, and NOTHING IN THIS FILE PRINTS IT
+#: (the startup banner names the port only). A caller that wants to log in by hand,
+#: or a capture script that fills the login form, supplies the value explicitly —
+#: which is also the only way it is ever shared.
+#: The variable name the capture scripts read for the same value
+#: (``scripts/mobile_overflow_capture.py``). Written out here rather than imported
+#: from there ON PURPOSE: these are sibling capture scripts, and importing one from
+#: the other would drag Chrome/CDP code into a fixture that only serves a daemon.
+PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
+
+PASSWORD = (
+    sys.argv[2]
+    if len(sys.argv) > 2
+    else (os.environ.get(PASSWORD_ENV) or secrets.token_urlsafe(16))
+)
 
 LONG_QUESTION = (
     "The remediation touches the mobile projection wire, the phone's ask card, "
@@ -427,7 +451,14 @@ async def main() -> None:
         daemon.session_projections[projection.session_id] = projection
         daemon.table.entries[record.pid] = entry
     app = build_app(daemon)
-    print(f"Fixture mobile: http://127.0.0.1:{port} password {PASSWORD}", flush=True)
+    print(f"Fixture mobile: http://127.0.0.1:{port}", flush=True)
+    if len(sys.argv) <= 2 and not os.environ.get(PASSWORD_ENV):
+        print(
+            "Fixture mobile: no password was supplied, so one was generated for "
+            "this run and is NOT printed — pass it as the second argument to log "
+            "in by hand (or to drive a capture).",
+            flush=True,
+        )
     await uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     ).serve()
