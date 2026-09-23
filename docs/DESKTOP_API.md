@@ -976,6 +976,40 @@ qualifier under "A submit is ACKNOWLEDGED" for what that is worth.
    not a turn — and a renderer that does not know the type ignores it and still
    advances its receipt cursor.
 
+### Harness-injected rows: `provider_payload.harness_injected`
+
+Some user-role rows were NOT typed by a person. The harness itself queues them:
+the goal judge's continuation prompt ("Continue working toward this goal: …"), the
+goal loop's own prompt, the post-compaction auto-continuation, the connectivity
+continuation that records why one answer arrived in two pieces across a network
+interruption. They are persisted as `Message(role="user")` because the TRANSCRIPT
+must record why the conversation continued — and painting one attributes the
+harness's words to the user, which no human-facing surface may do.
+
+Two fields answer "was this row minted by the harness?":
+
+* `message_start.message.provider_payload.harness_injected` — the live event's
+  copy. Structured marker, present only where the producer stamped the row.
+* the durable row's `payload.provider_payload.harness_injected` — the same key on
+  the journal entry a `snapshot`/`/history` page serves, because
+  `encode_message_payload` keeps a non-`None` `provider_payload`.
+
+Both mean, in the words of `harness/rows.py::is_harness_injection`'s docblock:
+*a row carrying it was never typed by a person, so no human-facing surface may
+paint it as their words.* A renderer that reads the marker on user rows paints
+nothing for an injected row — the transcript's own copy is the record, and the
+user's composer row is reserved for the user's own words.
+
+Neither field is new, and no protocol version moves for this: `provider_payload`
+has always been a `Message` field and has always ridden both wires. What changed
+is that surfaces are expected to READ it for `role == "user"` (the desktop's
+transcript reducer already reads the same key for tool rows), and that the
+harness now honours the rule at the emit site as well: a row the shared
+`is_harness_chrome` decision recognises is no longer announced as a
+`message_start` event at all, so a viewer that has not been taught the marker
+cannot paint chrome it was never sent. An owner on an older build still sends
+these rows, which is why the marker (and the recogniser) remain the contract.
+
 ### The `notification` frame
 
 Emitted **if and only if** the bridge observes a newly published, unseen

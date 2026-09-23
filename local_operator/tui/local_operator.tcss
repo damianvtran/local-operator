@@ -922,6 +922,33 @@ Toast {
     height: auto;
 }
 
+/* ---- the /goal overlay --------------------------------------------- *
+ *
+ * Same layer, same host rule, same reason as `#usage-host` above: `width:
+ * auto` so the host hugs the card, because a stretched host on an overlay
+ * layer blanks every cell of every row it covers — including the transcript
+ * either side of the card. Placement is a Python-set offset
+ * (`widgets/overlay.recentre`), which is also why there is no `align` here.
+ *
+ * It holds focus while it is open (the two action keys are the point of the
+ * card), so it is dismissed by Esc/q exactly as the usage card is, and it is
+ * sized by the widget — `width` and `height` are pinned in `_repaint` against
+ * the measured screen, because `auto` measures content against a guessed width
+ * before layout and settles a row tall. */
+#goal-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+GoalPanel {
+    width: auto;
+    height: auto;
+    padding: 1 2;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
 /* `padding: 1 2`, not `0 1`: this card floats OVER the transcript, so its
  * gutter is the only thing separating the report from the text underneath it.
  * One cell was not enough for the panel to read as lifted — the rows touched

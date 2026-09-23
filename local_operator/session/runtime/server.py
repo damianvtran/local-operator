@@ -2508,6 +2508,23 @@ class RuntimeServer:
             self._unsubscribe = await self._handle_call_on_session_loop(
                 self._handle.subscribe, self._schedule_push
             )
+            # ONE RE-ARM PROBE PER BOOT, immediately after the fold subscription
+            # is live and inside the same guarded prologue. The judged goal's
+            # active-ness is durable state and its judge is edge-triggered, so a
+            # restart has to ask the restored record ONCE whether a continuation
+            # was actually in flight (a `waiting`/`stalled` goal is deliberately
+            # left alone — see RULINGS R3). Hopped rather than called directly
+            # for the reason the two registrations above are: the record is read
+            # and the probe scheduled on the loop that owns the session.
+            #
+            # Probed, not required — a handle without the capability (a third-
+            # party or reduced host) simply has no goal judge to re-arm.
+            rearm_goal_judge = getattr(self._handle, "rearm_goal_judge", None)
+            if callable(rearm_goal_judge):
+                try:
+                    await self._handle_call_on_session_loop(rearm_goal_judge)
+                except Exception:  # noqa: BLE001 — additive, never a boot gate
+                    logger.debug("goal judge re-arm probe failed", exc_info=True)
             # v4: hosts that can serialize their event stream feed the relay.
             # Probed, not required — a handle without the capability leaves
             # attach clients on v3 projection-only behaviour, never broken.
