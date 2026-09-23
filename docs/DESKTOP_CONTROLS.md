@@ -258,17 +258,31 @@ the one the desktop client reads): nothing is rolled back, the
   rather than an empty string. A settled answer with no text at all is refused
   the same way as **409** `aside_empty_answer` instead of being stored as a
   finished exchange, because an empty assistant turn is complete, adoptable and
-  paints as no answer and no error. Either refusal DROPS the aside entry: a
-  question with no answer is neither continuable nor adoptable, so the readback
-  stays clean and the retry the sentence asks for starts fresh. The answer is
-  also streamed to the caller as live-only `aside_delta` frames (`{"aside_id",
+  paints as no answer and no error. Either refusal DROPS the refused request's
+  own entry: a question with no answer is neither continuable nor adoptable, so
+  the readback stays clean. What the retry then does depends on which ask
+  failed — a fresh ask (a new `request_id`, no `aside_id`) starts a clean entry,
+  while a refused CONTINUATION releases its panel's prefix, so retrying with
+  that panel's `aside_id` resumes it. A retry that instead names the dropped
+  entry's own id as `aside_id` is refused **409**: the store no longer holds it.
+  The answer is also streamed to the caller as live-only `aside_delta` frames
+  (`{"aside_id",
   "delta"}`, `replay: false` — never replayed, and never entering the
   transcript); those frames are PROGRESS, and the POST response's `text` stays
   authoritative. `subscription_id` is the id the session's `open` frame handed
   the viewer, and the frames go to THAT subscription ONLY — an aside is off the
   record, so another window on the same session sees nothing of it. Omitting it
   streams nothing (never a broadcast): a caller that named no subscription keeps
-  today's request/response behaviour and reads the answer from `text`. GET
+  today's request/response behaviour and reads the answer from `text`. RELEASE
+  SKEW IS THE CLIENT'S TO HANDLE: `subscription_id` is accepted only by a daemon
+  from the change that added it, and a daemon older than that answers **422** for
+  any body carrying it — extra keys are forbidden repo-wide by the CRUD `Input`
+  model, so the old daemon refuses the whole request rather than degrading the
+  stream. A client must therefore send the field only to a daemon that knows it;
+  the companion app change does that with a retry that drops it. A body with NO
+  `subscription_id` is unaffected by the field's existence: the aside runs, the
+  POST returns `text`, nothing is published (see
+  `test_an_ask_that_names_no_subscription_publishes_nothing`). GET
   `/asides/{aside_id}` recovers a response after HTTP loss; DELETE closes a settled
   panel. A continuation temporarily owns its prefix so two panels cannot adopt it
   twice.

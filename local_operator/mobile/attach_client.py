@@ -2108,12 +2108,14 @@ class AttachClient:
         ``aside_instruction`` IS SENT ONLY WHEN IT IS FALSE, so the frame stays
         byte-identical for the default the owner has always applied. An owner
         that predates the field knows neither the parameter nor this body key,
-        and that is the compatible direction: it wraps the turns, which is what
-        this seam asked for, and what a caller that wanted no wrap already
-        protects itself against by pre-wrapping its own turn (the wrap is
-        idempotent) — see ``session/aside.py``. Sending ``True``
-        explicitly would put a value on the wire that means no more than its
-        absence, so the key is omitted instead of sent as ``True``.
+        and it does not wrap the turns either — the seam wrap and
+        ``session/aside.py`` arrive with the same change as this key — so it
+        answers the raw turns exactly as it always has, which is the compatible
+        direction. The idempotency belt (an already-wrapped turn is returned
+        unchanged) therefore covers only peers built from this change onward.
+        Sending ``True`` explicitly would put a value on the wire that means no
+        more than its absence, so the key is omitted instead of sent as
+        ``True``.
         """
         fields: dict[str, Any] = {"on_delta": on_delta, "turns": turns}
         if aside_instruction is False:

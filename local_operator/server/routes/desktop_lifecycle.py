@@ -87,6 +87,20 @@ class AsideInput(Input):
     #: is the one the ``open`` frame mints and the events route validates
     #: (``^[a-f0-9]{32}$``, ``desktop_sessions.py``), so a malformed id is a 422
     #: from this body rather than a silent no-op.
+    #:
+    #: RELEASE SKEW, and it points the OPPOSITE way from ``aside_instruction``
+    #: one hop over: this field is accepted only by a daemon built from the
+    #: change that added it. ``Input`` (``extra="forbid"``,
+    #: ``desktop_sessions.py``) is repo-wide, so an OLDER daemon answers **422**
+    #: to any body carrying the key — a refused request, not a degraded stream —
+    #: and the CLIENT is therefore what must not send it there. The companion
+    #: app change does that with a retry that drops the field, which is why the
+    #: field's ABSENCE has to keep working exactly as it did before the field
+    #: existed: the aside still runs, the POST still returns the answer, and no
+    #: frames are published (``test_an_ask_that_names_no_subscription_publishes_nothing``,
+    #: ``docs/DESKTOP_CONTROLS.md``). Do NOT relax the prohibition here: an
+    #: ``extra="ignore"`` on this model would trade the whole plane's unknown-key
+    #: detection for one route's compatibility, and the fix belongs on the client.
     subscription_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
@@ -513,7 +527,9 @@ async def aside(session_id: str, body: AsideInput, request: Request):
             await bridge.remote.bind_runtime()
             # TARGETED, and the fallback is NOT a broadcast: a caller that named
             # no subscription gets no frames AT ALL, which is the honest reading
-            # of a viewer that did not ask (see ``AsideInput.subscription_id``).
+            # of a viewer that did not ask (see ``AsideInput.subscription_id``,
+            # which also states the release skew: an older daemon 422s a body
+            # carrying the field, so a client retrying without it lands HERE).
             # ``publish`` here would have delivered a private question's answer
             # to every other window on the session. A named function rather than
             # a lambda because the publish reports whether the subscription was

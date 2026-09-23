@@ -468,6 +468,45 @@ async def test_a_refused_aside_leaves_the_store_clean_and_the_retry_works(
 
 
 @pytest.mark.asyncio
+async def test_a_retry_naming_the_dropped_entry_id_is_refused(
+    tmp_path, monkeypatch, restore_app_state: None
+) -> None:
+    """The dropped entry is gone for CONTINUATIONS too, not only for reads.
+
+    "Ask again" is only actionable if the id the refusal released is really
+    released. What works is a FRESH ask (the shipped panel holds no ``aside_id``
+    after a failed first question) or a retry naming a LIVE panel's id; what is
+    refused is a client carrying the failed ask's own id forward as ``aside_id``
+    — the same 409 a closed, expired or foreign panel gets, because the store
+    no longer holds that entry (``docs/DESKTOP_CONTROLS.md``).
+    """
+    remote = _FakeRemote(error=AsideUnanswered())
+    app, _bridge = _install(monkeypatch, tmp_path, remote)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as client:
+        refused = await client.post(
+            f"/v1/desktop/sessions/{SESSION_ID}/asides",
+            json={"request_id": REQUEST_ID, "text": "why?"},
+        )
+        # The provider stays broken on purpose: a refusal at the DOOR never
+        # reaches it, so ``remote.turns`` below measures the whole request.
+        stale = await client.post(
+            f"/v1/desktop/sessions/{SESSION_ID}/asides",
+            json={"request_id": SECOND_ID, "text": "why?", "aside_id": REQUEST_ID},
+        )
+
+    assert refused.status_code == 409, refused.text
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"] == "This aside is no longer available"
+    assert [m.text for m in remote.turns[0]] == ["why?"]
+    assert app.state.desktop_asides == {}, "the dropped entry must not come back"
+
+
+@pytest.mark.asyncio
 async def test_a_refused_continuation_leaves_the_panel_it_continued_usable(
     tmp_path, monkeypatch, restore_app_state: None
 ) -> None:
