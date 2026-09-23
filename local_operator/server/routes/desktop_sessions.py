@@ -160,6 +160,14 @@ RUNTIME_BUSY = "runtime_busy"
 #: How soon a client may usefully resend a ``runtime_busy`` request. Short
 #: because the refusal is produced in ``DESKTOP_CONTROL_ATTACH_S`` rather than
 #: 15 s, so two retries still fit well inside the renderer's 20 s deadline.
+#:
+#: DELIBERATELY SHORTER THAN THE 3 s ENVELOPE (review round 1, N2). It is the
+#: PAUSE before the next attempt, not a forecast of when the owner answers: the
+#: retry spends its own ``DESKTOP_CONTROL_ATTACH_S`` waiting for the owner, so an
+#: owner that recovers within ~5 s of the refusal is admitted by the first
+#: retry, and refuse + pause + retry cycles (3 + 2 + 3 + 2 + 3 = 13 s) keep three
+#: attempts inside the renderer's 20 s deadline. Aligning it to 3 s buys no extra
+#: chance of admission and costs the third attempt's headroom.
 RUNTIME_BUSY_RETRY_AFTER_MS = 2000
 
 #: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is

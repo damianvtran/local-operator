@@ -1018,12 +1018,19 @@ class DesktopSessionBridge:
         #: OUTSIDE ``self.lock`` (see :meth:`acquire`). Held for the same reason
         #: ``warm_task`` is: asyncio keeps only a weak reference to a bare task.
         self.read_attach_task: asyncio.Task[bool] | None = None
-        #: Whether some read ANSWERED while ``read_attach_task`` was still in
-        #: flight, i.e. painted the cold facade the attach may be about to
-        #: replace. Only then does the attempt's outcome owe a
-        #: ``frontend.replace`` (see :meth:`_read_attach_settled`): an attach that
-        #: landed inside the grace was already in the frame the read served.
-        self.read_attach_outran = False
+        #: The attempts some read ANSWERED ahead of, i.e. painted the cold facade
+        #: an attempt may be about to replace. Only those attempts owe a
+        #: ``frontend.replace`` when they settle (see :meth:`_read_attach_settled`):
+        #: an attach that landed inside the grace was already in the frame that
+        #: read served.
+        #:
+        #: KEYED BY ATTEMPT, NOT A BRIDGE FLAG (review round 1, F3). One flag reset
+        #: by every new attempt lost a correction: reader A outruns T1, T1 settles
+        #: with its done-callback still queued, reader B finds T1 done and starts
+        #: T2 (clearing the flag), and T1's callback then saw nothing to publish,
+        #: leaving A's pane on the cold view with no transition. An attempt's own
+        #: membership here cannot be cleared by a later one.
+        self.read_attach_outran: set[asyncio.Task[bool]] = set()
         #: The runtime pid the lease-driven warm last left the viewer BOUND to, so
         #: the next cold period can ask how that runtime ended before it decides
         #: whether to pace (see :meth:`_lease_warm_loop`). ``None`` is "unknown",
@@ -1032,6 +1039,10 @@ class DesktopSessionBridge:
         #: Whether a warm has been SERVED on this intent. Distinct from the pid,
         #: which may legitimately be unknown for a served attempt.
         self.warm_served = False
+        #: The served pid whose exit was already probed, so the probe runs once
+        #: per served runtime rather than once per pacing pass (see
+        #: :meth:`_probe_served_runtime`).
+        self.warm_probed_pid: int | None = None
         #: The in-flight attention read shared by the snapshot and the poll loop,
         #: so a contended store is asked once rather than once per caller.
         self.attention_refresh: asyncio.Task[dict[str, Any]] | None = None
@@ -1201,11 +1212,22 @@ class DesktopSessionBridge:
                     # stream).
                     done, _ = await asyncio.wait({task}, timeout=READ_FIRST_FRAME_GRACE_S)
                     if not done:
-                        self.read_attach_outran = True
+                        self.read_attach_outran.add(task)
             else:
                 await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
         except BaseException:
-            await self.release()
+            # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
+            # review rounds 2 and 3 (review round 1 of this change, F4).
+            # ``release`` awaits the bridge lock, which every other route on this
+            # session contends, and ``_detach`` awaits the owner connection's
+            # tear-down; a cancellation delivered at either await propagates into
+            # an unshielded release and leaves ``users`` incremented for good —
+            # ``release`` is the only thing that drops it, and eviction only ever
+            # considers ``users == 0``. Shielded, the request unwinds promptly
+            # while the release runs to completion exactly once; shield's own
+            # callback retrieves the release's failure when nobody is left to
+            # raise it to.
+            await asyncio.shield(self.release())
             raise
         if self.attention_task is None:
             self.attention_task = asyncio.create_task(self._poll_attention())
@@ -1227,7 +1249,6 @@ class DesktopSessionBridge:
             return None
         task = asyncio.create_task(remote.attach_existing(budget=READ_ATTACH_BUDGET_S))
         self.read_attach_task = task
-        self.read_attach_outran = False
         task.add_done_callback(lambda settled: self._read_attach_settled(remote, settled))
         return task
 
@@ -1254,9 +1275,13 @@ class DesktopSessionBridge:
             # ``attach_existing`` absorbs every failure in read mode; anything
             # that still escapes is a bug to log, never a crash of the loop.
             logger.debug("read attach for %s failed", self.session_id, exc_info=task.exception())
-        if self.remote is not remote or not self.read_attach_outran:
+        # Membership is THIS attempt's own fact: a later attempt cannot clear it
+        # (see ``read_attach_outran``), and discarding it here is what makes the
+        # correction exactly once per attempt.
+        outran = task in self.read_attach_outran
+        self.read_attach_outran.discard(task)
+        if self.remote is not remote or not outran:
             return
-        self.read_attach_outran = False
         # PUBLISHED FOR A RETAINED DIAL TOO. The served frame may predate the
         # attempt's CLASSIFICATION, not only its outcome: under load the
         # registry read that decides ``owner-silent``/``owner-leaving`` runs in a
@@ -1377,7 +1402,7 @@ class DesktopSessionBridge:
             with contextlib.suppress(BaseException):
                 await self.read_attach_task
             self.read_attach_task = None
-        self.read_attach_outran = False
+        self.read_attach_outran.clear()
         # BEFORE `dispose()`, and suppressing the task's own failure as well as
         # the cancellation: an engage that lands after the facade is gone would
         # otherwise hold a freshly spawned runtime resident with no viewer to
@@ -2140,15 +2165,36 @@ class DesktopSessionBridge:
         self.warm_not_before = 0.0
         self.warm_served = False
         self.warm_served_pid = None
+        self.warm_probed_pid = None
 
-    def _served_runtime_exited_cleanly(self) -> bool:
+    async def _probe_served_runtime(self) -> bool:
+        """Whether the served runtime exited cleanly, memoising a FINAL verdict (N1).
+
+        This sits inside the pacing loop, so an unmemoised probe runs on every
+        ``_LEASE_WARM_POLL_S`` pass (a worker thread plus a ``ps`` fork). Only a
+        verdict that cannot change is memoised: once the pid is gone the boot
+        record decides for good, clean or not. A pid that is still ALIVE is not a
+        verdict — that runtime may yet exit cleanly and must then drop the pace
+        — so it is re-asked, which costs at most one probe a second and only
+        while a viewer is cold over a runtime that is still running (a resync, a
+        wedged socket), a state the loop leaves as soon as it binds or the lease
+        lapses. The next SERVED warm records a new pid and earns a fresh probe.
+        """
+        verdict = await asyncio.to_thread(self._served_runtime_exited_cleanly)
+        if verdict is None:
+            return False
+        self.warm_probed_pid = self.warm_served_pid
+        return verdict
+
+    def _served_runtime_exited_cleanly(self) -> bool | None:
         """Whether the runtime the last SERVED warm bound to left through its exit path.
 
         A pid that is still alive has not exited at all (a viewer can go cold
         over a live runtime — a resync, a wedged socket), and an unknown pid is
-        not evidence of anything: both answer False and keep the pace, which is
-        the conservative side of this question. Runs off the loop: it stats a
-        file under the run directory.
+        not evidence of anything. An unknown pid answers False (final) and a
+        live one ``None`` (undecided, see :meth:`_probe_served_runtime`); both
+        keep the pace, which is the conservative side of this question. Runs off
+        the loop: it stats a file under the run directory.
         """
         pid = self.warm_served_pid
         # ``check_zombie`` IS REQUIRED HERE, not a nicety: THIS process spawned
@@ -2157,11 +2203,14 @@ class DesktopSessionBridge:
         # that signal-0 reports alive. Measured over real ``serve``: after a
         # SIGTERM the served runtime's pid is ``ps`` state ``Z`` with its boot
         # record withdrawn, ``pid_alive`` answers True and only the zombie probe
-        # answers False \u2014 without it every served warm still paced the next
-        # cold period its full ~26 s. The probe's ``ps`` fork (~4 ms) runs once
-        # per cold period, off the loop, and only after a served warm.
-        if pid is None or registry.pid_alive(pid, check_zombie=True):
+        # answers False — without it every served warm still paced the next
+        # cold period its full ~26 s. The probe's ``ps`` fork (~4 ms) runs off
+        # the loop, only after a served warm, and once per served runtime once
+        # it has exited (see :meth:`_probe_served_runtime` for the live case).
+        if pid is None:
             return False
+        if registry.pid_alive(pid, check_zombie=True):
+            return None
         from local_operator.session.runtime import journal
 
         return journal.read_boot_record(pid, self.root) is None
@@ -2236,7 +2285,11 @@ class DesktopSessionBridge:
                 # must not be the thing that resurrects the stopped session.
                 self._clear_warm_backoff()
                 return
-            if self.warm_served and await asyncio.to_thread(self._served_runtime_exited_cleanly):
+            if (
+                self.warm_served
+                and self.warm_probed_pid != self.warm_served_pid
+                and await self._probe_served_runtime()
+            ):
                 # A SERVED WARM IS NOT A FAILURE (B-F1). The charge below stands
                 # after a served attempt so a runtime that boots and then DIES is
                 # paced; it used to stand for the runtime that simply finished —
