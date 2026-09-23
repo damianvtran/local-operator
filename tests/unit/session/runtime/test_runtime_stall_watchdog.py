@@ -195,7 +195,7 @@ def _run_stalled_script(
     timeout: float = 30.0,
     env_extra: dict[str, str] | None = None,
     dump_pid: int | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> SimpleNamespace:
     """Wait for a real native dump, prove the parked child survived, then reap it.
 
     ``subprocess.run`` cannot express the expected state for a GIL-held child:
@@ -275,11 +275,17 @@ def _run_stalled_script(
         stderr_file.close()
     if timed_out:
         raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(
-        proc.args,
-        None if observed_fire else proc.returncode,
-        stdout,
-        stderr,
+    # A PLAIN NAMESPACE RATHER THAN ``CompletedProcess``, and only here: this helper's
+    # contract needs a THIRD state — ``returncode is None`` means "the native timer fired
+    # while the child was still ALIVE", which ``subprocess.run`` cannot express and every
+    # cell below asserts — while ``CompletedProcess.returncode`` is annotated ``int``. The
+    # callers all read these fields by attribute, so the sentinel survives exactly as it
+    # was and the type gate sees an honest type rather than a suppressed one.
+    return SimpleNamespace(
+        args=proc.args,
+        returncode=None if observed_fire else proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -4088,7 +4094,24 @@ def test_a_dead_workload_ticker_no_longer_masks_a_healthy_runtime(
     bare_pid = int(bare.stdout.split("armed:", 1)[1].split()[0])
     bare_text = _dump_for(bare_dir, bare_pid).read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in bare_text, bare_text[-2000:]
-    assert stall_watchdog.held_fire(bare_pid, bare_dir / "logs") is True
+    # ...AND IT NEVER CLAIMS THE LIVE HELD STATE (finding B of the 2026-09-23
+    # convergence round). This child arms NO busy probe — there is no way for it to
+    # report work in flight — and `held` means "work was in flight and this runtime is
+    # still stalled", which a runtime that cannot answer must not have asserted on its
+    # behalf. The fire is still on the record, and still read as a survived one by
+    # :func:`fire_outcome`, because production expiry ends nothing either way.
+    #
+    # THE DIRECTION IS WHAT IS PINNED, not the arrival of the sampler's own line: this
+    # harness reaps the child the moment the fired marker appears (it is written BEFORE
+    # the stacks), so whether the post-fire beat lands inside that window is a race — and
+    # a cell that asserted the observation line would fail on the lost side of it for no
+    # reason. What must never happen is a held line on a runtime nothing reported work
+    # for, and `held_fire` reads exactly that.
+    assert (
+        stall_watchdog.HELD_MARKER not in bare_text
+    ), f"a fire over an unprobeable runtime raised the live held state: {bare_text[-900:]!r}"
+    assert stall_watchdog.held_fire(bare_pid, bare_dir / "logs") is False
+    assert stall_watchdog.fire_outcome(bare_pid, bare_dir / "logs") == stall_watchdog.FIRE_SURVIVED
     assert stall_watchdog.fired_leg(bare_pid, bare_dir / "logs") == (
         stall_watchdog.LEG_SILENCE
     ), f"the control's artifact no longer reads as the silence leg, which is the lie: {bare_text}"
@@ -5537,6 +5560,7 @@ flag = pathlib.Path(sys.argv[3])
 variant = sys.argv[4]
 release_after = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
 stop_after = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
+wait_for = sys.argv[7] if len(sys.argv) > 7 else ""
 
 
 def busy():
@@ -5569,6 +5593,18 @@ while True:
         flag.unlink()
         release_after = 0.0
     if stop_after and age >= stop_after:
+        if wait_for:
+            # A BOUNDED WAIT FOR THE READING LINE the parent asserts on: the sampler
+            # writes it one wake after the fire, so a child that stopped on a clock
+            # alone would race that assertion on a loaded host. Failing loudly is the
+            # point — a cell that cannot see the line must not pass by timing.
+            reading_deadline = time.monotonic() + 5
+            while time.monotonic() < reading_deadline:
+                if wait_for in stall_watchdog.dump_path().read_text(encoding="utf-8"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError(f"the sampler never wrote {wait_for!r}")
         # The clean exit a live runtime takes: it disarms, and the artifact of the
         # fire it survived has to survive that (see ``stall_watchdog.disarm``).
         stall_watchdog.disarm()
@@ -5625,6 +5661,17 @@ if admit:
         raise AssertionError("the sampler did not observe post-fire work admission")
     sentinel.write_text("admitted", encoding="utf-8")
 else:
+    # Wait for the line the sampler appends after the fire, so the parent's
+    # assertions read a SETTLED artifact rather than racing the sampler: the marker
+    # is written by the Python thread that observed the fire, one wake after it
+    # landed.
+    reading_deadline = time.monotonic() + bound * 5
+    while time.monotonic() < reading_deadline:
+        if stall_watchdog.OBSERVED_MARKER in dump.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("the sampler never recorded the idle fire")
     sentinel.write_text("idle survived", encoding="utf-8")
 """
 
@@ -5657,6 +5704,24 @@ def test_a_dump_only_idle_fire_survives_later_work_admission(tmp_path: Path) -> 
         pid = int(result.stdout.split("armed:", 1)[1].split()[0])
         text = _dump_for(run_dir, pid).read_text(encoding="utf-8")
         assert stall_watchdog.FIRED_MARKER in text, f"no C-timer dump for {mode}: {text!r}"
+        if mode == "idle":
+            # NOTHING WAS IN FLIGHT, so the live stalled state must stay OFF while the
+            # fire stays ON the record (finding B).
+            assert any(
+                line.startswith(stall_watchdog.OBSERVED_MARKER) for line in text.splitlines()
+            ), f"the idle fire left no observation line: {text[:900]!r}"
+            assert not any(
+                line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+            ), f"an idle fire raised the live held state: {text[:900]!r}"
+            assert stall_watchdog.held_fire(pid, run_dir / "logs") is False
+            assert pid not in stall_watchdog.held_pids(run_dir / "logs")
+        else:
+            # Work was admitted AFTER the fire, and the fire that lands over it — the
+            # one the re-arm after the flip is for — carries the held reading.
+            assert any(
+                line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+            ), f"the fire over admitted work was not recorded as held: {text[:900]!r}"
+            assert stall_watchdog.held_fire(pid, run_dir / "logs") is True
 
 
 def test_a_fire_with_work_in_flight_dumps_and_the_runtime_SURVIVES(tmp_path: Path) -> None:
@@ -5762,8 +5827,18 @@ def test_the_same_child_with_NO_work_in_flight_is_dumped_and_survives(
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert stall_watchdog.FIRED_MARKER in text, "the child survived without a real timer dump"
-    assert any(line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()), text
-    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
+    # THE FIRE WAS OVER NOTHING (finding B): the reading this dump earns is the neutral
+    # observation, and the long-standing cell here asserted the HELD marker instead —
+    # which is exactly the permanent false "stalled with work in flight" a listing then
+    # rendered for a runtime with nothing in flight.
+    assert any(
+        line.startswith(stall_watchdog.OBSERVED_MARKER) for line in text.splitlines()
+    ), f"the idle fire was not recorded as an observation: {text[:900]!r}"
+    assert not any(
+        line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+    ), f"an idle fire set the live held state: {text[:900]!r}"
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is False
+    assert pid not in stall_watchdog.held_pids(tmp_path / "logs")
 
 
 def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path) -> None:
@@ -5782,7 +5857,15 @@ def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path)
         tmp_path,
         # Work clears after the first fire; the child is still responsible for
         # stopping itself later, since neither timer fire may terminate it.
-        args=(str(sentinel), str(SHORT_BOUND_S), str(flag), "busy", "1.5", "4"),
+        args=(
+            str(sentinel),
+            str(SHORT_BOUND_S),
+            str(flag),
+            "busy",
+            "1.5",
+            "4",
+            stall_watchdog.OBSERVED_MARKER,
+        ),
         timeout=60.0,
     )
 
@@ -5796,6 +5879,12 @@ def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path)
     assert any(
         line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
     ), f"no surviving fire was recorded while work was in flight: {text[:900]!r}"
+    # ...AND THE LATER ONE, OVER CLEARED WORK, IS AN OBSERVATION (finding B): the two
+    # readings have to be tellable apart in the SAME artifact, which is the shape a
+    # person meets when a runtime recovers and then wedges again.
+    assert any(
+        line.startswith(stall_watchdog.OBSERVED_MARKER) for line in text.splitlines()
+    ), f"the fire over cleared work was not recorded as an observation: {text[:900]!r}"
     assert (
         text.count(stall_watchdog.FIRED_MARKER) >= 2
     ), f"no later dump was recorded after work cleared: {text[:600]!r}"
@@ -6072,12 +6161,610 @@ def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
     armed.held = True
 
     stall_watchdog._extend_for_execution(armed, 500.0, (stall_watchdog.WORKLOAD,))
-    assert captured == [False], (
-        f"the extension armed a native timer that may terminate a runtime: exit={captured}"
-    )
+    assert captured == [
+        False
+    ], f"the extension armed a native timer that may terminate a runtime: exit={captured}"
 
     # ...and the other direction: even when the caller labels the arm idle, the
     # single native timer wrapper remains dump-only.
     armed.held = False
     stall_watchdog._extend_for_execution(armed, 501.0, (stall_watchdog.WORKLOAD,))
     assert captured[-1] is False, "an IDLE arm must not authorize a native exit"
+
+
+# ============================================================================
+# THE FOUR FINDINGS OF THE 2026-09-23 CONVERGENCE ROUND, PINNED TOGETHER
+# ============================================================================
+# Each finding exists because a READER was inferring from an artifact's SILENCE: which
+# policy the build that wrote it followed (A), whether work was in flight when the
+# bound fired (B), whether this bound still exits a process (C), and which phase the
+# process had reached when it fired (D). So every cell below asserts a POSITIVE
+# statement — a marker, a header sentence, or an ordering — and each names the false
+# reading it replaces, because the false reading is what the stored artifacts say to
+# the next person who opens them.
+
+#: A LEGACY (pre-dump-only) header, as the builds on ``main`` wrote it: the sentence
+#: that states an idle fire takes a native exit. Written out here so the cells that
+#: claim a watchdog-caused death use the artifact that can support one.
+LEGACY_FATAL_HEADER = (
+    f"{stall_watchdog.ARM_MARKER}pid 1 armed for 300s at 1.0\n"
+    f"{stall_watchdog.LEGACY_FATAL_POLICY_PHRASES[1]}\n"
+)
+
+#: A current header, as THIS build writes it.
+CURRENT_HEADER = (
+    f"{stall_watchdog.ARM_MARKER}pid 1 armed for 300s at 1.0\n{stall_watchdog.DUMP_POLICY_MARKER}\n"
+)
+
+#: One fire, with a stack line under it: enough for every reader here.
+FIRED_BODY = f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n  File x, line 1\n"
+
+
+def _write_dump(logs: Path, pid: int, text: str) -> Path:
+    logs.mkdir(exist_ok=True)
+    path = logs / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_fire_outcome_attributes_only_what_the_artifact_states(tmp_path: Path) -> None:
+    """FINDING A: a fire is a watchdog death only where the artifact says it could be.
+
+    The reader this replaces answered "did the bound end this runtime?" from the ABSENCE
+    of a post-fire marker, which is true of the legacy fatal builds — an idle fire there
+    exited the process before anything could append a line — and false of every
+    dump-only one, where a GIL-held fire cannot append anything either. The table below
+    is the whole new contract, and the third and fourth rows are the ones the old
+    inference got wrong in opposite directions.
+    """
+    logs = tmp_path / "logs"
+    held = f"{stall_watchdog.HELD_MARKER}the bound fired and did NOT end this runtime\n"
+    observed = f"{stall_watchdog.OBSERVED_MARKER}the bound fired and did NOT end this runtime\n"
+    cases = {
+        # A DUMP-ONLY BUILD'S FIRE ENDED NOTHING, marker or no marker.
+        11: (CURRENT_HEADER + FIRED_BODY, stall_watchdog.FIRE_SURVIVED),
+        12: (CURRENT_HEADER + FIRED_BODY + observed, stall_watchdog.FIRE_SURVIVED),
+        13: (CURRENT_HEADER + FIRED_BODY + held, stall_watchdog.FIRE_SURVIVED),
+        # A LEGACY BUILD'S UNHELD FIRE IS THE ONE DEATH THIS READER MAY CLAIM.
+        14: (LEGACY_FATAL_HEADER + FIRED_BODY, stall_watchdog.FIRE_LEGACY_FATAL),
+        15: (
+            LEGACY_FATAL_HEADER + FIRED_BODY + held,
+            stall_watchdog.FIRE_SURVIVED,
+        ),
+        # ...AND A FIRE WHOSE ARTIFACT PROVES NEITHER CONVENTION PROVES NOTHING: the
+        # absent marker is not evidence, which is the reading this whole cell restores.
+        16: (
+            f"{stall_watchdog.ARM_MARKER}pid 1 armed for 300s at 1.0\n" + FIRED_BODY,
+            stall_watchdog.FIRE_UNKNOWN,
+        ),
+        # NO FIRE AT ALL — an armed header a SIGKILL left, a header with only the
+        # annotation, and a file that does not exist.
+        17: (CURRENT_HEADER, stall_watchdog.FIRE_UNKNOWN),
+        18: (
+            CURRENT_HEADER + f"{stall_watchdog.TEARDOWN_MARKER}{stall_watchdog.TEARDOWN_NOTE}\n",
+            stall_watchdog.FIRE_UNKNOWN,
+        ),
+    }
+    for pid, (text, expected) in cases.items():
+        _write_dump(logs, pid, text)
+        assert stall_watchdog.fire_outcome(pid, logs) == expected, (pid, expected, text)
+    assert stall_watchdog.fire_outcome(19, logs) == stall_watchdog.FIRE_UNKNOWN
+
+    # AND THE HELD MARKER STILL WINS ON A LEGACY ARTIFACT, which is what the check
+    # order in ``fire_outcome`` is for: row 15 carries the fatal sentence AND the held
+    # line, and the held line is the one that describes what happened.
+    assert stall_watchdog.held_fire(15, logs) is True
+    assert stall_watchdog.fire_outcome(15, logs) != stall_watchdog.FIRE_LEGACY_FATAL
+
+
+def test_the_reading_a_fire_earns_is_the_only_thing_that_sets_the_held_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FINDING B: the neutral reading must not raise the live ``stall_held`` state.
+
+    ``held_fire``/``held_pids`` answer "work was in flight and this runtime is still
+    stalled" — the state a listing renders as needing a person — and until this split
+    the sampler appended ``HELD_MARKER`` for EVERY fire it observed, so an idle fire (or
+    one whose work had cleared, or one over a GIL-held loop) left that state set for the
+    life of the dump. The fire is still recorded; what changed is which line records it.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    monkeypatch.setattr(stall_watchdog, "_start_sampler", lambda armed: None)
+    pid = os.getpid()
+    try:
+        # (a) NOTHING IN FLIGHT: an observation, and the live state stays OFF.
+        assert stall_watchdog.arm(seconds=5.0, busy=lambda: False, directory=tmp_path) is True
+        dump = stall_watchdog.dump_path(pid, tmp_path)
+        with dump.open("a", encoding="utf-8") as handle:
+            handle.write(FIRED_BODY)
+        with caplog.at_level(logging.WARNING, logger=stall_watchdog.logger.name):
+            stall_watchdog.beat(stall_watchdog.SERVING)
+        records = [
+            record
+            for record in caplog.records
+            if record.name == stall_watchdog.logger.name
+            and "did NOT end this runtime" in record.getMessage()
+        ]
+        text = dump.read_text(encoding="utf-8")
+        assert any(
+            line.startswith(stall_watchdog.OBSERVED_MARKER) for line in text.splitlines()
+        ), f"the idle fire left no observation line: {text[:800]!r}"
+        assert stall_watchdog.HELD_MARKER not in text, (
+            "an idle fire was recorded as held, which is the permanent false "
+            f"'stalled with work in flight' this split exists to prevent: {text[:800]!r}"
+        )
+        assert stall_watchdog.held_fire(pid, tmp_path) is False
+        assert pid not in stall_watchdog.held_pids(tmp_path)
+        # ...and it is still a fire: the observation is not a suppression.
+        assert pid in stall_watchdog.fired_pids(tmp_path)
+        assert stall_watchdog.fire_outcome(pid, tmp_path) == stall_watchdog.FIRE_SURVIVED
+        assert any("no work in flight" in record.getMessage() for record in records), (
+            "the log line beside the listing still says STALLED for a fire over nothing: "
+            f"{[r.getMessage() for r in records]}"
+        )
+
+        # (b) WORK IN FLIGHT: the same seam raises it, so the split did not simply
+        # switch the state off for everyone.
+        stall_watchdog.disarm()
+        assert stall_watchdog.arm(seconds=5.0, busy=lambda: True, directory=tmp_path) is True
+        dump = stall_watchdog.dump_path(pid, tmp_path)
+        with dump.open("a", encoding="utf-8") as handle:
+            handle.write(FIRED_BODY)
+        stall_watchdog.beat(stall_watchdog.SERVING)
+        text = dump.read_text(encoding="utf-8")
+        assert any(
+            line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+        ), f"a fire over work in flight lost its held reading: {text[:800]!r}"
+        assert stall_watchdog.held_fire(pid, tmp_path) is True
+        assert pid in stall_watchdog.held_pids(tmp_path)
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_no_production_timer_site_can_arm_a_fatal_expiry() -> None:
+    """FINDING C: the dump-only policy, as a check rather than as a promise.
+
+    Two halves, both against the SOURCE, because the sentence that shipped a fatal
+    binding was a literal at a call site: the module's only native call passes
+    ``exit=False``, and no production call anywhere passes ``exit_leg=True`` or
+    ``exit=True``. The behavioural half — a real child that survives its bound — is
+    asserted in the cells that drive ``_PARKED_CHILD`` and ``_EXIT_LEG_CHILD``.
+    """
+    checked = 0
+    for path in sorted((REPO / "local_operator").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "dump_traceback_later" not in source and "_arm_timer(" not in source:
+            continue
+        checked += 1
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg not in {"exit", "exit_leg"}:
+                    continue
+                if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                    raise AssertionError(
+                        f"a production timer site arms a fatal expiry: "
+                        f"{path}:{node.lineno} {ast.unparse(node)}"
+                    )
+    assert checked >= 1, "no production timer site found: the bound is inert"
+
+    tree = ast.parse(
+        (REPO / "local_operator" / "session" / "runtime" / "stall_watchdog.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    native = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "dump_traceback_later"
+    ]
+    assert native, "the module no longer arms a native timer at all"
+    for node in native:
+        keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+        assert "exit" in keywords and isinstance(keywords["exit"], ast.Constant), ast.unparse(node)
+        assert (
+            keywords["exit"].value is False
+        ), f"the native timer is no longer dump-only: {ast.unparse(node)}"
+
+
+def test_no_runtime_message_claims_the_bound_ends_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FINDING C, second half: the words the runtime writes must match the policy.
+
+    Three surfaces, because each one is read by somebody who cannot check the code: the
+    dump header (an operator opening the file after a freeze), the arm-time log line
+    (the first thing they read in ``runtime.log``), and the two header constants that
+    are rendered into every dump. The phrases below are the ones that SHIPPED as stale
+    promises; the legacy sentences are asserted absent from this build's own output, so
+    a future header cannot accidentally make every dump read as a legacy-fatal artifact
+    to :func:`fire_outcome`.
+    """
+    # THE SENTENCES THAT SHIPPED, as substrings rather than the bare words: a message
+    # MAY say this bound ends nothing — that is the policy — and a check on the words
+    # alone would forbid the correction along with the defect. Each entry below is a
+    # fragment of a line that really was written into a dump or a log.
+    stale = (
+        "and ends the runtime",
+        "holds the exit",
+        "ENDED this runtime",
+        "is dumped and exited",
+        "the exit faulthandler takes",
+        "armed with exit=True",
+        "_exit(1)",
+        "hit its bound and is gone",
+    )
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    try:
+        assert stall_watchdog.arm(directory=tmp_path) is True
+        header = stall_watchdog.dump_path(os.getpid(), tmp_path).read_text(encoding="utf-8")
+        with caplog.at_level(logging.INFO, logger=stall_watchdog.logger.name):
+            stall_watchdog.announce()
+        logged = " ".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == stall_watchdog.logger.name
+        )
+        surfaces = {
+            "the dump header": header,
+            "the arm-time log line": logged,
+            "OBSERVATION_NOT_VERDICT": stall_watchdog.OBSERVATION_NOT_VERDICT,
+            "HOW_TO_READ_THE_FIRED_VALUE": stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE,
+            "DUMP_ONLY_STATEMENT": stall_watchdog.DUMP_ONLY_STATEMENT,
+        }
+        for name, text in surfaces.items():
+            for phrase in stale:
+                assert (
+                    phrase not in text
+                ), f"{name} still asserts an exit this build cannot take: {phrase!r}"
+            for legacy in stall_watchdog.LEGACY_FATAL_POLICY_PHRASES:
+                assert legacy not in text, (
+                    f"{name} spells a LEGACY policy sentence, which would make every dump "
+                    f"this build writes read as a fatal-build artifact: {legacy!r}"
+                )
+        assert (
+            stall_watchdog.DUMP_POLICY_MARKER in header
+        ), f"the header does not state this build's policy: {header[:400]!r}"
+        assert "dumps every thread" in logged, logged
+        # ...AND THE LINE SAYS WHAT IT IS: the policy, in the one word both bound-shapes
+        # share. The stale-phrase scan above is the guard that matters; this is the
+        # positive half, so a line rewritten to say nothing at all cannot pass.
+        assert "dump-only" in logged, logged
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_the_teardown_annotation_is_read_off_the_ordering_alone(tmp_path: Path) -> None:
+    """FINDING D: the phase is classified by POSITION, and ambiguity stays unknown.
+
+    The annotation is written before ``asyncio.Runner`` cancels tasks and joins the
+    default executor, so a fire BELOW it was taken during teardown and one ABOVE it was
+    not. Everything else — a marker that is present but not above the fire, a marker that
+    landed mid-line because both writers share one buffered descriptor, an artifact with
+    no marker at all — is reported as unknown rather than inferred, which is what keeps a
+    GIL-held stall (which can never reach the annotation) from being filed as teardown.
+    """
+    logs = tmp_path / "logs"
+    note = f"{stall_watchdog.TEARDOWN_MARKER}{stall_watchdog.TEARDOWN_NOTE}\n"
+    cases = {
+        11: (CURRENT_HEADER + note + FIRED_BODY, True),
+        12: (CURRENT_HEADER + FIRED_BODY + note, None),
+        13: (
+            CURRENT_HEADER
+            + f'  File "{stall_watchdog.TEARDOWN_MARKER}{stall_watchdog.TEARDOWN_NOTE}\n'
+            + FIRED_BODY,
+            None,
+        ),
+        14: (CURRENT_HEADER + FIRED_BODY, None),
+        15: (CURRENT_HEADER + note, None),
+        # A SECOND FIRE BELOW THE SAME ANNOTATION STILL READS AS TEARDOWN (the reader
+        # takes the first fire's position, which is the one the annotation preceded).
+        16: (CURRENT_HEADER + note + FIRED_BODY + FIRED_BODY, True),
+    }
+    for pid, (text, expected) in cases.items():
+        _write_dump(logs, pid, text)
+        assert stall_watchdog.fired_in_runner_teardown(pid, logs) is expected, (pid, text)
+    assert stall_watchdog.fired_in_runner_teardown(17, logs) is None
+
+
+def test_the_teardown_annotation_is_a_no_op_when_unarmed_and_idempotent_when_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FINDING D, second cell: the annotation changes nothing but the artifact.
+
+    ``note_runner_teardown`` runs on the runtime's shutdown path, so it must be free for
+    every caller that never armed a bound (the in-process hosts, the TUI, this whole
+    suite) and it must be once-per-arming: it names a PHASE, and a phase is entered once.
+    The rest of the cell pins that it did not become a second timer policy — the native
+    arms stay ``exit=False``, a fire over work in flight still records the held reading,
+    and ``disarm`` still removes an un-fired dump.
+    """
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    monkeypatch.setattr(stall_watchdog, "_start_sampler", lambda armed: None)
+
+    # (a) NOTHING ARMED: no-op, and no artifact is created to annotate.
+    assert stall_watchdog.note_runner_teardown() is False
+    assert not list(tmp_path.glob(f"{stall_watchdog.DUMP_PREFIX}-*.log"))
+
+    pid = os.getpid()
+    try:
+        assert stall_watchdog.arm(seconds=5.0, busy=lambda: True, directory=tmp_path) is True
+        assert stall_watchdog.note_runner_teardown() is True
+        assert stall_watchdog.note_runner_teardown() is False, "the phase was annotated twice"
+        assert stall_watchdog._ARMED is not None
+        assert stall_watchdog._ARMED.runner_teardown.is_set() is True
+        dump = stall_watchdog.dump_path(pid, tmp_path)
+        text = dump.read_text(encoding="utf-8")
+        assert text.count(stall_watchdog.TEARDOWN_MARKER) == 1, text
+        assert [armed[1] for armed in fake.armed] == [False], fake.armed
+
+        # (b) A LATER FIRE SITS BELOW THE ANNOTATION, which is the production shape and
+        # the reason the classifier can answer at all.
+        with dump.open("a", encoding="utf-8") as handle:
+            handle.write(FIRED_BODY)
+        stall_watchdog.beat(stall_watchdog.SERVING)
+        text = dump.read_text(encoding="utf-8")
+        assert stall_watchdog.fired_in_runner_teardown(pid, tmp_path) is True
+        assert any(
+            line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+        ), f"the annotation changed how a fire is recorded: {text[:900]!r}"
+        assert stall_watchdog.held_fire(pid, tmp_path) is True
+        # EVERY arm this run took is dump-only, including the re-arm the fire itself
+        # performed; the count is not asserted because the re-arm's own interval is the
+        # backoff's business, not this cell's.
+        assert fake.armed and all(armed[1] is False for armed in fake.armed), fake.armed
+        # The artifact of a fire the runtime survived still outlives the clean exit.
+        stall_watchdog.disarm()
+        assert dump.exists()
+    finally:
+        stall_watchdog.disarm()
+
+    # (c) ...and with no fire, the clean exit still removes the dump.
+    assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
+    quiet = stall_watchdog.dump_path(pid, tmp_path)
+    assert quiet.exists()
+    assert stall_watchdog.note_runner_teardown() is True
+    stall_watchdog.disarm()
+    assert not quiet.exists(), "an annotated run that never fired left a body on disk"
+
+
+_EXECUTOR_PARKED_CHILD = """
+import asyncio
+import os
+import pathlib
+import sys
+import time
+
+from local_operator.session.runtime import process, stall_watchdog
+
+release = pathlib.Path(sys.argv[1])
+parked = pathlib.Path(sys.argv[2])
+done = pathlib.Path(sys.argv[3])
+bound = float(sys.argv[4])
+
+# ARMED INSIDE THE COROUTINE, so the annotation is not racing the timer: this cell is
+# about the ORDER of the annotation and the fire, and an arm taken before the body ran
+# could fire before the annotation on a loaded host. The bound still starts before the
+# executor join, which is the phase under test.
+def worker() -> str:
+    parked.write_text("parked in the default executor", encoding="utf-8")
+    deadline = time.monotonic() + 300
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return "released"
+
+
+async def body(operator_cap: bytes | None = None) -> int:
+    assert stall_watchdog.arm(seconds=bound, busy=lambda: False), "the child could not arm"
+    print(f"armed:{os.getpid()}", flush=True)
+    # The future is deliberately dropped: the work is the executor thread itself, and
+    # what this cell needs is a runner whose teardown has something to join.
+    asyncio.get_running_loop().run_in_executor(None, worker)
+    return 0
+
+
+process.amain = body
+rc = asyncio.run(process._run_amain(None))
+done.write_text(f"clean exit {rc}", encoding="utf-8")
+"""
+
+
+def test_a_real_child_annotates_the_runner_teardown_before_the_executor_join(
+    tmp_path: Path,
+) -> None:
+    """FINDING D, third cell: the whole mechanism on a real process.
+
+    A child arms a short bound and parks a default-executor worker on a file only the
+    parent can release, so ``asyncio.run`` returns and its Runner then blocks in
+    ``shutdown_default_executor`` -> ``_do_shutdown`` -> ``Thread.join``. What must be
+    true is the whole finding: the bound fires and the process SURVIVES it, the dump
+    carries the annotation ABOVE the fire, the parked join is what the stacks show, and
+    releasing the worker lets the child finish cleanly on its own terms — which is what
+    makes this an annotation of a phase rather than a claim about a death.
+    """
+    release = tmp_path / "release.txt"
+    parked = tmp_path / "parked.txt"
+    done = tmp_path / "done.txt"
+    script = tmp_path / "parked_child.py"
+    script.write_text(_EXECUTOR_PARKED_CHILD, encoding="utf-8")
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, str(script), str(release), str(parked), str(done), str(SHORT_BOUND_S)],
+        env=_child_env(tmp_path),
+        cwd=str(tmp_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        dump = _dump_for(tmp_path, proc.pid)
+        deadline = time.monotonic() + 60.0
+        fired = False
+        settled = False
+        while time.monotonic() < deadline:
+            assert proc.poll() is None, (
+                "the child left before its bound fired, so nothing was parked in the "
+                f"executor join: rc={proc.returncode}"
+            )
+            if parked.exists() and dump.is_file():
+                text = dump.read_text(encoding="utf-8")
+                if stall_watchdog.FIRED_MARKER in text:
+                    fired = True
+                    # THE MARKER LINE LANDS BEFORE THE STACKS: ``faulthandler`` writes
+                    # the fired value, then walks every thread. Reading at the first
+                    # sight of the marker would look at a half-written dump, so this
+                    # waits for the frame the annotation exists to explain.
+                    if "_do_shutdown" in text or "shutdown_default_executor" in text:
+                        settled = True
+                        break
+            time.sleep(0.02)
+        assert fired, (
+            "the bound never fired while the executor join was parked: "
+            f"parked={parked.exists()} dump={dump.is_file()}"
+        )
+        assert settled, "the dump never grew the executor-join stacks the fire interrupted"
+        text = dump.read_text(encoding="utf-8")
+        assert (
+            stall_watchdog.TEARDOWN_MARKER in text
+        ), f"the runner's own teardown was not annotated: {text[:600]!r}"
+        assert text.index(stall_watchdog.TEARDOWN_MARKER) < text.index(
+            stall_watchdog.FIRED_MARKER
+        ), "the annotation landed below the fire, so it cannot describe that fire"
+        assert "_do_shutdown" in text or "shutdown_default_executor" in text, (
+            "the stacks do not show the executor join this annotation exists to explain: "
+            f"{text[:1200]!r}"
+        )
+        assert not done.exists(), "the child completed before the worker was released"
+        assert stall_watchdog.fired_in_runner_teardown(proc.pid, tmp_path / "logs") is True
+        assert (
+            stall_watchdog.fire_outcome(proc.pid, tmp_path / "logs") == stall_watchdog.FIRE_SURVIVED
+        ), "a dump-only fire was not read as survived by the production reader"
+
+        # RELEASE, and let it finish on its own terms: nothing here kills it, and the
+        # exit code is the proof that the fire ended nothing.
+        release.write_text("the parent releases the worker", encoding="utf-8")
+        assert proc.wait(timeout=120.0) == 0, (
+            f"the annotated child did not finish cleanly: rc={proc.returncode} "
+            f"{proc.stderr.read() if proc.stderr else ''}"
+        )
+        assert done.read_text(encoding="utf-8") == "clean exit 0"
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+
+
+_GIL_PARKED_RUNNER_CHILD = """
+import asyncio
+import ctypes
+import os
+import sys
+
+from local_operator.session.runtime import process, stall_watchdog
+
+
+def park_the_loop_deliberately() -> None:
+    lib = ctypes.PyDLL(None)
+    lib.sleep.argtypes = [ctypes.c_uint]
+    lib.sleep(600)
+
+
+async def body(operator_cap: bytes | None = None) -> int:
+    assert stall_watchdog.arm(seconds=float(sys.argv[1]), busy=lambda: False), "could not arm"
+    print(f"armed:{os.getpid()}", flush=True)
+    park_the_loop_deliberately()
+    return 0
+
+
+process.amain = body
+asyncio.run(process._run_amain(None))
+"""
+
+
+def _run_parked_child(
+    script: str, work_dir: Path, args: tuple[str, ...], settle: str
+) -> tuple[str, int]:
+    """Spawn a GIL-parked child, wait for its fire AND its stacks, then reap it.
+
+    ``_run_stalled_script`` reaps as soon as ``FIRED_MARKER`` appears, which is while
+    ``faulthandler`` is still walking every thread — so a cell that asserts on a STACK
+    can read a dump truncated mid-write, and would fail for a reason that has nothing to
+    do with the behaviour under test (measured: it did, under fleet load). This waits
+    for the frame it is about while the child is still alive, then reaps only the
+    process group it created.
+    """
+    path = work_dir / "parked_child.py"
+    path.write_text(script, encoding="utf-8")
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, str(path), *args],
+        env=_child_env(work_dir),
+        cwd=str(work_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    dump = _dump_for(work_dir, proc.pid)
+    deadline = time.monotonic() + 45.0
+    text = ""
+    try:
+        while time.monotonic() < deadline:
+            assert (
+                proc.poll() is None
+            ), f"the parked child left before its dump settled: rc={proc.returncode}"
+            if dump.is_file():
+                text = dump.read_text(encoding="utf-8")
+                if stall_watchdog.FIRED_MARKER in text and settle in text:
+                    break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(f"the dump never carried {settle!r} beside a fire: {text[:800]!r}")
+    finally:
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=10)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+    return text, proc.pid
+
+
+def test_a_GIL_parked_child_is_never_annotated_as_teardown(tmp_path: Path) -> None:
+    """FINDING D, fourth cell: the phase a GIL-held stall never reaches.
+
+    The annotation is written by the wrapper's ``finally``, so a loop parked inside
+    ``amain`` with the GIL held can never get it — the coroutine does not return. The
+    fire is still an observation on a dump-only build; what it must NOT be is an
+    attributed teardown, because a reader that inferred one from a parked stack would be
+    inventing the phase it cannot see.
+    """
+    text, pid = _run_parked_child(
+        _GIL_PARKED_RUNNER_CHILD,
+        tmp_path,
+        (str(SHORT_BOUND_S),),
+        "park_the_loop_deliberately",
+    )
+    assert stall_watchdog.FIRED_MARKER in text, text[:400]
+    assert "park_the_loop_deliberately" in text, text[:800]
+    assert stall_watchdog.TEARDOWN_MARKER not in text, (
+        "a phase marker was written for a process that never left ``amain``: " f"{text[:800]!r}"
+    )
+    assert stall_watchdog.fired_in_runner_teardown(pid, tmp_path / "logs") is None
+    assert (
+        stall_watchdog.fire_outcome(pid, tmp_path / "logs") == stall_watchdog.FIRE_SURVIVED
+    ), "the GIL-held fire lost its honest reading while its phase stayed unknown"

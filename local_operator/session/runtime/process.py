@@ -4377,6 +4377,37 @@ async def amain(operator_cap: bytes | None = None) -> int:
     return 0
 
 
+async def _run_amain(operator_cap: bytes | None) -> int:
+    """Run ``amain`` and annotate the dump when the asyncio runner starts tearing down.
+
+    THE WHOLE OF FINDING D (2026-09-23 convergence round) IS THE ``finally`` BELOW, and
+    its position is the mechanism rather than a style choice. ``asyncio.run`` constructs
+    a ``Runner``, runs this coroutine, and only THEN tears the runner down: it cancels
+    the remaining tasks, runs async-generator shutdown and joins the default executor
+    (``shutdown_default_executor`` -> ``_do_shutdown`` -> ``Thread.join``, bounded by
+    ``asyncio.constants.THREAD_JOIN_TIMEOUT``). Those phases run OUTSIDE this coroutine,
+    so the ``finally`` is the last moment a Python thread of ours is alive to say which
+    phase the process has entered — and it is exactly the phase the operator's store
+    kept losing: 17-27 dumps whose loop sits in asyncio shutdown with the death
+    unattributed, because nothing in the artifact said the loop was in teardown rather
+    than in work that stopped reporting.
+
+    NAMED FOR WHAT IS KNOWN, NOT FOR WHAT USUALLY FOLLOWS: 'asyncio runner teardown
+    started; executor join may follow'. Task cancellation and async-generator shutdown
+    precede the join, so a line claiming the join would name the wrong phase for the
+    fires that land in the first two.
+
+    SYNCHRONOUS AND UNCONDITIONAL BY DESIGN: the annotation is a no-op when nothing is
+    armed (every in-process host, every TUI, the whole test suite), so this wrapper
+    costs an unarmed runtime one attribute read, and it cannot raise — a diagnostic must
+    never be the reason a shutting-down runtime fails to leave.
+    """
+    try:
+        return await amain(operator_cap=operator_cap)
+    finally:
+        stall_watchdog.note_runner_teardown()
+
+
 def main() -> int:
     # THE TOKENIZER WARM STARTS FIRST, before the log file, the imports and the
     # lease: it is the only piece of boot work that nothing else on this path
@@ -4445,7 +4476,12 @@ def main() -> int:
     # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
     try:
-        return asyncio.run(amain(operator_cap=operator_cap))
+        # THROUGH THE WRAPPER, NEVER ``amain`` DIRECTLY: the wrapper's ``finally`` is what
+        # annotates the dump with the runner's own teardown phase, and it has to run
+        # BEFORE ``asyncio.run`` starts that teardown. Calling ``amain`` here would put
+        # the note after the join it exists to explain — or, on the path where the join
+        # never returns, never write it at all. See :func:`_run_amain`.
+        return asyncio.run(_run_amain(operator_cap=operator_cap))
     except KeyboardInterrupt:
         return 0
     finally:

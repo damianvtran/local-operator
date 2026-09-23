@@ -122,9 +122,7 @@ def bounded(seconds: float, what: str) -> Iterator[None]:
         # diagnostic. Keep the test red in that case; the C callback itself must
         # not terminate pytest to report the bound.
         if _is_real_dump(path):
-            raise TimeoutError(
-                f"{what!r} exceeded {seconds:g}s; thread dump retained at {path}"
-            )
+            raise TimeoutError(f"{what!r} exceeded {seconds:g}s; thread dump retained at {path}")
     finally:
         handle.close()
         # The timer's C thread may have written a real dump before the step returned.
