@@ -6996,3 +6996,172 @@ async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_pat
                 assert detail["still_pending"] is True, detail
     finally:
         await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_served_warm_whose_runtime_exited_cleanly_does_not_pace_the_next(
+    tmp_path, monkeypatch
+):
+    """B-F1: a SUCCESSFUL warm must not charge the next cold period 30 s.
+
+    The idle drain reaps a warmed runtime seconds after the user looks away, and
+    switching back inside the pace used to wait out its remainder cold (26.2-26.8 s
+    p95 watch->live, reproduced over real ``serve``). The runtime that served the
+    last warm is gone and withdrew its boot record, which only a clean exit does,
+    so the next intent engages at once. The crash-loop pin above
+    (``test_a_runtime_that_boots_then_dies_is_paced_not_respawned_each_beat``) is
+    the other half: an unknown pid, a live pid, or a surviving boot record keeps
+    the pace.
+    """
+    attempts: list[bool] = []
+    now = 100.0
+    exited_cleanly = {"value": True}
+
+    def clock() -> float:
+        return now
+
+    class BoundClient:
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+        async def desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+            pass
+
+    async def serve(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        remote._client = BoundClient()  # type: ignore[assignment]
+        remote._ready_for_events = True
+        remote._runtime_pid = 424242
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    monkeypatch.setattr(
+        module.DesktopSessionBridge,
+        "_served_runtime_exited_cleanly",
+        lambda self: self.warm_served_pid == 424242 and exited_cleanly["value"],
+    )
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        remote = bridge.remote
+        monkeypatch.setattr(remote, "_ensure_bound", serve)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: attempts == [False], why="the first warm never ran")
+        await _until(lambda: bridge.warm_served, why="the served warm was not recorded")
+        assert bridge.warm_served_pid == 424242
+
+        # The drain reaps it; the viewer is cold again with the lease still live
+        # and the clock still inside the 30 s pace.
+        remote._client = None
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(
+            lambda: attempts == [False, False],
+            why="a clean exit still charged the next cold period its pace",
+        )
+
+        # The crash-shaped exit (boot record left behind) keeps the pace.
+        exited_cleanly["value"] = False
+        remote._client = None
+        for _ in range(3):
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            await asyncio.sleep(0.05)
+        assert attempts == [False, False], "an unclean exit was re-spawned inside the pace"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_does_not_wait_on_a_contended_attention_store(tmp_path, monkeypatch):
+    """B-F6: a writer holding ``attention.db`` must not hold a conversation open.
+
+    The store is a rollback journal shared by every session on the machine, and
+    a read rides out up to ~10.8 s of lock. The snapshot answers from the last
+    known receipt state inside ``ATTENTION_SNAPSHOT_WAIT_S`` and the refresh
+    publishes an ``attention`` frame when it lands.
+    """
+    release = threading.Event()
+    real_state = module.AttentionStore.state
+
+    def slow_state(self, conversation):
+        release.wait(10)
+        return real_state(self, conversation)
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    monkeypatch.setattr(module.AttentionStore, "state", slow_state)
+    async with pool.session(sid, read=True) as bridge:
+        watcher = bridge.subscribe()
+        started = time.monotonic()
+        snapshot = await bridge.snapshot()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.3, f"the snapshot waited {elapsed:.2f}s on attention.db"
+        assert snapshot["payload"]["frontend"]["snapshot"]["session_id"] == sid
+
+        release.set()
+        await _until(
+            lambda: any(
+                item is not None and item[0]["type"] == "attention"
+                for item in list(watcher.queue._queue)  # type: ignore[attr-defined]
+            ),
+            why="the late attention read was never published",
+        )
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_served_runtime_probe_memoises_only_a_final_verdict(tmp_path, monkeypatch):
+    """N1 (review round 1): the exit probe is not re-run every pacing pass.
+
+    The probe sits inside ``_lease_warm_loop`` (a worker thread plus a ``ps``
+    fork), so a final verdict for a served pid, clean or not, is asked once.
+    A pid that is still ALIVE is not a verdict (``None``): that runtime can
+    still exit cleanly, which must then drop the pace, so it is re-asked.
+    """
+    attempts: list[bool] = []
+    verdicts: list[bool | None] = [None, None, False]
+    probes: list[int | None] = []
+
+    class BoundClient:
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+        async def desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+            pass
+
+    async def serve(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        remote._client = BoundClient()  # type: ignore[assignment]
+        remote._ready_for_events = True
+        remote._runtime_pid = 424242
+
+    def probe(self) -> bool | None:
+        probes.append(self.warm_served_pid)
+        return verdicts[min(len(probes), len(verdicts)) - 1]
+
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    monkeypatch.setattr(module.DesktopSessionBridge, "_served_runtime_exited_cleanly", probe)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        remote = bridge.remote
+        monkeypatch.setattr(remote, "_ensure_bound", serve)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: bridge.warm_served, why="the served warm was not recorded")
+
+        # Cold again inside the pace: the live answers are re-asked, and the
+        # final "not clean" one is asked once however many passes follow.
+        remote._client = None
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: len(probes) >= 3, why="a live verdict was memoised")
+        for _ in range(10):
+            await asyncio.sleep(0.02)
+        assert probes == [424242, 424242, 424242], "a final verdict was probed again"
+        assert attempts == [False], "an unclean exit was re-spawned inside the pace"
+    await pool.close()
