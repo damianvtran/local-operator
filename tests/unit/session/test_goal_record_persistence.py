@@ -112,7 +112,9 @@ def test_restore_rebuilds_status_judge_and_history(tmp_path: Path) -> None:
     source.mark_done("the judge said so")
     source.dismiss()
     source.arm("B")
-    source.judge = GoalJudgeState(state="continuing", run=2, verdict="continue", reason="r", failures=1)
+    source.judge = GoalJudgeState(
+        state="continuing", run=2, verdict="continue", reason="r", failures=1
+    )
     write_goal_record(tmp_path, source.to_payload())
     write_session_attachment(tmp_path, team="", agent="", goal="B")
     session = _stub_session(tmp_path)

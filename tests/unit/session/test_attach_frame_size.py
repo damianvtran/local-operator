@@ -66,6 +66,7 @@ from local_operator.session.frontend_state import (
     _DERIVED_STATE_LABELS,
     _MODEL_CATALOGUE_LINE_LIMIT,
     _SHAREABLE_STATE_FIELDS,
+    GOAL_REASON_WIRE_CHARS,
     LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
     LIVE_EVENT_END_ROWS_MAX,
     LIVE_EVENT_TEXT_FLOOR_CHARS,
@@ -82,6 +83,7 @@ from local_operator.session.frontend_state import (
     McpServerState,
     TodoItemState,
     TodoPhaseState,
+    _bound_goal_record_in_place,
     _folded_components,
     _released_row,
     _with_lineage,
@@ -1030,6 +1032,18 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
 
     assert frame["data"]["snapshot"]["attention"] == attention
     size = _line_bytes(frame)
+    # The record YIELDED on this frame rather than being counted on to fit, which
+    # is what makes the assertion below a measurement of the BOUNDED shape: the
+    # entry cap alone could not have brought these bytes under the line, and a
+    # fixture that only proved the frame fits would not notice the wire bound
+    # being deleted.
+    snapshot = frame["data"]["snapshot"]
+    assert snapshot["goal_history"] == [], (
+        "the wire bound did not run on a frame this size, so this guard is "
+        "measuring the unbounded shape (see _bound_goal_record_in_place)"
+    )
+    assert snapshot["goal_history_truncated"] is True
+    assert len(snapshot["goal_judge"]["reason"]) == GOAL_REASON_WIRE_CHARS
     assert size < _MAX_LINE_BYTES, (
         f"the attach frame is {size:,} bytes, over the {_MAX_LINE_BYTES:,} limit. "
         "Some field in FrontendSessionState grows without bound and is not "
@@ -6035,3 +6049,52 @@ def test_a_deep_roster_charges_for_its_own_keys_and_markers() -> None:
     kept = sum(len(rows) for rows in filtered["job_trajectory_appends"].values())
     assert kept > 0, "the bound emptied every job's rows to fit a frame the keys cost"
     assert len(filtered["job_trajectory_replacements"]) == jobs
+
+
+def test_the_goal_record_yields_only_when_the_frame_is_over_the_line() -> None:
+    """The wire bound, exercised directly, on both sides of its threshold.
+
+    The class guard above proves the frame FITS with the record populated past
+    what it can carry; this pins the two halves that make that true, because a
+    bound that always fired would pass that guard by throwing the history away on
+    every session and nobody's test would notice.
+
+    Dropping the history is what the flag has to accompany — the same lie
+    `model_catalogue_truncated` exists to prevent: a reader that receives an
+    empty list must be able to tell "nothing settled" from "yielded to fit".
+    """
+
+    def _record() -> dict[str, Any]:
+        return {
+            "goal_status": "active",
+            "goal_judge": {
+                "state": "continuing",
+                "run": 3,
+                "verdict": "continue",
+                "reason": "r" * LOOP_REASON_CHARS,
+            },
+            "goal_history": [_goal_history_row(index) for index in range(GOAL_HISTORY_MAX)],
+        }
+
+    small = {"op": "frontend_sync", "data": {"snapshot": _record()}}
+    _bound_goal_record_in_place(small, small["data"]["snapshot"])
+    snapshot = small["data"]["snapshot"]
+    # Under the line NOTHING yields, including the full-length reason: the entry
+    # clip is the record's own bound and survives here.
+    assert len(snapshot["goal_history"]) == GOAL_HISTORY_MAX
+    assert "goal_history_truncated" not in snapshot
+    assert len(snapshot["goal_judge"]["reason"]) == LOOP_REASON_CHARS
+    assert snapshot["goal_status"] == "active"
+
+    over = _record()
+    over["filler"] = "x" * (_MODEL_CATALOGUE_LINE_LIMIT + 1)
+    big = {"op": "frontend_sync", "data": {"snapshot": over}}
+    _bound_goal_record_in_place(big, big["data"]["snapshot"])
+    # Over it: the list goes with the flag set, the judge keeps all four keys and
+    # clips its prose, and the ACTIVE goal — the thing on this frame a user is
+    # looking at — is untouched.
+    assert big["data"]["snapshot"]["goal_history"] == []
+    assert big["data"]["snapshot"]["goal_history_truncated"] is True
+    assert len(big["data"]["snapshot"]["goal_judge"]["reason"]) == GOAL_REASON_WIRE_CHARS
+    assert set(big["data"]["snapshot"]["goal_judge"]) == {"state", "run", "verdict", "reason"}
+    assert big["data"]["snapshot"]["goal_status"] == "active"
