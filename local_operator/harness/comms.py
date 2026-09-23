@@ -1021,8 +1021,19 @@ class SubagentComms:
         """
         rows: list[dict[str, Any]] = []
         for record in self._records.values():
-            if record.session_dir is None:
-                continue
+            # A record with NO transcript directory is NOT dropped. It is a child
+            # that died before ``attach`` ran — a launch that failed during an
+            # install swap is the measured case — and dropping it made the class
+            # invisible AND unreachable: ``hub op=list`` could not name it,
+            # ``hub op=peek`` by id or label returned "unknown subagent", and
+            # ``resume`` was impossible, so the parent could only re-dispatch
+            # from scratch and lose whatever the child had done. Its settled
+            # OUTCOME and its ``error_text`` are durable facts about it and are
+            # what its parent needs to diagnose it, so the row survives even
+            # though there is no transcript to replay. It can never claim
+            # ``resumable`` (see ``_describe``): the write below carries no
+            # ``session_dir``, so ``resume`` refuses it with its own honest
+            # reason rather than promising a resume that then fails.
             rows.append(
                 {
                     "job_id": record.job_id,
@@ -1043,7 +1054,13 @@ class SubagentComms:
                     # and a resumed grandchild that can activate the writes it
                     # was refused (review round 3, R6).
                     "restricted": record.restricted,
-                    "session_dir": str(record.session_dir),
+                    # ``None`` — NOT the string "None" — when the child never
+                    # attached. ``restore`` and the row guard both read this as
+                    # "no transcript", so a stringified ``None`` would make a
+                    # directory named "None" out of a child that has none.
+                    "session_dir": (
+                        str(record.session_dir) if record.session_dir is not None else None
+                    ),
                     "outcome": record.outcome,
                     # Rides with the outcome: both are the same durable fact,
                     # and both must outlive the job row the manager sweeps.
@@ -1380,7 +1397,17 @@ class SubagentComms:
             # polling across the settle boundary looks.
             resumable, detail = False, "still settling; it becomes resumable in a moment"
         elif record.session_dir is None:
-            resumable, detail = False, "never started, so it has no transcript"
+            # NOT resumable, and that is honest — there is no transcript to
+            # replay — but the ROW still exists and still names WHY it died.
+            # Carrying the recorded error here is the point of keeping the
+            # record: a pre-attach failure ("No package metadata was found for
+            # local-operator", a launch inside an install swap) was previously
+            # reported as a bare "never started", so a parent could not tell a
+            # packaging/install failure from a child it had simply never run.
+            resumable = False
+            detail = "never started, so it has no transcript"
+            if record.error_text:
+                detail = f"never started ({record.error_text}), so it has no transcript"
         elif not (record.session_dir / TRANSCRIPT_FILENAME).exists():
             resumable, detail = False, "transcript is gone from disk"
         else:

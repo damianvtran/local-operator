@@ -2935,3 +2935,81 @@ def test_a_child_hub_reply_with_parent_shaped_args_still_reaches_the_parent():
     assert isinstance(message, CustomMessage)
     assert message.custom_type == HUB_MESSAGE_TYPE
     assert "review posted" in message.details["text"]
+
+
+def test_a_child_that_dies_before_attaching_keeps_its_handle_and_its_reason() -> None:
+    """A pre-attach failure must be ENUMERABLE and DIAGNOSABLE, not invisible.
+
+    Measured defect: a child that failed before ``attach`` ran (job
+    ``f6ed760e3449``, "No package metadata was found for local-operator",
+    spawned inside an install swap) had ``session_dir is None``, and
+    ``snapshot()`` DROPPED such a record outright. So the parent could not name
+    it (``hub op=list`` omitted it), could not peek it by id or label, and could
+    not resume it — the only recovery was to re-dispatch from scratch and lose
+    whatever it had done. Nothing on any surface said WHY it failed.
+
+    What such a child can and cannot promise: it has no transcript, so it is
+    NOT resumable, and the roster must say so honestly rather than offer a
+    resume that would fail. But its outcome and its error text ARE durable
+    facts, so the record survives a snapshot/restore and the roster reports the
+    reason.
+    """
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("dead", "remediate-ud1426-r2", agent_role="coder")
+    # Never attached: no transcript directory, and the settle path recorded the
+    # failure. This is the exact shape the writer produces.
+    assert comms._records["dead"].session_dir is None
+    comms.record_outcome(
+        "dead", "failed", error_text="No package metadata was found for local-operator"
+    )
+
+    # The record survives the round trip that carries it across a restart.
+    payload = comms.snapshot()
+    assert any(row["job_id"] == "dead" for row in payload), (
+        "a pre-attach failure was dropped from the snapshot, so it cannot be "
+        "named or diagnosed after a restart"
+    )
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(payload)
+
+    row = next(r for r in restored.roster() if r.job_id == "dead")
+    assert row.status == "failed"
+    assert row.error_text == "No package metadata was found for local-operator"
+    # Honest refusal, not a promise: no transcript means no resume.
+    assert row.resumable is False
+    assert row.session_id is None
+    # ...and the ROW says why it is not resumable, carrying the recorded reason.
+    assert (
+        row.detail and "No package metadata was found for local-operator" in row.detail
+    ), row.detail
+
+
+def test_a_live_and_a_clean_child_are_unaffected_by_the_pre_attach_path() -> None:
+    """The negative arm: keeping no-transcript records must not change the rest.
+
+    A child WITH a transcript is untouched by this change — it still snapshots,
+    restores and reports as before — and a clean completion still carries no
+    error text. Without this, a fix that simply kept every record and labelled
+    every unattached child "failed" would pass the test above.
+    """
+    from pathlib import Path
+
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("ok", "reviewer", agent_role="reviewer")
+    comms._records["ok"].session_dir = Path("/tmp/definitely-a-transcript-dir")
+    comms.record_outcome("ok", "completed", result_text="done")
+
+    payload = comms.snapshot()
+    row_payload = next(r for r in payload if r["job_id"] == "ok")
+    assert row_payload["session_dir"] == "/tmp/definitely-a-transcript-dir"
+
+    restored = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    restored.restore(payload)
+    row = next(r for r in restored.roster() if r.job_id == "ok")
+    assert row.status == "completed"
+    assert row.error_text is None
+    assert row.session_id == "definitely-a-transcript-dir"
