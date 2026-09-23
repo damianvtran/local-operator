@@ -5198,7 +5198,17 @@ class TranscriptView(ScrollableContainer):
         # next turn streams into a reader who is, by construction, at the
         # bottom of an empty column.
         self._tail_anchor.acquire()
-        self.scroll_home(animate=False)
+        # IMMEDIATE and inside the programmatic guard. A bare
+        # `scroll_home(animate=False)` is DEFERRED to after the next refresh, so
+        # it lands outside any guard, and `watch_scroll_y` read it as the READER
+        # leaving the bottom — releasing the anchor this method just acquired.
+        # On an in-app `/resume` that is the frame the incoming conversation's
+        # first rows arrive in: two frames painted at scroll 0 with the head
+        # notice on screen, a whole screenful off the tail, until the backfill's
+        # anchored insert re-acquired it (design round 1, D1: 22 ms on this
+        # branch, the same class main paints for 26 ms).
+        with self._tail_anchor.programmatic_scroll():
+            self.scroll_to(y=0, animate=False, immediate=True, force=True)
         if self._on_clear is not None:
             self._on_clear()
 

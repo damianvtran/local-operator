@@ -924,6 +924,13 @@ class AttachedSession:
     asking. See :class:`SessionProtocol`'s runtime-role block.
     """
 
+    #: Paint-first marker (``ViewerSessionProtocol.attach_behind``). A CLASS
+    #: default, not only the ``__init__`` assignment below: ``False`` is the
+    #: right answer for every facade nobody chose paint-first for, and a class
+    #: attribute keeps a hand-built instance (``__new__`` in the protocol
+    #: conformance test) a viewer without reciting it.
+    attach_behind: bool = False
+
     def __init__(
         self,
         *,
@@ -994,6 +1001,13 @@ class AttachedSession:
         #: prints it once on adoption so the user is told why the session came
         #: up bare instead of being left to guess (UX round 1, U2).
         self.degraded_reason: str = ""
+        #: The launcher opened this viewer cold IN FRONT OF a live owner it will
+        #: bind to behind the paint (``lop --resume`` / ``/resume`` onto a live
+        #: owner whose conversation is on disk). The TUI reads it to narrate and
+        #: bound that attach, which the ordinary cold open does not need: there
+        #: nothing is waiting on an owner that exists. Set by the caller that
+        #: chose paint-first, never inferred here.
+        self.attach_behind: bool = False
         #: Told when the runtime vanished for good; see ``_go_cold``.
         self._went_cold_callback: Callable[[], Any] | None = None
         #: Told when the runtime retired ITSELF for a newer build (the
@@ -5157,6 +5171,13 @@ class AttachedSession:
         events — so they land in transcript order, once, before anything the
         relay adds. Rows the cold read painted stay claimed and are not
         repainted.
+
+        AN ID-LESS ROW IS DROPPED FROM THE UN-CLAIM ON PURPOSE (review round 1,
+        F3). Nothing can claim or dedupe a row without an id —
+        :meth:`_replay_durable_suffix` skips it for the same reason — so
+        releasing "" would release nothing. It is not lost: the TUI projects its
+        transcript from this facade's ``history()`` on the bind's rollover, and
+        that list carries the row whatever its id.
         """
         gap = {
             str(getattr(message, "id", "") or "")
