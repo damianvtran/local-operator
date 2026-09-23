@@ -42,6 +42,16 @@ def _stub_session(directory: Path, *, restoring: bool = False) -> Session:
     session._transcript = cast(Any, _Transcript(directory))
     session._goal_state = GoalState()
     session._restoring_attachment = restoring
+    # The attributes `Session.__init__` seeds that the attachment write reads.
+    # `arm_goal` journals the goal through `_persist_attachment` as well as the
+    # record (the goal rides the same tail as the team/agent briefs), and that
+    # path resolves `active_team_name` — which reads `active_team` and then, when
+    # that is empty, the carried `_unresolved_team`. A double built with
+    # `object.__new__` skips `__init__`, so it has to seed them itself or the
+    # real write path raises on the first goal transition.
+    session.active_team = None
+    session._unresolved_team = ""
+    session._unresolved_agent = ""
     # Counted, and stubbed rather than run: publishing is the mutation path's
     # business (pinned by the host tests), and a real refresh needs a store.
     session.refresh_frontend_state = lambda: None  # type: ignore[method-assign]
