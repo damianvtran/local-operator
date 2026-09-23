@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,8 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     TextContent,
 )
+from local_operator.session.goal_judge import goal_continuation_prompt
+from local_operator.session.goal_loop import LOOP_JUDGE_PROMPT, LOOP_PROMPT
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
@@ -102,6 +104,84 @@ E2E_ORACLE_MODEL = ModelSpec(provider="openai", model_id="e2e-oracle-model", con
 #: that a genuinely stuck boot is reported by the assertion rather than by the
 #: watchdog, which gives a clearer message.
 ADOPT_TIMEOUT_S = 20.0
+
+
+def last_user_text(request: ChatRequest) -> str:
+    """The question a provider call is ASKING: its last user-role row.
+
+    A provider call carries the whole conversation, so the last user row is what
+    distinguishes the calls a goal-owning session makes from one another — the
+    human's own words for their turn, the judge's forked question for its aside,
+    one of the two loop prompts for a self-continuation. Reading the WHOLE
+    message list instead would match the goal transcript every time and label
+    every call the same.
+    """
+    users = [message for message in request.messages if message.role == "user"]
+    if not users:
+        return ""
+    return " ".join(block.text for block in users[-1].content if getattr(block, "text", None))
+
+
+def provider_call_kinds(
+    requests: Sequence[ChatRequest],
+    *,
+    goal: str,
+    extra: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Label every provider call by WHAT IT IS, not by how many there were.
+
+    ``/goal <text>`` no longer costs one provider call. It starts the user's own
+    turn, and beside it the judged-goal machinery forks a judge AND may admit a
+    continuation turn — all of it on the OWNER's host, so all of it lands in the
+    same scripted stream. A bare ``len(stream.requests)`` therefore cannot tell a
+    second user turn (the bug these cells exist to catch: an argument submitted
+    twice, or a command that re-asks) from the harness legitimately working the
+    goal. The property that survives the feature is that a command starts exactly
+    ONE user-authored turn and that every other call is attributable, and this is
+    the instrument that can state it.
+
+    Labels, from the question each call asks:
+
+    * ``goal`` — the row IS the standing goal text, i.e. the ``/goal`` argument
+      submitted as an ordinary turn. Counting THIS is how a cell states that a
+      command submits its argument once, and a retry does not submit it again;
+    * ``judge`` — ``LOOP_JUDGE_PROMPT.format(goal=...)``, the forked aside. The
+      goal judge and the ``/loop`` driver's judge ask the SAME question (one
+      policy, two triggers), so they share a label on purpose;
+    * ``continuation`` — ``goal_continuation_prompt(goal)``, the turn the judge
+      admitted;
+    * ``loop`` — ``LOOP_PROMPT``, the count loop's own next iteration, which is
+      app-authored chrome rather than anybody's words;
+    * whatever ``extra`` names, for the questions a cell drives itself (a
+      goal-mode loop's ``LOOP_GOAL_PROMPT``, an aside's own text);
+    * ``user`` — THE DEFAULT: a provider call whose question is none of the
+      above is a human's own turn, because the harness's questions are the few
+      texts this module knows by name and a person's turn is whatever they
+      typed. A cell that needs an absolute census therefore asserts its exact
+      counts (how many user turns it drove, and how many of each harness call)
+      rather than a floor.
+    """
+    judge_question = LOOP_JUDGE_PROMPT.format(goal=goal)
+    continuation = goal_continuation_prompt(goal)
+    known = {
+        goal: "goal",
+        judge_question: "judge",
+        continuation: "continuation",
+        LOOP_PROMPT: "loop",
+    }
+    if extra:
+        known.update(extra)
+    return [known.get(last_user_text(request), "user") for request in requests]
+
+
+def user_turns(kinds: Sequence[str]) -> int:
+    """The user-authored turns in a census: the ``/goal`` argument and the rest.
+
+    Named rather than inlined because the pair is easy to get subtly wrong at a
+    call site: a ``/goal`` turn is a user turn, it just happens to be the one
+    whose text a cell also asserts separately.
+    """
+    return sum(kind in {"user", "goal"} for kind in kinds)
 
 
 class ScriptedStream:
