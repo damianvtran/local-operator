@@ -220,14 +220,20 @@ describe("empty sections cost no heading (design round 1, D1)", () => {
 });
 
 describe("the list teaches its own pin gesture (design round 1, D2)", () => {
-	/* The caption is ALWAYS MOUNTED and collapses via max-height (design round 2,
-	   D8 — an abrupt unmount snapped the list ~23px). So the tests read the
-	   wrapper's height class and its `aria-hidden`, which is the same signal a
-	   sighted reader and assistive tech get. */
-	function hintBox(): HTMLElement {
-		/* The grid wrapper: <div grid> > <div overflow-hidden> > <p>. */
-		return screen.getByText("touch and hold a row to pin it").parentElement
-			?.parentElement as HTMLElement;
+	/* The caption is ALWAYS MOUNTED and collapses via grid rows (design round 2, D8
+	   — an abrupt unmount snapped the list ~23px; round 3 replaced a fixed
+	   max-height cap, which clipped a WRAPPED caption, with the 0fr/1fr track
+	   trick). So the tests read the wrapper's row class and its `aria-hidden`,
+	   which is the same signal a sighted reader and assistive tech get. */
+		function hintBox(): HTMLElement {
+		/* The grid wrapper: <div grid> > <div overflow-hidden> > <p>. The inner
+			  overflow-hidden child is asserted, not just walked past: without it a
+		   `1fr` track paints at full height and the collapse silently stops
+		   reaching zero (review round 4, MINOR 1). */
+		const wrapper = screen.getByText("touch and hold a row to pin it")
+			.parentElement as HTMLElement;
+		expect(wrapper.className).toContain("overflow-hidden");
+		return wrapper.parentElement as HTMLElement;
 	}
 
 	it("shows the hint while nothing is pinned", () => {

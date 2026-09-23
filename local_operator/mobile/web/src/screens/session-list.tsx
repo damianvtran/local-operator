@@ -615,7 +615,7 @@ export function SessionListScreen() {
 					placeholder="Search conversations…"
 					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
-				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
+				    {/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 				    round 1, D2). The session view's ☆ is one tap away and does the same
 				    thing, but a reader has to already be in a conversation to find it, so
 				    it cannot teach the list's own long-press.
@@ -635,17 +635,17 @@ export function SessionListScreen() {
 				    caps it to instant for free (the global block), which is the right
 				    fallback — the point is not the motion, it is that nothing snaps.
 
-					   THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
-						  earlier version capped `max-height` at a fixed 2rem — sized for ONE
-						  line of this caption at the default type scale. A caption that WRAPS
-					   to two lines (a longer localized string, a narrower container) is then
-					   taller than the cap, and `overflow-hidden` clips the second line away:
+				    THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
+				    earlier version capped `max-height` at a fixed 2rem — sized for ONE
+				    line of this caption at the default type scale. A caption that WRAPS
+				    to two lines (a longer localized string, a narrower container) is then
+				    taller than the cap, and `overflow-hidden` clips the second line away:
 				    the discoverer silently disappears for exactly the readers who need
-					   the label most. (The cap itself scales with the root font, so a
-						  large-text one-liner still fits — the failure is the WRAP, not the
-					   zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
-					   caption is fully painted at any string length and collapses to zero
-					   with no magic number to keep in sync with the type scale. */}
+				    the label most. (The cap itself scales with the root font, so a
+				    large-text one-liner still fits — the failure is the WRAP, not the
+				    zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
+				    caption is fully painted at any string length and collapses to zero
+				    with no magic number to keep in sync with the type scale. */}
 				<div
 					className={cn(
 						"grid transition-[grid-template-rows] duration-200 ease-out",
