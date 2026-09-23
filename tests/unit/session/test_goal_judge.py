@@ -22,6 +22,8 @@ The three rules worth reading the tests for:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -71,8 +73,12 @@ class Harness:
         self.settled: list[str] = []
         self.changed: list[dict[str, object]] = []
         #: Hooks a test uses to make the WORLD move while the judge is in flight.
-        self.on_judge: object = None
-        self.on_prompt: object = None
+        # Typed as the callables they are: these doubles' whole point is that a
+        # test can install a hook on the judge/prompt edge, and an `object`
+        # declaration made every call site a type error that a `type: ignore`
+        # then had to cover — which is how a rename here would slip through.
+        self.on_judge: Callable[[Any], None] | None = None
+        self.on_prompt: Callable[[Any], None] | None = None
         self.prompt_error: BaseException | None = None
         self.judge_started = asyncio.Event()
         self.release_judge = asyncio.Event()
@@ -96,7 +102,7 @@ class Harness:
     async def judge(self, prompt_text: str) -> str:
         self.judge_calls.append(prompt_text)
         self.judge_started.set()
-        if self.on_judge is not None:  # type: ignore[operator]
+        if self.on_judge is not None:
             self.on_judge(self)
         await self.release_judge.wait()
         if not self.answers:
@@ -108,7 +114,7 @@ class Harness:
 
     async def prompt_turn(self, text: str) -> None:
         self.prompts.append(text)
-        if self.on_prompt is not None:  # type: ignore[operator]
+        if self.on_prompt is not None:
             self.on_prompt(self)
         if self.prompt_error is not None:
             raise self.prompt_error
