@@ -4624,25 +4624,29 @@ class Session:
         """
         stored = self._goal_state.set(text)
         if not stored:
-            # A CLEARED goal takes its identity with it. The token is what tells
-            # a late verdict that the goal it judged is gone, and one left behind
-            # would be INHERITED by the next text written this way — so a verdict
-            # captured against the old goal would match the new one, which is the
-            # staleness the token exists to catch. `delete()` rather than a second
-            # clearing routine: same act, same reason, and it records nothing
-            # (the empty text was already stored above).
-            self._goal_state.delete()
-        else:
-            # A goal written WITHOUT arming still needs a token, or the judge
-            # refuses to run on it (see ``GoalState.ensure_token``). This is the
-            # plain "replace the text" act — the mobile relay and ``lop --goal``
-            # — and its goal is standing work by the same reading that makes a
-            # restored record `active`, so the two halves must not disagree about
-            # whether it is pursued. No record write here: the token is this
-            # session's, nothing in flight spans a boot, and this path
-            # deliberately keeps `set_goal` a tail write plus a journal rather
-            # than a second `arm`.
-            self._goal_state.ensure_token()
+            # A CLEARED goal is ``/goal --clear``'s act, so it goes through the
+            # ONE routine that performs it rather than a second blanking here —
+            # and the two DID differ: this branch journalled the attachment
+            # alone, while ``_restore_goal_record`` supplies the goal TEXT from
+            # ``goal.json`` whenever the attachment carries none. Clearing only
+            # the tail left the sidecar holding the objective, and the next
+            # ``--resume`` read it straight back (measured: a later
+            # ``lop exec --resume SID --loop 1`` STARTED a loop on a goal an
+            # earlier run had cleared, instead of refusing for want of one).
+            # ``delete_goal`` also takes the token with it, which is what stops
+            # a late verdict against the departed goal matching the next text.
+            self.delete_goal()
+            return stored
+        # A goal written WITHOUT arming still needs a token, or the judge
+        # refuses to run on it (see ``GoalState.ensure_token``). This is the
+        # plain "replace the text" act — the mobile relay and ``lop --goal``
+        # — and its goal is standing work by the same reading that makes a
+        # restored record `active`, so the two halves must not disagree about
+        # whether it is pursued. No record write here: the token is this
+        # session's, nothing in flight spans a boot, and this path
+        # deliberately keeps `set_goal` a tail write plus a journal rather
+        # than a second `arm`.
+        self._goal_state.ensure_token()
         # Same tail, same fate on resume as the team/agent briefs, so the goal
         # is journalled by the same mechanism rather than a second one.
         self._persist_attachment()
