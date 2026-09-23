@@ -271,6 +271,14 @@ def build_goal_body(
     if not history and not history_truncated:
         out.append("  none yet", style="dim")
     shown = history[: max(0, max_rows)]
+    hidden = len(history) - len(shown)
+    if hidden and not shown:
+        # NOT ONE settled row fits, so the HEADING carries the count itself.
+        # `settled` with nothing after it is the same silent under-report the
+        # notice exists to remove, and inlining it costs one row instead of two —
+        # which is precisely the row that made the notice fall off a 14-line
+        # terminal, where the old card printed `none yet` over eleven goals.
+        out.append(f"  … {hidden} more settled", style="dim")
     for entry in shown:
         out.append("\n")
         entry_status = str(entry.get("status") or "")
@@ -291,7 +299,7 @@ def build_goal_body(
         if settled_at:
             out.append(f" · {settled_at[:16].replace('T', ' ')}", style="dim")
     hidden = len(history) - len(shown)
-    if hidden > 0:
+    if hidden and shown:
         out.append("\n")
         out.append(f"… {hidden} more settled", style="dim")
     if history_truncated:
