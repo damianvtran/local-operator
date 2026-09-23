@@ -7109,3 +7109,59 @@ async def test_the_snapshot_does_not_wait_on_a_contended_attention_store(tmp_pat
             why="the late attention read was never published",
         )
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_served_runtime_probe_memoises_only_a_final_verdict(tmp_path, monkeypatch):
+    """N1 (review round 1): the exit probe is not re-run every pacing pass.
+
+    The probe sits inside ``_lease_warm_loop`` (a worker thread plus a ``ps``
+    fork), so a final verdict for a served pid, clean or not, is asked once.
+    A pid that is still ALIVE is not a verdict (``None``): that runtime can
+    still exit cleanly, which must then drop the pace, so it is re-asked.
+    """
+    attempts: list[bool] = []
+    verdicts: list[bool | None] = [None, None, False]
+    probes: list[int | None] = []
+
+    class BoundClient:
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+        async def desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+            pass
+
+    async def serve(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        remote._client = BoundClient()  # type: ignore[assignment]
+        remote._ready_for_events = True
+        remote._runtime_pid = 424242
+
+    def probe(self) -> bool | None:
+        probes.append(self.warm_served_pid)
+        return verdicts[min(len(probes), len(verdicts)) - 1]
+
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    monkeypatch.setattr(module.DesktopSessionBridge, "_served_runtime_exited_cleanly", probe)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        remote = bridge.remote
+        monkeypatch.setattr(remote, "_ensure_bound", serve)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: bridge.warm_served, why="the served warm was not recorded")
+
+        # Cold again inside the pace: the live answers are re-asked, and the
+        # final "not clean" one is asked once however many passes follow.
+        remote._client = None
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(lambda: len(probes) >= 3, why="a live verdict was memoised")
+        for _ in range(10):
+            await asyncio.sleep(0.02)
+        assert probes == [424242, 424242, 424242], "a final verdict was probed again"
+        assert attempts == [False], "an unclean exit was re-spawned inside the pace"
+    await pool.close()

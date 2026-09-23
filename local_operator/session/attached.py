@@ -2546,7 +2546,7 @@ class AttachedSession:
                 # no longer waits for this attempt (it answers after
                 # ``READ_FIRST_FRAME_GRACE_S`` while the dial carries on behind
                 # it), so a frame taken mid-dial would otherwise fall back to
-                # ``no-runtime`` \u2014 "no pid holds the lease" \u2014 about a pid whose
+                # ``no-runtime`` — "no pid holds the lease" — about a pid whose
                 # record is in hand. The record already says which of the two
                 # live tokens is true; the attempt below re-classifies on its
                 # outcome and clears it on success.
@@ -3694,8 +3694,8 @@ class AttachedSession:
             # bridge no longer waits for a read's attach before painting
             # (``READ_FIRST_FRAME_GRACE_S``), so a stream is usually open when
             # this sync lands, and a rollover published from
-            # ``_install_frontend`` would carry ``cold: true`` \u2014 the facade has
-            # not finished syncing at that instant \u2014 over a now-live owner.
+            # ``_install_frontend`` would carry ``cold: true`` — the facade has
+            # not finished syncing at that instant — over a now-live owner.
             # Every other caller keeps its historical ordering.
             self._install_frontend(frontend.snapshot, publish=not retain_unsynced)
             await self._load_frontend_history(frontend)

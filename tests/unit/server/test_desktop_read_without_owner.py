@@ -901,3 +901,116 @@ async def test_a_healthy_owner_lands_inside_the_first_frame_grace(
             snapshot = await bridge.snapshot()
         assert snapshot["payload"]["cold"] is False, "a healthy owner was painted cold"
         await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_control_acquire_gives_its_reference_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4 (review round 1): acquire's failure path must not leak its reference.
+
+    The interleaving that pinned the bridge: a control acquire is cancelled
+    mid-attach, its failure handler awaits ``release``, the bridge lock is held
+    by another route on the same session, and a SECOND cancellation lands while
+    the release waits for that lock. Unshielded, the cancellation went into the
+    release and ``users`` stayed incremented forever, so the bridge could never
+    be evicted. Shielded, the release completes once the lock frees.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    attaching = asyncio.Event()
+
+    async def parked_attach(**_: Any) -> bool:
+        attaching.set()
+        await asyncio.Event().wait()
+        return False  # pragma: no cover — only ever cancelled
+
+    async with pool.session(sid, read=True) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "attach_existing", parked_attach)
+        acquiring = asyncio.create_task(bridge.acquire())
+        await asyncio.wait_for(attaching.wait(), timeout=DEADLOCK_GUARD_S)
+        assert bridge.users == 2
+
+        # Another route holds the bridge lock, so the failure path's release
+        # has to wait for it; the second cancellation lands inside that wait.
+        await bridge.lock.acquire()
+        try:
+            acquiring.cancel()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            acquiring.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await acquiring
+        finally:
+            bridge.lock.release()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert bridge.users == 1, "the cancelled acquire kept its reference"
+    assert bridge.users == 0
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_settle_behind_a_newer_attempt_still_corrects_its_cold_paint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3 (review round 1): the outran fact belongs to the attempt, not the bridge.
+
+    Reader A answers cold ahead of attempt T1. T1 settles, and before its
+    done-callback runs, reader B finds T1 done and the facade still cold and
+    starts T2. With one bridge-level flag, starting T2 cleared it and T1's
+    callback published nothing, so A's pane stayed cold with no transition.
+    B's start is modelled at the exact point the reviewer named, the gap
+    between T1 finishing and its callback, by wrapping the callback rather than
+    racing the loop.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    gates: list[asyncio.Event] = []
+
+    async def gated_attach(**_: Any) -> bool:
+        gate = asyncio.Event()
+        gates.append(gate)
+        await gate.wait()
+        return False
+
+    async with pool.session(sid, read=True) as bridge:
+        remote = bridge.remote
+        assert remote is not None and remote.is_cold
+        monkeypatch.setattr(remote, "attach_existing", gated_attach)
+        published: list[int] = []
+        monkeypatch.setattr(bridge, "publish_frontend_replace", lambda: published.append(1))
+        original = bridge._read_attach_settled
+        newer: list[asyncio.Task[bool] | None] = []
+
+        def settled(owner: AttachedSession, task: asyncio.Task[bool]) -> None:
+            if not newer:
+                # Reader B, between T1 finishing and T1's callback.
+                newer.append(bridge._start_read_attach(owner))
+            original(owner, task)
+
+        monkeypatch.setattr(bridge, "_read_attach_settled", settled)
+
+        await bridge.acquire(read=True)  # reader A, outruns T1
+        first = bridge.read_attach_task
+        assert first is not None and not first.done()
+        gates[0].set()
+        await asyncio.wait_for(asyncio.shield(first), timeout=DEADLOCK_GUARD_S)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        second = newer[0]
+        assert second is not None and second is not first, "B did not start a new attempt"
+        assert published == [1], "T1's settle lost the frame that corrects A's cold paint"
+
+        # T2 was outrun by nobody, so its own settle owes no frame.
+        gates[1].set()
+        await asyncio.wait_for(asyncio.shield(second), timeout=DEADLOCK_GUARD_S)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert published == [1]
+        assert not bridge.read_attach_outran
+        await bridge.release()
+    await pool.close()

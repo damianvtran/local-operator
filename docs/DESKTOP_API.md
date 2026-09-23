@@ -892,6 +892,16 @@ succeed shortly. `runtime_unreachable` keeps its meaning — nothing could be
 dialled — and carries no retry fields. Every field is additive: a client that
 predates them reads the unchanged sentence.
 
+The 3 s is PER CALL, and it starts once the call holds the facade's bind lock.
+Control calls to one conversation still dial one at a time, so a second call
+issued while the first is waiting on the same silent owner is refused after
+about twice the envelope (measured: 3,034 ms then 6,046 ms, both
+`runtime_busy`), and N concurrent calls stack to about N × 3 s. Reads are not
+part of this queue. `retry_after_ms` (2 s) is deliberately shorter than the
+envelope: it is the pause before the next attempt, and the retry spends its own
+3 s waiting for the owner, so refuse + pause cycles keep three attempts inside
+a 20 s client deadline.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -948,6 +958,18 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    `/history` serves — so first paint of a conversation with no live runtime
    needs no second round trip. A non-empty page beside a `cold_reason` is how a
    renderer knows this backend fills it and may skip the duplicate `/history`.
+   Key that on the PRESENCE of `cold_reason`, never on its value. The FIRST
+   cold frame for a live-but-busy owner usually carries `cold_reason:
+   "no-runtime"`, not `owner-silent`: the attempt that classifies the owner
+   queues behind any control dial on the same facade (4/4 frames measured while
+   a `/warm` or send was in flight), and the frame goes out before it records
+   the classification. `no-runtime` beside `attaching: true` therefore means
+   "not classified yet", not "no pid holds this conversation". The
+   `frontend.replace` that follows carries the classified token or `cold:
+   false`. A cold snapshot's `cursor_missing` is always `false`: the page is
+   the unanchored tail (no `before_id`, no `through_id`), and only an anchored
+   read can find its cursor missing. This holds whether the page is empty or
+   not.
    A read waits at most `READ_FIRST_FRAME_GRACE_S` (50 ms) for its attach to an
    existing owner; a busy owner is painted cold with `attaching: true` and the
    attach carries on behind the frame, ending in a `frontend.replace` whose
