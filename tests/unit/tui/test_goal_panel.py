@@ -506,9 +506,9 @@ async def test_the_card_never_covers_the_docked_composer(size: tuple[int, int]) 
         panel = app.query_one(GoalPanel)
         card_bottom = panel.region.y + panel.region.height
         shell = app.query_one("#input-shell")
-        assert card_bottom <= shell.region.y, (
-            f"{size}: card bottom {card_bottom} covers the composer at {shell.region.y}"
-        )
+        assert (
+            card_bottom <= shell.region.y
+        ), f"{size}: card bottom {card_bottom} covers the composer at {shell.region.y}"
         # ...and it is the SQUEEZE that bought that, not a card that simply
         # refused to paint its own content.
         assert panel.has_class("-squeezed")

@@ -286,9 +286,7 @@ def build_goal_body(
         # wraps the row and takes the hint with it, which is the same defect D2
         # found on the goal row.
         tail = 2 + 2 + len(entry_status) + (_HISTORY_STAMP_CELLS if settled_at else 0)
-        text = truncate_cells(
-            " ".join(str(entry.get("text") or "").split()), max(10, inner - tail)
-        )
+        text = truncate_cells(" ".join(str(entry.get("text") or "").split()), max(10, inner - tail))
         out.append(text, style=_DONE_STYLE if entry_status == "done" else "")
         out.append(f"  {entry_status}", style="dim")
         if settled_at:
@@ -301,9 +299,7 @@ def build_goal_body(
         out.append("\n")
         out.append(_HISTORY_CLIPPED_NOTE, style="dim")
     out.append("\n")
-    out.append(
-        _hint_row(status=status, goal=goal, actions=actions, armed=armed), style="dim"
-    )
+    out.append(_hint_row(status=status, goal=goal, actions=actions, armed=armed), style="dim")
     return out
 
 
@@ -496,9 +492,7 @@ class GoalPanel(Static):
         the card while the pin still claimed it fit.
         """
         cells = max(1, width)
-        return sum(
-            max(1, -(-cell_len(line) // cells)) for line in body.plain.split("\n")
-        )
+        return sum(max(1, -(-cell_len(line) // cells)) for line in body.plain.split("\n"))
 
     def _repaint(self) -> None:
         if not self.display or not self.is_mounted:

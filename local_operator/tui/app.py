@@ -34186,7 +34186,10 @@ class OperatorApp(App[None]):
         press), and on a DONE card it drops the chip — the act the palette
         already names `--dismiss`, which is the benign one and needs no arming.
         """
-        from local_operator.session.goal import cleared_goal_receipt, goal_dismissed_receipt
+        from local_operator.session.goal import (
+            cleared_goal_receipt,
+            goal_dismissed_receipt,
+        )
 
         message.stop()
         record = self._goal_record()
@@ -34702,9 +34705,7 @@ class OperatorApp(App[None]):
             self._goal_judge_in_flight = False
             logger.debug("goal judge re-arm could not be started", exc_info=True)
 
-    async def _rearm_goal_judge_worker(
-        self, session: Any, source: SessionInteraction
-    ) -> None:
+    async def _rearm_goal_judge_worker(self, session: Any, source: SessionInteraction) -> None:
         """Run ONE trigger-3 re-arm and release the in-flight flag.
 
         The flag is cleared unconditionally, for the same reason the turn-end
