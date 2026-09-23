@@ -17881,6 +17881,40 @@ class OperatorApp(App[None]):
 
         self.push_screen(LinkPickerScreen(targets), _open_choice)
 
+    def open_transcript_link(self, url: str) -> None:
+        """Open a URL the user CLICKED in the transcript.
+
+        The click route's entry point, called by
+        :meth:`~local_operator.tui.widgets.transcript.TranscriptBlock.on_click`
+        once it has resolved which URL the pointer was over. The block is
+        deliberately left knowing nothing about schemes or browsers: it reports
+        a cell's link, and everything that decides whether a string may reach a
+        browser lives here, beside ``/links``.
+
+        It funnels into the SAME :meth:`_open_link` the picker uses, so the two
+        routes cannot drift — one guard, one opener, one receipt. That is the
+        property that makes the scheme check honest: a second opener spelled
+        out here would be a second place to forget it.
+
+        A worker rather than an await for :meth:`_open_link`'s own reason: the
+        launcher waits on a child process, and this is called from inside
+        Textual's event dispatch, which must not block on one.
+
+        ``LinkTarget`` is constructed rather than looked up. Its ``sender`` and
+        ``rank`` describe a ROW IN THE PICKER — which message a URL came from,
+        so two same-host links can be told apart — and a click has already
+        answered that question by pointing at one. The fields are filled with
+        what is true of this route rather than left to imply a provenance
+        nobody read.
+        """
+        source = self._interaction
+
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        target = LinkTarget(url=url, sender="agent", rank=0)
+        self.run_worker(self._open_link(target, notice), group="open-link")
+
     async def _open_link(self, target: LinkTarget, notice: NoticeFn) -> None:
         """Hand ONE url to the browser, and say what happened.
 
