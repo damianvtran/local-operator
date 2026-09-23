@@ -130,6 +130,9 @@ from local_operator.procstate import (
 from local_operator.redaction_shapes import (
     CREDENTIAL_SHAPES,
     PEM_BODY_FLOOR,
+    PEM_BODY_LINE_RE,
+    PEM_END_LINE_RE,
+    PEM_HEADER_LINE_RE,
     REDACTION_MARKER,
     ShapeHit,
     ShapeReport,
@@ -2250,12 +2253,20 @@ MEMORY_EXCEEDED_FALLBACK = (
 # between the two classifiers is a silent leak — which is exactly what happened when the
 # table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
 # published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+#: The patterns, kept under their historical names: they are the DEFINITION of the three
+#: languages, and #1445's arms (`_pem_grammar_is_live`, the body-floor pin) read them
+#: through these names to check that a literal is still armour and that the grammar's floor
+#: is the hold's. Nothing at runtime reached them after the deciders landed, which is what
+#: these aliases say rather than leaving a reader to find out.
+_PEM_HEADER_LINE = PEM_HEADER_LINE_RE
+_PEM_BODY_LINE = PEM_BODY_LINE_RE
+_PEM_END_LINE = PEM_END_LINE_RE
+
 #: The SAME three languages, decided in linear time rather than by the patterns'
 #: own backtracking walk — the three call sites below are where that walk was
-#: measured. The patterns stay the definition and the arms in
-#: `tests/unit/secrets/test_credential_shapes.py` pin each decider to its pattern.
-#: Bound at module level so a test can stand in for one, which is how "the
-#: classifier was not reached" is asserted as a fact rather than a duration.
+#: measured, and the arms in `tests/unit/secrets/test_credential_shapes.py` pin each
+#: decider to its pattern. Bound at module level so a test can stand in for one, which
+#: is how "the classifier was not reached" is asserted as a fact rather than a duration.
 _pem_body_line = pem_body_line
 _pem_end_line = pem_end_line
 _pem_header_line_end = pem_header_line_end
@@ -2714,18 +2725,21 @@ class _PipeRedactor:
         # as an earlier round did) changes the bytes the shape table is about to read, and
         # a rewritten separator is a shape the table cannot match. The remainder is
         # passed through exactly as read.
-        tail = ready[begin.end() :]
+        # The DECIDER answers with the offset the pattern's match ENDS at (the same
+        # number `_PEM_HEADER_LINE.search(ready).end()` gave), so the split below is by
+        # an int and not by a match object.
+        tail = ready[begin:]
         break_match = _PEM_LINE_BREAK.match(tail)
         if break_match is None:
             # The header is the last thing in this release: the terminator arrives
             # with the next one, and the block is open across that boundary.
-            return ready[: begin.end()]
+            return ready[:begin]
         # The terminator is emitted BYTE-IDENTICAL (no rewriting — see above) and
         # never offered to the line loop, which read it as prose and closed the
         # block. This is also where an escaped `\\n` (no real break) keeps its
         # behaviour: it is not a separator, so it stays in the masked remainder.
         return (
-            ready[: begin.end()]
+            ready[:begin]
             + break_match.group()
             + self._mask_open_key_block(tail[break_match.end() :])
         )

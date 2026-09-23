@@ -31,9 +31,11 @@ import itertools
 import json
 import re
 import shlex
+import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -852,8 +854,18 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
 #: stands for every string built from the same kinds, which is what lets a bounded
 #: sweep below stand for an unbounded one. `\u0661` is an Arabic-Indic digit: `\d`
 #: takes it and `[0-9]` does not, so its presence here is what catches a machine
-#: that read the fragment's digit class as ASCII.
-_DECIDER_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "a", ",")
+#: that read the fragment's digit class as ASCII. `\r` is here for the same reason in
+#: the other direction, and it is the kind this sweep was MISSING: the armour tail is
+#: `[ \t]*(?=\r|\n|$)` and a `\r` is what tells a decider modelling the tail as `$`
+#: apart from the pattern (the merged-tree disagreement with #1445) — without this kind
+#: and the CR fixtures below, this arm passed under exactly the disagreement it exists
+#: to catch.
+_DECIDER_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "a", ",", "\r")
+#: The terminators an armour line is actually written with, for the fixture loop below:
+#: LF, CRLF and a bare CR used as the line end, plus the whitespace an editor or a wiki
+#: leaves between the last dash and the terminator.
+_DECIDER_TERMINATORS = ("\n", "\r\n", "\r")
+_DECIDER_TAIL_WHITESPACE = ("", "  ", "\t")
 #: Tokens for the must-not-reject direction: eight characters is the body floor,
 #: and the shorter ones are what the short-line arm is for.
 _DECIDER_TOKENS = ("MIIEowIB", "MIIEowIB,", "MIIEowIB  ", "M")
@@ -947,6 +959,18 @@ def _decider_fixtures() -> list[str]:
         fixtures.append(header + _PEM_BODY + "\n" + _banner(spelling, "END"))
         fixtures.append(header + _numeric_rows(2))
         fixtures.append("the key at ./id_rsa:" + header.rstrip() + "\n" + _numeric_rows(2))
+        # THE ARMOUR SPELLINGS, in every terminator x tail-whitespace combination: a
+        # CRLF file, a bare-CR one and a wiki/editor's trailing spaces all carry a line
+        # end the `$`-only model of the tail cannot see (the disagreement with #1445),
+        # and `_banner()` emits LF, so nothing above reaches them.
+        armour = header.rstrip("\n")
+        for terminator in _DECIDER_TERMINATORS:
+            for whitespace in _DECIDER_TAIL_WHITESPACE:
+                line = f"{armour}{whitespace}{terminator}"
+                fixtures.append(line)
+                fixtures.append(f"{line}{_PEM_BODY}{terminator}")
+                fixtures.append(f"{line}{_PEM_BODY}{terminator}{_PEM_BODY}{terminator}")
+                fixtures.append(f"12|{line}{_PEM_BODY}{terminator}")
     return fixtures
 
 
@@ -980,6 +1004,129 @@ def test_the_linear_deciders_agree_with_the_patterns_they_replace() -> None:
         _assert_deciders_agree(text)
 
 
+# --- the armour tail: one definition, two readers (the pattern and the decider) ----
+#
+# `pem_header_line_end` decides the same question `PEM_HEADER_LINE_RE` asks, and the two
+# drifted apart exactly once: #1445 widened the pattern's tail to `_PEM_ARMOUR_TAIL`
+# (`[ \t]*(?=\r|\n|$)`, so CRLF, bare-CR and trailing-whitespace armour lines match),
+# while this branch's decider still modelled the tail as `$` alone — and the pipe then
+# published the whole body of such a block (measured through the real filter with the
+# `$`-only decider: 3 of 3 body lines out, no marker). The arms below hold the two
+# together structurally (the decider reads the tail's own halves) and behaviourally (a
+# spelling differential, plus the pipe's own consequence).
+_ARMOUR_TERMINATORS = ("\n", "\r\n", "\r", "")
+_ARMOUR_TAIL_WHITESPACE = ("", " ", "\t", "  ", " \t")
+
+
+def _armour_texts() -> list[str]:
+    """Every armour spelling a real file, wiki or Windows editor produces."""
+    out: list[str] = []
+    prefixes = ("", "1\t", "12: ", "[12] ", "\u2502 12 \u2502 ", "1.", "  7) ")
+    spellings = ("PRIVATE KEY", "RSA PRIVATE KEY", "OPENSSH PRIVATE KEY", "EC PRIVATE KEY")
+    bodies = ("", _PEM_BODY, "MIIEow", "  1000    1008")
+    for terminator, whitespace, prefix, spelling, body in itertools.product(
+        _ARMOUR_TERMINATORS, _ARMOUR_TAIL_WHITESPACE, prefixes, spellings, bodies
+    ):
+        out.append(f"{prefix}{_DASHES}BEGIN {spelling}{_DASHES}{whitespace}{terminator}{body}")
+    return out
+
+
+def test_the_header_deciders_tail_is_the_patterns_tail() -> None:
+    """The STRUCTURAL half: the decider derives its tail from the pattern's own text.
+
+    A documentary obligation ("keep the decider's tail in step with the pattern's") is
+    what failed on the merge with #1445, so the link is made of constants instead: the
+    pattern embeds `_PEM_ARMOUR_TAIL`, and the decider's two halves are checked HERE to
+    compose exactly that string. Editing either half without the other reddens this arm;
+    editing both leaves the pattern and the decider still agreeing by construction, which
+    is the property that matters.
+    """
+    terminated = "|".join(list(redaction_shapes._PEM_ARMOUR_TAIL_TERMINATOR_TEXT) + ["$"])
+    assert redaction_shapes._PEM_ARMOUR_TAIL == (
+        "[" + redaction_shapes._PEM_ARMOUR_TAIL_RUN_TEXT + "]*(?=" + terminated + ")"
+    ), "the armour tail and the two halves the decider reads have drifted apart"
+    assert (
+        redaction_shapes._PEM_ARMOUR_TAIL in redaction_shapes.PEM_HEADER_LINE_RE.pattern
+    ), "the header pattern no longer embeds the shared armour tail"
+    # And the halves the DECIDER scans are the characters that text denotes, so the
+    # decider's model of the tail cannot describe a different line end than the pattern's.
+    assert redaction_shapes._PEM_ARMOUR_TAIL_RUN == " \t"
+    assert redaction_shapes._PEM_ARMOUR_TAIL_TERMINATORS == "\r\n"
+
+
+def test_the_header_decider_agrees_with_the_pattern_on_every_armour_spelling() -> None:
+    """The BEHAVIOURAL half, over the spellings the tail exists for, plus its sensitivity.
+
+    The decider is the pattern's answer in linear time, so the two must agree on `end()`
+    (not merely on yes/no) for every spelling: LF, CRLF, a bare CR used as the terminator,
+    trailing space or TAB, and every numbered/bracketed/boxed prefix in front of them.
+    The controls are the other direction — ordinary prose, a bare banner, a CERTIFICATE
+    line, a header with no terminator and one followed by extra text — which must stay
+    UNMATCHED by both, since the pipe opens its block state on this answer.
+
+    The last block is the sensitivity: a `$`-only tail — what the pattern carried before
+    #1445 and what a decider modelling it by hand would still carry — does NOT match a
+    CRLF armour line, so the sweep is shown to be able to see the widening it pins rather
+    than agreeing with itself.
+    """
+    pattern = redaction_shapes.PEM_HEADER_LINE_RE
+    texts = _armour_texts()
+    assert len(texts) > 500
+    for text in texts:
+        match = pattern.search(text)
+        want = None if match is None else match.end()
+        assert redaction_shapes.pem_header_line_end(text) == want, repr(text)
+
+    for control in (
+        "[redacted] CERTIFICATE-----",
+        "prose BEGIN PRIVATE KEY here",
+        "12| done",
+        "",
+        "[redacted] PRIVATE KEY---",
+        "[redacted] PRIVATE KEY-----.\n",
+        "[redacted] PRIVATE KEY----- extra\n",
+    ):
+        assert redaction_shapes.pem_header_line_end(control) is None, repr(control)
+        assert pattern.search(control) is None, repr(control)
+
+    crlf = f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r\n{_PEM_BODY}\r\n"
+    dollar_only = re.compile(pattern.pattern.replace(redaction_shapes._PEM_ARMOUR_TAIL, r"$"))
+    assert dollar_only.search(crlf) is None, "the `$`-only tail already matches a CRLF armour line"
+    assert pattern.search(crlf) is not None, "the shipped pattern lost the CRLF spelling"
+
+
+def test_the_pipe_masks_a_crlf_armour_blocks_body() -> None:
+    """The arm that catches the disagreement where it HURTS: the CONSEQUENCE, through the pipe.
+
+    `pem_header_line_end` is what opens the pipe's block state, so a decider that answers
+    `None` for a CRLF or trailing-whitespace armour line is not a cosmetic disagreement —
+    for an unterminated (or cap-forced) block the pipe's own line loop is the ONLY layer
+    that can hide the body, and it never engages. Measured through the real filter with the
+    `$`-only decider (the previous head of this branch, and what a merger resolving the
+    tail in one place leaves behind): 3 of 3 body lines published and no marker, for both
+    spellings; measured with the shared tail: 0 of 3, one marker, for every terminator.
+    """
+    cases = {
+        "lf": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\n{_PEM_BODY}\n{_PEM_BODY}\n{_PEM_BODY}\n",
+        "crlf": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r\n{_PEM_BODY}\r\n"
+        f"{_PEM_BODY}\r\n{_PEM_BODY}\r\n",
+        "bare_cr": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r{_PEM_BODY}\r{_PEM_BODY}\r",
+        "trailing_ws": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}  \n{_PEM_BODY}\n"
+        f"{_PEM_BODY}\n{_PEM_BODY}\n",
+    }
+    for name, text in cases.items():
+        settled = _pipe_settled(('"private_key": "' + text).encode(), 4096)
+        assert _PEM_BODY not in settled, f"the {name} armour block published its body"
+        assert REDACTION_MARKER in settled, f"the {name} armour block was not masked"
+        # AND THE FILTER DID NOT FAULT. `feed` fails closed by DRAINING, so an
+        # exception inside the mask is invisible in this output except as one marker
+        # line — which is exactly how a merge that swapped the header search for the
+        # decider and left `begin.end()` behind (an `int` has no `.end()`) passed the
+        # first two assertions while every one of these payloads was withheld. The
+        # withheld text is the only signal, so it is asserted here.
+        assert builtin._WITHHELD_LIVE_OUTPUT not in settled, f"the pipe faulted on the {name} block"
+
+
 # --- the `-open` rule's digit-maximal spelling -------------------------------
 #
 # `gcp-service-account-value-open` is the table's ONE rule that runs the prefix
@@ -1011,17 +1158,64 @@ def _open_rule_shape() -> Any:
     )
 
 
-def _released_open_rule_pattern() -> re.Pattern[str]:
-    """The `-open` rule with the RELEASED fragment, built from the SHARED pieces.
+#: `origin/main`'s LINE_PREFIX, as a LITERAL — the released fragment's own text, not this
+#: module's.
+#:
+#: WHY NOT THE MODULE'S FRAGMENT (agent review R3-4). This branch re-spells the
+#: whitespace around a unit's separator — the trailing `[ \t]*` moved inside the optional
+#: group, which is the same language and one whitespace consumer per unit instead of two
+#: — so `redaction_shapes.LINE_PREFIX` is "the fragment as it stands ON THIS BRANCH". A
+#: reference built from it is the branch's earlier spelling: a language change that the
+#: whitespace rewrite itself introduced would be invisible to every differential that
+#: used it, which is exactly the gap R3-4 measured. With the released text written out
+#: here, `_released_open_rule_pattern` means what it says, and
+#: `test_the_branchs_fragment_speaks_the_released_language` holds the branch's own
+#: spelling to it so the two references cannot drift apart silently either.
+_RELEASED_LINE_PREFIX = (
+    "[ \\t]*(?:(?:\\[?\\d+\\]?[ \\t]*(?:[.)\\]]|\\.\\]|->|[|:>-])?[ \\t]*"
+    "|\\u2502[ \\t]*\\d+[ \\t]*\\u2502[ \\t]*)+)?"
+)
+#: The released body-line fragment: the released floor spelled as the literals the released
+#: module holds (`{8,}` and `{1,7}`), NOT through `redaction_shapes.PEM_BODY_FLOOR` — this
+#: text is a recording of the other revision, so it reads the other revision's numbers.
+_RELEASED_PEM_LINE_CONTENT = (
+    r"[A-Za-z0-9+/=]{8,},?[ \t]*"
+    r"|[A-Za-z0-9+/=]{1,7},?[ \t]*(?="
+    + redaction_shapes.LINE_SEP
+    + _RELEASED_LINE_PREFIX
+    + r"[A-Za-z0-9+/=]{8,})"
+)
 
-    Written out from the fragments rather than derived from the shipped source, so
-    the reference is INDEPENDENT of what the shipped rule says: the differential
-    arm below is then a comparison against the released rule, not against the
-    shipped rule compared with itself. `_open_rule_source_is_the_released_spelling`
-    is what ties the two together, and it holds the shipped source to this build
-    plus exactly the digit-maximal substitution — so an unrelated edit to the rule
-    (its header tail, its anchor, its lookahead) reddens there instead of quietly
-    redefining what the differential compares.
+
+def _released_open_rule_pattern() -> re.Pattern[str]:
+    """`origin/main`'s `-open` rule, built from the RELEASED fragments as LITERALS.
+
+    The reference the differential arms compare against, and the point of it is that it
+    is INDEPENDENT of what the shipped rule says: it is written out from the released
+    text (see `_RELEASED_LINE_PREFIX` for why a literal, R3-4), and
+    `_open_rule_source_is_the_shared_spelling` is the drift pin that holds the shipped
+    source to the BRANCH's fragments plus exactly the digit-maximal substitution — so an
+    unrelated edit to the rule (its header tail, its anchor, its lookahead) reddens there
+    instead of quietly redefining what this differential compares.
+    """
+    return re.compile(
+        r'(?i)("?private[_-]?key"?\s*:\s*")'
+        r"(-{1,4}[\x27\x22]?-{1,4}BE" + "GIN [A-Z0-9 ]*PRIV" + r"ATE KEY-{1,4}[\x27\x22]?-{1,4}"
+        r"(?:"
+        r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+        r"(?:" + _RELEASED_LINE_PREFIX + r"(?:" + _RELEASED_PEM_LINE_CONTENT + r")[ \t]*)+"
+        r"(?=" + redaction_shapes.LINE_SEP + r"|[\x27\x22]|$)"
+        r")*)"
+    )
+
+
+def _shared_fragment_open_rule_pattern() -> re.Pattern[str]:
+    """The same rule built from the SHARED pieces — the branch's fragments, not released.
+
+    This is what the drift pin compares the shipped source against, because the pin's
+    question is "is the shipped source the branch's spelling plus the digit-maximal
+    substitution", and answering it with the released literal would fold two questions
+    ("did the substitution happen" and "did the fragment change") into one red.
     """
     return re.compile(
         r'(?i)("?private[_-]?key"?\s*:\s*")'
@@ -1038,13 +1232,60 @@ def _released_open_rule_pattern() -> re.Pattern[str]:
     )
 
 
-def _open_rule_source_is_the_released_spelling() -> bool:
-    """The shipped rule, with the substitutions inverted, IS the independent reference."""
+def _open_rule_source_is_the_shared_spelling() -> bool:
+    """The shipped rule, with the substitutions inverted, IS the branch's spelling."""
     source = _open_rule_shape().pattern.pattern
     inverted = source.replace(
         redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT, redaction_shapes._PEM_LINE_CONTENT
     ).replace(redaction_shapes._PEM_DIGIT_MAX_PREFIX, redaction_shapes.LINE_PREFIX)
-    return inverted == _released_open_rule_pattern().pattern
+    return inverted == _shared_fragment_open_rule_pattern().pattern
+
+
+#: Bound for the arms that hand a DENSE payload to a rule or through the pipe.
+#:
+#: They assert costs in MILLISECONDS, and the regression they exist for — the ambiguous
+#: fragment back under the shipped rule — does not return at all: measured past a 420 s
+#: selection bound with the fix reverted, and each dense arm past 90 s on its own (agent
+#: review R3-2). WITHOUT a bound that regression does not redden anything; the suite has
+#: no `pytest-timeout`, so it wedges a CI shard until the job cap and the cause is
+#: unreadable.
+#:
+#: It is a CPU bound and not a wall bound, which is the same instrument choice this file's
+#: cost arms make (`time.process_time`): this fleet shares ~14 cores with ~25 agent
+#: sessions, so a probe gets 4-20% of a core and wall inflates 5-25x — measured here, the
+#: differential arm's own 1.1 s of CPU took 18 s of wall during this round. A wall bound
+#: tight enough to fire "in seconds" would therefore red an HONEST run on a loaded host,
+#: which is the worse failure; the CPU bound cannot. `signal.setitimer(ITIMER_PROF)`
+#: decrements only while the process runs (and it does interrupt CPython's regex engine —
+#: verified), so the bound means exactly what the arms measure.
+#:
+#: 15 s is 28x the heaviest honest reading in any bounded arm here (the released rule on
+#: the `dense_4col` fixture, 0.54 s of CPU; the shipped rule on every dense payload is
+#: under 1 ms) and the regressed walk is unbounded, so no reading sits near it.
+_DENSE_WALK_BOUND_SECONDS = 15.0
+
+
+@contextmanager
+def _bounded(seconds: float, what: str) -> Iterator[None]:
+    """Fail fast, and NAME the walk, when something that must be linear is not."""
+    if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGPROF"):
+        yield
+        return
+
+    def _fired(signum: int, frame: Any) -> None:
+        raise AssertionError(
+            f"{what} did not return within {seconds:g}s of CPU: a walk this arm asserts is "
+            "linear is not (the BOUND is the arm's — see _DENSE_WALK_BOUND_SECONDS — so "
+            "this is a regression in the rule or the pipe, not a slow machine)"
+        )
+
+    previous = signal.signal(signal.SIGPROF, _fired)
+    signal.setitimer(signal.ITIMER_PROF, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGPROF, previous)
 
 
 def _open_rule_matches(pattern: re.Pattern[str], text: str) -> list[tuple[Any, ...]]:
@@ -1060,6 +1301,39 @@ def _open_rule_matches(pattern: re.Pattern[str], text: str) -> list[tuple[Any, .
     ]
 
 
+def _fragment_witnesses(left: re.Pattern[str], right: re.Pattern[str]) -> list[str]:
+    """Strings where the two PREFIX spellings' languages differ, over a bounded sweep.
+
+    Shared by the fragment arms so the sweep a new reference is held to is the same sweep
+    the existing one was: a whole-string kind sweep up to length three (a sequence of
+    KINDS stands for every string built from those kinds), the digit-run locus at widths
+    the kind sweep cannot reach, and the boundary spellings the unit's optional tail
+    exists for.
+    """
+    found: list[str] = []
+    strings = ["".join(combo) for combo in itertools.product(_OPEN_RULE_KINDS, repeat=3)]
+    for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+        for separator in ("", " ", "|", ".", "-", "]", " [", "\t"):
+            strings.append("1" * left_run + separator + "1" * right_run)
+    strings += [
+        "12 34 MIIEowIBAAKCA",
+        "12 34",
+        "1234",
+        "[12]34",
+        "12]34",
+        "1]2",
+        "1.]2",
+        "1->2",
+        "\u2502 1 \u2502",
+        "10000000 10000001",
+        "   1000    1008    1016",
+    ]
+    for text in strings:
+        if bool(left.fullmatch(text)) != bool(right.fullmatch(text)):
+            found.append(text)
+    return found
+
+
 def test_the_digit_maximal_prefix_spells_the_released_fragment_language() -> None:
     r"""The FREQUENT obligation, swept in both directions and not sampled.
 
@@ -1072,6 +1346,11 @@ def test_the_digit_maximal_prefix_spells_the_released_fragment_language() -> Non
     (`12 34 MIIEowIBAAKCA` needs the first unit to end immediately before `34`), and
     telling those two apart is what this arm is for.
 
+    BOTH SIDES ARE THIS BRANCH'S SPELLING — that is the right level for this arm, which
+    is about the maximalisation rather than about the release, and
+    `test_the_branchs_fragment_speaks_the_released_language` is the arm that holds the
+    branch's own spelling to `origin/main`'s (R3-4).
+
     The last block is the arm's own SENSITIVITY check: the same sweep is run against
     a spelling whose digit class is `[0-9]`, which differs from `\d` on the
     Arabic-Indic digit in the alphabet, and a witness must be found. Without it a
@@ -1080,53 +1359,69 @@ def test_the_digit_maximal_prefix_spells_the_released_fragment_language() -> Non
     released = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
     maximal = re.compile("(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX + ")")
 
-    def witnesses(left: re.Pattern[str], right: re.Pattern[str]) -> list[str]:
-        found: list[str] = []
-        strings = ["".join(combo) for combo in itertools.product(_OPEN_RULE_KINDS, repeat=3)]
-        # the digit-run locus itself, at widths the kind sweep cannot reach
-        for left_run, right_run in itertools.product(range(1, 5), repeat=2):
-            for separator in ("", " ", "|", ".", "-", "]", " [", "\t"):
-                strings.append("1" * left_run + separator + "1" * right_run)
-        strings += [
-            "12 34 MIIEowIBAAKCA",
-            "12 34",
-            "1234",
-            "[12]34",
-            "12]34",
-            "1]2",
-            "1.]2",
-            "1->2",
-            "\u2502 1 \u2502",
-            "10000000 10000001",
-            "   1000    1008    1016",
-        ]
-        for text in strings:
-            if bool(left.fullmatch(text)) != bool(right.fullmatch(text)):
-                found.append(text)
-        return found
-
-    assert not witnesses(released, maximal), "the digit-maximal prefix changed the language"
+    assert not _fragment_witnesses(
+        released, maximal
+    ), "the digit-maximal prefix changed the language"
     # SENSITIVITY: an ASCII digit class is a DIFFERENT language on this alphabet,
     # so the sweep above is shown to be able to see a divergence at all.
     ascii_class = re.compile(
         "(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX.replace("\\d", "[0-9]") + ")"
     )
-    assert witnesses(maximal, ascii_class), "the sweep cannot see a language difference"
+    assert _fragment_witnesses(maximal, ascii_class), "the sweep cannot see a language difference"
+
+
+def test_the_branchs_fragment_speaks_the_released_language() -> None:
+    """R3-4's gap, closed IN the file rather than from outside it.
+
+    This branch re-spells the whitespace around a unit's separator: the trailing
+    `[ \t]*` moved inside the optional group, one whitespace consumer per unit instead
+    of two. Same language — but every reference built from
+    `redaction_shapes.LINE_PREFIX` is then the BRANCH's spelling, and before this arm
+    nothing in the suite compared the branch's fragment with `origin/main`'s at all:
+    the round-4 reviewer had to close that gap with an external 24,309-input run. The
+    rule-level differential now compares against the released text as a literal
+    (`_released_open_rule_pattern`), and this arm is the other half — the fragment the
+    OTHER rules in the table still embed (`PEM_BODY_LINE_RE`, `PEM_HEADER_LINE_RE`,
+    `_PEM_RUN`), held to the released fragment directly.
+
+    The sweep is `_fragment_witnesses`, the same one the maximalisation arm uses, and
+    the sensitivity check is that dropping the separator allowance from the released
+    spelling — a real language change, and the one the whitespace rewrite could have
+    made by accident — is found by it.
+    """
+    branch = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
+    released = re.compile("(?:" + _RELEASED_LINE_PREFIX + ")")
+
+    assert not _fragment_witnesses(
+        branch, released
+    ), "the branch's fragment spelling changed the released language"
+    # SENSITIVITY: a released spelling with its separator allowance removed is a
+    # DIFFERENT language (`1]2`, `1->2`, `1.]2`), so the sweep is shown to be able to
+    # see a whitespace/separator change rather than merely agreeing with itself.
+    no_separator = re.compile(
+        "(?:" + _RELEASED_LINE_PREFIX.replace(r"[.)\]]|\.\]|->|[|:>-]", "") + ")"
+    )
+    assert _fragment_witnesses(
+        released, no_separator
+    ), "the sweep cannot see a separator-allowance change"
 
 
 def test_the_open_rule_is_its_released_spelling_with_the_digits_maximal() -> None:
     """The drift pin, and the structural half of Q3.
 
-    Two assertions, and the first is the one QA's Q3 asked for: the RELEASED
+    Two assertions, and the first is the one QA's Q3 asked for: the SHARED
     fragment must not appear in this rule's source at all. A rule that keeps the
     ambiguous fragment anywhere — the body unit, or the short arm's lookahead, which
     carries the same ambiguity and is reached by the same walk — reaches
     `_shape_safe_spans` and the scrubber with a walk that is exponential in the
     digits of a dense line, which is the fatal class by another door.
 
-    The second is that the shipped source IS the released spelling with exactly
-    those substitutions, so the differential arm below compares against the same
-    rule it claims to.
+    The second is that the shipped source IS the BRANCH's spelling with exactly
+    those substitutions. That is the pin on the SUBSTITUTION, deliberately and not on
+    the release: the differential arms compare against `origin/main`'s own text
+    (`_released_open_rule_pattern`, R3-4), so holding this pin to the branch's
+    fragments keeps "did the substitution happen" and "did the fragment change" as
+    two questions with two reds instead of one.
     """
     source = _open_rule_shape().pattern.pattern
 
@@ -1138,12 +1433,12 @@ def test_the_open_rule_is_its_released_spelling_with_the_digits_maximal() -> Non
     ), "both the body unit and the short arm's lookahead must use the maximal fragment"
     assert source.count(redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT) == 1
     assert (
-        _released_open_rule_pattern().pattern != source
-    ), "the shipped rule IS the released spelling; nothing to compare"
-    assert _open_rule_source_is_the_released_spelling(), (
-        "the shipped rule is not the released spelling plus the digit-maximal substitution "
-        "(an edit to the rule that is not that substitution redefines what the differential "
-        "arm compares, so it has to redden here)"
+        _shared_fragment_open_rule_pattern().pattern != source
+    ), "the shipped rule IS the branch's shared spelling; nothing to compare"
+    assert _open_rule_source_is_the_shared_spelling(), (
+        "the shipped rule is not the branch's spelling plus the digit-maximal substitution "
+        "(an edit to the rule that is not that substitution redefines what the drift pin "
+        "and the differential arms compare, so it has to redden here)"
     )
 
 
@@ -1218,11 +1513,18 @@ def test_the_open_rule_matches_its_released_spelling_on_every_fixture() -> None:
     """
     shipped = _open_rule_shape().pattern
     released = _released_open_rule_pattern()
+    assert (
+        released.pattern != shipped.pattern
+    ), "the reference IS the shipped rule; the differential compares nothing"
     cases = _open_rule_fixtures()
     for name, text in cases.items():
-        assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), name
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the rule differential on the {name} fixture"):
+            assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), name
     for text in _open_rule_generated():
-        assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), repr(text)
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, "the rule differential on the generated sweep"):
+            assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), repr(
+                text
+            )
 
     banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
     anchor = '"private_key": "'
@@ -1236,9 +1538,114 @@ def test_the_open_rule_matches_its_released_spelling_on_every_fixture() -> None:
         f"{anchor}{banner}\n{_numeric_rows(1, columns=8, start=1000)}",
         f"{anchor}{banner}\n{_numeric_rows(140, columns=8, start=1000)}",
     ):
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped rule on a dense payload"):
+            assert (
+                _open_rule_matches(shipped, text) == reference
+            ), "the dense payload moved the rule's span"
+
+
+def _maximal_only_open_rule_pattern() -> re.Pattern[str]:
+    """The PREVIOUS head's spelling: every unit maximal, and no partial final unit.
+
+    It exists so the bracket arm below can show that it is able to see R3-1's class at
+    all: a family that the previous spelling no longer diverges on has gone vacuous, and
+    an arm over it would pass whatever the shipped rule said.
+    """
+    maximal_only = (
+        r"[ \t]*(?:(?:"
+        + redaction_shapes._PEM_PREFIX_UNIT_MAX
+        + r"|"
+        + redaction_shapes._PEM_PREFIX_BOX_UNIT_MAX
+        + r")+)?"
+    )
+    return re.compile(
+        _released_open_rule_pattern().pattern.replace(_RELEASED_LINE_PREFIX, maximal_only)
+    )
+
+
+#: The bracket family agent review R3-1 reproduced, re-derived here independently of the
+#: review's own matrix: prefix x run length x tail x template, where the class tail of the
+#: body line is reachable ONLY by stopping a digit run at a `[`-introduced unit. The
+#: released grammar allows that stop because the unit's `]`, whitespace and separator are
+#: all optional exactly when the next character is still a digit; a fully maximal
+#: spelling cannot, so it publishes a line the released rule masks.
+_OPEN_RULE_BRACKET_PREFIXES = ("", "[", "[1", "1 [", "[12] ", "12] ", "\u2502 12 \u2502 ")
+_OPEN_RULE_BRACKET_RUNS = (7, 8, 9, 10, 11, 12)
+_OPEN_RULE_BRACKET_TAILS = ("", "M", "MIIEowIBAAKCA", "=", "12", "MIIEowIBAAKCAQEA")
+
+
+def _open_rule_bracket_family() -> list[str]:
+    """The witness class and its neighbours, in the two spellings a caller produces.
+
+    Both templates are ANCHORED (the rule itself needs the `private_key` anchor) and the
+    second puts a full body line after the witness, which is the spelling under which the
+    short arm's lookahead is what has to see it.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    out: list[str] = []
+    for prefix, run, tail in itertools.product(
+        _OPEN_RULE_BRACKET_PREFIXES, _OPEN_RULE_BRACKET_RUNS, _OPEN_RULE_BRACKET_TAILS
+    ):
+        line = f"{prefix}{'1' * run}{tail}"
+        out.append(f"{anchor}{banner}\n{line}\n")
+        out.append(f"{anchor}{banner}\n{line}\n{_PEM_BODY}\n")
+    return out
+
+
+def test_the_open_rule_restores_the_released_rules_bracket_family() -> None:
+    """R3-1: the maximal spelling must not mask LESS than the released rule.
+
+    The fragment arms above are both green on the class this arm is about, and that is
+    the finding rather than an accident: they compare FRAGMENTS, and a fragment cannot
+    see a divergence whose cause is what the fragment's tail is serving. Here the
+    question is the RULE's, and the witness is a body line of `[` followed by nine `1`s
+    under an anchored header: the released parse is the unit `[1` plus the content
+    `11111111` and masks the line; a spelling that requires every digit run to be
+    maximal eats all nine digits as the unit's run, has no eight-character content left,
+    and PUBLISHES the line (`origin/main` `(0, 54)` against `(0, 43)`, measured).
+
+    Three assertions, and the middle one is what keeps it honest: the family must
+    DIVERGE under the previous spelling (else the arm is vacuous), every divergent input
+    must be one where the released rule masks MORE (never the other direction, which
+    would be a published line rather than a widened mask), and the shipped rule must
+    agree with the released one on all of them.
+    """
+    shipped = _open_rule_shape().pattern
+    released = _released_open_rule_pattern()
+    previous = _maximal_only_open_rule_pattern()
+    family = _open_rule_bracket_family()
+
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the bracket family under the released rule"):
+        divergences = [
+            text
+            for text in family
+            if _open_rule_matches(previous, text) != _open_rule_matches(released, text)
+        ]
+    assert divergences, (
+        "the family went vacuous: the previous (fully maximal) spelling no longer diverges "
+        "from the released rule on it, so this arm could not see R3-1's class at all"
+    )
+    assert all("[" in text for text in divergences), "the class is bracket-introduced"
+    for text in divergences:
+        previous_spans = _open_rule_matches(previous, text)
+        released_spans = _open_rule_matches(released, text)
         assert (
-            _open_rule_matches(shipped, text) == reference
-        ), "the dense payload moved the rule's span"
+            not previous_spans or previous_spans[0][1] < released_spans[0][1]
+        ), f"a divergent input where the previous spelling masks at least as much: {text!r}"
+    assert all(
+        _open_rule_matches(shipped, text) == _open_rule_matches(released, text) for text in family
+    ), "the shipped rule does not speak the released rule's language on the bracket family"
+
+    # The user-visible half of the same witness: what `scrub_shapes` PUBLISHES. The
+    # reviewer's finding was measured through the shape table (the path a tool result
+    # takes), where the previous head returned the body line verbatim.
+    published_line = "[" + "1" * 9
+    witness = '"private_key": "' + _banner(_PEM_SPELLINGS[0]) + published_line + "\n"
+    assert _open_rule_matches(released, witness) == _open_rule_matches(shipped, witness)
+    assert published_line not in redaction_shapes.scrub_shapes(
+        witness
+    ), "the bracket witness's body line is published by the shape table"
 
 
 def _pipe_settled(raw: bytes, chunk: int) -> str:
@@ -1270,9 +1677,12 @@ def test_the_open_rules_spelling_does_not_move_a_pipe_byte_at_any_chunk_size(
     cases = _open_rule_fixtures()
     policies = (7, 64, 4096, 65536)
 
-    shipped_cells = {
-        name: [_pipe_settled(text.encode(), c) for c in policies] for name, text in cases.items()
-    }
+    shipped_cells: dict[str, list[str]] = {}
+    for name, text in cases.items():
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the shipped spelling through the pipe on {name}"
+        ):
+            shipped_cells[name] = [_pipe_settled(text.encode(), c) for c in policies]
 
     monkeypatch.setattr(
         redaction_shapes,
@@ -1289,20 +1699,24 @@ def test_the_open_rules_spelling_does_not_move_a_pipe_byte_at_any_chunk_size(
         ),
     )
     for name, text in cases.items():
-        assert [_pipe_settled(text.encode(), c) for c in policies] == shipped_cells[
-            name
-        ], f"the two spellings paint different bytes for {name}"
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the released spelling through the pipe on {name}"
+        ):
+            assert [_pipe_settled(text.encode(), c) for c in policies] == shipped_cells[
+                name
+            ], f"the two spellings paint different bytes for {name}"
 
     monkeypatch.setattr(
         redaction_shapes,
         "_MULTILINE_SHAPES",
         tuple(shape for shape in original if shape.label != _OPEN_RULE_LABEL),
     )
-    moved = [
-        name
-        for name, text in cases.items()
-        if [_pipe_settled(text.encode(), c) for c in policies] != shipped_cells[name]
-    ]
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the pipe with the rule dropped, per fixture"):
+        moved = [
+            name
+            for name, text in cases.items()
+            if [_pipe_settled(text.encode(), c) for c in policies] != shipped_cells[name]
+        ]
     assert moved, "dropping the rule moved nothing, so this arm compares nothing"
 
 
@@ -1469,23 +1883,83 @@ def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
     header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
     for columns in (5, 6, 8):
         rows = _numeric_rows(1, columns=columns, start=1000)
-        start = time.process_time()
-        scrubbed = redaction_shapes.scrub_shapes(f"{header}\n{rows}")
-        cpu = time.process_time() - start
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the table's block rule on a {columns}-column row"
+        ):
+            start = time.process_time()
+            scrubbed = redaction_shapes.scrub_shapes(f"{header}\n{rows}")
+            cpu = time.process_time() - start
         assert cpu < 0.05, f"an anchored {columns}-column row cost {cpu:.3f} s of CPU in the table"
         assert (
             REDACTION_MARKER in scrubbed
         ), f"the anchored spelling stopped being masked at {columns}"
         assert rows in scrubbed, "only the header is a credential here; the row must survive"
     payload = f"{header}\n{_numeric_rows(140, columns=8, start=1000)}"
-    start = time.process_time()
-    scrubbed = redaction_shapes.scrub_shapes(payload)
-    cpu = time.process_time() - start
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the table's block rule on the 140-row payload"):
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(payload)
+        cpu = time.process_time() - start
     assert cpu < 0.5, f"the 140-row dense payload cost {cpu:.3f} s of CPU in the table"
     assert (
         REDACTION_MARKER in scrubbed
     ), "the dense payload's anchored spelling stopped being masked"
     assert "1056" in scrubbed, "the row content must survive; only the header is a credential here"
+
+
+def test_the_short_arms_lookahead_is_load_bearing_on_its_own_population() -> None:
+    """R3-5: the SECOND substitution has a population of its own, and it is measured.
+
+    Both fragments carry the ambiguity, and the arms above exercise the BODY unit's half
+    (a dense row, where the rule's own line walk is what costs). The short arm's LOOKAHEAD
+    is reached by a different input — a sub-floor line before a dense row, where the
+    lookahead is what has to parse the next line's prefix — and none of this file's
+    fixtures builds one: the `short_mid` case follows `3| Qw9z` with a 13-character body,
+    which the released lookahead answers immediately. So the comment beside the
+    substitution ("both are substituted because they carry the same ambiguity") had no
+    measurement behind it here, and the next reader simplifying the lookahead away would
+    have kept every arm green — the argument R3-1 already showed is insufficient on its
+    own, because what a split SERVES is what decides.
+
+    MEASURED (this round, on this spelling; `Qw9z` then a `%8d` row): the released
+    lookahead costs 0.005 / 0.302 / 2.216 / 18.578 s of CPU at 4 / 6 / 7 / 8 columns, and
+    the eight-column form is what agent review R3-5 measured as "past 100 s" through the
+    live pipe; the shipped spelling is 1 ms or under on every one of them, and 0.001 s on
+    the 106-byte seven-column payload the review used.
+
+    WHY THE ARM ASSERTS THE COST AND THE STRUCTURE RATHER THAN REPRODUCING THAT WALK:
+    demonstrating the released lookahead's non-return at eight columns costs 18.6 s of CPU
+    (341 s of wall on this loaded fleet) on EVERY run, and a smaller column count is core
+    speed-dependent — 0.302 s at six columns is not a bound that cannot fire on a faster
+    machine. So the load-bearing property is pinned two ways that are cheap and stable:
+    the shipped spelling's cost on exactly that population (with a CPU ceiling, under the
+    bound), and the substitution's SHAPE — the lookahead must carry the maximal fragment
+    and must not carry the shared one, which is what a "simplification" would change.
+    """
+    header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    # One sub-floor line, then the dense row: `{1,7}` then a full line behind a prefix.
+    payload = f"{header}\nQw9z\n{_numeric_rows(1, columns=8, start=1000)}\n"
+
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped spelling on the short-mid payload"):
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(payload)
+        cpu = time.process_time() - start
+    assert cpu < 0.05, f"the short-mid payload cost {cpu:.3f} s of CPU shipped"
+    assert REDACTION_MARKER in scrubbed, "the short-mid payload's header stopped being masked"
+
+    # The SHAPE half: the short arm's lookahead is the maximal spelling, and the shared
+    # (ambiguous) prefix is not inside it. `_PEM_DIGIT_MAX_LINE_CONTENT` is the fragment
+    # both the pipe's classifier and this rule read, so this is also the pin that keeps
+    # the two from drifting apart.
+    assert (
+        redaction_shapes._PEM_DIGIT_MAX_PREFIX in redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT
+    ), "the short arm's lookahead no longer carries the maximal prefix"
+    assert (
+        redaction_shapes.LINE_PREFIX not in redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT
+    ), "the short arm's lookahead still walks the ambiguous fragment"
+    assert (
+        redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT.count(redaction_shapes._PEM_DIGIT_MAX_PREFIX)
+        == 1
+    ), "the lookahead must carry the substitution exactly once"
 
 
 def test_an_unclosed_block_is_masked_and_the_text_before_it_is_released() -> None:

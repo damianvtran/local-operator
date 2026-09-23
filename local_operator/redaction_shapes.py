@@ -104,6 +104,7 @@ coverage, where under-masking is still a leak and over-masking is still a defect
 
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, replace
 from typing import (
@@ -1647,6 +1648,19 @@ def _tolerant(token_class: str) -> str:
 _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY")
 
 
+#: One NUMBERED unit of a tool's line numbering: an optional opening bracket, the digit
+#: run, an optional closing bracket, whitespace, and an optional separator.
+#:
+#: It is a NAMED fragment rather than inline text because the `-open` rule needs a second
+#: spelling of this unit (`_PEM_PREFIX_UNIT_MAX`, below), and a second hand-written copy
+#: of a grammar fragment is exactly how the shape table and the pipe's classifier drift
+#: apart — the defect Q9-F1/Q10-F1 recorded above, one level down.
+_PEM_PREFIX_UNIT = r"\[?\d+\]?[ \t]*(?:(?:[.)\]]|\.\]|->|[|:>-])[ \t]*)?"
+
+#: bat's boxed numbering (`│ 12 │`). Its digit run is delimited on BOTH sides, so it has
+#: no partial form to spell: no unit and no content can extend into it.
+_PEM_PREFIX_BOX_UNIT = r"\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
+
 #: The line-number prefix tools actually emit, as ONE definition shared by the shape
 #: table and the pipe's own body classifier (``tools/builtin.py`` imports these). A second
 #: hand-written allowance is what published the body for `cat -n` output after the shape
@@ -1654,7 +1668,9 @@ _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE
 #: between the two is a silent leak rather than a missed match.
 #:
 #: Covered: `12|`, `12:`, `12>`, `12->`, `12)`, `12.]`, `[12]`, `12<TAB>` (cat -n), bat's
-#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator.
+#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator,
+#: and it is built from the two units above so that a third spelling (this rule's maximal
+#: one) cannot be written by hand beside it.
 LINE_PREFIX = (
     r"[ \t]*(?:(?:"
     # THE SEPARATOR'S TRAILING WHITESPACE LIVES INSIDE THE OPTIONAL GROUP, and that
@@ -1686,46 +1702,41 @@ LINE_PREFIX = (
     # runs it over arbitrary text is a guard or a linear matcher, not a cheaper
     # fragment: `local_operator/tools/builtin.py` shields its two hot call sites
     # with necessary-condition gates and records the residual.
-    r"\[?\d+\]?[ \t]*(?:(?:[.)\]]|\.\]|->|[|:>-])[ \t]*)?"
-    r"|\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
-    r")+)?"
+    + _PEM_PREFIX_UNIT
+    + r"|"
+    + _PEM_PREFIX_BOX_UNIT
+    + r")+)?"
 )
 
 #: A line separator in either spelling: escaped (inside a JSON value) or real, CRLF
 #: included.
 LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
 
-#: One PEM body line with that prefix. Eight characters is the floor for a line that
-#: stands on its own; a SHORTER line counts only when a full one follows it (a truncated
-#: run) or when it is the block's last line before the closing quote or the end of the
-#: text — inside an open block nothing may be published, which is the block's whole point
-#: (Q10-F2: a sub-eight-character line in the MIDDLE published everything after it, and a
-#: short FINAL line published where the previous head masked).
-#:
-#: The floor is a NAME because the pipe needs the same number for a different question:
-#: a cap-forced release can end INSIDE a line, and a fragment shorter than the floor is
-#: read as PROSE (the full-line alternative needs the floor) — which CLOSES an open
-#: block. `tools/builtin.py` holds that cut back to the line boundary by at most
-#: ``PEM_BODY_FLOOR - 1`` bytes, and reads this constant rather than restating the
-#: number, for the same reason the regexes above are shared.
-#:
-#: ONE definition, TWO readers today and a THIRD expected — and the third is where a
-#: merge has to reconcile rather than pick. The pipe-filter-spin branch (#1427) replaces
-#: the three ``PEM_*_LINE_RE`` patterns at the pipe's call sites with LINEAR DECIDERS
-#: (``pem_body_line`` / ``pem_end_line`` / ``pem_header_line_end``) and spells BOTH ends
-#: of this floor by hand: ``{8,}`` and ``{1,7}`` in its copies of the two fragments
-#: below, and an ``8``/``7`` pair in its ``_pem_body_arm_span`` calls. A decider whose
-#: floor is a byte LOWER than the hold's under-holds the tail of a line, and
-#: under-holding is the leak direction — the fragment is then read as prose, which
-#: closes the block. So the deciders read ``PEM_BODY_FLOOR`` and
-#: ``PEM_BODY_FLOOR - 1`` from here, and the two quantifier spellings below are built
-#: from the same number so a pattern cannot drift from it either.
+#: The body grammar's FLOOR: how many class characters a body line needs to stand on its
+#: own. It is a NAME because three readers ask three different questions of it — the body
+#: grammar accepts at exactly this width, `tools/builtin.py` HOLDS a cap-forced cut back
+#: to the line boundary by at most `PEM_BODY_FLOOR - 1` bytes when a release can end in
+#: the MIDDLE of a line, and this branch's linear deciders
+#: (`pem_body_line` / `pem_end_line` / `pem_header_line_end`) read it for both arms of
+#: the grammar they decide. `#1445` landed the constant and the hold (#1445's own comment
+#: carried the note that this branch would be the third reader, spelling an `8` / `7`
+#: pair by hand); the deciders read `PEM_BODY_FLOOR` and `PEM_BODY_FLOOR - 1` now, because
+#: a decider a byte BELOW the hold's floor under-holds — the fragment is then read as
+#: PROSE, which closes the block and publishes what follows, which is the leak direction.
 PEM_BODY_FLOOR = 8
-#: The floor's two spellings, as the regexes below need them and built from the number
-#: above: a MINIMUM run (a line that stands on its own) and a run bounded one below it
-#: (the truncated-line allowance). Not restated as literals anywhere in this module.
+
+#: The floor's two spellings, as the regexes need them and built from the number above:
+#: a MINIMUM run (a line that stands on its own) and a run bounded one below it (the
+#: truncated-line allowance). Not restated as a literal anywhere below.
 _PEM_FLOOR_MIN_RUN = "{" + str(PEM_BODY_FLOOR) + ",}"
 _PEM_FLOOR_SUB_RUN = "{1," + str(PEM_BODY_FLOOR - 1) + "}"
+
+#: One PEM body line with that prefix. `PEM_BODY_FLOOR` characters is the floor for a
+#: line that stands on its own; a SHORTER line counts only when a full one follows it (a
+#: truncated run) or when it is the block's last line before the closing quote or the end
+#: of the text — inside an open block nothing may be published, which is the block's
+#: whole point (Q10-F2: a sub-eight-character line in the MIDDLE published everything
+#: after it, and a short FINAL line published where the previous head masked).
 _PEM_FULL_LINE = r"[A-Za-z0-9+/=]" + _PEM_FLOOR_MIN_RUN + r",?[ \t]*"
 _PEM_SHORT_MID_LINE = (
     r"[A-Za-z0-9+/=]"
@@ -1787,20 +1798,98 @@ _PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
 #: not embed the fragment at all, and the fragment alone decides nothing here: it is
 #: the ambiguity's combination with this rule's unbounded body run that made the
 #: engine walk 2**(digits-1) partitions per digit run.
-_PEM_DIGIT_MAX_PREFIX = LINE_PREFIX.replace(r"\d+", r"\d+(?!\d)")
+#: The two units above with every digit run required to be MAXIMAL.
+#:
+#: The box unit is maximalised only for symmetry with the fragment it mirrors: its run is
+#: delimited by `│` on both sides, so it can never be split and the predicate changes
+#: nothing it matches.
+_PEM_PREFIX_UNIT_MAX = _PEM_PREFIX_UNIT.replace(r"\d+", r"\d+(?!\d)")
+_PEM_PREFIX_BOX_UNIT_MAX = _PEM_PREFIX_BOX_UNIT.replace(r"\d+", r"\d+(?!\d)")
+
+#: The `-open` rule's prefix: maximal units, THEN AT MOST ONE RELEASED UNIT — and that
+#: trailing unit is what makes this spelling the released LANGUAGE rather than a subset
+#: of it (agent review R3-1 on #1427).
+#:
+#: WHY A UNIT MUST BE ALLOWED TO STOP MID-RUN. `\d+(?!\d)` on EVERY unit is not the same
+#: language, because the released grammar lets a unit's tail be epsilon — `\]?`, the
+#: whitespace and the separator are all optional — exactly when the next character is
+#: still a digit, and the BODY CONTENT may then consume the rest of that run. The witness
+#: is a body line of `[` followed by nine `1`s under an anchored header: `origin/main`
+#: parses it as the unit `[1` plus the content `11111111` and masks the line (span
+#: `(0, 54)`); a fully maximal spelling must eat all nine digits as the unit's run, leaves
+#: no eight-character content behind it, and PUBLISHES the line — measured `(0, 43)`, i.e.
+#: a released mask lost, which is the one direction this table may never move.
+#:
+#: WHY EXACTLY ONE, AND WHY LAST. Any split of a CONTIGUOUS run into several units is
+#: redundant — collapsing it into one unit does not move where the prefix ENDS — so the
+#: only split that can matter is the one that decides where the content begins, and that
+#: split is by definition in the LAST unit's run: the released parse's prefix end is
+#: either a maximal-run end (those are `*` above) or a position strictly inside the run
+#: that the content immediately follows (this trailing unit). Allowing the released unit
+#: ONCE, at the END, is therefore the whole difference — and it is what keeps the walk
+#: linear: per run the engine has one maximal unit to try, and the trailing unit adds a
+#: bounded walk of the FINAL run only, instead of a partition of every run.
+#:
+#: The full enumeration of both directions is pinned by
+#: `test_the_open_rule_restores_the_released_rules_bracket_family` (the witness class and
+#: its neighbours, against the independently rebuilt released rule) and by
+#: `test_the_open_rule_matches_its_released_spelling_on_every_fixture` (the corpus and a
+#: generated sweep, whose alphabet carries `[`).
+_PEM_DIGIT_MAX_PREFIX = (
+    r"[ \t]*(?:(?:"
+    + _PEM_PREFIX_UNIT_MAX
+    + r"|"
+    + _PEM_PREFIX_BOX_UNIT_MAX
+    + r")*(?:"
+    + _PEM_PREFIX_UNIT
+    + r")?)?"
+)
 _PEM_DIGIT_MAX_LINE_CONTENT = (
     _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE.replace(LINE_PREFIX, _PEM_DIGIT_MAX_PREFIX)
 )
+#: NIT-2 (agent review round 3): UNREFERENCED AT RUNTIME — this is the pipe's pre-decider
+#: block spelling, and the deciders (`pem_body_line` / `pem_end_line` / `pem_header_line_end`)
+#: replaced every caller, so nothing reaches it. Kept rather than deleted, and recorded
+#: rather than left implicit: #1445 rewrites the `{1,7}` in its last line, so a deletion
+#: here is a merge surface for no gain. Deleting it is a follow-up once both land.
 _PEM_RUN = (
     r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
     r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]" + _PEM_FLOOR_SUB_RUN + r",?)?"
 )
 PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$", re.MULTILINE)
+#: The ARMOUR TAIL: what may follow the closing run of dashes on a BEGIN/END armour
+#: line. Trailing space or TAB (an editor's, a wiki's, a CRLF file's carriage return),
+#: then that line's own end — the carriage return of a CRLF or bare-CR terminator, the
+#: line feed, or the end of the text.
+#:
+#: ONE DEFINITION, READ BY BOTH THE PATTERN AND THE DECIDER — and that is not tidiness.
+#: `#1445` landed this tail on the pattern (`$` alone cannot match in front of a `\r`, so a
+#: CRLF, bare-CR or trailing-whitespace armour line was not a header at all); this branch
+#: owns the DECIDER, and while a decider models a tail by hand the two can answer the same
+#: question differently — which is exactly what happened when the pattern widened and the
+#: decider kept `$`: the pipe then PUBLISHED the block's body (measured on the previous
+#: head through the real filter: 3 of 3 body lines out, no marker, for an unterminated CRLF
+#: block and for a trailing-whitespace one). A documentary obligation ("keep the tail in
+#: step with the pattern's") is what failed there, so the decider DECODES its two halves
+#: from this text below rather than restating them, and
+#: `test_the_header_deciders_tail_is_the_patterns_tail` holds the composition together.
+_PEM_ARMOUR_TAIL_RUN_TEXT = r" \t"
+_PEM_ARMOUR_TAIL_TERMINATOR_TEXT = (r"\r", r"\n")
+_PEM_ARMOUR_TAIL = (
+    "[" + _PEM_ARMOUR_TAIL_RUN_TEXT + "]*(?=" + "|".join(_PEM_ARMOUR_TAIL_TERMINATOR_TEXT) + "|$)"
+)
+#: The same two halves as the CHARACTERS the linear decider scans for, decoded from the
+#: text above — so a decider that could disagree with the pattern is not something a reader
+#: has to notice, it is something they would have to construct.
+_PEM_ARMOUR_TAIL_RUN = codecs.decode(_PEM_ARMOUR_TAIL_RUN_TEXT, "unicode_escape")
+_PEM_ARMOUR_TAIL_TERMINATORS = "".join(
+    codecs.decode(spelling, "unicode_escape") for spelling in _PEM_ARMOUR_TAIL_TERMINATOR_TEXT
+)
+
 PEM_HEADER_LINE_RE = re.compile(
     r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
-    r"-{1,4}[\x27\x22]?-{1,4}[ \t]*(?=\r|\n|$)",
-    # The trailing ``[ \t]*(?=\r|\n|$)`` is the CRLF / CR / trailing-whitespace spelling
+    # The NAMED tail below is the CRLF / CR / trailing-whitespace spelling
     # of the armour line, and it is not cosmetic either: ``$`` alone cannot match in
     # front of a ``\r``, so ``...KEY-----\r\n`` — an ordinary key file written on
     # Windows, or quoted by a wiki, or left with a trailing space by an editor — was not
@@ -1831,6 +1920,7 @@ PEM_HEADER_LINE_RE = re.compile(
     # text changes its pipe output. The decision was still made in the mask-more
     # direction — a real key file with CRLF endings masks now, and it published its body
     # before.
+    r"-{1,4}[\x27\x22]?-{1,4}" + _PEM_ARMOUR_TAIL,
     # MULTILINE, and that is not cosmetic: the pipe layer SEARCHES a multi-line read for
     # this header, so without the flag it matched only when the read was exactly one
     # header line — which the release point's hold makes impossible — and the entire
@@ -2086,8 +2176,9 @@ def _pem_body_arm_span(piece: str, floor: int, ceiling: int | None) -> tuple[int
 
     The token is the piece's trailing run of `[A-Za-z0-9+/=]`, optionally
     followed by one `,` and then whitespace to the piece end. Its width is a
-    RANGE rather than one number in both arms — `{8,}` is a floor, and the short
-    arm is a ceiling — and the PREFIX may enter the run as well as start before
+    RANGE rather than one number in both arms — the full arm is floored at
+    `PEM_BODY_FLOOR`, the short arm is a ceiling — and the PREFIX may enter the run as
+    well as start before
     it, which is why this returns a span: `[112345678` is a prefix of `[1` with a
     token of `12345678`. No span means no offset can work, and the common case —
     `%8d` columns end in a short digit run, prose ends in a word — stops here
@@ -2138,9 +2229,13 @@ def pem_body_line(line: str) -> bool:
     this decider first over-accepted a table row that follows a banner.
 
     `$` under `MULTILINE` means "the end, or just before a newline", so each arm
-    ends at its piece's end: the full arm is a `{8,}` token, and the short arm is
-    a one-to-seven character token followed by a separator and then a full token
-    behind a prefix. The caller is the pipe's line loop (`tools/builtin.py`),
+    ends at its piece's end: the full arm is a `PEM_BODY_FLOOR`-character token, and the
+    short arm is a sub-floor token (one to `PEM_BODY_FLOOR - 1` characters) followed by
+    a separator and then a full token behind a prefix. Both widths are read from
+    `PEM_BODY_FLOOR` and not restated, because this decider's floor and the pipe's own
+    hold are the same number on purpose — a decider a byte below the hold's floor
+    under-holds, and under-holding publishes (see the constant). The caller is the
+    pipe's line loop (`tools/builtin.py`),
     which passes one line with its terminator stripped — where the short arm can
     never fire — and this is exact for that input and for a whole multi-line read
     alike, because the arms are the pattern's own rather than an in-domain
@@ -2148,8 +2243,8 @@ def pem_body_line(line: str) -> bool:
     """
     pieces = line.split("\n", 1)
     piece = pieces[0]
-    full = _pem_body_arm_span(piece, 8, None)
-    short = _pem_body_arm_span(piece, 1, 7) if len(pieces) > 1 else None
+    full = _pem_body_arm_span(piece, PEM_BODY_FLOOR, None)
+    short = _pem_body_arm_span(piece, 1, PEM_BODY_FLOOR - 1) if len(pieces) > 1 else None
     if full is None and short is None:
         return False
     flags = _pem_prefix_end_flags(piece)
@@ -2199,9 +2294,17 @@ def pem_header_line_end(text: str) -> int | None:
     The search is modelled as the pattern's own `MULTILINE` anchors: `^` matches
     at the start of the text and after every `\\n`, `$` at the end and before
     every `\\n` — so the text is cut at its `\\n`s and each piece is asked the
-    end-anchored question. A piece keeps any `\\r` of a CRLF terminator, and the
-    rigid tail cannot contain one, so a CRLF header line does not match here any
-    more than it matches the pattern.
+    end-anchored question. A piece keeps any `\\r` of a CRLF terminator, and THAT is
+    where the tail matters rather than where it can be ignored: the pattern's tail is
+    `_PEM_ARMOUR_TAIL` (`[ \\t]*(?=\\r|\\n|$)`, read here as its two halves), so a
+    CRLF, bare-CR or trailing-whitespace header line matches BOTH the pattern and this
+    decider, and the offset returned is the position of that `\\r` — the same `end()`
+    the pattern's own lookahead gives. An earlier revision modelled the tail as `$`
+    alone and returned the piece's length, so it answered `None` for those spellings
+    while the widened pattern matched them — which on the pipe means the block's whole
+    body published.
+    `test_the_header_deciders_tail_is_the_patterns_tail` and the armour-spelling
+    differential beside it are what hold the two together now.
 
     Both literals the tail needs are required before any of the work below, and
     they are necessary conditions of the pattern (the fragment cannot consume a
@@ -2210,51 +2313,94 @@ def pem_header_line_end(text: str) -> int | None:
     """
     offset = 0
     for piece in text.split("\n"):
-        if _pem_header_piece_matches(piece):
-            return offset + len(piece)
+        end = _pem_header_piece_end(piece)
+        if end is not None:
+            return offset + end
         offset += len(piece) + 1
     return None
 
 
-def _pem_header_piece_matches(piece: str) -> bool:
+def _pem_armour_tail_stops(piece: str) -> list[tuple[int, set[int]]]:
+    """Every position the armour tail may end at, each with the rigid ends that reach it.
+
+    `_PEM_ARMOUR_TAIL` is `[ \\t]*(?=\\r|\\n|$)`: after the closing dashes there may be
+    trailing whitespace, and then that line's own end — a `\\r` (the CR of a CRLF file,
+    or a bare CR used as the terminator) or the end of the piece (the `\\n` was the
+    split). So a stop's rigid end is any position from which the tail's own run class,
+    `_PEM_ARMOUR_TAIL_RUN`, leads to that stop, and the terminators are read from
+    `_PEM_ARMOUR_TAIL_TERMINATORS` — both halves are the constants the PATTERN is built
+    from, so the pattern and this decider cannot drift apart (which is what #1445's
+    widening of the pattern did to the previous, `$`-only, model).
+
+    Ordered, and in the pattern's own order: the terminator stops by position, then the
+    piece's end. Bounded by the piece and allocation-free per candidate: a stop's run is
+    walked back over the run class only, so this is O(len(piece)).
+    """
+    stops = [index for index, char in enumerate(piece) if char in _PEM_ARMOUR_TAIL_TERMINATORS]
+    stops.append(len(piece))
+    out: list[tuple[int, set[int]]] = []
+    for stop in stops:
+        start = stop
+        while start > 0 and piece[start - 1] in _PEM_ARMOUR_TAIL_RUN:
+            start -= 1
+        out.append((stop, set(range(start, stop + 1))))
+    return out
+
+
+def _pem_header_piece_end(piece: str) -> int | None:
     """One `^…$` line of `pem_header_line_end`: `LINE_PREFIX` + the whole tail.
 
-    The tail is `-{1,4}['\\"]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}['\\"]?-{1,4}`
-    and every piece of it is local: a rigid structure, the `BEGIN ` literal, a
-    run of `[A-Z0-9 ]`, the `PRIVATE KEY` literal, a rigid structure that has to
-    reach the line end. So the candidates are enumerated from the literals and
-    each one is a constant-time question against the prefix machine's flags —
-    no search, and no partition to walk.
+    Returns the offset the pattern's match would END at inside this piece, or None. The
+    tail is
+    `-{1,4}['\\"]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}['\\"]?-{1,4}` + the
+    armour tail, and every piece of it is local: a rigid structure, the `BEGIN `
+    literal, a run of `[A-Z0-9 ]`, the `PRIVATE KEY` literal, a rigid structure whose
+    end is pinned by the tail. So the candidates are enumerated from the literals and
+    each one is a constant-time question against the prefix machine's flags — no
+    search, and no partition to walk.
+
+    The stops are tried in the pattern's order and the first that yields a structure
+    wins: the tail's `[ \\t]*` is greedy, so after the rigid structure it consumes the
+    trailing whitespace and the lookahead must hold THERE — the earliest reachable
+    terminator, and the piece's end only when no terminator precedes it. That is also
+    why the returned offset is the stop and not the piece's length: the pattern's
+    lookahead does not consume its `\\r`.
     """
     if _PEM_BEGIN not in piece or _PEM_KEY not in piece:
-        return False
+        return None
     length = len(piece)
-    endings = {
-        length - rigid for rigid in _pem_rigid_end_lengths(piece, length) if length - rigid >= 0
-    }
-    if not endings:
-        return False
-    flags = _pem_prefix_end_flags(piece)
-    at = piece.find(_PEM_BEGIN)
-    while at >= 0:
-        body = at + len(_PEM_BEGIN)
-        # The `[A-Z0-9 ]*` between the literals is a run, so its end bounds where
-        # `PRIVATE KEY` may begin — and a `PRIVATE KEY` that starts inside it and
-        # ends past it is still a match, which is why the search window is the
-        # run's end plus the literal's own length.
-        bound = body
-        while bound < length and piece[bound] in _PEM_HEADER_CLASS:
-            bound += 1
-        key = piece.find(_PEM_KEY, body, bound + len(_PEM_KEY))
-        while 0 <= key <= bound:
-            if key + len(_PEM_KEY) in endings:
-                for rigid in _pem_rigid_end_lengths(piece, at):
-                    start = at - rigid
-                    if start >= 0 and flags[start]:
-                        return True
-            key = piece.find(_PEM_KEY, key + 1, bound + len(_PEM_KEY))
-        at = piece.find(_PEM_BEGIN, at + 1)
-    return False
+    flags: bytearray | None = None
+    for stop, rigid_ends in _pem_armour_tail_stops(piece):
+        endings = {
+            end - rigid
+            for end in rigid_ends
+            for rigid in _pem_rigid_end_lengths(piece, end)
+            if end - rigid >= 0
+        }
+        if not endings:
+            continue
+        if flags is None:
+            flags = _pem_prefix_end_flags(piece)
+        at = piece.find(_PEM_BEGIN)
+        while at >= 0:
+            body = at + len(_PEM_BEGIN)
+            # The `[A-Z0-9 ]*` between the literals is a run, so its end bounds where
+            # `PRIVATE KEY` may begin — and a `PRIVATE KEY` that starts inside it and
+            # ends past it is still a match, which is why the search window is the
+            # run's end plus the literal's own length.
+            bound = body
+            while bound < length and piece[bound] in _PEM_HEADER_CLASS:
+                bound += 1
+            key = piece.find(_PEM_KEY, body, bound + len(_PEM_KEY))
+            while 0 <= key <= bound:
+                if key + len(_PEM_KEY) in endings:
+                    for rigid in _pem_rigid_end_lengths(piece, at):
+                        start = at - rigid
+                        if start >= 0 and flags[start]:
+                            return stop
+                key = piece.find(_PEM_KEY, key + 1, bound + len(_PEM_KEY))
+            at = piece.find(_PEM_BEGIN, at + 1)
+    return None
 
 
 def _anchored_key_value_guard(match: Match[str]) -> bool:
