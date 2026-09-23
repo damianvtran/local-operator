@@ -805,6 +805,90 @@ _URL_LIKE = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 #: A dotted attribute path (``current.session_key``, ``models-dev.listing``).
 _DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+")
 
+#: The characters a type ANNOTATION may be spelled with, used as a whole-value
+#: confinement check. A credential literal is full of characters a type never
+#: carries — a quote, ``/``, ``@``, ``=``, ``$``, ``%``, a backtick — so a value
+#: spelled entirely inside this alphabet cannot be one of those spellings, which
+#: is what stops this clause from releasing a credential that merely CONTAINS an
+#: angle bracket. ``[``/``]``/``(``/``)`` are deliberately absent: a value carrying
+#: one of them is released by :data:`_EXPRESSION_CHARS` before this test runs.
+_TYPE_ALPHABET = frozenset(
+    "abcdefghijklmnopqrstuvwxyz" "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "0123456789" "_<>,:&'."
+)
+
+#: Primitive type names, in every language whose source this pass reads.
+#:
+#: A primitive is what lets a generic's ARGUMENT prove itself a type without being
+#: CamelCase: ``Vec<u8>``, ``Map<string, string>``, ``Optional[str]``. Without it
+#: the argument rule would have to accept any lowercase word, and a value spelled
+#: ``SomePassword<secret>`` would be read as a type.
+_TYPE_PRIMITIVES = frozenset(
+    {
+        # Rust
+        "bool",
+        "char",
+        "str",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "f32",
+        "f64",
+        # TypeScript / JavaScript
+        "string",
+        "number",
+        "boolean",
+        "any",
+        "unknown",
+        "never",
+        "void",
+        "object",
+        "symbol",
+        "bigint",
+        "undefined",
+        "null",
+        # Python
+        "int",
+        "float",
+        "complex",
+        "bytes",
+        "bytearray",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "frozenset",
+        "type",
+        "None",
+    }
+)
+
+#: How deep a nested type application may go before the value stops being read as
+#: a type. ``Arc<Mutex<String>>`` is 2, ``Option<Vec<HashMap<K, V>>>`` is 3. This
+#: is a bound on RECURSION — a pathological value must not drive the parser — and
+#: not a claim about how deeply real annotations nest.
+_TYPE_NESTING_LIMIT = 8
+
+#: The spelling of a TYPE NAME: CamelCase, or a single capital with anything after
+#: it. This is the same judgement the bare-name clause in
+#: :func:`_value_is_not_a_credential` makes inline, named here because the type
+#: parser needs it too and two spellings of one rule drift.
+#:
+#: A digit is ALLOWED here, unlike in that clause: a type name legitimately carries
+#: one (``Base64``, ``Sha256``, ``Utf8``), and the digit test there exists to keep a
+#: real AWS session token — a bare CamelCase run of digits and letters — out. A
+#: value reaching this test has already had to parse as a type application, which
+#: no session token does.
+_TYPE_NAME = re.compile(r"[A-Z][A-Za-z0-9]*|[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*")
+
 
 #: Qualifier words that make an otherwise ambiguous ``*_KEY``/``*_KEYS`` name a
 #: CREDENTIAL name rather than a code one. ``PRIVATE_KEY`` is a secret;
@@ -965,6 +1049,161 @@ def _repeats_its_own_name(value: str, name: str) -> bool:
     return value_norm in name_norm or name_norm in value_norm
 
 
+def _is_type_leaf_name(segment: str) -> bool:
+    """Whether a path segment is spelled as a TYPE name rather than a word.
+
+    This is the existing CamelCase judgement, reused: a type's own name begins
+    with a capital (``String``, ``HashMap``, ``Foo``) or is a single capital
+    (``T``, ``K``), and a language primitive is in :data:`_TYPE_PRIMITIVES`. A
+    lowercase word is neither, which is what keeps ``Foo<word>`` out.
+    """
+    if not segment:
+        return False
+    if segment in _TYPE_PRIMITIVES or segment == "_":
+        return True
+    return bool(_TYPE_NAME.fullmatch(segment))
+
+
+def _parse_generic_argument(text: str, index: int, end: int, depth: int) -> tuple[bool, int, bool]:
+    """Parse one generic argument: a lifetime, a const integer, or a type.
+
+    The third value says whether the argument is evidence that the enclosing
+    value is a TYPE. A lifetime and a const-generic integer are both legal
+    arguments (``Cow<'a, str>``, ``GenericArray<u8, N>``) but neither is proof on
+    its own, which is why the caller requires at least one argument that is.
+    """
+    if index < end and text[index] == "'":
+        index += 1
+        start = index
+        while index < end and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        return (index > start), index, True
+    if index < end and text[index].isdigit():
+        while index < end and text[index].isdigit():
+            index += 1
+        return True, index, False
+    return _parse_type_expression(text, index, end, depth)
+
+
+def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple[bool, int, bool]:
+    """Parse ONE type expression from ``text[index:end]``.
+
+    The grammar is the one real annotations are written in, and it is checked on
+    the WHOLE value rather than searched inside it. That is the load-bearing
+    part: a credential that merely contains an angle bracket does not parse as a
+    type, and the parser has to run out of characters at the same place the value
+    does.
+
+    Returns ``(parsed, next_index, is_a_type_name)``, where the last element says
+    whether what was parsed is spelled as a type NAME — the distinction the
+    caller uses to reject ``abc::def`` and ``Foo<word>``.
+
+    **An unterminated argument list is accepted**, and that is the common case
+    rather than an edge: the assigned-value group cannot cross whitespace, so
+    ``HashMap<String, String>`` reaches this rule as ``HashMap<String`` and
+    ``Option<Vec<u8>>`` as ``Option<Vec<u8``. The value is therefore allowed to
+    run out of characters inside a generic, provided the arguments it did carry
+    are types — which is what an annotation looks like when it is cut at a
+    delimiter, and what no credential-shaped value looks like.
+    """
+    if depth > _TYPE_NESTING_LIMIT:
+        return False, index, False
+    # An optional reference marker, with its optional lifetime: ``&``, ``&'a``.
+    while index < end and text[index] == "&":
+        index += 1
+        if index < end and text[index] == "'":
+            index += 1
+            while index < end and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+    start = index
+    while index < end and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    if index == start:
+        return False, index, False
+    segments = [text[start:index]]
+    while text.startswith("::", index):
+        index += 2
+        segment_start = index
+        while index < end and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        if index == segment_start:
+            return False, index, False
+        segments.append(text[segment_start:index])
+    # Only the LEAF has to be a type name: ``std::collections::HashMap`` is
+    # spelled with lowercase module segments, and demanding case from them would
+    # miss every qualified path in real code.
+    is_a_type_name = _is_type_leaf_name(segments[-1])
+    if index < end and text[index] == "<":
+        index += 1
+        argument_is_a_type = False
+        while index < end:
+            parsed, index, argument_is_a_type_here = _parse_generic_argument(
+                text, index, end, depth + 1
+            )
+            if not parsed:
+                return False, index, is_a_type_name
+            if argument_is_a_type_here:
+                argument_is_a_type = True
+            if index < end and text[index] == ",":
+                index += 1
+                continue
+            if index < end and text[index] == ">":
+                index += 1
+            break
+        if not argument_is_a_type:
+            # ``Foo<word>`` — a generic application whose arguments are not
+            # types. That spelling is exactly how a person writes a passphrase
+            # with angle brackets in it, so it is NOT released.
+            return False, index, is_a_type_name
+        is_a_type_name = True
+    return True, index, is_a_type_name
+
+
+def _is_type_expression(value: str) -> bool:
+    """Whether a matched value is a TYPE ANNOTATION rather than a credential.
+
+    **Why this exists.** ``api_key: Option<String>`` is a Rust struct field, and
+    the assignment rule read the generic type as the value of a credential-shaped
+    name: ``api_key`` is a credential name, the type is 14 characters of opaque
+    text to the value test, and the name is STRONG, so the value proof returned
+    ``False`` and the type was masked. Two of those in one file escalated to a
+    rotation demand that stopped a release, which is the cost this exists to
+    prevent — a guard that asks an operator to rotate a credential on a type
+    annotation is not one anybody can safely learn to ignore.
+
+    **Why the test is a parse and not a shape.** The cheap discriminators — "the
+    value contains an angle bracket", "the value does not contain a digit" — are
+    both wrong in the dangerous direction: a passphrase is free to contain either,
+    and each cheap test releases a whole class of real values with it. So the
+    value is read with the grammar real annotations are written in, on the whole
+    value, and it is released only when every character of it belongs to that
+    grammar: a reference, a path, and balanced generic arguments that are
+    themselves types.
+
+    **The named residual, and it is accepted deliberately.** A value spelled
+    exactly as ``Ident<Ident>`` — capitals on both sides, no other symbols — is
+    read as a type. ``DB_PASSWORD=Pass<Word>`` is therefore released. That is the
+    same residual class the neighbouring clauses already carry, and it is bounded
+    by construction: no issuer's alphabet contains ``<`` or ``>`` (base64url, hex,
+    JWT and UUID all exclude them), every vendor prefix is lowercase, and a
+    human-chosen password must additionally be spelled with capitals on both the
+    base and the argument and carry no digit, no symbol and no word break. A
+    credential that meets all of that is not distinguishable from a type by
+    spelling at all, so it is recorded here rather than guessed at.
+    """
+    if not value:
+        return False
+    if not any(char in value for char in "<:&"):
+        # No type-ONLY character. A bare word or path here is indistinguishable
+        # from a credential by spelling, and the CamelCase clause above already
+        # releases the bare TYPE NAME spelling, so nothing is owed to this case.
+        return False
+    if not set(value) <= _TYPE_ALPHABET:
+        return False
+    parsed, index, is_a_type_name = _parse_type_expression(value, 0, len(value), 0)
+    return parsed and index == len(value) and is_a_type_name
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1033,6 +1272,24 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         # ...and no digit: ``FwoGZXIvYXdzEBYaDExampleTokenValue1234567890`` is a
         # real AWS session token and is in the original corpus, while every type
         # name in this tree is digit-free.
+        return True
+    # A TYPE APPLICATION is a reference too, and this is the clause that covers
+    # the annotations the clause above cannot: ``api_key: Option<String>``,
+    # ``Vec<String>``, ``HashMap<String, String>``, ``Result<String, Error>``,
+    # ``Arc<Mutex<String>>``, ``Box<dyn Trait>``, ``std::string::String``,
+    # ``&SomeVeryLongEnumName``. The bare-name clause above is a single-identifier
+    # test, so a GENERIC gone through it is not a type at all — it is 14 characters
+    # of opaque text beside a credential-shaped name, on a STRONG name, which is
+    # why the value proof returned ``False`` and the type was masked.
+    #
+    # Measured: reading three real source files put two of these in a transcript
+    # (``api_key: Option<String>`` twice, in one file), both of them masked, one
+    # family of them ESCALATED, and the escalation stopped a release pending a
+    # rotation verdict for a type annotation. That is the cost this clause exists
+    # to prevent, and it is the reason the release is a PARSE of the whole value
+    # rather than a shape test — see :func:`_is_type_expression` for the grammar,
+    # the confinement check, and the residual this deliberately accepts.
+    if _is_type_expression(value):
         return True
     # A bare ``_``-led identifier with no digit is a reference, even under a strong
     # name: ``get_api_key=_oauth_api_key``. Restored unchanged from ``origin/main``
