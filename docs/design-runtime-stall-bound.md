@@ -135,13 +135,21 @@ because a runtime still constructing itself is not idle in any sense that bound 
 act on — so `arm` seeds `_Armed.held` true and every fire in this stretch is
 non-fatal: the fire writes its dump and its `bound held:` marker, and the process
 carries on. A boot that never reaches publication therefore keeps answering "in
-flight" for the rest of its life, and nothing in the module ends it; the way out is
-the boot's own failure path or an operator (`lop stop`). What the boot bound
-contributes in that window is the ATTRIBUTION — the fired value is the boot bound and
-the deadline sibling is absent, together the never-engaged class — while the exit leg
-only becomes fatal once the runtime has published and its work has cleared (a
-property of the in-flight prohibition, #1439, not of the boot phase). Pinned as a
-pair, because the two arming shapes answer different questions:
+flight" for the rest of its life, and nothing in the module ends it. **What does end
+it, measured rather than assumed** (the first version of this paragraph named an
+escape that cannot reach this class — agent review round 2, Q-3): the boot's **own
+failure path** is the automatic exit (the construction error that ends the runtime
+child: `rc 2` with the cause on stderr, 1.4 s here); **`lop stop` is not one**, because
+it resolves its target through session records (`mobile.peer_send.resolve_peer_target`)
+and a boot that never published has none — `lop stop --pid <pid>` answers `no session
+found with pid <pid>` and the process goes on; and an operator ends it by signalling
+the pid the dump is named for, which its header carries (`kill -TERM <pid>`, not gated
+on any record). What the boot bound contributes in that window is the ATTRIBUTION — the
+fired value is the boot bound and the deadline sibling is absent, together the
+never-engaged class — while the exit leg only becomes fatal once the runtime has
+published and its work has cleared (a property of the in-flight prohibition, #1439,
+not of the boot phase). Pinned as a pair, because the two arming shapes answer
+different questions:
 `test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD` (the entry point's
 own arming, `busy=process._busy_probe`, held at `rc 0`) and
 `test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut` (a caller with no

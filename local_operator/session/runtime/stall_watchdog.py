@@ -539,11 +539,24 @@ DEFAULT_STALL_S = 300.0
 #: ``arm`` seeds ``_Armed.held`` True here and every fire in this stretch is
 #: NON-FATAL. A boot that hangs is therefore DUMPED at this bound and HELD, and one
 #: that never reaches publication keeps answering "in flight" for the rest of its
-#: life, so nothing in this module ends it; the way out is the boot's own failure
-#: path or an operator (``lop stop``). What this bound contributes is the
-#: ATTRIBUTION: the fired value is this number and the deadline sibling is absent —
-#: together, the never-engaged class. The exit leg goes fatal only once the runtime
-#: has published and its work has cleared (#1439's rule, applied to the boot phase).
+#: life, so nothing in this module ends it. THE WAY OUT IS MEASURED RATHER THAN
+#: ASSUMED, because the first version of this paragraph named one that does not
+#: reach this class (agent review round 2, Q-3):
+#:
+#: * the boot's OWN FAILURE PATH is the exit that is automatic — the construction
+#:   error that ends the runtime child (measured: rc 2 and the cause on stderr, 1.4 s);
+#: * ``lop stop`` is NOT one. It resolves its target through session RECORDS
+#:   (``mobile.peer_send.resolve_peer_target``) and a boot that never published has
+#:   none, so ``lop stop --pid <pid>`` answers ``no session found with pid <pid>``
+#:   and the process carries on (measured, as is the ``--session`` form);
+#: * an operator ends it by SIGNALLING the pid this dump is named for — the header
+#:   above carries it, and ``kill -TERM <pid>`` ends the process (measured: the
+#:   signal is not gated on any record).
+#:
+#: What this bound contributes is the ATTRIBUTION: the fired value is this number
+#: and the deadline sibling is absent — together, the never-engaged class. The exit
+#: leg goes fatal only once the runtime has published and its work has cleared
+#: (#1439's rule, applied to the boot phase).
 DEFAULT_BOOT_STALL_S = 900.0
 
 #: The largest bound ``faulthandler`` can hold. Its timeout becomes a signed
