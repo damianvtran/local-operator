@@ -23,13 +23,14 @@ injected clock.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.process import _reaper
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD
 from local_operator.update import BuildStamp
 
@@ -73,7 +74,14 @@ class _Handle:
         self.disposed = False
         self.denials = 0
         self.retired = False
-        self.draining = False
+        # THE LATCH IS THE PRODUCTION HANDLE'S FIELD, because
+        # ``begin_drain``/``end_drain`` below call that handle's own methods:
+        # ``_draining`` and the retiring cause it latches are what it writes and
+        # what the arms read back.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
         self.update_failed: str | None = None
         #: Permanently busy until a test says otherwise — the incident's own shape
         #: (a lane parked behind a child process), and the one state the abandon arm
@@ -94,22 +102,38 @@ class _Handle:
         return 0
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
-        self.drains += 1
-        self.draining = True
-        return True
+        """The PRODUCTION latch, called through, with this file's counter beside it.
+
+        ``ServingSessionHandle.begin_drain`` decides whether the latch closes and is
+        the only thing that writes the state the arms read back, so it is CALLED
+        rather than modelled — a double that re-implemented it would keep these cells
+        green while the production handle stopped latching at all. ``drains`` is this
+        rig's bookkeeping for the cell that asserts the latch is not taken twice.
+        """
+        latched = ServingSessionHandle.begin_drain(
+            cast("ServingSessionHandle", self), cause, detail
+        )
+        if latched:
+            self.drains += 1
+        return latched
 
     def end_drain(self) -> bool:
-        """The release a real handle grew for this arm (``serving.end_drain``).
+        """The PRODUCTION release, called not modelled, for ``begin_drain``'s reason.
 
-        Modelled here rather than stubbed away because the ASSERTION this file is
-        about is that the latch comes off: a fake without it would let the arm
-        pass while the production handle kept refusing admissions forever.
+        The assertion these cells are about is that the latch comes OFF, so the release
+        they measure has to be the one the production handle performs; ``releases``
+        counts those, and a double that could fabricate one would let the arm pass while
+        the handle kept refusing admissions forever.
         """
-        if not self.draining:
-            return False
-        self.draining = False
-        self.releases += 1
-        return True
+        released = ServingSessionHandle.end_drain(cast("ServingSessionHandle", self))
+        if released:
+            self.releases += 1
+        return released
+
+    @property
+    def draining(self) -> bool:
+        """The production latch's own field, under the name these cells read."""
+        return self._draining
 
     def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
         self.update_failed = pair
@@ -227,8 +251,8 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
     build move may not end a runtime with a turn in flight, because the answer to
     "this work has not reported anything for fifteen minutes" is a person looking
     at it, not a silent cut. The shape it asserts now is the whole arm — the latch
-    is RELEASED (the fake exposes the production ``end_drain``, so a tree that
-    keeps refusing admissions fails here), nothing is disposed and ``stop`` stays
+    is RELEASED (the double CALLS the production ``end_drain`` — see ``_Handle`` — so a
+    tree that keeps refusing admissions fails here), nothing is disposed and ``stop`` stays
     clear (the process keeps serving), the failure is PUBLISHED, and the ordinary
     build phrase is still the one on the record rather than a forced-handover
     phrase that no longer describes what happens.

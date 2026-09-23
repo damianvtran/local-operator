@@ -1938,12 +1938,25 @@ async def _pump_update_heartbeat(handle: object, *, interval: float) -> None:
 async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: float) -> None:
     """The half every arm that KEEPS the build this runtime loaded has in common.
 
-    Two steps, and they are the same two wherever a handover gives up: the messages
-    the departure queued come back IN — they run here, on the build the operator
-    still has, rather than leaving a receipt for a successor that is not coming —
-    and the failure is PUBLISHED, on the record and as an incident row carrying
-    ``types.UPDATE_FAILED_CAUSE`` (the operator's own requirement: "indicate that
-    the update failed so that it can be reported as an issue and addressed").
+    Two steps, and they are the same two wherever a handover gives up: the failure is
+    PUBLISHED, on the record and as an incident row carrying ``types.UPDATE_FAILED_CAUSE``
+    (the operator's own requirement: "indicate that the update failed so that it can be
+    reported as an issue and addressed"), and the messages the departure queued come back
+    IN — they run here, on the build the operator still has, rather than leaving a receipt
+    for a successor that is not coming.
+
+    PUBLISH FIRST, AND THAT ORDER IS THE REPAIR RATHER THAN A TIDY (QA round 1, Q-2). The
+    re-admission can run the spooled owner prompts — real turns, measured at 27-37 s — and
+    the reaper may find the work done ONE TICK after it lands (``REAP_CHECK_S``), at which
+    point this runtime exits and the record is withdrawn with it. Published second, the
+    failure was therefore observable on the fleet row for as little as a second, or not at
+    all, which is the operator's requirement failing in exactly the state it was written
+    for. The two steps touch DISJOINT state — one delivers the inbox, the other writes the
+    record and an incident row — so neither can read the other's output, no invariant is
+    ordered by it, and the publish is strictly more reliable here: it no longer depends on
+    the drain returning at all (:func:`_drain_inbox_into` is best-effort per row and
+    swallows its own failures, but nothing about that should be able to take the record's
+    account down with it).
 
     FACTORED OUT rather than written twice because the two callers are the two
     shapes of the same decision — the update window that ran out of its bound
@@ -1954,13 +1967,13 @@ async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: 
     The runtime is never killed here. That is the whole contract of this module's
     give-up arms: a failed update leaves a working session on the build it loaded.
     """
-    await _drain_inbox_into(handle)
     note = getattr(runtime, "note_update_failed", None)
     if callable(note):
         try:
             await cast("Callable[..., Awaitable[None]]", note)(pair, bound)
         except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
             logger.warning("could not publish the failed update", exc_info=True)
+    await _drain_inbox_into(handle)
 
 
 async def _abandon_update_window(handle: object, runtime: object, pair: str, bound: float) -> None:
@@ -1971,14 +1984,18 @@ async def _abandon_update_window(handle: object, runtime: object, pair: str, bou
     1. the window CLOSES — the lock is released and the record's ``updating`` is
        cleared, so no admission is queued against a handover that is not coming
        and no surface keeps reading "updating";
-    2. the messages the window QUEUED are drained back IN, so they run here, on
-       the build the operator still has — the alternative is a receipt for a
-       successor that never boots;
+    2. the handle REMEMBERS the pair, so the automatic rung does not re-open the
+       same window on its next check and burn the bound again forever;
     3. the failure is PUBLISHED, on the record and as an incident row carrying
        ``types.UPDATE_FAILED_CAUSE``, which is what makes it reportable instead
-       of silent (the operator's "so that it can be reported as an issue");
-    4. the handle REMEMBERS the pair, so the automatic rung does not re-open the
-       same window on its next check and burn the bound again forever.
+       of silent (the operator's "so that it can be reported as an issue") —
+       BEFORE the queued messages come back in, for the reason
+       :func:`_keep_loaded_build` states: the re-admission can run real turns,
+       and a runtime that exits a tick after it lands would take the record's
+       account of the failure with it;
+    4. the messages the window QUEUED are drained back IN, so they run here, on
+       the build the operator still has — the alternative is a receipt for a
+       successor that never boots.
 
     The runtime is never killed here — that is the whole contract. A failed
     update leaves a working session on the build it loaded.
@@ -2869,12 +2886,14 @@ async def _drain_for(
         # THE DWELL, and it is the SECOND question because it is the WEAKER
         # observation: an expired staleness clock names what the runtime saw the
         # work NOT do, while an expired dwell says only that the hold is old. A
-        # hold that has gone silent is therefore always diagnosed by the arm above
-        # (15 min is inside 30), and what reaches this line is the state nothing
-        # else bounds — a handover whose lanes keep reporting (see
-        # ``types.BUILD_DRAIN_DWELL_S`` for the eight-hour measurement). Ordered,
-        # not folded into one comparison, so the log and the published bound say
-        # which of the two the runtime actually ran out of.
+        # hold that has been SILENT FOR the staleness bound is therefore always
+        # diagnosed by the arm above (15 min is inside 30), and what reaches this
+        # line is every other hold: a handover whose work keeps reporting, AND one
+        # whose work went quiet inside the staleness bound and is merely younger
+        # than 15 min of silence — which is why nothing here says anything about
+        # the work (see the log line below). Ordered, not folded into one
+        # comparison, so the log and the published bound say which of the two the
+        # runtime actually ran out of.
         if drain.progress.dwell_s(at) >= BUILD_DRAIN_DWELL_S:
             await _abandon_move(drain, handle, runtime, at=at, dwell=True)
             return False
@@ -2908,10 +2927,11 @@ async def _abandon_move(
       work has reported nothing for fifteen minutes, so what the runtime saw is
       stated as silence;
     * the DWELL bound (``dwell=True``, :data:`types.BUILD_DRAIN_DWELL_S`) — the drain
-      has been HELD for half an hour with the work still reporting. Nothing is
-      claimed about the work here, because nothing was observed about it: the
-      movement clock keeps being reset by the very reports that make this arm
-      necessary (a lane that keeps stepping holds a drain for as long as it likes).
+      has been HELD for half an hour with work STILL IN FLIGHT. Nothing is claimed
+      about that work here, and that is deliberate: the dwell decides on the hold
+      alone, so it reaches a hold whose lanes keep reporting AND one that went quiet
+      less than the staleness bound ago — the state a lane that steps can hold for as
+      long as it likes, and the one the eight-hour measurement came from.
 
     Replaces a force-cut that ended the runtime and its turn together after
     :data:`types.BUILD_DRAIN_PROGRESS_S` of no movement from the work in flight.
@@ -3011,13 +3031,18 @@ async def _abandon_move(
         # matched to the update it abandoned.
         logger.warning(
             "session runtime: the build drain for %s was latched for %.0fs with work "
-            "still in flight and still reporting (dwell bound %.0fs, handover to %s); "
-            "ABANDONING the handover, releasing the latch and keeping %s — the work "
-            "continues and this runtime keeps serving it",
+            "still in flight (dwell bound %.0fs, handover to %s, pid %d); ABANDONING the "
+            "handover, releasing the latch and keeping %s — the work continues and this "
+            "runtime keeps serving it",
             drain.reason,
             spent,
             bound,
             drain.to or "<unnamed>",
+            # THE PID, as every latch and exit line in this module carries it: this is
+            # the line an operator greps for in a shared, rotated runtime log, where
+            # session ids repeat across builds and a bare pair does not identify the
+            # process whose drain was given up (QA round 1, Q-3).
+            os.getpid(),
             _loaded_build_label(runtime),
         )
     else:

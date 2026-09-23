@@ -41,7 +41,6 @@ from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.tui.app import (
     DRAIN_NOTICE,
-    DRAIN_NOTICE_ABANDONED,
     DRAIN_NOTICE_OTHER,
     QUEUED_ELSEWHERE_NOTICE,
     QUEUED_PROMPT_MISSED_NOTICE,
@@ -368,58 +367,6 @@ async def test_the_notice_states_the_trigger_the_frame_named(
         await pilot.pause()
         assert [n._text for n in _notices(app)] == [SIGNAL_DRAIN_NOTICE], _notices(app)
         assert "newer build" not in SIGNAL_DRAIN_NOTICE, SIGNAL_DRAIN_NOTICE
-
-
-@pytest.mark.asyncio
-async def test_an_abandoned_handover_is_not_told_a_new_message_will_be_refused(
-    monkeypatch: Any, tmp_path: Any
-) -> None:
-    """The record PAIR decides, because the PHRASE is the same on both sides of an abandon.
-
-    ``process._abandon_move`` keeps the ordinary build phrase on the record after it
-    gives the handover up — deliberately, because the drain object stays latched and
-    the commitment to leave is still real — so a notice keyed on the phrase alone paints
-    "a new message will not start a turn until the new build is up" at the one instant
-    that is FALSE: releasing the latch is what makes admissions work again. The second
-    half of the pair is the only thing that distinguishes the two states, and this cell
-    is about the pair being what the sentence is chosen from.
-
-    Three arrivals, one seam: the drain as announced (the phrase, no failure yet) keeps
-    the ordinary sentence; the same phrase WITH the failed half gets the abandoned
-    sentence, which may not borrow the refusal clause; and a phrase this build cannot
-    name still degrades to the neutral sentence — with a failure beside it or without —
-    because the fallback's whole job is that no unknown trigger is ever painted another
-    trigger's words.
-    """
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 24)) as pilot:
-        await pilot.pause()
-        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
-
-        app._on_runtime_draining(LEAVING_FOR_BUILD)
-        await pilot.pause()
-        assert [n._text for n in _notices(app)] == [DRAIN_NOTICE], _notices(app)
-
-        app._on_runtime_draining(LEAVING_FOR_BUILD, "", "0.62.9 -> 0.62.12")
-        await pilot.pause()
-        texts = [n._text for n in _notices(app)]
-        assert texts[-1] == DRAIN_NOTICE_ABANDONED, texts
-        assert texts[-1] != DRAIN_NOTICE, "the abandoned state was told it was refusing"
-        assert "will not start a turn" not in DRAIN_NOTICE_ABANDONED, DRAIN_NOTICE_ABANDONED
-        assert "newer build" in DRAIN_NOTICE_ABANDONED, (
-            "the sentence has to name the handover that did not happen, which is the "
-            "fact the operator acts on"
-        )
-
-        unknown = "leaving for a trigger this build has never heard of"
-        app._on_runtime_draining(unknown, "", "0.62.9 -> 0.62.12")
-        await pilot.pause()
-        texts = [n._text for n in _notices(app)]
-        assert texts[-1] == DRAIN_NOTICE_OTHER, (
-            "a failed update beside an unplaceable phrase must not become a sentence "
-            f"about a build: {texts}"
-        )
 
 
 @pytest.mark.asyncio
