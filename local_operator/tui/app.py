@@ -128,13 +128,15 @@ from local_operator.model.effort import (
     next_effort,
     resolve_effort_in,
 )
-from local_operator.providers.catalogue import picker_rows
 
-# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
-# it is reached through a lazy seam: this module already imports the session
-# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
-# objection that applies to a Textual WIDGET does not apply to the app.
-from local_operator.references import expand_references, scan_directory_report
+# NOT imported here: `providers.catalogue` (the model picker's shared ranking)
+# and `references` (the `@path` resolver). Both are reached only after the user
+# acts -- opening `/model`, typing `@`, submitting a message with a reference --
+# and together they were ~460 ms of this module's 1.8-2.8 s import, because
+# `providers.catalogue` pulls the whole provider layer (httpx) and `references`
+# pulls `tools.builtin`. Every `lop` launch paid that before first paint
+# (backend load report B-F10). They are imported at their call sites instead;
+# `tests/unit/test_import_graph.py` pins them off this module's import graph.
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -33682,6 +33684,8 @@ class OperatorApp(App[None]):
         # order and cannot import a textual widget to get it. Everything below
         # this call is session-shaped and stays here: a daemon has no sticky
         # serving spec and no runtime catalogue to merge.
+        from local_operator.providers.catalogue import picker_rows
+
         rows, _hidden = picker_rows(
             entries,
             usable=usable,
@@ -36454,6 +36458,8 @@ class OperatorApp(App[None]):
         """
         message.stop()
         picker = self._editor().picker
+        from local_operator.references import scan_directory_report
+
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         if not choices:
             picker.set_choices([])
@@ -38769,6 +38775,8 @@ class OperatorApp(App[None]):
         async def _decline(tool_name: str, description: str) -> bool:
             """Refuse without asking — see the chain above for why."""
             return False
+
+        from local_operator.references import expand_references
 
         result = await expand_references(text, self.session_cwd(), request_approval=_decline)
         for notice in result.notices:

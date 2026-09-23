@@ -7,6 +7,7 @@ The catalog has no acknowledgement path: listing a conversation is not reading i
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import os
@@ -1043,6 +1044,78 @@ def subagent_population(directory: Path) -> int:
     return len(_scan_sessions(directory)[1])
 
 
+def _select_page(
+    entries: Sequence[CatalogEntry],
+    birth_bounds: Mapping[str, float],
+    limit: int,
+    pinned: frozenset[str],
+    sessions: Path,
+) -> list[CatalogEntry]:
+    """The ranked page plus off-page pins, reading birth dates only for rows that can compete.
+
+    ``entries`` mixes rows whose ``created_at`` is already real (subagent layer,
+    desktop drafts, live rows the registry appended) with scan candidates still
+    carrying the 0.0 placeholder; an id in ``birth_bounds`` is a placeholder and
+    its value is an UPPER BOUND on its birth — the scan's activity mtime.
+
+    WHY THE BOUND HOLDS. Birth is written once, when the directory is first
+    materialised (``creation.ensure_session_created_at``), BEFORE any transcript
+    or inbox append can move the activity clock past it; a fork stamps a fresh
+    birth before copying bytes in, and ``Transcript._restore_mtime`` only ever
+    puts back an EARLIER activity time, never one before birth. Measured on the
+    reporting store, 2026-09-22: 0 of 9,517 directories with activity had
+    ``created_at`` later than it. Since ``rank`` sorts ``-created_at`` ascending,
+    ``created_at <= bound`` makes ``(tier, wake, -bound, id)`` a LOWER bound on
+    the row's real key.
+
+    THE SELECTION IS THEREFORE EXACT, not a heuristic: a best-first pass pops
+    the smallest key; a placeholder is resolved (one ``created_at.json`` read)
+    and pushed back with its real key, and a resolved row is emitted. A row is
+    emitted only when its real key is no larger than every remaining row's
+    lower bound, so the page is the same rows in the same order a full sort
+    would give, for the cost of reading births for the page plus the rows
+    whose activity is recent enough to contend for it. A store that violated
+    the bound (a hand-edited ``created_at.json``, a ``touch``-ed-back
+    transcript) degrades to that row ranking as though it were born at its
+    last activity, and the returned list is still sorted by real key.
+
+    ``pinned`` rows beyond the page are resolved individually and appended in
+    rank order, which is below every page row for the reason above.
+    """
+    from dataclasses import replace
+
+    heap: list[tuple[tuple[int, int, float, str], bool, int, CatalogEntry]] = []
+    for index, entry in enumerate(entries):
+        key = entry.rank
+        bound = birth_bounds.get(entry.id)
+        if bound is None:
+            heap.append((key, True, index, entry))
+        else:
+            heap.append(((key[0], key[1], -bound, key[3]), False, index, entry))
+    heapq.heapify(heap)
+
+    def resolve(entry: CatalogEntry) -> CatalogEntry:
+        # ``replace`` rather than rebuilding, so every derived field the entry
+        # already carries (attention, subagent marks) is kept.
+        born = session_created_at(sessions / entry.id)
+        return replace(entry, row=entry.row._replace(created_at=born))
+
+    page: list[CatalogEntry] = []
+    while heap and len(page) < max(limit, 0):
+        key, resolved, index, entry = heapq.heappop(heap)
+        if resolved:
+            page.append(entry)
+            continue
+        real = resolve(entry)
+        heapq.heappush(heap, (real.rank, True, index, real))
+    extras = [
+        entry if resolved else resolve(entry)
+        for _key, resolved, _index, entry in heap
+        if entry.id in pinned
+    ]
+    return sorted(page, key=lambda entry: entry.rank) + sorted(extras, key=lambda entry: entry.rank)
+
+
 def load_catalog(
     directory: Path,
     limit: int = CATALOG_SCAN_LIMIT,
@@ -1203,15 +1276,21 @@ def load_catalog(
                     label=label,
                 )
             )
-    # Creation time is the immutable ordering key (#800), so every construction
-    # site must stamp it. Rows left at the 0.0 default all tie and fall through
-    # to the session-id tie-break, which silently reverses newest-first order.
+    # Creation time is the immutable ordering key (#800), and every row this
+    # function RETURNS is stamped with it. Scan candidates are NOT stamped here,
+    # though: reading ``created_at.json`` for every candidate was 0.80 s of a
+    # 1.47 s desktop list at 9,400 directories (and 2.8 s of 4.7 s on a 10k
+    # store of visible sessions), for a page that returns ~200-500 of them.
+    # They carry the placeholder 0.0 plus an UPPER BOUND on their birth — the
+    # scan's activity mtime — and :func:`_select_page` reads the real value only
+    # for rows that can still reach the page. No placeholder escapes: every
+    # returned entry is resolved first. See ``_select_page`` for why the bound
+    # holds.
     rows = [
         SessionRow(
             session_id,
             mtime,
             "",
-            created_at=session_created_at(directory / "sessions" / session_id),
             # Stamped from the scan's own read so a row that never reaches
             # ``cached_session_rows`` below (nothing here guarantees every
             # candidate is hydrated) still states its archive state honestly.
@@ -1219,6 +1298,7 @@ def load_catalog(
         )
         for session_id, mtime, _origin, archived in candidates
     ]
+    birth_bounds = {session_id: mtime for session_id, mtime, _origin, _archived in candidates}
     # One directory read plus a stat per unlisted candidate, NOT
     # ``glob("*/desktop.json")``. The glob looks equivalent and is not: a
     # pattern whose wildcard is a DIRECTORY component makes pathlib open and
@@ -1329,7 +1409,13 @@ def load_catalog(
     if marker_rows_added and not include_archived:
         rows = [row for row in rows if row.id not in (archived_marker_rows or frozenset())]
     rows = decorate_rows(directory, rows, include_live=True, include_archived=include_archived)
-    identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
+    # The namespace is a property of the PARENT directory, and every row here
+    # shares one, so `conversation_identity` is asked once and its answer reused.
+    # Building a `Path` per row just to ask it was 0.56 s of a 1.9 s list at
+    # 10,000 visible sessions (pure `pathlib` construction). Still the one rule's
+    # own answer, never a second spelling of it.
+    namespace = conversation_identity(directory / "sessions" / "_").partition("/")[0]
+    identities = {row.id: f"{namespace}/{row.id}" for row in rows}
     attention: dict[str, dict[str, Any]] = {}
     try:
         attention = AttentionStore(directory / "attention.db").state_many(identities.values())
@@ -1349,15 +1435,13 @@ def load_catalog(
         # is the only read of that store, and it happens after the decoration.
         logger.warning("session catalogue could not read attention state", exc_info=True)
         rows = [row._replace(degraded=row.degraded + (DECORATION_ATTENTION,)) for row in rows]
-    ranked = list(
-        rank_entries(
-            [entry_for(row, attention.get(identities[row.id])) for row in rows]
-            # The ONE join point. Sub entries are concatenated here rather than
-            # being members of `rows`, so they never pass through the
-            # decoration and attention work above -- and this stays a single
-            # `rank_entries` call over a single list.
-            + subagent_entries
-        )
+    unranked = (
+        [entry_for(row, attention.get(identities[row.id])) for row in rows]
+        # The ONE join point. Sub entries are concatenated here rather than
+        # being members of `rows`, so they never pass through the decoration
+        # and attention work above -- and this stays a single ranking over a
+        # single list.
+        + subagent_entries
     )
     # THE PAGE, THEN THE PINS THAT FELL OUTSIDE IT. The slice is a RECENCY
     # window, and a pin is the one thing in this listing that is not recency: it
@@ -1367,28 +1451,31 @@ def load_catalog(
     # exactly the row the window removes — so the caller that renders pins names
     # them and gets them back here.
     #
-    # WHAT THIS COSTS: nothing measurable, and that is the reason it lives here
-    # rather than in a caller. Every candidate's row, decoration and attention
-    # lookup has ALREADY happened by this point — the slice is the only thing
-    # that discarded these entries — so an extra costs one membership test, not
-    # a scan, a hydration or a second `cached_session_rows` call. A caller-side
-    # union would have to re-scan the store or re-hydrate by id, and the id
-    # lookup it would need is the one thing this function does not return.
+    # WHAT THIS COSTS: one ``created_at.json`` read per pinned extra, and that
+    # is the reason it lives here rather than in a caller. Every candidate's
+    # row, decoration and attention lookup has ALREADY happened by this point,
+    # so an extra costs a membership test and its own birth read, not a scan, a
+    # hydration or a second `cached_session_rows` call. A caller-side union
+    # would have to re-scan the store or re-hydrate by id, and the id lookup it
+    # would need is the one thing this function does not return.
     #
     # SILENTLY ABSENT WHEN IT CANNOT BE RESOLVED, deliberately: an id that is
     # not in ``ranked`` at all — a hidden (delegated) run, which never reaches
     # ``candidates``, or a directory that has since been deleted — is simply not
     # appended, rather than raising. The caller asked for a row it would like to
     # render, not for a promise this store cannot keep.
-    entries = ranked[:limit]
-    if pinned_off_page:
-        # The window is the caller's own page bound, so a pinned row sitting
-        # exactly AT that bound is carried too — it is a row the caller's page
-        # does not carry, which is the whole condition. Order is preserved: the
-        # extras rank below every page row by construction, so appending them
-        # keeps the result in rank order.
-        wanted = set(pinned_off_page)
-        entries += [entry for entry in ranked[limit:] if entry.id in wanted]
+    # The window is the caller's own page bound, so a pinned row sitting
+    # exactly AT that bound is carried too — it is a row the caller's page does
+    # not carry, which is the whole condition. Order is preserved: the extras
+    # rank below every page row by construction, so appending them keeps the
+    # result in rank order.
+    entries = _select_page(
+        unranked,
+        birth_bounds,
+        limit,
+        frozenset(pinned_off_page),
+        directory / "sessions",
+    )
     # KNOWN LIMITATION, decided rather than missed. This slice applies to the
     # COMBINED list, so a store with more than ~160 visible sessions cannot fit
     # both populations in CATALOG_SCAN_LIMIT. Sub rows do not lose that race:

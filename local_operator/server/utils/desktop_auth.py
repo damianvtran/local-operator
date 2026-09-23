@@ -11,16 +11,23 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.controller import ProviderController
 from local_operator.providers.oauth.callback_server import LoginCallbacks
 from local_operator.providers.registry import (
     ProviderDefinition,
     get_provider_definition,
 )
+
+if TYPE_CHECKING:
+    # Imported where a controller is built, not at module scope:
+    # ``providers.controller`` pulls the httpx client stack, and this module is
+    # on ``lop serve``'s import path through ``routes.auth``, so every server
+    # boot paid for an HTTP client that only a provider login or logout uses
+    # (backend load report B-F10).
+    from local_operator.providers.controller import ProviderController
 
 LOGIN_TIMEOUT_S = 900
 MAX_OPERATIONS = 32
@@ -64,6 +71,8 @@ class DesktopAuth:
         self.operations: dict[str, LoginOperation] = {}
 
     def controller(self) -> ProviderController:
+        from local_operator.providers.controller import ProviderController
+
         return ProviderController(self.store, self.config_dir)
 
     def start(self, provider: str) -> LoginOperation:
@@ -122,6 +131,8 @@ class DesktopAuth:
             on_warning=on_warning,
             on_manual_code_input=on_input if definition.accepts_paste_prompt else None,
         )
+        from local_operator.providers.controller import ProviderController
+
         controller = ProviderController(
             self.store, self.config_dir, login_callbacks=lambda _definition: callbacks
         )
