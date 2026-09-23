@@ -704,6 +704,20 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "--token=" + "dGhp" + "cyBpcyBhIHRva2Vu=",
         "a padded base64 flag value: case and a symbol keep it a VALUE",
     ),
+    # --- 2026-09-22: the flag rule's WORD-shaped over-mask, at the GRADING end ---
+    # The mask of a word after a flag is deliberate (the suite's own prose test says
+    # why); the ESCALATION was the defect, and this row makes the corpus the referee of
+    # it. The word occurs TWICE in the line, so the whole-value half of the exposure
+    # question answers YES for reasons that have nothing to do with the mask — which is
+    # exactly the 33 KB documentation read that demanded a rotation for the word
+    # ``when``. Every positive is asserted non-escalating by
+    # ``test_only_the_documented_positive_case_escalates``, so this row needs no test of
+    # its own. Assembled from its segments, like the rows above, so no literal in this
+    # SOURCE is a flag VALUE.
+    Case(
+        "--api-key " + "when you need it, and when the flag is set it wins",
+        "a word after the flag, twice in one line: masked, and never escalated",
+    ),
 )
 
 

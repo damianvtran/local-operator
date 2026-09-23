@@ -2820,6 +2820,63 @@ def _present_heads(text: str, values: Sequence[str]) -> set[str]:
     return found
 
 
+#: A bare English word: letters only, all lower case. What ordinary prose leaves in a
+#: credential flag's argument position, and the one class whose letters cannot be told
+#: from prose anywhere in the text (see :func:`_is_prose_after_a_flag`).
+_BARE_WORD = re.compile(r"[a-z]+")
+
+
+def _is_prose_after_a_flag(hit: ShapeHit) -> bool:
+    """Whether this hit is the flag rule's over-mask of an English word.
+
+    **Measured 2026-09-22, on a documentation read.** A ``read`` of a project's
+    ``AGENTS.md`` — 33 KB of ordinary prose — escalated to a "rotate it" demand on ONE
+    hit: the sentence ``It also accepts --api-key [redacted] you need to override the
+    env-backed credential`` puts ``when`` in a credential flag's argument position, the
+    flag rule masked that word (deliberately, see
+    ``test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation``), and the
+    exposure question then answered YES — because a four-character English word occurs
+    again somewhere in 33 KB of prose. The rotation demand named the word ``when``.
+
+    **Why the MASK stays and the CLAIM goes.** Masking a word-shaped argument is a
+    deliberate over-mask: the cost is one unreadable English word, and the alternative —
+    letting a flag whose value really is a short word through — is unrecoverable. The
+    ESCALATION was never deliberate, and the module's own test says so in its name: this
+    shape "may never demand a rotation".
+
+    **Why the question cannot be answered rather than answered differently.** A value
+    that cannot be told from prose cannot be told from prose ANYWHERE in the text: the
+    whole-value half of :func:`_credential_fragments_survive` asks whether those letters
+    are present, and for a word the answer is yes for reasons that have nothing to do
+    with this mask. No amount of reading the text distinguishes the second ``when`` from
+    the first, so the claim is REFUSED rather than downgraded — the mask is complete,
+    which is what ``complete`` means, and ``exposed`` is the half that cannot be read
+    here. The ``vendor-prefixed-token`` arm took the same judgement in the other
+    direction (:data:`_VENDOR_TAIL_IS_A_NAME`: there the match is refused); keeping the
+    mask and refusing the claim is the protective half of that trade.
+
+    **The class, and the length bound on it.** A bare run of lowercase letters, and
+    shorter than :data:`_ASSIGNED_VALUE_MIN_CHARS` — the module's own masked-value
+    floor, which already says of this shape "a short value under a credential-shaped
+    name is a placeholder or a word, not a credential". The bound is the same
+    judgement applied to the other end: the corpus pins three bare lowercase runs of
+    SIXTEEN characters as positives, and for a run that long the exposure question
+    keeps its power — a second copy of a sixteen-character token really is evidence
+    that this copy was not the only one. Nothing with a digit, a separator, a symbol
+    or any upper-case letter is this class at all.
+
+    **The stated limit.** A word-shaped credential that really IS printed a second time
+    in the clear is graded contained, so it files no rotation demand — the price of not
+    manufacturing one for every English word, and it is pinned in the corpus rather than
+    left for a differential to find.
+    """
+    return (
+        hit.label == "cli-credential-flag"
+        and len(hit.value) < _ASSIGNED_VALUE_MIN_CHARS
+        and _BARE_WORD.fullmatch(hit.value) is not None
+    )
+
+
 def _credential_fragments_survive(hit: ShapeHit, index: _SurvivalIndex) -> bool:
     """Whether a readable piece of the CREDENTIAL survived in the masked text.
 
@@ -2861,6 +2918,12 @@ def _credential_fragments_survive(hit: ShapeHit, index: _SurvivalIndex) -> bool:
     """
     value = hit.value
     if not value or value == REDACTION_MARKER:
+        return False
+    if _is_prose_after_a_flag(hit):
+        # Not a downgrade of the answer but a refusal to ask: for a value that cannot
+        # be told from prose, the question has no discriminating power. See
+        # :func:`_is_prose_after_a_flag` for the measured escalation this refuses and
+        # for the limit it states.
         return False
     if index.whole_survives(value):
         return True

@@ -2721,7 +2721,19 @@ def _corpus_grading() -> str:
 #: the head one reproduces ``2a29fe4c…`` for the 423 rows that existed at ``bf48ca47``
 #: under BOTH modules, field for field, so the move is the corpus's growth (423 -> 438)
 #: and not a behaviour change on any pre-existing row.
-_CORPUS_GRADING_DIGEST = "946670a43b804aebea1482161ec8802a4dcb93d31148e1ac4997f3392d1c6114"
+#:
+#: MOVED ONCE MORE ON 2026-09-22, in the commit that refuses the EXPOSURE CLAIM for the
+#: flag rule's word-shaped over-mask, and the argument is the same shape: no pre-existing
+#: row moved — the 438 rows above produce ``946670a4…`` byte for byte under this module
+#: too, measured by grading every one of them field for field with
+#: ``git show 1e8d33e6:local_operator/redaction_shapes.py`` loaded as a second module —
+#: and the digest moves for the corpus's growth alone, 438 -> 439: one positive that puts
+#: the word TWICE in the line, so the whole-value half of the exposure question answers
+#: yes for reasons that have nothing to do with the mask. That row is the second specimen
+#: the operator reported — a 33 KB documentation read escalated to a "rotate it" demand
+#: for the word ``when`` — and ``test_only_the_documented_positive_case_escalates`` now
+#: referees it like every other positive.
+_CORPUS_GRADING_DIGEST = "ff40e8311973056583572313371fdc9983820bc7068d61160d1c27277a03a9b1"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -2749,7 +2761,17 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
     long and one of its six-character windows is in the text with the redaction
     marker stripped. Restating it is the point — a re-implementation that agrees
     with the corpus for the wrong reason fails on the next case.
+
+    ONE EXCLUSION, and it is part of the predicate rather than an exception to it:
+    the flag rule's word-shaped over-mask (``--api-key [redacted] you need to``) is graded
+    CONTAINED whatever the text says, because a value that is a bare lowercase word
+    SHORTER THAN THE MODULE'S OWN EIGHT-CHARACTER MASKED-VALUE FLOOR answers both
+    questions YES for reasons that have nothing to do with the mask — every English word
+    recurs in prose, which is how a 33 KB documentation read filed an ESCALATED rotation
+    demand for the word ``when`` (2026-09-22). It is restated here, not imported, so the
+    exclusion cannot drift from the implementation without failing this arm.
     """
+    short_word_floor = 8
     checked = 0
     for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
         masked, hits = scrub_shapes_with_hits(case.text)
@@ -2757,7 +2779,15 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
         for hit in hits:
             value = hit.value
             exposed = bool(value) and value != REDACTION_MARKER
-            if exposed:
+            word_shaped = (
+                len(value) < short_word_floor
+                and value.isascii()
+                and value.isalpha()
+                and value.islower()
+            )
+            if hit.label == "cli-credential-flag" and word_shaped:
+                exposed = False
+            elif exposed:
                 exposed = value in masked or (
                     len(value) >= 6
                     and any(value[start : start + 6] in readable for start in range(len(value) - 5))
@@ -3170,6 +3200,19 @@ def test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation() -> None:
     )
     assert "rotate" not in notice
     assert "no exposure" in notice
+
+    # ...and the GRADING has to say the same thing, because that wording is only reached
+    # when it does. The word occurs TWICE in this line, which is the shape of the
+    # 2026-09-22 documentation read: for a word, the whole-value half of the exposure
+    # question answers YES because the word is simply repeated in the prose around it, so
+    # a 33 KB read filed the ESCALATED notice ("rotate it") for the word ``when``. The
+    # withholding is what `_is_prose_after_a_flag` is for, and this is where it is pinned.
+    import local_operator.redaction_shapes as rs
+
+    repeated = prose + ", which was the whole of it"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked, "the over-mask stopped holding"
+    assert rs.shape_report(hits).reached_model is False, "a prose word demanded a rotation"
 
 
 def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
