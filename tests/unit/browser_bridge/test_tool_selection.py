@@ -553,6 +553,137 @@ async def test_access_actions_require_a_url(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_access_reports_the_sessions_attachment(monkeypatch) -> None:
+    """The REAL path: the probe reaches the text the agent reads (§5.1).
+
+    ``ToolContext.attached_probe`` is a declared field precisely so a built-in
+    tool may look for it; this drives ``execute_browser`` rather than calling the
+    renderer directly, so a field that was declared and never wired cannot pass.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    unattached = ToolContext(browser=BrowserSurface(), attached_probe=lambda: False)
+    result = await builtin.execute_browser(
+        "t", {"action": "request_access", "url": "https://example.com"}, None, None, unattached
+    )
+
+    assert "No interface is attached to this session right now" in result.text
+    assert "then proceed with what you have" in result.text
+    # Still notify-first: the request is what makes the prompt visible when a
+    # surface does attach.
+    assert "Notify the operator anyway" in result.text
+
+
+def test_the_access_flow_reads_the_live_attached_probe() -> None:
+    """No probe reads as ATTACHED, and it is re-read per call.
+
+    ``True`` for a bare tool test or an unwired host is the pre-existing default
+    and the safe direction: a wrong "attached" costs a wait that is re-checked,
+    a wrong "unattached" tells the agent to give up on a question the operator
+    was ready to answer.
+    """
+    assert builtin._attached_here(None) is True
+    assert builtin._attached_here(ToolContext()) is True
+
+    state = {"attached": False}
+    context = ToolContext(attached_probe=lambda: state["attached"])
+    assert builtin._attached_here(context) is False
+    state["attached"] = True
+    assert builtin._attached_here(context) is True
+
+    def explode() -> bool:
+        raise RuntimeError("a broken probe is not a reason to give up")
+
+    assert builtin._attached_here(ToolContext(attached_probe=explode)) is True
+
+
+def test_a_pending_prompt_says_whether_an_interface_is_attached() -> None:
+    """Both variants. The notify-first instruction is shared; the ADVICE differs."""
+    attached = builtin._access_result_text("pending", "https://example.com", host="")
+    unattached = builtin._access_result_text(
+        "pending", "https://example.com", host="", attached=False
+    )
+
+    assert "An interface is attached to this session" in attached
+    assert "No interface is attached" not in attached
+    assert "make sure they are told" in attached
+
+    assert "No interface is attached to this session right now" in unattached
+    assert "An interface is attached to this session" not in unattached
+    assert "proceed with what you have rather than blocking the turn on it" in unattached
+
+    # Both name the surface the prompt is on, and both tell the agent to notify.
+    for text in (attached, unattached):
+        assert "in the Local Operator extension popup" in text
+    assert "Notify the operator anyway" in unattached
+    # The host-selected sentence still follows the host argument.
+    ui = builtin._access_result_text("pending", "https://example.com", host=builtin.HOST_UI_PREFIX)
+    assert "desktop app's browser tab" in ui
+
+
+def test_the_pending_prompt_names_the_fifteen_minute_wait_and_the_re_request() -> None:
+    """The operator's ask, literally: 15 minutes, then re-request to ping again.
+
+    The cap on ONE call does not move (240 s) — the browser tool is
+    ``interruptible=False`` and a prompt cannot outlive the extension's
+    10-minute TTL — so the text has to say where the rest of the budget comes
+    from and what re-raises the prompt.
+    """
+    text = builtin._access_result_text("pending", "https://example.com", host="")
+
+    assert "UP TO 15 MINUTES" in text
+    assert "Use the `wait` tool for the remaining time" in text
+    assert "action='request_access' again with the same url" in text
+    assert "most 240s per call" in text
+    assert builtin.BROWSER_AWAIT_ACCESS_MAX_S == 240.0
+    assert builtin.BROWSER_AWAIT_ACCESS_DEFAULT_S == builtin.BROWSER_AWAIT_ACCESS_MAX_S
+
+
+def test_an_unanswered_prompt_is_not_reported_as_a_refusal() -> None:
+    """The claim that cost the incident: silence read as "the origin is unavailable"."""
+    for attached in (True, False):
+        text = builtin._access_result_text(
+            "pending", "https://example.com", host="", attached=attached
+        )
+        assert "AN UNANSWERED PROMPT IS NOT A REFUSAL" in text
+        assert "Do not report the origin as" in text
+
+
+@pytest.mark.asyncio
+async def test_the_await_timeout_names_re_request_not_an_endless_await(monkeypatch) -> None:
+    """The timeout arm must name the re-request, not just another await.
+
+    The retired text ended "then call await_access again", which invites an
+    unbounded retry loop against a prompt that has already expired.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        assert action == "await_access"
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "await_access", "url": "https://example.com", "timeout_s": 0.05},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+
+    assert "still pending after" in result.text
+    assert "action='request_access'" in result.text
+    assert "15 MINUTES" in result.text
+    assert "An unanswered prompt is not a refusal." in result.text
+
+
+@pytest.mark.asyncio
 async def test_session_identity_is_stable_across_the_whole_flow(monkeypatch) -> None:
     """Round-2 M4: the REAL plumbing — ToolContext.session_id →
     execute_browser → _browser_requester → the wire params of every access and
