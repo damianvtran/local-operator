@@ -512,6 +512,14 @@ export function SessionListScreen() {
 
 	useEffect(() => retainSessionListStream(), []);
 
+	/* One predicate for the pin hint, used by BOTH the height class and
+	   ``aria-hidden`` — two spellings of one condition is how a control ends up
+	   painted one way and read out another (review round 3, NIT 1). Gated on what
+	   is VISIBLE (D5) and on the STORE's pins (D6): the caption names a row the
+	   reader can see, and a search that merely hides the pinned rows must not
+	   bring it back. */
+	const showPinHint = visible.length > 0 && !sessions.some((session) => session.pinned);
+
 	/* One card factory for all three sections, so a section cannot forget the FLIP
 	   ref or the long-press handler — the bug a fourth copy of this markup would
 	   eventually grow. */
@@ -625,23 +633,31 @@ export function SessionListScreen() {
 				    pin landed. The wrapper is always mounted and animates its height to
 				    zero, so the list settles instead of jumping. `prefers-reduced-motion`
 				    caps it to instant for free (the global block), which is the right
-				    fallback — the point is not the motion, it is that nothing snaps. */}
+				    fallback — the point is not the motion, it is that nothing snaps.
+
+					   THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
+						  earlier version capped `max-height` at a fixed 2rem — sized for ONE
+						  line of this caption at the default type scale. A caption that WRAPS
+					   to two lines (a longer localized string, a narrower container) is then
+					   taller than the cap, and `overflow-hidden` clips the second line away:
+				    the discoverer silently disappears for exactly the readers who need
+					   the label most. (The cap itself scales with the root font, so a
+						  large-text one-liner still fits — the failure is the WRAP, not the
+					   zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
+					   caption is fully painted at any string length and collapses to zero
+					   with no magic number to keep in sync with the type scale. */}
 				<div
 					className={cn(
-						"overflow-hidden transition-[max-height] duration-200 ease-out",
-						visible.length > 0 && !sessions.some((session) => session.pinned)
-							? "max-h-8"
-							: "max-h-0",
+						"grid transition-[grid-template-rows] duration-200 ease-out",
+						showPinHint ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
 					)}
-					aria-hidden={
-						visible.length > 0 && !sessions.some((session) => session.pinned)
-							? undefined
-							: true
-					}
+					aria-hidden={showPinHint ? undefined : true}
 				>
-					<p className="mx-2 mb-2 text-meta text-ink-dim">
-						touch and hold a row to pin it
-					</p>
+					<div className="overflow-hidden">
+						<p className="mx-2 mb-2 text-meta text-ink-dim">
+							touch and hold a row to pin it
+						</p>
+					</div>
 				</div>
 				{sessions.length === 0 ? (
 					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
