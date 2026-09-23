@@ -1383,3 +1383,55 @@ async def test_the_verdict_keeps_its_next_step_on_one_row_at_eighty_columns(monk
         # And it is still TWO authored statements, so the wider widths cannot
         # silently rejoin it into the paragraph this replaced.
         assert _gave_up("the runtime is not responding").count("\n") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_resume_onto_a_live_owner_paints_first_and_binds_behind(monkeypatch, tmp_path):
+    """PAINT FIRST, ATTACH BEHIND: a conversation on disk opens without a dial.
+
+    The blocking `connect` held `/resume` on the owner's canonical sync before
+    anything was drawn — 15 s and a refusal against a busy owner, and the whole
+    redial budget (about 42 s) against a silent one. With a transcript on disk
+    the conversation is adopted as a cold viewer instead and the ordinary eager
+    engage binds it behind the paint, so this asserts the three halves: NO dial
+    on the request path, the adopted session is that cold viewer, and the engage
+    was started for it. The redial tests above keep the dial path (their root
+    holds no transcript), which is the fallback this branch degrades to.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    directory = tmp_path / "sessions" / "remote-1"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    dials: list[Any] = []
+    colds: list[str] = []
+    engaged: list[str] = []
+    cold_viewer = FakeSession()
+
+    async def connect(*_args, **_kwargs):
+        dials.append("connect")
+        return FakeSession()
+
+    async def cold(session_id, **_kwargs):
+        colds.append(session_id)
+        return cold_viewer
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.cold", cold)
+    monkeypatch.setattr(
+        OperatorApp, "_engage_runtime_eagerly", lambda self: engaged.append("engage")
+    )
+
+    async with _running(app):
+        engaged.clear()
+        await app._attach_or_refuse(tmp_path, "remote-1")
+
+        assert dials == [], "a conversation on disk must not wait on the owner's sync to paint"
+        assert colds == ["remote-1"]
+        assert app._session is cold_viewer
+        assert engaged == ["engage"], "the bind behind the paint was never started"
+        assert _notices(app) == [], "a paint-first open narrates no redial"

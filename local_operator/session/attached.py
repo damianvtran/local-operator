@@ -1097,6 +1097,12 @@ class AttachedSession:
         self._degraded_resync_retry_task: asyncio.Task[None] | None = None
         self._frontend_refresh_cut: tuple[str, int] | None = None
         self._hydrated_once = False
+        #: The rows a COLD facade painted from disk before it ever bound, by id.
+        #: Set by :meth:`cold` / :meth:`saved_preview` and consumed by the first
+        #: :meth:`_load_frontend_history`, the one place that can see what the
+        #: owner wrote between that read and the bind (see
+        #: :meth:`_replay_cold_gap`).
+        self._cold_painted_ids: set[str] | None = None
         self._display_history: DisplayHistoryWindow | None = None
         self._history_hydrated = True
         #: Whether the PRE-COMPACTION rows behind the context replay are
@@ -1513,6 +1519,7 @@ class AttachedSession:
         self._can_go_cold = True
         self._display_window_requested = True
         self._bind_history(preview.messages, None, drop_history_duplicates=True)
+        self._cold_painted_ids = set(self._history_ids)
         model = FrontendModelSpec(provider="", model_id="")
         self._install_frontend(
             FrontendSessionState(
@@ -1577,6 +1584,7 @@ class AttachedSession:
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
             # which is the visible flicker this whole change exists to remove.
+        self._cold_painted_ids = set(self._history_ids)
         # Children can persist a roster before the parent's first transcript
         # row. Absence of that file must not hide independently durable spend.
         state = self._restore_cold_details(state)
@@ -4229,6 +4237,7 @@ class AttachedSession:
         )
         self._display_revision += 1
         previous = self._display_history
+        cold_painted, self._cold_painted_ids = self._cold_painted_ids, None
         if window is None or window.status != "ok":
             # Legacy owners and oversized prose keep the honest full replay.
             self._display_history = None
@@ -4241,6 +4250,8 @@ class AttachedSession:
                 self._buffered_events.insert(
                     0, HistoryDeltaEvent(messages=list(self._history), reset=True)
                 )
+            elif cold_painted is not None:
+                self._replay_cold_gap(cold_painted)
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
@@ -4282,6 +4293,8 @@ class AttachedSession:
             self._buffered_events.insert(0, HistoryDeltaEvent(messages=rows, reset=True))
         elif self._hydrated_once and previous is not None:
             self._replay_durable_suffix(rows[max(0, previous.total_message_count - page.start) :])
+        elif cold_painted is not None:
+            self._replay_cold_gap(cold_painted)
         # Loaded rows suppress duplicate relay, but are not all painted: the
         # TUI mounts only its viewport and pages older rows later.
         self._live_message_phase.clear()
@@ -5123,6 +5136,38 @@ class AttachedSession:
         self._runtime_ready.set()
         self._drain_buffered_events()
         self._maybe_start_gate()
+
+    def _replay_cold_gap(self, cold_painted: set[str]) -> None:
+        """Paint the rows a cold facade's owner wrote after the cold read.
+
+        A COLD facade's FIRST bind. Its frontend painted the transcript it read
+        off disk, and the owner may have written rows since — a turn that
+        finished between the read and the bind, or the one it is still in.
+        :meth:`_replay_durable_suffix` never ran for that gap, because a
+        facade that has never hydrated has no ``previous`` window to measure
+        it against; and the bind has just folded those rows' ids into
+        ``_history_ids`` and ``_message_events``, so ``_is_duplicate`` swallows
+        their live ``message_end`` too. Neither route painted them: messages
+        silently missing from the screen on every paint-first attach, which
+        is the TUI's ``/resume`` and ``lop --resume`` onto a live owner.
+
+        The fix is to un-claim exactly the ids the cold read did NOT paint and
+        run the ordinary durable replay over the bound history, which claims
+        them again and emits them as ONE typed delta ahead of the buffered live
+        events — so they land in transcript order, once, before anything the
+        relay adds. Rows the cold read painted stay claimed and are not
+        repainted.
+        """
+        gap = {
+            str(getattr(message, "id", "") or "")
+            for message in self._history
+            if str(getattr(message, "id", "") or "") not in cold_painted
+        }
+        gap.discard("")
+        if not gap:
+            return
+        self._message_events -= gap
+        self._replay_durable_suffix(self._history)
 
     def _replay_durable_suffix(self, history: list[Any]) -> None:
         """Emit ONE typed history delta for durable rows nothing ever painted.
