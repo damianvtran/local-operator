@@ -80,6 +80,8 @@ from tests.unit.secrets.credential_shape_corpus import (
     NEGATIVE_CASES,
     POSITIVE_CASES,
     PRE_ESCAPED_LINE,
+    TYPE_ANNOTATION_NEGATIVES,
+    TYPE_ANNOTATION_POSITIVES,
     Case,
 )
 
@@ -301,6 +303,142 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
     assert "agent_runtime_model_worker" in scrubbed, "the user must stay readable"
     assert "mongodb-prod.example.net" in scrubbed, "the host must stay readable"
     assert scrubbed.startswith("MONGO_DSN=mongodb+srv://agent_runtime_model_worker:")
+
+
+#: What the type clause is worth, as COUNTS rather than as a claim, and measured
+#: the way the rest of this file measures a guard: neutralise the arm, count the rows
+#: whose reading moves.
+#:
+#: Measured 2026-09-23 (``_corpus_grading()`` for the corpus under both modules). The
+#: first is how many of ``TYPE_ANNOTATION_NEGATIVES`` come back MASKED when the arm
+#: is removed — the rows that make the arm load-bearing at all; the second is how
+#: many of ``TYPE_ANNOTATION_POSITIVES`` come back READABLE when the arm is widened
+#: to everything — the rows that catch the clause over-reaching. Both are floors, not
+#: equalities: adding rows may raise them, and a change that lowers one has taken the
+#: arm's reach off a case that used to need it.
+#:
+#: The five negatives the first count does not include are the rows another rule
+#: already releases (a bare primitive below the value floor, an annotation carrying
+#: ``[``, a keyword argument in a function signature); they are in the corpus as
+#: regression rows, and the count says so rather than leaving a reader to wonder.
+_TYPE_CLAUSE_ROWS_THE_ARM_HOLDS = 15
+_TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM = 8
+
+
+def test_the_type_annotation_clause_is_load_bearing_in_both_directions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither half of this corpus can pass without the arm, and each half proves it.
+
+    This is the "prove the test can still fail" test for the type clause, and it
+    exists because the clause is the kind of guard that is easy to believe without
+    evidence: it sits inside a value predicate, it releases rather than masks, and a
+    release is invisible unless something asserts the text survived.
+
+    Three readings of the same rows:
+
+    * IN PLACE: every negative comes back byte-identical, which is the fix;
+    * REMOVED: the arm returns ``False`` and the rows that depend on it come back
+      MASKED — so those rows are evidence for the arm and not for some other rule;
+    * WIDENED: the arm returns ``True`` and the positives come back READABLE — the
+      direction where the clause stops protecting a credential, which is the failure
+      a reader of the corpus alone cannot see.
+    """
+    import local_operator.redaction_shapes as rs
+
+    in_place = [
+        case for case in TYPE_ANNOTATION_NEGATIVES if rs.scrub_shapes(case.text) == case.text
+    ]
+    assert len(in_place) == len(TYPE_ANNOTATION_NEGATIVES), [
+        case.reason for case in TYPE_ANNOTATION_NEGATIVES if case not in in_place
+    ]
+
+    monkeypatch.setattr(rs, "_is_type_expression", lambda value: False)
+    held = [case for case in TYPE_ANNOTATION_NEGATIVES if rs.scrub_shapes(case.text) != case.text]
+    assert len(held) >= _TYPE_CLAUSE_ROWS_THE_ARM_HOLDS, [case.reason for case in held]
+
+    monkeypatch.setattr(rs, "_is_type_expression", lambda value: True)
+    released = [
+        case for case in TYPE_ANNOTATION_POSITIVES if rs.scrub_shapes(case.text) == case.text
+    ]
+    assert len(released) >= _TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM, [
+        case.reason for case in TYPE_ANNOTATION_POSITIVES if case not in released
+    ]
+
+
+def test_the_type_clause_needs_a_type_only_marker() -> None:
+    """The three markers, and the spelling the clause must NOT reach.
+
+    A type-only character — an angle bracket, a path separator, a reference — is what
+    makes a value decidable as a type WITHOUT any allowlist of type names, which is
+    what lets a custom annotation (``Option<SomeVeryLongTypeName>``) be released. The
+    other half of this test is the load-bearing one: a bare word or a bare path is not
+    decidable as a type, so ``API_KEY=averylonglowercasename`` keeps masking. A clause
+    that released any long lowercase value would be a leak dressed as a fix, and this
+    is the assertion that says so.
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._is_type_expression("Option<String>") is True
+    assert rs._is_type_expression("std::collections::HashMap") is True
+    assert rs._is_type_expression("&SomeVeryLongEnumName") is True
+    # ...and no marker at all is not a type, whatever it is spelled like.
+    assert rs._is_type_expression("averylonglowercasename") is False
+    assert rs._is_type_expression("public-catalogue-read") is False
+
+
+def test_the_type_clauses_arguments_must_be_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The argument half of the clause, and the list it rests on.
+
+    A generic application is only a type if what is INSIDE the angles is types. That
+    rule is what keeps ``API_KEY=MyPass<secret>`` masked — the spelling a person
+    reaches for when they write a passphrase with angle brackets in it — and it is
+    carried by two things that can each silently stop working: the argument test, and
+    ``_TYPE_PRIMITIVES``, which is what lets a lowercase argument (``u8``, ``str``,
+    ``string``) prove itself a type without admitting every lowercase word.
+
+    The primitive list being load-bearing is asserted rather than assumed: emptied,
+    the same spelling stops being a type, so a future edit that trims the list loses
+    ``Vec<u8>`` and fails here.
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._is_type_expression("Vec<u8>") is True
+    # A lifetime argument, in the spelling the value group actually delivers: the
+    # annotation ``Cow<'a, str>`` is cut at the comma-space by the assigned-value
+    # class, so the clause reads ``Cow<'a`` — the whole spelling never reaches it,
+    # and a test that fed it the whole one would be asserting about dead input.
+    assert rs._is_type_expression("Cow<'a") is True
+    # A generic whose only argument is a const integer is not a type application, and
+    # neither is one whose argument is a word.
+    assert rs._is_type_expression("PassWord<1>") is False
+    assert rs._is_type_expression("MyPass<secret>") is False
+
+    monkeypatch.setattr(rs, "_TYPE_PRIMITIVES", frozenset())
+    assert rs._is_type_expression("Vec<u8>") is False
+
+
+def test_the_type_clauses_accepted_residual_is_a_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one release this clause makes that is not a type annotation.
+
+    ``API_KEY=Pass<Word>`` is a credential spelled exactly as ``Ident<Ident>``, and no
+    spelling test separates that from a type application — a type name and a chosen
+    password use the same alphabet. It is pinned as a corpus row rather than
+    described in prose so a later change has to meet it, and the two assertions here
+    are what make it a boundary of THIS clause: the row survives today, and it is
+    released by this arm (removed, the same value masks).
+    """
+    import local_operator.redaction_shapes as rs
+
+    residual = [case for case in NEGATIVE_CASES if "Ident<Ident>" in case.reason]
+    assert len(residual) == 1, [case.reason for case in residual]
+    case = residual[0]
+    assert rs.scrub_shapes(case.text) == case.text
+
+    monkeypatch.setattr(rs, "_is_type_expression", lambda value: False)
+    assert rs.scrub_shapes(case.text) != case.text, "the residual must be this arm's"
 
 
 def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
@@ -3338,6 +3476,32 @@ def _corpus_grading() -> str:
 #:    by a differential rather than stated by the table, which is the thing this constant
 #:    exists to stop.
 _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0eef58406f57"
+#: MOVED on 2026-09-23 by the fix for the TYPE-ANNOTATION false positive, and the
+#: argument is the measurement this constant's history always asks for, taken the
+#: same way: the 423 rows the constant above covered produce
+#: ``2a29fe4c…`` BYTE FOR BYTE under the fixed module (``git show
+#: origin/main:tests/unit/secrets/credential_shape_corpus.py`` loaded beside
+#: ``origin/main``'s module and this one, ``_corpus_grading()`` computed for that
+#: corpus under both and compared) — so not a masked text, not a label, not a
+#: value, not a window, not a ``complete``, not an ``exposed`` moved for any
+#: pre-existing row. The digest moves because the corpus grew to 452: 20 negatives
+#: for the type annotations the assignment rule was masking, 8 positives for the
+#: credentials spelled like them, and one negative for the residual this release
+#: accepts.
+#:
+#: FIFTEEN of the 20 added negatives move, and they all move the SAME way — from
+#: masked to readable — which is the whole claim of the fix; the other five were
+#: already released by another rule (a bare primitive below the value floor, an
+#: annotation carrying ``[``, a keyword argument in a function signature), so they
+#: are regression rows rather than behaviour rows. TWO of the fifteen ESCALATED
+#: before the fix, and that is the cost this change removes: a two-argument Rust
+#: generic and a two-primitive TypeScript generic both graded ``exposed``, because
+#: the mask covered the truncation of the type and left its tail readable — which
+#: is a rotation demand for a type annotation, and one of them stopped a release
+#: pending a verdict. NONE of the 8 added positives moves: they were masked before
+#: and they are masked now, which is what makes them evidence that the clause is
+#: scoped rather than broad.
+_CORPUS_GRADING_DIGEST = "eb72b005904af2d9c068642a2cd91315ab4a2fb8072865da1d7aa6aad2bb64ad"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:

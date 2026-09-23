@@ -207,6 +207,166 @@ COUNT_QUALIFIER_NAMES: tuple[str, ...] = (
 )
 
 
+
+
+def _angled(inner: str) -> str:
+    """``<inner>``, assembled rather than spelled.
+
+    The angle characters are built here for one reason: this corpus is read by
+    agents through the very pass it describes, and the spellings below are the
+    false positive this section exists to make readable. A fixture written out in
+    full would put that trigger in a file those agents read — and before the fix
+    it fired there too, which is why the first draft of this section masked its
+    own evidence.
+    """
+    return chr(60) + inner + chr(62)
+
+
+def _generic(base: str, *arguments: str) -> str:
+    """A generic type application (``Option<String>``), assembled as above."""
+    return base + _angled(", ".join(arguments))
+
+
+#: The TYPE ANNOTATIONS that must survive, and the reason each one exists.
+#:
+#: **This is the false positive, and it is measured rather than imagined.** Reading
+#: three real source files (``agentic_adm.rs``, ``article_search.rs``, ``mod.rs``)
+#: put two of these in a transcript: a struct field whose NAME is credential-shaped
+#: and whose VALUE is a Rust type. Both were masked, and the escalation they carried
+#: — the mask covered part of the type and left the rest readable, which grades
+#: ``exposed`` — stopped a release pending a rotation verdict for a type annotation.
+#:
+#: They are a NAMED table rather than rows inside the block below so the tests read
+#: them by identity; a case found by searching a reason string is one prose edit away
+#: from testing nothing (the coupling agent review R1, finding 7 corrected elsewhere in
+#: this file). ``_generic`` keeps the angle characters out of this source, so a future
+#: change to the spelling cannot silently rewrite a fixture.
+TYPE_ANNOTATION_NEGATIVES: tuple[Case, ...] = (
+    # --- the measured line, and the two spellings it was reported in -----------
+    Case(
+        "    api_key: " + _generic("Option", "String") + ",",
+        "a Rust struct field: a credential-shaped NAME, a TYPE for a value",
+    ),
+    Case(
+        "pub image: " + _generic("Option", "String") + ",",
+        "the same field with its visibility modifier, as reported",
+    ),
+    Case(
+        "    let api_key: " + _generic("Option", "String") + " = None;",
+        "the same type in a let binding: not a struct field only",
+    ),
+    Case(
+        "    api_key: " + _generic("Option", "String") + ",",
+        "the private spelling, with no visibility modifier",
+    ),
+    # --- the generic spellings, and the truncation the value group forces -------
+    Case(
+        "    api_key: " + _generic("Vec", "String") + ",",
+        "a Vec annotation",
+    ),
+    Case(
+        "api_key: " + "HashMap" + _angled("String"),
+        "a HashMap cut at the comma-space: how a two-argument generic ARRIVES",
+    ),
+    Case(
+        "    pub api_key: " + _generic("HashMap", "String, String") + ",",
+        "the whole two-argument generic on the line, which ESCALATED before the fix",
+    ),
+    Case(
+        "api_key: " + "Result" + _angled("String"),
+        "a Result cut the same way",
+    ),
+    Case(
+        "api_key: " + _generic("Arc", "Mutex" + _angled("T")) + ",",
+        "a nested generic: Arc<Mutex<T>>",
+    ),
+    Case(
+        "api_key: " + _generic("Option", "Vec" + _angled("u8")) + ",",
+        "a nested generic over a primitive: Option<Vec<u8>>",
+    ),
+    Case(
+        "api_key: " + _generic("Option", "SomeVeryLongTypeName") + ",",
+        "a generic over a CUSTOM type name, which no allowlist would cover",
+    ),
+    Case(
+        "api_key: " + _generic("ArrayVec", "u8, 32") + ",",
+        "a const generic: a bare integer argument beside a type",
+    ),
+    Case(
+        "api_key: " + _generic("Cow", "str") + ",",
+        "a generic over a Rust primitive",
+    ),
+    Case(
+        "api_key: " + _generic("Cow", "'a, str") + ",",
+        "the same with a lifetime argument",
+    ),
+    Case(
+        "api_key: Box" + _angled("dyn Trait") + ",",
+        "a trait object, which carries a SPACE and so reaches the rule cut",
+    ),
+    # --- the other two type-only markers: a qualified path, and a reference -----
+    Case(
+        "api_key: std::collections::HashMap,",
+        "a fully qualified path: :: is type-only punctuation",
+    ),
+    Case(
+        "api_key: &SomeVeryLongEnumName,",
+        "a reference to a long type name, with no angle bracket at all",
+    ),
+    # --- the same constructs in the other two languages ------------------------
+    Case(
+        "  api_key: " + _generic("Map", "string, string") + ";",
+        "a TypeScript generic over two primitives",
+    ),
+    Case(
+        "  api_key: string;",
+        "a bare TypeScript primitive",
+    ),
+    Case(
+        "    api_key: Optional[str] = None",
+        "a Python annotation, already released by the expression-character rule",
+    ),
+)
+
+#: The values this release must NOT touch: real credentials spelled in a way that
+#: resembles a type. Each is a case the type clause could plausibly have eaten, and
+#: the reason names the arm that stops it — which is what makes these the evidence
+#: that the clause is scoped rather than broad.
+TYPE_ANNOTATION_POSITIVES: tuple[Case, ...] = (
+    Case(
+        "API" + "_KEY=" + "Aa1!" + "bB2@" + "cC3#" + "dD4",
+        "a mixed-case token: no type-only character, released by no arm here",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("MyPass", "secret"),
+        "a passphrase written as a generic whose ARGUMENT is not a type",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Abc", "xyz"),
+        "the same: a lowercase argument is a word, not a type",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Foo", "word"),
+        "the same spelling with a longer word",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("PassWord", "1"),
+        "a generic whose only argument is a const integer: not a type application",
+    ),
+    Case(
+        "API" + "_KEY=" + "averylong" + "lowercase" + "name",
+        "a long lowercase word: no type-only character at all",
+    ),
+    Case(
+        "SESSION" + "_TOKEN=" + "abc" + "::" + "def",
+        "a credential spelled with a path separator: the LEAF name is a word",
+    ),
+    Case(
+        "DB" + "_PASSWORD=" + "Correct" + "_horse" + _angled("Battery") + "7",
+        "a passphrase carrying angles and digits: not confined to the type alphabet",
+    ),
+)
+
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
 def _secret_run(specification: str) -> str:
@@ -734,6 +894,10 @@ POSITIVE_CASES: tuple[Case, ...] = (
         _secret_run("PROD"),
         "the accepted over-mask: a ONE-WORD store name carries no separator to read",
     ),
+    # The positives this change adds, and the reason they are its evidence: each is
+    # a REAL credential spelled in a way that resembles a type, so the type clause
+    # releasing one would be the fix eating the thing it protects.
+    *TYPE_ANNOTATION_POSITIVES,
 )
 
 
@@ -1311,6 +1475,25 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         "--token " + "ABCDEF" + "=" + "ABCDEF",
         "no separator in EITHER half: masked at the base module, released by this change",
+    ),
+    # The spellings this change releases, as rows rather than as a paragraph.
+    *TYPE_ANNOTATION_NEGATIVES,
+    # ...and the one it releases that is NOT a type annotation, pinned here so the
+    # boundary the type clause draws is a row a later change has to argue with.
+    #
+    # ``Pass<Word>`` is a credential spelled EXACTLY as ``Ident<Ident>`` — capitals
+    # on both sides, no digit, no symbol, no word break — and no spelling test can
+    # tell that from a type application: a type name and a chosen password use the
+    # same alphabet. It sits in the NEGATIVE half deliberately, which is this file's
+    # convention for an accepted residual (see the lowercase vendor tail above), and
+    # the residual is bounded by construction rather than by hope: no issuer's
+    # alphabet contains ``<`` or ``>`` — base64url, hex, JWT and UUID all exclude
+    # them — every vendor prefix is lowercase, and the escape routes a credential
+    # actually has (a rendered blob, a DSN, a header) all carry the symbols the
+    # whole-value confinement check rejects.
+    Case(
+        "API" + "_KEY=" + _generic("Pass", "Word"),
+        "the accepted residual: Ident<Ident> is a type by spelling, and is recorded",
     ),
 )
 
