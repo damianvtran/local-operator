@@ -102,6 +102,63 @@ NO_VERDICT_REASON = "judge returned no verdict"
 STALLED_BREAKER_REASON = "judge could not decide"
 STALLED_CAP_REASON = f"stopped after {MAX_GOAL_CONTINUATIONS} continuations"
 
+#: The sentence a STALL owes the USER, one per bound, and keyed by the REASON the
+#: judge published.
+#:
+#: Keyed by the reason rather than by a second cause code, so the receipt cannot
+#: name a bound the record does not: the two transitions that stall already carry
+#: their own sentence, and a cause added later falls to
+#: :data:`STALLED_UNKNOWN_NOTICE` instead of going unannounced — which matters
+#: more here than in any other receipt, because a goal the harness has stopped
+#: working on and a goal quietly waiting look identical from the outside.
+#:
+#: The tail is the desktop's own clause for this state ("stalled — send a message
+#: to continue", ``composer-status-row.tsx``/``destination-pickers.tsx``), so the
+#: chip a user reads and the line they are handed say the same thing about how to
+#: get the goal moving again. It is TRUE of both bounds: the breaker re-judges on
+#: the next turn end and continues if the judge can now answer, and the cap's
+#: streak is per-streak (RULINGS R4), so a user-authored turn resets it.
+STALLED_BREAKER_NOTICE = f"goal stalled: {STALLED_BREAKER_REASON} — send a message to continue"
+STALLED_CAP_NOTICE = f"goal stalled: {STALLED_CAP_REASON} — send a message to continue"
+
+#: The reason a stall carries -> the sentence it owes the user.
+STALLED_NOTICES: dict[str, str] = {
+    STALLED_BREAKER_REASON: STALLED_BREAKER_NOTICE,
+    STALLED_CAP_REASON: STALLED_CAP_NOTICE,
+}
+
+#: What a stall says when its reason is one this build cannot name. Never
+#: nothing: an unannounced stall is the finding this vocabulary exists to close.
+STALLED_UNKNOWN_NOTICE = "goal stalled: auto-continuation stopped — send a message to continue"
+
+
+def goal_stalled_notice(moved: dict[str, Any]) -> str | None:
+    """The sentence a STALL entry owes the user, or ``None`` when this is not one.
+
+    THE EDGE IS THE MOVE, and the moved FIELDS carry it rather than a latch kept
+    here or on a host. :meth:`GoalJudge._publish` journals and publishes only the
+    fields that MOVED, so a ``state`` key in ``moved`` means the state just
+    CHANGED — that, and only that, is the entry into ``stalled``. A later publish
+    while the state is unchanged carries no ``state`` key at all (the diff drops
+    it, and the streak reset at the next turn end is the ordinary example: it
+    publishes ``{"run": 0}`` beside a state that stays ``stalled``), so a caller
+    that emits on this helper's return value announces the transition once and
+    cannot repeat it while the state stays put. A notice per publish is exactly
+    the repeat this rule avoids.
+
+    Asking ONE helper from both hosts is the same argument the module docstring
+    makes for the shared policy: a rule applied on the runtime and forgotten on
+    the TUI is the host disagreement these constants exist to remove.
+
+    A RE-ENTRY announces again, deliberately: if the stall clears, the judge
+    re-arms on the next turn end and a bound fires a second time, the harness
+    really did stop twice, and silence on the second is the case where the user's
+    own nudge appears to have done nothing.
+    """
+    if moved.get("state") != "stalled":
+        return None
+    return STALLED_NOTICES.get(str(moved.get("reason") or ""), STALLED_UNKNOWN_NOTICE)
+
 
 def goal_continuation_prompt(goal: str) -> str:
     """The ONE producer of the continuation text.
@@ -488,5 +545,18 @@ class GoalJudge:
         }
         if not moved:
             return
+        if moved.get("state") == "stalled" and "reason" in fields:
+            # A STALL'S REASON ALWAYS RIDES ITS TRANSITION, even when it repeats.
+            # Everything else here is a write-thrift rule, but the reason is the
+            # ONE fact the stall's receipt exists to carry — WHICH bound stopped
+            # auto-continuation — and the same bound firing twice publishes the
+            # same string, which the diff above would drop. The receipt would
+            # then fall through to the sentence for a cause it cannot name, i.e.
+            # announce the stop and forget the thing it was announcing about.
+            #
+            # Carried HERE rather than patched in each reader: a host that had to
+            # reach past the published diff for the reason would be a second
+            # opinion about what the judge published, and there are two hosts.
+            moved["reason"] = fields["reason"]
         self._mirror.update(moved)
         self.changed(moved)
