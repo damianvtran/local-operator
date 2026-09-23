@@ -161,6 +161,25 @@ Screens, following branding.md §7's agent-output hierarchy:
 - **Session list** — one card per session: name, cwd, model label, streaming
   shimmer, needs-attention badge (approval/ask pending), running-subagent
   chip. New-session button with a cwd picker (home + recents).
+
+  Rows are drawn in the SAME order the terminal sidebar and the desktop app use:
+  the daemon sorts every row on the shared catalogue key
+  (`session.catalog.CatalogEntry.rank` — the tier from `session_category`, the
+  wake band, birth, id) and marks each row active/previous with the shared
+  `active` rule, so the three surfaces cannot disagree about the order or about
+  which list a conversation is in, and the phone's list is STABLE across
+  activity refreshes (an early version re-derived the key from live state and
+  moved rows as sessions streamed). The screen only GROUPS what it is sent:
+  **★ Pinned**, **Active Sessions**, **Previous Sessions**.
+
+  A conversation is pinned with a long-press on its row (★ Pinned is where it
+  then appears, lifted out of its old section) or from the ☆/★ control in the
+  session view's header. Both write the **shared durable pin store**
+  (`sidebar-pins.json` via `local_operator.tui.sidebar_pins`) — the same file
+  the TUI's `F10` and the desktop app's pin action read and write — so a pin
+  made on the phone appears on the other surfaces and vice versa. The route is
+  `POST /api/sessions/{id}/pin` with `{"pinned": bool}` (desired state, not a
+  toggle, so a retried request cannot flip the pin back).
 - **Session view** — transcript with TUI-parity rendering: user rows,
   assistant markdown, one-line tool calls with state glyphs and green/red
   diff counts, tap to expand/collapse args+output+diff; todos panel;

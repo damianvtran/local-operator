@@ -288,6 +288,21 @@ export function clearSessionUnseen(sessionId: string): void {
 	emit();
 }
 
+/** Optimistic half of the pin handshake (the POST is `setSessionPin` in
+    api.ts): the row must move into (or out of) ★ Pinned the instant the user
+    acts, or a tap that visibly changed nothing reads as a fault. The daemon's
+    next list repaint confirms it; if the POST fails, that repaint restores the
+    truth, which is the honest state — the same contract `clearSessionUnseen`
+    above states for the unread mark. */
+export function applySessionPin(sessionId: string, pinned: boolean): void {
+	const target = sessions.find((s) => s.session_id === sessionId);
+	if (!target || Boolean(target.pinned) === pinned) return;
+	sessions = sessions.map((s) =>
+		s.session_id === sessionId ? { ...s, pinned } : s,
+	);
+	emit();
+}
+
 /* ------------------------------------------------------------------ */
 /* Tab title aggregate                                                 */
 /* ------------------------------------------------------------------ */
