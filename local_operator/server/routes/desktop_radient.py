@@ -11,7 +11,6 @@ import re
 import time
 from typing import Annotated, Any, Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictBool, model_validator
 
@@ -37,6 +36,10 @@ from local_operator.server.routes.desktop_sessions import (
 )
 from local_operator.server.utils.desktop_auth import DesktopAuth
 
+# NOT imported here: httpx. The two handlers that reach Radient import it
+# themselves -- this router is imported by ``server.app``, and a module-level
+# httpx was ~350 ms of every ``lop serve`` boot for routes that only run when
+# the desktop opens a Radient screen (backend load report B-F10).
 router = APIRouter(tags=["Desktop Radient"], dependencies=[Depends(require_desktop)])
 
 #: The identifier shape every id in this module shares, written ONCE and anchored
@@ -952,6 +955,7 @@ async def agent_statuses(body: RadientRequest, auth: DesktopAuth) -> dict[str, A
         agent_id: {"liked": False, "favourited": False} for agent_id in ids
     }
     limiter = asyncio.Semaphore(STATUS_BATCH_CONCURRENCY)
+    import httpx
 
     async def read(client: httpx.AsyncClient, agent_id: str, suffix: str, key: str) -> None:
         async with limiter:
@@ -1071,6 +1075,7 @@ async def radient(
             return reply(await agent_statuses(body, auth))
 
     method, path = endpoint(body)
+    import httpx
 
     async def execute():
         # The ONE place this transport decides whether it has a bearer worth

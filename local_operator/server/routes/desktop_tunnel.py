@@ -28,7 +28,6 @@ from fastapi import APIRouter, Depends
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
-from local_operator.tunnels import report
 
 router = APIRouter(tags=["Desktop tunnel"], dependencies=[Depends(require_desktop)])
 
@@ -43,4 +42,9 @@ async def tunnel_state() -> CRUDResponse[Any]:
     machine — and because the cases that matter (a parked connector, a dead
     grant) are exactly the ones where that call cannot answer.
     """
+    # Imported per request, not at module scope, for the reason
+    # ``routes/auth.py`` gives: the report pulls the tunnel gateway (PyJWT,
+    # httpx) onto every ``lop serve`` boot (backend load report B-F10).
+    from local_operator.tunnels import report
+
     return reply(await report.local_payload())
