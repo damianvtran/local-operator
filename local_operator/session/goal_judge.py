@@ -222,6 +222,12 @@ def owns_the_session(session: Any) -> bool:
     return getattr(session, "runtime_locality", "unknown") == "this-process"
 
 
+#: The two judge states that mean WORK WAS ALREADY BEING SPENT, and so the only
+#: two a restart re-arms (RULINGS R3). ``waiting``/``stalled`` mean nothing was in
+#: flight, and *checkpoint state is not an instruction to spend more tokens*.
+_REARM_STATES = frozenset({"continuing", "judging"})
+
+
 class GoalJudge:
     """One edge-triggered judge per OWNER of a session. Holds no long-lived task.
 
@@ -332,6 +338,29 @@ class GoalJudge:
 
     # -- trigger 3: session start / resume / adopt -----------------------------
 
+    def needs_rearm(self) -> bool:
+        """Whether the RESTORED record says work was already in flight.
+
+        Trigger 3's eligibility, stated ONCE and read by both callers that have
+        to agree on it: :meth:`rearm_on_resume` itself, and the runtime host,
+        which must answer it BEFORE it schedules that call.
+
+        The host cannot simply schedule and let the probe decide, because it
+        registers the probe in the handle's ``_background_tasks`` — the set
+        ``is_busy`` reads as *work a clean exit would destroy*. A probe that
+        will immediately find nothing to do therefore makes an otherwise idle
+        runtime report busy for as long as the no-op takes, and ``is_busy`` is
+        exactly the term ``is_pristine`` and the reaper ask. Measured on this
+        fleet: a runtime that had just booted its empty ``Untitled
+        conversation`` failed ``is_pristine()`` on the pending probe alone, so
+        the session the user never used could not be retired as pristine.
+
+        Being a synchronous read of the durable record is what makes it usable
+        there: the host's plan cannot await, so the question has to be answerable
+        without one.
+        """
+        return self.judge_state().state in _REARM_STATES
+
     async def rearm_on_resume(self) -> None:
         """Re-engage ONCE when the restored record says a continuation was in flight.
 
@@ -350,8 +379,7 @@ class GoalJudge:
         if not self._claim():
             return
         try:
-            record = self.judge_state()
-            if record.state not in {"continuing", "judging"}:
+            if not self.needs_rearm():
                 return
             await self._drive(error=False, aborted=False, reset_streak=False)
         finally:
