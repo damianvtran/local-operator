@@ -464,6 +464,14 @@ def status_glyph(
     if status == "running":
         return spinner_glyph or SPINNER_FRAMES[0], "running", "muted"
     if status == "failed":
+        # A failed child that carries a CUT-OFF cause is not an ordinary
+        # provider failure: it was stopped involuntarily by the harness, and a
+        # reader must be able to tell the two apart at a glance (design D1 —
+        # otherwise the recorded cause is invisible on every row). The word
+        # changes; the danger ink does not, because a cut-off run did fail to
+        # answer.
+        if cut_off:
+            return GLYPH_FAILED, "cut off", "danger"
         return GLYPH_FAILED, "failed", "danger"
     if status == "cancelled":
         return GLYPH_CANCELLED, "cancelled", "dim"
@@ -638,6 +646,12 @@ class RowFacts:
     #: :data:`GLYPH_PAUSED`. Sourced from the comms graph by the app and handed
     #: down, so the panel stays a pure renderer of facts it is given.
     paused: bool
+    #: Whether this child was CUT OFF involuntarily (``AsyncJob.cut_off_cause``).
+    #: Carried as its own fact for the same reason as ``paused``: a child the
+    #: loop's continuation guard cut off settles ``failed`` — the same status an
+    #: ordinary provider failure takes — so the STATUS alone cannot distinguish
+    #: it, and the whole point of recording the cause is that the row says so.
+    cut_off: bool
     running: bool
     elapsed: str
     activity: str
@@ -704,6 +718,9 @@ def row_facts(
             status="running",
             queued=False,
             paused=False,
+            # A row whose job could not be read cannot carry a cause; the
+            # fallback is a blank, not an invented cut-off.
+            cut_off=False,
             running=False,
             elapsed="0s",
             activity="",
@@ -723,6 +740,7 @@ def _read_row(
     status = str(getattr(job, "status", "running"))
     queued = bool(getattr(job, "queued", False))
     running = status == "running" and not queued
+    cut_off = bool(getattr(job, "cut_off_cause", ""))
     details = getattr(job, "latest_details", None)
     if not isinstance(details, Mapping):
         details = {}
@@ -745,10 +763,43 @@ def _read_row(
     elif status == "failed":
         # Settled rows carry the outcome's first line instead: the band row is
         # the summary, the full-page view is the detail, and the row between
-        # them says which side of that split it is on.
+        # them says which side of that split it is on. A CUT-OFF child is the
+        # exception: its error sentence is the guard's own text, not an outcome
+        # to summarise, so the row says ``cut off`` when there is no other
+        # detail to carry — the same word the interrupted arm prints, so one
+        # involuntary end reads alike whether it settled failed or interrupted.
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "error_text", "") or "")).split()
         )
+        if cut_off:
+            # The word LEADS the outcome prose, and deliberately does not wait
+            # for the prose to be empty: a real cut-off child always carries the
+            # classified notice as ``error_text``, so an ``if not activity`` guard
+            # was a branch the writer never reaches and the row stayed
+            # byte-identical to a plain provider failure (design D1 / reviewer
+            # MAJOR-2, measured at 140/100/60/40). Leading with the word makes the
+            # two states tell apart at a glance while keeping the sentence that
+            # says what happened on the same row.
+            word = status_glyph(status, cut_off=True)[1]
+            # NOT when the prose already says it: the production error text is
+            # ``format_cut_off_notice``, which itself begins ``turn cut off — ``,
+            # so an unconditional prefix rendered ``cut off — turn cut off — ...``
+            # on the dock and the child page for every cause (runtime-shutdown and
+            # runtime-killed double identically) — design D9. Prefixing is for the
+            # case where the text does NOT already lead with the fact; when it does,
+            # the word is already on the row. Case-folded so ``Turn cut off`` counts
+            # as already-led.
+            # ``format_cut_off_notice`` leads ``turn cut off — ``, so the word sits a
+            # few characters in rather than at position 0; the test is a short-window
+            # containment (the word within ``len(word)+6`` cells) so ``cut off —`` and
+            # ``turn cut off —`` both count as already-led, while a provider error
+            # that happens to mention the phrase later in its prose still gets the
+            # leading word.
+            already_led = word.casefold() in activity.casefold()[: len(word) + 6]
+            if activity:
+                activity = activity if already_led else f"{word} \u2014 {activity}"
+            else:
+                activity = word
     else:
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "result_text", "") or "")).split()
@@ -798,6 +849,7 @@ def _read_row(
         status=status,
         queued=queued,
         paused=paused,
+        cut_off=cut_off,
         running=running,
         elapsed=job_elapsed(job),
         activity=activity,
@@ -987,7 +1039,9 @@ def _glyph_cells(facts: RowFacts) -> int:
     the row draws is what lets ``compose_row``'s own truncate eat the last
     cell of a dollar figure.
     """
-    glyph, _word, _token = status_glyph(facts.status, queued=facts.queued, paused=facts.paused)
+    glyph, _word, _token = status_glyph(
+        facts.status, queued=facts.queued, paused=facts.paused, cut_off=facts.cut_off
+    )
     return max(_GLYPH_COL, cell_len(glyph))
 
 
@@ -1242,7 +1296,11 @@ def compose_row(
     role_width = _role_width(rung, role, role_column)
     role_pad = " " * max(0, role_width - cell_len(role))
     glyph, _word, token = status_glyph(
-        facts.status, queued=facts.queued, spinner_glyph=spinner_glyph, paused=facts.paused
+        facts.status,
+        queued=facts.queued,
+        spinner_glyph=spinner_glyph,
+        paused=facts.paused,
+        cut_off=facts.cut_off,
     )
 
     row = Text(no_wrap=True, overflow="ellipsis")

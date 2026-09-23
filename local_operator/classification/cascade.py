@@ -42,7 +42,7 @@ from local_operator.classification.types import DecisionVendor
 from local_operator.classification.vendors import VENDOR_CLASSES, build_vendor
 
 if TYPE_CHECKING:
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ def leg_order(settings: Mapping[str, Any] | None) -> tuple[str, ...]:
 
 
 async def resolve_vendor(
-    manager: "CredentialManager",
+    config_dir: "Path | None",
     settings: Mapping[str, Any] | None = None,
     *,
     client: httpx.AsyncClient | None = None,
@@ -133,9 +133,9 @@ async def resolve_vendor(
     """
     model = model_override(settings)
     for name in leg_order(settings):
-        vendor = build_vendor(name, manager, model=model, client=client)
+        vendor = build_vendor(name, config_dir, model=model, client=client)
         try:
-            credential = await vendor.credential(manager)
+            credential = await vendor.credential(config_dir)
         except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
             logger.warning("classification: %s credential resolution failed", name, exc_info=True)
             continue
@@ -145,7 +145,7 @@ async def resolve_vendor(
 
 
 def vendor_status(
-    manager: "CredentialManager",
+    config_dir: "Path | None",
     settings: Mapping[str, Any] | None = None,
 ) -> list[tuple[str, bool]]:
     """``[(vendor_name, available)]`` for diagnostics and tests. Never performs I/O.
@@ -171,11 +171,11 @@ def vendor_status(
             # their credentials say.
             status.append((name, False))
             continue
-        status.append((name, _static_credential_present(manager, name)))
+        status.append((name, _static_credential_present(config_dir, name)))
     return status
 
 
-def _static_credential_present(manager: "CredentialManager", name: str) -> bool:
+def _static_credential_present(config_dir: "Path | None", name: str) -> bool:
     """Whether the leg's disk-free credential tier is populated.
 
     Each leg's key names mirror :mod:`local_operator.classification.vendors`
@@ -195,11 +195,10 @@ def _static_credential_present(manager: "CredentialManager", name: str) -> bool:
     # store nor the environment holds is simply not present.
     from local_operator.providers.registry import provider_secret_value
 
-    # The manager's own root (R4), matching the sibling vendor legs in
-    # ``vendors.py``: a provider-class row the caller configured elsewhere is the
+    # The caller's own root (R4), matching the sibling vendor legs in
+    # ``vendors.py``: a provider-class row under a non-default config root is the
     # one this probe must see, or the diagnostic reports a host it never read.
-    base = getattr(manager, "config_dir", None)
-    return any(provider_secret_value(key, base=base) or os.environ.get(key) for key in keys)
+    return any(provider_secret_value(key, base=config_dir) or os.environ.get(key) for key in keys)
 
 
 __all__ = [

@@ -607,7 +607,6 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
     def factory() -> Any:
         from local_operator.agents import AgentRegistry
         from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
         from local_operator.paths import config_dir
         from local_operator.session_factory import create_session
 
@@ -621,7 +620,6 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
         # a benchmark).
         base_dir = config_dir()
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager.readonly(base_dir)
         agent_registry = AgentRegistry(base_dir)
 
         session_args = argparse.Namespace(
@@ -633,7 +631,7 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
             train=exec_args.train,
             resume=exec_args.resume,
         )
-        return create_session(session_args, config_manager, credential_manager, agent_registry)
+        return create_session(session_args, config_manager, agent_registry)
 
     return factory
 

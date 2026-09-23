@@ -446,10 +446,20 @@ SIGNAL_DRAIN_S = 120.0
 #: patience for "my session is locked", because the alternative to firing is what
 #: the incident measured: unbounded, and it ended in a wedge nobody could clear.
 #: 15 min clears the longest silent step evidenced here, tolerates a silent model
-#: stream of the same order, and hands a stuck session over a quarter of an hour
-#: after its work stopped rather than never. Force-cutting something that was
-#: merely slow is the residual risk, accepted deliberately: it costs the turn in
-#: flight, while not firing costs the whole session.
+#: stream of the same order, and reports a stuck session a quarter of an hour after
+#: its work stopped rather than never.
+#:
+#: WHAT THE BOUND DOES NOW, since the obvious reading of the paragraph above is the
+#: one that was removed: it does NOT cut the turn. Force-cutting something that was
+#: merely slow was the accepted residual risk — it cost the turn in flight — and the
+#: operator's rule for every build move is that a runtime is replaced when its turn
+#: is COMPLETE, never on a heuristic of inactivity. So the bound now ABANDONS the
+#: handover: the runtime keeps the build it loaded, the messages the drain queued
+#: come back in, and the failure is published under ``UPDATE_FAILED_CAUSE``
+#: (``process._abandon_move``). What the bound still buys is unchanged and is what
+#: its calibration was for: a session whose work has gone silent stops being a
+#: handover nobody can complete, and becomes a reported condition on a runtime that
+#: is still serving.
 #:
 #: HERE, beside ``SIGNAL_DRAIN_S``, for that constant's own reason: the phrase that
 #: NAMES this bound is published on the record two front ends read
@@ -530,11 +540,16 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #: on it and publishes the OVERDUE phrase instead.
 LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 
-#: What a runtime publishes when its build drain has held with NO MOVEMENT
-#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S`` and has therefore stopped
-#: waiting (``process._leave_overdue``). The third phrase beside the two above,
-#: and the only one that reports a bound already SPENT rather than a wait still
-#: running.
+#: What a runtime USED TO publish when its build drain had held with NO MOVEMENT
+#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S``. NO ARM SENDS IT ANY MORE
+#: (``process._abandon_move`` abandons the handover instead of leaving, and keeps
+#: :data:`LEAVING_FOR_BUILD` on the record), and it stays in this module and in all
+#: four consumer tables for the reason a published vocabulary always outlives its
+#: publisher: the records that carry it are on disk, and this build still has to
+#: RENDER them. So it remains a member of :data:`PUBLISHED_LEAVING_PHRASES` — which
+#: is also what keeps ``cli.LEAVING_COLUMN_WIDTH`` sized for a row a reader may
+#: still meet — and what changed is only that nothing advertises it as a state this
+#: runtime can reach.
 #:
 #: WHY IT EXISTS SEPARATELY, AND WHY EVERY FRONT END KEYS ON IT.
 #: ``LEAVING_FOR_BUILD`` promises that the turn in flight finishes, and for the
@@ -572,6 +587,8 @@ LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 #: ``/info`` card-67 budget of 53, which is where the wide rung draws. The
 #: explicit "reported" half lives on the prose surfaces
 #: (``tui.app.OVERDUE_DRAIN_NOTICE`` and the refusal), which are not width-bound.
+#: This phrase is the widest of the three, which is why the historical entry above
+#: keeps the column where it is rather than letting a re-derivation shrink it.
 LEAVING_FOR_BUILD_OVERDUE = (
     f"leaving for the build on disk; no movement ({bound_text(BUILD_DRAIN_PROGRESS_S)})"
 )
@@ -917,6 +934,75 @@ class DiscoveryRecord(Protocol):
 #: a capacity slot is not spending anything. This module stays stdlib-only, so
 #: the constant costs nothing to import on the CLI startup path.
 RUNNING_SUBAGENT_STATUSES = frozenset({"running", "starting", "pausing"})
+
+
+#: The largest value a subagent count on a record may carry and still be read as
+#: a measurement.
+#:
+#: Lives here for the same reason the set above does: THREE readers refuse a value
+#: past this ceiling — ``info.collect`` when it tallies a fleet, ``resume._counted``
+#: when it asks whether a sidebar row is delegating, and the desktop listing's own
+#: response model when it serializes a row — and they must refuse at the SAME
+#: number, because the failure they guard is a display one: a 31-digit figure
+#: renders 81 cells wide and overflows every frame, including the abbreviated rung
+#: that exists to serve it. It is not that such a count is wrong; it is that nothing
+#: past this could be real, so refusing it is the honest reading, and the readers
+#: agreeing is what keeps one surface from printing a number another drops.
+#:
+#: DELIBERATELY FAR ABOVE ANYTHING THIS CODEBASE CAN PRODUCE —
+#: ``DEFAULT_MAX_RUNNING_JOBS`` is 15 and the count is a ``len()`` over a bounded
+#: roster — so it can only reject a foreign or damaged record, never a real fleet.
+#: Six digits still fit the narrow rung.
+#:
+#: ``SessionRecord.from_json`` does no type validation, so this is a bound on what
+#: a RECORD may say, not on what the runtime publishes (its own writer counts real
+#: children). This module stays stdlib-only, so neither the constant nor the reader
+#: below costs anything to import on the CLI startup path.
+MAX_REPORTED_SUBAGENT_COUNT = 999_999
+
+
+def reported_subagent_count(value: Any) -> int | None:
+    """A published subagent count, or ``None`` when the record did not report one.
+
+    THE ONE RULE, read by every consumer of these two fields: ``info.collect``'s
+    fleet tally, ``resume._counted`` (the sidebar's predicate), and the desktop
+    listing's response model at the wire edge. It lives beside the fields it
+    validates rather than in the first module that needed it, because the three
+    disagreeing about which values are believable is how one surface prints a
+    figure another drops.
+
+    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
+    no type validation — so every field on a record is whatever the writer put in
+    the file. That is fine for the strings and bools read elsewhere, which only
+    ever get formatted, but these two are the first record fields its readers do
+    ARITHMETIC on, and arithmetic is where a foreign value stops being cosmetic:
+
+    * a ``str`` or ``list`` raises ``TypeError`` inside a roll-up. ``info``'s
+      ``_safe`` guards whole SECTIONS, so one bad record cost the entire sessions
+      block — no table, no runtimes row, and no lower-bound caveat — on a screen
+      whose whole purpose is describing a host that is already broken. Before
+      these fields existed there was no arithmetic there and the same record
+      listed normally, so that was a regression rather than a new limitation.
+    * a merely-numeric wrong value does not raise at all, which is worse: a float
+      printed ``4.5 total — 1 sessions + 3.5 subagents`` and a negative printed
+      ``-1 subagents``, both as measured fact.
+    * at the desktop listing's wire edge the same choice is between a degradation
+      and an outage, because a validation error on ONE row fails the WHOLE
+      response: a damaged record would take out the conversation list rather than
+      lose a count from it.
+
+    Anything that is not a non-negative ``int`` at or below
+    :data:`MAX_REPORTED_SUBAGENT_COUNT` is therefore treated as NOT REPORTED
+    rather than sanitised into a number: an unusable value is not a measurement,
+    and calling it ``None`` is what each reader's own contract already says to do
+    with a missing term. ``bool`` is excluded explicitly — it is an ``int``
+    subclass, so ``True`` would otherwise count as one subagent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    if value > MAX_REPORTED_SUBAGENT_COUNT:
+        return None
+    return value
 
 
 @dataclass

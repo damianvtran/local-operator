@@ -38,7 +38,11 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
+from local_operator.scratchpad import (
+    SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_MAX_WRITE_BYTES,
+    SCRATCHPAD_PATH_ENV,
+)
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 
@@ -1449,6 +1453,234 @@ async def test_scratchpad_refuse_traversal_absolute_and_directory_targets(tmp_pa
     assert "e.g. 'scratchpad://run/name.md'" in dir_write.text
 
     assert not list(tmp_path.rglob("escape.md"))
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tmp_path) -> None:
+    """The content policy through the REAL tools, which is the only place the
+    wiring is proved: a check that raised correctly but was never called would
+    pass every unit test of the check itself and refuse nothing at runtime.
+
+    Each refusal has to be an ``invalid arguments`` result — the model's own
+    argument at fault, a different fault from a machine failure — and it has to
+    name where the material belongs, because that alternative is what the next
+    call acts on. ``write`` and ``edit`` are driven separately because they
+    share one resolver and diverge on the size arm only.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    segment = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert segment.is_error is True
+    assert segment.details is not None and segment.details["__fault"] == "invalid_arguments"
+    assert "'node_modules' is a build or dependency directory" in segment.text
+    assert "git worktree add" in segment.text
+    # The advice is appended by the shared constant rather than restated per arm,
+    # so it cannot drift between them — and the caller reads it here.
+    assert segment.text.endswith(SCRATCHPAD_ELSEWHERE)
+
+    # The case-varied spelling of the same directory, which on this machine's
+    # case-insensitive volume IS the same directory: this is the reviewer's
+    # repro, and it is pinned through the tool because that is where it was.
+    folded = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://NODE_MODULES/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert folded.is_error is True
+    assert folded.details is not None and folded.details["__fault"] == "invalid_arguments"
+    assert "'NODE_MODULES' is a build or dependency directory" in folded.text
+
+    # The FAMILY arm, which is the whole point of matching a SHAPE: this tree was
+    # in no list, and a caller that reaches for it is exactly who the refusal is
+    # for. The segment is named as typed, so the message reads as the URL does.
+    family = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://cmake-build-debug/CMakeCache.txt", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert family.is_error is True
+    assert family.details is not None and family.details["__fault"] == "invalid_arguments"
+    assert "'cmake-build-debug' is a build or dependency directory" in family.text
+
+    # A versioned shared library, whose version rides in the name after the
+    # extension — the shape ``Path.suffix`` cannot see, judged here on the real
+    # tool so the wiring and the matcher are proved together.
+    versioned = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://libfoo.so.1.2", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert versioned.is_error is True
+    assert versioned.details is not None and versioned.details["__fault"] == "invalid_arguments"
+    assert "'.so' is a compiled, archived or model artefact" in versioned.text
+
+    suffix = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://runs/model.pt", "old_text": "a", "new_text": "b"},
+        None,
+        None,
+        context,
+    )
+    assert suffix.is_error is True
+    assert suffix.details is not None and suffix.details["__fault"] == "invalid_arguments"
+    assert "'.pt' is a compiled, archived or model artefact" in suffix.text
+    assert "mktemp -d" in suffix.text
+
+    # The refusal is the model's argument at fault, and none of it reached the
+    # disk: no directory was created on the way to saying no.
+    assert not (pad / "node_modules").exists()
+    assert not (pad / "NODE_MODULES").exists()
+    assert not (pad / "runs").exists()
+    assert not (pad / "cmake-build-debug").exists()
+    assert not (pad / "libfoo.so.1.2").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, monkeypatch) -> None:
+    """The BACKSTOP end to end, and the arm only the pad's own contents can
+    refuse: every name here is ordinary scratch, so nothing but the total can
+    say no. It has to arrive as the model's own argument at fault, like the name
+    arms, because the fix is a decision about where that material lives rather
+    than a machine failure to retry.
+
+    The budget is set from the pad's own ALLOCATED size, which is the walk's unit
+    (a sparse file measures 0), so the boundary is exact on any block size.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    budget = (pad / "bulk.dat").stat().st_blocks * 512
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+
+    refused = await tools["write"].execute(
+        "c", {"path": "scratchpad://x.csv", "content": "a,b\n"}, None, None, context
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert f"{budget:,}-byte ceiling" in refused.text
+    assert refused.text.endswith(SCRATCHPAD_ELSEWHERE)
+    assert not (pad / "x.csv").exists()
+
+    # The same fixture one name apart: overwriting the file that IS the pad's
+    # total is still allowed, because the write REPLACES those bytes rather than
+    # adding to them. A pad at the ceiling must stay workable in place.
+    replaced = await tools["write"].execute(
+        "c", {"path": "scratchpad://bulk.dat", "content": "small\n"}, None, None, context
+    )
+    assert replaced.is_error is False
+    assert (pad / "bulk.dat").read_text() == "small\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_payload_over_the_write_ceiling(tmp_path) -> None:
+    """The SIZE arm, end to end, because it is the one arm that depends on a
+    value computed at the call site rather than on the name. A ceiling that is
+    only unit-tested through ``check_scratchpad_write`` would leave the wiring
+    — ``len(content.encode("utf-8"))`` at the ``write`` handler — unproved.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    refused = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://dump.csv", "content": "x" * (SCRATCHPAD_MAX_WRITE_BYTES + 1)},
+        None,
+        None,
+        context,
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert str(SCRATCHPAD_MAX_WRITE_BYTES) in refused.text
+    assert not (pad / "dump.csv").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_still_writes_ordinary_scratch_with_the_same_fixture(tmp_path) -> None:
+    """The same fixture and the same call, one name apart: the policy must not
+    have cost the pad the writes it exists for. Without this the refusal tests
+    would pass against a resolver that refused everything.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    created = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://notes.md", "content": "still scratch\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert created.is_error is False
+    assert created.text == (
+        f"Created scratchpad://notes.md -> {pad / 'notes.md'} (14 chars)"
+        # The receipt's lifetime clause is the advisory's wording (adopted by
+        # this branch on rebase): the pad is session-SCOPED and rides out a
+        # restart, and "deleted with the session" was read by a measured session
+        # as meaning "like a temp directory" (2026-09-22).
+        " — kept for this session (survives restarts)."
+    )
+
+    # The negatives that must survive the shape rule, through the tool: a name
+    # that merely BEGINS with a refused token is scratch, and it is the case a
+    # rule that matched a substring would have taken away.
+    contained = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules-notes.md", "content": "why it is big\n"},
+        None,
+        None,
+        context,
+    )
+    assert contained.is_error is False
+    assert (pad / "node_modules-notes.md").read_text() == "why it is big\n"
+
+    # ...and neither does a LEAF that merely begins with a token followed by a
+    # file TYPE (M1): `out.json` is data work, while `out/` is the directory the
+    # rule is about.
+    leaf = await tools["write"].execute(
+        "c", {"path": "scratchpad://out.json", "content": "{\n}\n"}, None, None, context
+    )
+    assert leaf.is_error is False
+    assert (pad / "out.json").read_text() == "{\n}\n"
+    assert (pad / "notes.md").read_text(encoding="utf-8") == "still scratch\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_reads_are_not_gated_so_an_old_pad_can_be_cleaned_up(tmp_path) -> None:
+    """Reads are deliberately OUTSIDE the policy, and this pins it. Pads written
+    before the rule are full of exactly the refused names — ``bash`` can put a
+    build tree in the pad with no check at all — and the agent cleaning one up
+    needs to read it. A gate on ``read`` would leave that litter listed by a
+    shell ``ls`` but unreadable through the scheme that is meant to be the way in.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    litter = pad / "node_modules"
+    litter.mkdir(parents=True)
+    (litter / "x.js").write_text("module.exports = 1\n", encoding="utf-8")
+
+    listed = await tools["read"].execute(
+        "c", {"path": "scratchpad://node_modules/"}, None, None, context
+    )
+    assert listed.is_error is False
+    assert "x.js" in listed.text
+
+    read = await tools["read"].execute(
+        "c", {"path": "scratchpad://node_modules/x.js"}, None, None, context
+    )
+    assert read.is_error is False
+    assert "module.exports = 1" in read.text
 
 
 @pytest.mark.asyncio
@@ -3269,6 +3501,188 @@ async def test_the_tmpdir_spelling_is_recognised(tmp_path, monkeypatch) -> None:
         text = await _run_bash(context, command)
         assert text.count("[scratch]") == 1, text
         assert _bash_nudge_line(temp_root / "x.log") in text
+
+
+def _home_spelling_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A ``HOME`` the test owns, with the name arm's own root fixture in place.
+
+    ``Path.expanduser``/``Path.home`` read ``HOME`` from the environment — the same
+    variable the product hands its child shells — so redirecting it covers BOTH the
+    scan under test and the command's own ``~`` expansion, and no seam has to be
+    opened in the module for the test's benefit. Aiming the temp roots at the
+    test's root is not optional: see ``_name_arm_fixture`` for why a row that
+    skipped it would pass for a reason it does not name.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "segment", "created"),
+    [
+        # The three spellings, and the `${HOME}` row is not a duplicate of the
+        # `$HOME` one: the expansion order is a real difference there, so a helper
+        # that rewrote `${HOME}` into a leftover `${}` would be silent on exactly
+        # this row (the same reason `${TMPDIR}` gets its own row next door).
+        ("echo hi > ~/workspace/minervaai/tmp/tilde.md", "tmp", "tilde.md"),
+        ("echo hi > $HOME/workspace/minervaai/tmp/dollar.md", "tmp", "dollar.md"),
+        ("echo hi > ${HOME}/workspace/minervaai/scratch/braced.sh", "scratch", "braced.sh"),
+        # A different creation POSITION through the same spelling: `mkdir`'s
+        # operand rather than a redirect, so the row fails if the normalisation
+        # reached one position and not the other.
+        ("mkdir ~/workspace/minervaai/tmp/somewhere", "tmp", "somewhere"),
+    ],
+)
+async def test_the_home_spelling_is_recognised(
+    tmp_path, monkeypatch, command, segment, created
+) -> None:
+    """The hole this closes, measured on the released v0.62.3: the SAME write into a
+    scratch-named directory was advised when its target was spelled absolutely and
+    fell SILENT when it was spelled through the home directory — which is how a
+    session spells a home path far more often. `write`/`edit` never had the
+    asymmetry (`_resolve_workspace_path` calls `Path.expanduser`), so these rows pin
+    one channel agreeing with the other rather than two channels disagreeing.
+
+    The command really runs, so the row also proves the two sides agree about WHICH
+    file is meant: the shell's own `~`/`$HOME` expansion picks the file the scan
+    predicted, which is the only thing that lets the assertion name one path.
+    """
+    home = _home_spelling_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    directory = home / "workspace" / "minervaai" / segment
+    (home / "workspace" / "minervaai" / "tmp").mkdir(parents=True, exist_ok=True)
+    (home / "workspace" / "minervaai" / "scratch").mkdir(parents=True, exist_ok=True)
+
+    text = await _run_bash(context, command)
+
+    lines = [line for line in text.splitlines() if line.startswith("[scratch]")]
+    expected = _scratch_dir_nudge_line(directory / created, remedy=f"${SCRATCHPAD_PATH_ENV}")
+    assert lines == [expected], text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ANOTHER user's home is not this scan's to resolve, so the normaliser
+        # DECLINES it and the target keeps the shape it had before this change —
+        # the same refusal `_resolve_workspace_path` makes for `~nosuchuser` (whose
+        # own row lives in test_approval_descriptions.py).
+        "echo hi > ~other/workspace/minervaai/tmp/x.md",
+        # Depth TWO: expanding a home spelling must not reach past the depth-1 rule
+        # the arm documents for the absolute form of the same path.
+        "echo hi > ~/workspace/minervaai/tmp/deep/x.md",
+        # A `~` that is not the LEADING component is a literal directory name.
+        "echo hi > {home}/workspace/minervaai/tmp/~/x.md",
+        # A word that merely CONTAINS a spelling is not the spelling.
+        "echo hi > $HOMEfoo/workspace/minervaai/tmp/x.md",
+        # The relative case, still exactly where it was: the normalisation is an
+        # addition to the absolute test, not a working directory for it.
+        "echo hi > tmp/x.md",
+    ],
+)
+async def test_a_home_spelling_that_names_no_scratch_named_directory_is_silent(
+    tmp_path, monkeypatch, command
+) -> None:
+    """The refusals around the new expansion, one row each.
+
+    Asserted at the SCANNER (``builtin._bash_scratch_hint``) rather than through
+    `_run_bash`, because NONE of these five commands can complete in a real shell:
+    `~other` names no user, `$HOMEfoo` expands to an empty prefix so the redirect
+    lands on an absolute path nothing creates, the two `~/workspace/minervaai/tmp/`
+    rows write into a tree this fixture does not build, and the bare relative row
+    has no `tmp/` under the cwd. A row that failed on its own shell error would be
+    reporting the shell's verdict as the scan's.
+
+    They matter because an expansion is the kind of change whose failures are
+    silent in the OTHER direction: a helper that rewrote too much would nudge a
+    path the command never named, and every row here would still pass if the
+    normaliser were deleted outright. Two of them (the leading-`~`-only rule and
+    the merely-containing word) are the ones a `str.replace`-shaped implementation
+    gets wrong.
+    """
+    home = _home_spelling_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    assert builtin._bash_scratch_hint(command.format(home=home), context) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelling_into_the_pad_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The containment clause, reached through the new expansion.
+
+    With the home directory handed to the session, the pad is a SUBDIRECTORY of it,
+    so a tilde path into the pad now meets the pad's own `scratchpad`/`tmp` name
+    through a spelling that could not reach it before. This row is silent both
+    before and after — it exists so the expansion cannot START nudging the pad, and
+    the temp roots are moved aside because `tmp_path` really does live under the
+    machine's `$TMPDIR`, where the name arm declines everything anyway (see
+    `_name_arm_fixture`).
+    """
+    _point_the_nudge_at(monkeypatch, tmp_path / "shared-tmp")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    context, pad, _ = _scratchpad_context(tmp_path)
+    (pad / "tmp").mkdir(parents=True, exist_ok=True)
+    assert pad.is_relative_to(tmp_path)  # the shape this row depends on
+
+    text = await _run_bash(context, "echo hi > ~/sessions/sess-pad/scratchpad/tmp/rig.log")
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelling_reaches_the_temp_root_arm(tmp_path, monkeypatch) -> None:
+    """The normalisation sits BEFORE the absolute test, so both arms share it.
+
+    With the temp root aimed at the home directory itself, `~/x.log` has to fire
+    the TEMP arm with the temp root's own reason, exactly as `/…/x.log` does. A
+    helper called from the name arm alone would leave this row silent while every
+    row above still passed.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    _point_the_nudge_at(monkeypatch, home)
+    monkeypatch.setenv("HOME", str(home))
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(context, "echo hi > ~/paid.log")
+
+    assert text.count("[scratch]") == 1, text
+    assert _bash_nudge_line(home / "paid.log") in text
+
+
+@pytest.mark.asyncio
+async def test_a_write_through_a_home_spelling_is_nudged(tmp_path, monkeypatch) -> None:
+    """Pin the channel that never had the hole.
+
+    `write`/`edit` resolve through `_resolve_workspace_path`, which calls
+    `Path.expanduser`, so a `~/…` target has always fired here — this row exists so
+    that a later change to the shell normaliser cannot be "harmonised" by teaching
+    THIS channel the shell's old silence.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / "workspace" / "minervaai" / "tmp").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = home / "workspace" / "minervaai" / "tmp" / "pinned.md"
+
+    result = await tools["write"].execute(
+        "c",
+        {"path": "~/workspace/minervaai/tmp/pinned.md", "content": "pinned\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Created {target.resolve()} (7 chars)."
+    assert second == _scratch_dir_nudge_line(target)
 
 
 @pytest.mark.asyncio

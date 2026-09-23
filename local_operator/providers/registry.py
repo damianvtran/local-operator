@@ -865,10 +865,11 @@ def provider_secret_value(env_key: str, *, base: Path | None = None) -> str | No
         raw = retrieve_secret(provider_secret_name(env_key), root, role="provider")
     except (SecretStoreError, OSError, ValueError):
         return None
-    # ``surrogateescape``, matching the plaintext reader this consolidates
-    # (:meth:`CredentialManager.load_from_file`): a credential is an arbitrary
-    # byte string, and ``errors="replace"`` would substitute U+FFFD so the
-    # provider authenticates with a corrupted key instead of the stored one.
+    # ``surrogateescape``, matching the legacy plaintext reader this consolidates
+    # (``secrets.legacy_env.read_credentials``, the migration's only reader): a
+    # credential is an arbitrary byte string, and ``errors="replace"`` would
+    # substitute U+FFFD so the provider authenticates with a corrupted key
+    # instead of the stored one.
     value = raw.decode("utf-8", "surrogateescape").strip()
     return value or None
 
@@ -1071,10 +1072,10 @@ def env_key_name(provider_id: str) -> str | None:
 
 
 def credential_file_names(provider_id: str) -> list[str]:
-    """The ``CredentialManager`` key names ``provider_id`` can be configured under.
+    """The key NAMES ``provider_id`` can be configured under, every ``env_keys`` form.
 
-    THE reader for the legacy credential file, for every ``env_keys`` form.
-    ``env_key_name`` answers only for the plain-string form and returns ``None``
+    The name-source for the store-first rungs: ``env_key_name`` answers only for
+    the plain-string form and returns ``None``
     for the callable one — today exactly ``anthropic`` — so any caller built on
     it alone silently drops the provider whose key the user is most likely to
     have set by hand. That is not hypothetical: it is how an install configured
@@ -1093,7 +1094,7 @@ def credential_file_names(provider_id: str) -> list[str]:
 
     Alias-aware in the same way :func:`resolve_env_key` is: a login flavour
     (``xai-oauth``) declares no key name of its own but the provider it stores
-    under does, and that is the name the legacy file holds.
+    under does, and that is the name a store row or the environment holds.
 
     Returns an empty list for an unknown provider or one with no key name at
     all, so it is safe to call unconditionally and iterate over.

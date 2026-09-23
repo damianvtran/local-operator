@@ -2778,24 +2778,67 @@ class RuntimeServer:
         # ``control.py`` records at 201 forks per probe.
         previous = (time.monotonic(), time.process_time())
         while not self._closed.is_set():
-            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-            if self._closed.is_set():
-                return
-            previous_wall, previous_cpu = previous
-            moment = (time.monotonic(), time.process_time())
-            lag_s, cpu_since_beat_s = moment[0] - previous_wall, moment[1] - previous_cpu
-            previous = moment
-            # PROGRESS, REPORTED TO THE STALL BOUND. This loop is the serving
-            # plane's own sign of life, and it carries ONE stamp — the workload's
-            # is its own (``process._beat_stall_watchdog``). The timer is
-            # re-armed for the earliest of the two deadlines, so a tick here
-            # cannot mask a parked workload loop; that is the whole point of
-            # tracking them apart (see ``stall_watchdog``). Deliberately before
-            # the record write below rather than after it: the bound must be
-            # restarted by THIS LOOP HAVING RUN, not by the write having
-            # succeeded — a failed write is self-healing and must not look like a
-            # stall.
-            stall_watchdog.beat(stall_watchdog.SERVING)
+            # THE WHOLE CYCLE IS GUARDED, INCLUDING THE STAMP, and this is the
+            # previous change's own defect one plane over: ``_watch_stall_beats``
+            # exists because a reporter that dies takes the plane's evidence with it
+            # (the bound fires one deadline later on a healthy runtime, and a
+            # ``faulthandler`` dump cannot show it — a dead TASK has no thread and no
+            # frame). The WORKLOAD tick got that supervision in #1419; this tick, the
+            # SERVING plane's only sign of life, was started as a bare
+            # ``ensure_future`` and every statement before the record write below was
+            # unguarded — so a raise from ``beat`` ended the serving plane's reporter
+            # for the life of the process, with nothing observed, nothing logged and
+            # nothing recorded. The dump would then show what an idle healthy process
+            # shows, which is exactly the reading the census cannot settle.
+            #
+            # ``CancelledError`` IS NOT CAUGHT and needs no arm of its own: it is a
+            # ``BaseException`` since 3.8, so a shutdown (``close`` cancels this task)
+            # still propagates while everything else is logged, RECORDED through
+            # ``note_tick_death`` — the instrument that names a dead reporter in the
+            # dump — and left running. The tick is NOT re-stamped on the failure path,
+            # deliberately: a stamp would claim this plane reported when it did not,
+            # and the honest fail-safe is the one #1419 states — a plane whose
+            # reporter is truly gone goes unreported and the bound fires on its
+            # deadline, with the reason in the dump rather than one leg quietly
+            # switched off.
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                if self._closed.is_set():
+                    return
+                previous_wall, previous_cpu = previous
+                moment = (time.monotonic(), time.process_time())
+                lag_s, cpu_since_beat_s = moment[0] - previous_wall, moment[1] - previous_cpu
+                previous = moment
+                # PROGRESS, REPORTED TO THE STALL BOUND. This loop is the serving
+                # plane's own sign of life, and it carries ONE stamp — the workload's
+                # is its own (``process._beat_stall_watchdog``). The timer is
+                # re-armed for the earliest of the two deadlines, so a tick here
+                # cannot mask a parked workload loop; that is the whole point of
+                # tracking them apart (see ``stall_watchdog``). Deliberately before
+                # the record write below rather than after it: the bound must be
+                # restarted by THIS LOOP HAVING RUN, not by the write having
+                # succeeded — a failed write is self-healing and must not look like a
+                # stall.
+                stall_watchdog.beat(stall_watchdog.SERVING)
+            except Exception:  # noqa: BLE001 — the guard's job is to keep the plane reported
+                logger.warning(
+                    "runtime heartbeat: the SERVING plane's tick failed; the loop keeps "
+                    "running so the plane is still reported, and the death is recorded in "
+                    "the stall dump",
+                    exc_info=True,
+                )
+                # THROUGH THE TOTAL WRITE (``process._record_tick_death``'s sibling
+                # contract): a raise from here would end the very supervision this arm
+                # exists to keep, and this write reaches the dump's own path lookup.
+                try:
+                    stall_watchdog.note_tick_death(
+                        stall_watchdog.SERVING,
+                        "the serving plane's heartbeat raised; the loop continued, so the "
+                        "plane is reported but this tick stamped nothing",
+                    )
+                except Exception:  # noqa: BLE001 — a diagnostic never ends a reporter
+                    logger.debug("could not record the serving tick's death", exc_info=True)
+                continue
             try:
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
@@ -3844,8 +3887,14 @@ class RuntimeServer:
         from local_operator import incidents
         from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
 
+        # THE BOUND THE CALLER ACTUALLY ENFORCED, which is why it is a parameter
+        # (design review round 1, D2): two arms publish this token with two different
+        # bounds, and the shared sentence names none of them, so the failure reports
+        # its own number here or it reports no number at all. Rendering the window's
+        # constant instead told the operator that an update which had spent fifteen
+        # minutes in the drain gave up "within 5s".
         rendered = incidents.render_cut_off_reason(
-            UPDATE_FAILED_CAUSE, detail=f"({pair})" if pair else ""
+            UPDATE_FAILED_CAUSE, detail=incidents.update_failed_detail(pair, bound)
         )
         try:
             await write_incident(UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered)
@@ -6304,7 +6353,21 @@ class RuntimeServer:
             # what the once-per-episode latch exists to preserve.
             self._frame_cap_warned = False
             return
-        ordinary = self._projection_payload()
+        # BUILD AND CAP THE FRAME OFF THE EVENT LOOP. ``_projection_payload``
+        # runs ``cap_projection_frame``, which serialises a payload that can sit
+        # near the 1 MB wire cap; on the loop that is measured to park the whole
+        # runtime — 13 of 50 runtime-stall dumps in one 24 h window hold the loop
+        # thread in ``json.dumps -> _frame_bytes -> cap_projection_frame``, and
+        # one of those fired the 300 s stall bound and killed the runtime. The
+        # build is a pure function of the projection the fold publishes, so it
+        # belongs in a worker: ``_push`` is a coalesced repaint, never a
+        # request/response, so nothing waits on it within a turn.
+        #
+        # ONLY THE BUILD MOVES. ``_send_to`` stays on the loop and says why
+        # itself (the writer and its lock are loop-owned objects), and the
+        # per-connection frames are derived from ``ordinary`` on the loop after
+        # the hop returns, so the wire bytes are unchanged.
+        ordinary = await asyncio.to_thread(self._projection_payload)
         await asyncio.gather(
             *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )

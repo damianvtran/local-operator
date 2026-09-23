@@ -54,7 +54,6 @@ from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
@@ -1535,6 +1534,7 @@ def credential_update_command(args: argparse.Namespace) -> int:
     """
     from local_operator.ansi import strip_control_sequences
     from local_operator.cli_style import ERROR, WARNING, paint
+    from local_operator.providers.key_prompt import prompt_for_provider_key
     from local_operator.providers.registry import PROVIDER_REGISTRY, env_key_name
 
     # Warn when the key is not one the registry knows, with the closest match \u2014
@@ -1556,16 +1556,13 @@ def credential_update_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    # ``readonly``, NOT ``CredentialManager(...)``.
-    # ``__init__`` runs ``_ensure_config_exists``, so the plaintext
-    # ``credentials.env`` this consolidation retires was recreated by the very
-    # command that now writes only the encrypted store — on a host that had
-    # already migrated and deleted the file (R5). Nothing this command does needs
-    # the file: ``prompt_for_credential`` writes a provider-class STORE row, and
-    # ``config_dir`` is bound by ``_bind`` either way.
-    credential_manager = CredentialManager.readonly(config_dir())
+    # ``prompt_for_provider_key`` writes a provider-class STORE row and creates
+    # nothing: the prompt moved out of the deleted ``CredentialManager`` (PR2b),
+    # whose construction used to recreate the plaintext ``credentials.env`` this
+    # consolidation retires — on a host that had already migrated and deleted the
+    # file (R5). Nothing this command does needs the file.
     try:
-        credential_manager.prompt_for_credential(args.key, reason="update requested")
+        prompt_for_provider_key(args.key, reason="update requested")
     except KeyboardInterrupt:
         # 130 is the shell's SIGINT convention; the message is one quiet line,
         # not the red stack-trace panel the generic handler would have drawn.
@@ -3853,6 +3850,15 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the column entirely and list that session exactly as an ordinary idle one — the
     # defect design review round 1 (D1) measured against this renderer.
     show_updating = any(updating.values()) or any(failed.values())
+    # THE THIRD STATE (design review round 1, D1), gated and separate for the reasons
+    # the two above state: it is not a departure and not an update, it is a runtime
+    # whose own bound fired, dumped and could not end it — stalled with the turn still
+    # inside, and only ``lop stop`` ends it. Without this the listing rendered such a
+    # session exactly as an ordinary idle one, which is the half of the operator's rule
+    # (a runtime is a person's to end once it can no longer finish) that a listing
+    # carries.
+    held = {row["session_id"]: bool(row.get("stall_held")) for row in rows}
+    show_held = any(held.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3867,6 +3873,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
     if show_updating:
         header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
+    if show_held:
+        header += f" {'STALLED':<{HELD_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3911,6 +3919,7 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+
         if show_updating:
             # The cell is RENDERED from the row's pair through the ONE phase reader
             # (``types.update_phase``/``update_short``), so the copy here, the info
@@ -3928,6 +3937,17 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the one column whose text is an identifier rather than prose.
             said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
+        if show_held:
+            # AFTER the updating cell, because the header appends ``STALLED`` after
+            # ``UPDATING`` (agent review round 2, MAJOR-3): emitted the other way round
+            # the two values sat under each other's headers on every row that carries
+            # both — the held cell an updating value, and vice versa. The record's own
+            # phrase is a full sentence and belongs in the notice; a list column carries
+            # the fact, in the words the panel uses, so one state does not acquire two
+            # vocabularies across the two surfaces a reader compares (the rule
+            # ``STOP_RUNG_LABELS`` states for the stop rungs).
+            said_held = HELD_CELL if held.get(row["session_id"]) else ""
+            line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
         print(line)
     return 0
 
@@ -5315,6 +5335,13 @@ WHY_COLUMN_WIDTH = 48
 #: module keeps session internals out of its module scope on purpose (see the
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
+#: What the ``STALLED`` column says, and the width the header needs. The cell names
+#: the state and the remedy in the register the panel uses (``HELD_STATE_WORD``),
+#: because the fact is one the reader must be able to act on from a listing — ONE word
+#: for it on all three surfaces (the panel, the dump and this cell), and no "stalled"
+#: under a header that already says it (design review round 2, D7).
+HELD_CELL = "bound held; lop stop"
+HELD_COLUMN_WIDTH = len(HELD_CELL)
 LEAVING_COLUMN_WIDTH = 51
 
 #: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
@@ -6586,10 +6613,9 @@ def agents_delete_command(
             resolve_radient_credential_sync,
         )
 
-        credential_manager = CredentialManager.readonly(config_dir)
         config_manager = ConfigManager(config_dir)
         base_url = _radient_hub_base_url(config_manager)
-        api_key = resolve_radient_credential_sync(credential_manager, base_url)
+        api_key = resolve_radient_credential_sync(config_manager.config_dir, base_url)
         if not api_key:
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
             return 1
@@ -6612,17 +6638,20 @@ def agents_delete_command(
 # --- Additive subcommand handlers (rewrite) --------------------------------
 
 
-def _build_auth_stack(config_dir: Path) -> tuple[Any, Any]:
-    """(auth_store, credential_manager) for the login handlers.
+def _build_auth_stack(config_dir: Path) -> tuple[Any, Path]:
+    """``(auth_store, config_dir)`` for the login handlers.
+
+    The second element is the config ROOT the store-first readers resolve
+    under, not the ``CredentialManager`` that used to carry it: PR2b deleted
+    that class and ``AuthStore``/``list_logins`` take the path directly.
 
     Lazy import of the providers stream's AuthStore — the CLI module top
     level must never depend on it.
     """
     from local_operator.providers.auth_store import AuthStore
 
-    credential_manager = CredentialManager.readonly(config_dir)
-    auth_store = AuthStore(credential_manager=credential_manager)
-    return auth_store, credential_manager
+    auth_store = AuthStore(config_dir=config_dir)
+    return auth_store, config_dir
 
 
 def login_command(args: argparse.Namespace) -> int:
@@ -6632,9 +6661,9 @@ def login_command(args: argparse.Namespace) -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return 1
-    auth_store, credential_manager = _build_auth_stack(config_dir())
+    auth_store, config_dir_path = _build_auth_stack(config_dir())
     try:
-        return run_login(getattr(args, "provider", None), credential_manager, auth_store)
+        return run_login(getattr(args, "provider", None), config_dir_path, auth_store)
     finally:
         auth_store.close()
 
@@ -6646,7 +6675,7 @@ def logout_command(args: argparse.Namespace) -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return 1
-    auth_store, _credential_manager = _build_auth_stack(config_dir())
+    auth_store, _config_dir = _build_auth_stack(config_dir())
     try:
         return run_logout(args.provider, auth_store)
     finally:
@@ -6660,9 +6689,9 @@ def login_status_command() -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return 1
-    auth_store, credential_manager = _build_auth_stack(config_dir())
+    auth_store, config_dir_path = _build_auth_stack(config_dir())
     try:
-        return list_logins(auth_store, credential_manager)
+        return list_logins(auth_store, config_dir_path)
     finally:
         auth_store.close()
 
@@ -7459,7 +7488,6 @@ def mcp_command(args: argparse.Namespace) -> int:
 async def create_session(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: "AgentRegistry",
     *,
     has_ui: bool = False,
@@ -7479,7 +7507,6 @@ async def create_session(
     return await _create_session(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=has_ui,
         defer_mcp_wiring=defer_mcp_wiring,
@@ -7516,7 +7543,6 @@ def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
 async def _run_headless_repl(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: "AgentRegistry",
 ) -> int:
     """Plain-stream REPL for non-tty stdout or ``--no-tui``.
@@ -7551,9 +7577,7 @@ async def _run_headless_repl(
         logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     console = Console(stderr=True, highlight=False)
-    session = await create_session(
-        args, config_manager, credential_manager, agent_registry, has_ui=False
-    )
+    session = await create_session(args, config_manager, agent_registry, has_ui=False)
     renderer = PrintRenderer(stream_text=True)
     unsubscribe = renderer.attach(session)
     console.print(
@@ -7588,7 +7612,6 @@ async def _run_headless_repl(
 
 def _preflight_hosting_model(
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: "AgentRegistry",
     current_agent: Optional[Any],
     args: argparse.Namespace,
@@ -7692,7 +7715,7 @@ def _preflight_hosting_model(
         # Every other path keeps fail-fast, but with the WHOLE quickstart at
         # once (item A1/U1) — the old message named only "Hosting platform is
         # not configured" and the user fixed it one error at a time.
-        _print_first_run_quickstart(credential_manager)
+        _print_first_run_quickstart()
         return 1
     except ValueError as exc:
         # A model-resolution error (hosting set, no default known): fatal on
@@ -7708,10 +7731,10 @@ def _preflight_hosting_model(
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
 
-    return _preflight_api_key(hosting, credential_manager, require_key=require_api_key)
+    return _preflight_api_key(hosting, config_manager.config_dir, require_key=require_api_key)
 
 
-def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
+def _print_first_run_quickstart() -> None:
     """One complete message naming hosting, model AND key at once (item A1/U1).
 
     The fail-fast paths (headless REPL, exec, non-tty) reach this when nothing
@@ -7753,7 +7776,7 @@ def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
 
 
 def _preflight_api_key(
-    hosting: str, credential_manager: CredentialManager, *, require_key: bool = True
+    hosting: str, config_dir: Path | None, *, require_key: bool = True
 ) -> int | None:
     """Verify that the provider has a credential source.
 
@@ -7792,7 +7815,7 @@ def _preflight_api_key(
         from local_operator.providers.auth_store import AuthStore
         from local_operator.providers.registry import credential_provider_id
 
-        auth_store = AuthStore(credential_manager=credential_manager)
+        auth_store = AuthStore(config_dir=config_dir)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -7892,7 +7915,6 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
 
         base_dir = config_dir()
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager.readonly(base_dir)
         from local_operator.agents import AgentRegistry  # lazy: heavy module
 
         agent_registry = AgentRegistry(base_dir)
@@ -7902,7 +7924,6 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
         scheduler_service = SchedulerService(
             agent_registry=agent_registry,
             config_manager=config_manager,
-            credential_manager=credential_manager,
             env_config=get_env_config(),
             operator_type=OperatorType.CLI,
             verbosity_level=(
@@ -8277,10 +8298,9 @@ def main() -> int:
                     resolve_radient_credential_sync,
                 )
 
-                credential_manager = CredentialManager.readonly(base_dir)
                 config_manager = ConfigManager(base_dir)
                 base_url = _radient_hub_base_url(config_manager)
-                api_key = resolve_radient_credential_sync(credential_manager, base_url)
+                api_key = resolve_radient_credential_sync(config_manager.config_dir, base_url)
                 if not api_key:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
@@ -8680,7 +8700,7 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return 1
-                key_result = _preflight_api_key(hosting, CredentialManager.readonly(base_dir))
+                key_result = _preflight_api_key(hosting, base_dir)
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
@@ -8722,7 +8742,6 @@ def main() -> int:
             return 1
 
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager.readonly(base_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
@@ -8839,7 +8858,6 @@ def main() -> int:
         # path keeps its fatal check — a scripted run has no login prompt).
         preflight_result = _preflight_hosting_model(
             config_manager,
-            credential_manager,
             agent_registry,
             current_agent,
             args,
@@ -9039,8 +9057,8 @@ def main() -> int:
             from local_operator.providers.auth_store import AuthStore
             from local_operator.providers.controller import ProviderController
 
-            tui_auth_store = AuthStore(credential_manager=credential_manager)
-            tui_controller = ProviderController(tui_auth_store, credential_manager)
+            tui_auth_store = AuthStore(config_dir=config_manager.config_dir)
+            tui_controller = ProviderController(tui_auth_store, config_manager.config_dir)
             try:
                 # BIND BY KEYWORD. ``_run_with_scheduler`` forwards *args
                 # positionally, so a positional controller lands in whatever
@@ -9132,7 +9150,6 @@ def main() -> int:
                 _run_headless_repl,
                 args,
                 config_manager,
-                credential_manager,
                 agent_registry,
             )
         )

@@ -50,7 +50,6 @@ from local_operator.agents import AgentData, AgentRegistry
 from local_operator.bootstrap import initialize_operator, resolve_model_configuration
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -500,7 +499,6 @@ class ServerExecutor:
     def __init__(
         self,
         model_configuration: ModelConfiguration,
-        credential_manager: Optional[CredentialManager] = None,
         config_manager: Optional[ConfigManager] = None,
         agent_registry: Optional[AgentRegistry] = None,
         agent: Optional[AgentData] = None,
@@ -510,7 +508,6 @@ class ServerExecutor:
         status_queue: StatusQueue | None = None,
     ) -> None:
         self.model_configuration = model_configuration
-        self.credential_manager = credential_manager
         self.config_manager = config_manager
         self.agent_registry = agent_registry
         self.agent = agent
@@ -601,7 +598,12 @@ class ServerExecutor:
         settings = (
             self.config_manager.get_config().values if self.config_manager is not None else None
         )
-        auth_store = AuthStore(credential_manager=self.credential_manager)
+        # The store is reached by config ROOT, not by a credential carrier: the
+        # ``CredentialManager`` that used to carry it is deleted (PR2b) and
+        # ``ConfigManager`` already owns this path.
+        auth_store = AuthStore(
+            config_dir=self.config_manager.config_dir if self.config_manager is not None else None
+        )
         stream_fn = create_stream_fn(auth_store, settings=settings)
         try:
             request = ChatRequest(
@@ -653,7 +655,6 @@ class ServerOperator:
         self,
         executor: ServerExecutor,
         config_manager: ConfigManager,
-        credential_manager: CredentialManager,
         agent_registry: AgentRegistry,
         env_config: EnvConfig,
         hosting: str,
@@ -667,7 +668,6 @@ class ServerOperator:
         self.model_selection_override = model_selection_override
         self.executor = executor
         self.config_manager = config_manager
-        self.credential_manager = credential_manager
         self.agent_registry = agent_registry
         self.env_config = env_config
         self.hosting = hosting
@@ -731,7 +731,6 @@ class ServerOperator:
         session = await initialize_operator(
             operator_type=OperatorType.SERVER,
             config_manager=self.config_manager,
-            credential_manager=self.credential_manager,
             agent_registry=self.agent_registry,
             env_config=self.env_config,
             # The routes mutate ``executor.model_configuration`` to apply the
@@ -869,7 +868,6 @@ def _last_assistant_text(messages: Sequence[Message | CustomMessage]) -> str:
 def create_operator(
     request_hosting: str,
     request_model: str,
-    credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
@@ -899,7 +897,6 @@ def create_operator(
 
     model_configuration, hosting, model_name = resolve_model_configuration(
         config_manager,
-        credential_manager,
         env_config,
         request_hosting=request_hosting,
         request_model=request_model,
@@ -910,7 +907,6 @@ def create_operator(
 
     executor = ServerExecutor(
         model_configuration=model_configuration,
-        credential_manager=credential_manager,
         config_manager=config_manager,
         agent_registry=agent_registry,
         agent=current_agent,
@@ -922,7 +918,6 @@ def create_operator(
     operator = ServerOperator(
         executor=executor,
         config_manager=config_manager,
-        credential_manager=credential_manager,
         agent_registry=agent_registry,
         env_config=env_config,
         hosting=hosting,

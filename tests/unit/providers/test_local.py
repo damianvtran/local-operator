@@ -422,10 +422,7 @@ def test_desktop_provider_and_model_routes_share_local_configuration(local_serve
     from fastapi.testclient import TestClient
 
     from local_operator.env import EnvConfig
-    from local_operator.server.dependencies import (
-        get_credential_manager,
-        get_env_config,
-    )
+    from local_operator.server.dependencies import get_config_manager, get_env_config
     from local_operator.server.routes.models import router
 
     local_server["manager"].update_config(
@@ -433,7 +430,7 @@ def test_desktop_provider_and_model_routes_share_local_configuration(local_serve
     )
     app = FastAPI()
     app.include_router(router)
-    app.dependency_overrides[get_credential_manager] = lambda: MagicMock()
+    app.dependency_overrides[get_config_manager] = lambda: MagicMock()
     app.dependency_overrides[get_env_config] = lambda: EnvConfig()
     with TestClient(app) as client:
         providers = client.get("/v1/models/providers")

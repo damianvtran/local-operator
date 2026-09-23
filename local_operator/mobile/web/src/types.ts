@@ -46,7 +46,10 @@ export type SubagentStatus =
 	| "completed"
 	| "failed"
 	| "cancelled"
-	| "parked";
+	| "parked"
+	/** Waiting for a free slot in the parent's capacity. NOT running: a parked
+	    child spends nothing, and the roster header counts the running lane. */
+	| "queued";
 
 export interface TranscriptEntryDetails {
 	/* The fold serializes these in the shape the tool produced, NOT always
@@ -280,7 +283,32 @@ export interface SessionSummary {
 	    omit the field entirely, so readers must treat absence as false. */
 	unseen?: boolean;
 	pending_kind: "approval" | "ask" | "" | null;
-	subagents_running: number;
+	/** The record's own phrase when the runtime has been SIGNALLED and is
+	    finishing the work in flight before it exits; `""` otherwise (an older
+	    daemon omits it, so readers normalise with `?? ""`).
+
+	    RANKED HERE RATHER THAN DRAWN, and that is the point: a draining session
+	    has children still running, so a mark derived from the counts alone would
+	    advertise delegated work for a row the list itself is about to describe as
+	    leaving. The daemon already refuses to report counts for such an entry
+	    (`_advertisable_counts`); this field is the second guard for a client
+	    talking to a build that predates that refusal. */
+	leaving?: string;
+	/** How many of this session's OWN delegated children are RUNNING. `null`
+	    means the daemon did not report a count, and MUST NOT be read as zero: a
+	    row that could not be asked must not be told "no subagents". The daemon
+	    reports `null` for an entry it cannot vouch for (its dial is degraded, the
+	    owner stopped beating, the runtime is leaving) as well as for a session
+	    with no live record at all, and an older daemon omits the field — so
+	    readers normalise with `typeof … === "number"`. */
+	subagents_running?: number | null;
+	/** Delegated children parked waiting for a capacity slot. Separate from the
+	    running count for the reason the record keeps them apart: a parked child
+	    spends nothing, but "queued with nothing running" is still not idle. The
+	    two fields are declared on the same terms — both nullable AND optional —
+	    because a reader that tolerates absence for one and not the other is a
+	    reader whose two arms drift (review round 1, R2). */
+	subagents_queued?: number | null;
 	todos_open: number;
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */

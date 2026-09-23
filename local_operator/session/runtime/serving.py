@@ -1686,6 +1686,32 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
         return True
 
+    def end_drain(self) -> bool:
+        """Release the drain latch: the move this runtime committed to is NOT happening.
+
+        THE UNDO OF :meth:`begin_drain`, and it exists for one caller —
+        ``process._abandon_move``, the arm that gives up a build handover that could
+        not reach idle. Without it the process would keep serving while refusing every
+        admission for the rest of its life, which is the wedge the give-up arm exists
+        to end rather than to create: a runtime that is serving again must be able to
+        TAKE work again, or the session it kept serving is unreachable.
+
+        ``False`` when no drain was latched, so a caller need not check first.
+
+        WHAT IT DOES NOT UNDO, stated because the omission is deliberate: the wakes
+        already diverted to the inbox stay there. Undiverting would mean re-installing
+        the resume catch-up shim :meth:`Session.retire_wakes_to_inbox` replaced, and
+        the rows are not lost either way — ``process._keep_loaded_build`` drains that
+        same spool back IN as part of the abandon, which is the whole reason it runs
+        before this returns.
+        """
+        if not getattr(self, "_draining", False):
+            return False
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        return True
+
     # -- the update window -------------------------------------------------
     #
     # The IDLE handover's admission window. ``begin_retire`` is a one-way door that
@@ -6440,12 +6466,17 @@ class ServingSessionHandle(SessionHandle):
         published on the record because a subagent graph is in-process state no
         other session can observe.
 
-        The roster is ONE flat read: ``SubagentComms.nodes()`` already contains
-        every nested descendant, so counting is a filter over that list and must
-        never have a recursive walk added on top — that would double count every
-        node below depth 0. The statuses counted as running mirror the ones
-        ``info.collect`` uses, so the record and this session's own tree cannot
-        disagree.
+        The roster is ONE linear read: ``SubagentComms.status_counts()`` counts
+        every nested descendant in a single pass over the shared registry, so
+        counting is a filter over that histogram and must never have a
+        recursive walk added on top — that would double count every node below
+        depth 0. (The count used to be a filter over the ``nodes()`` LIST, which
+        read as "one flat read" and was not: ``nodes()`` -> ``node()`` ->
+        ``_describe()`` -> ``_live_twin()`` walked every record once per record,
+        so this publisher was quadratic in the roster and ran on the event loop
+        once per root event. See ``RosterPass``.) The statuses counted as
+        running mirror the ones ``info.collect`` uses, so the record and this
+        session's own tree cannot disagree.
 
         ``(None, None)`` on an unreadable roster rather than ``(0, 0)``: an
         unanswerable probe is not a measurement of zero, and the reader's
@@ -6456,17 +6487,12 @@ class ServingSessionHandle(SessionHandle):
             comms = getattr(session, "subagent_comms", None)
             if comms is None:
                 return (None, None)
-            nodes = comms.nodes()
+            counts = comms.status_counts()
         except Exception:  # noqa: BLE001 — an unhealthy session still publishes
             logger.debug("could not read the subagent roster", exc_info=True)
             return (None, None)
-        running = queued = 0
-        for node in nodes:
-            status = str(getattr(node, "status", "") or "")
-            if status in RUNNING_SUBAGENT_STATUSES:
-                running += 1
-            elif status == "queued":
-                queued += 1
+        running = sum(counts.get(status, 0) for status in RUNNING_SUBAGENT_STATUSES)
+        queued = counts.get("queued", 0)
         return (running, queued)
 
     def _publish_subagents(self) -> None:
@@ -6475,8 +6501,13 @@ class ServingSessionHandle(SessionHandle):
         Driven from ``_publish_busy`` — i.e. from ``_notify`` — because a
         subagent launching or settling IS a session event, so the transition
         publish is sub-second under any real workload while the 15 s heartbeat
-        floor bounds a missed publish. ``set_subagents`` de-duplicates, so the
-        steady-state cost is one dict walk plus two comparisons per event.
+        floor bounds a missed publish. ``set_subagents`` de-duplicates, so a
+        publish that changes nothing costs one comparison per side.
+
+        The walk behind the counts is linear, and saying so is the point: it
+        was quadratic, and the earlier claim here ("one dict walk plus two
+        comparisons per event") was what stopped anyone looking. See
+        :meth:`subagent_counts` and ``SubagentComms.RosterPass``.
         """
         server = self._registrant
         setter = getattr(server, "set_subagents", None)
@@ -6556,9 +6587,10 @@ class ServingSessionHandle(SessionHandle):
         # registry in ``SubagentComms`` is the only place that knows it. Both
         # hosts must therefore agree about the same row, or a runtime-hosted
         # session 404s every child transcript while a TUI-hosted one serves it.
-        # The cost is the one the TUI already pays per folded event (one
-        # registry walk plus a bounded copy); no child transcript ever leaves
-        # with it.
+        # The cost is the one the TUI already pays per folded event: one linear
+        # registry pass, plus a job-row lookup and the outcome/error text caps
+        # per node (both listed as unaddressed in the PR). No child transcript
+        # ever leaves with it.
         comms = getattr(self._session, "_subagent_comms", None)
         if comms is not None:
             self._fold.set_subagent_details(comms)
@@ -6710,14 +6742,12 @@ async def spawn_owned_session(
     # function-local form is what keeps that future change cheap.
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
     from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session_factory import create_session
 
     config_directory = config_dir()
     config_manager = ConfigManager(config_dir=config_directory)
-    credential_manager = CredentialManager.readonly(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
     # The publication latch the deferred MCP wiring parks on. Created HERE, on
@@ -6761,7 +6791,6 @@ async def spawn_owned_session(
     session = await create_session(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=False,
         cwd=cwd,

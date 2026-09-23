@@ -24,7 +24,7 @@ async def test_list_credentials_success(test_app_client, mock_credential_manager
     """Test retrieving credentials list successfully.
 
     The keys are armed as provider-class STORE ROWS (PR2a): the endpoint lists the
-    store, and the legacy ``CredentialManager`` file view it used to union is gone.
+    store, and the legacy ``credentials.env`` file view it used to union is gone.
     """
     _store_key(mock_credential_manager, "OPENAI_API_KEY", "test-key")
     _store_key(mock_credential_manager, "SERPAPI_API_KEY", "test-key2")

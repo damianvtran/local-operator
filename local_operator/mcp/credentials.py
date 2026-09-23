@@ -44,8 +44,8 @@ class MCPCredentials(BaseModel):
 def credential_source(key: str, base: Path) -> str:
     """Which store holds ``key``: ``encrypted``, ``missing``, or ``unavailable``.
 
-    **Nothing here creates a credential-shaped file.** ``CredentialManager``'s
-    plain constructor calls ``_ensure_config_exists``, which CREATES the
+    **Nothing here creates a credential-shaped file.** A plain credential
+    constructor once called ``_ensure_config_exists``, which CREATED the
     plaintext ``credentials.env`` — and a metadata probe that creates the store
     it is describing is a side effect the caller never asked for, on a file the
     consolidation retires.

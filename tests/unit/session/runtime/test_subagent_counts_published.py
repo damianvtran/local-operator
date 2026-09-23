@@ -27,6 +27,7 @@ Two properties are load-bearing and both are asserted here:
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,21 @@ class _Comms:
     def nodes(self) -> list[_Node]:
         return list(self._nodes)
 
+    def status_counts(self) -> dict[str, int]:
+        """The histogram the real registry builds in ONE linear pass.
+
+        ``SubagentComms.status_counts`` is what the probe reads, so the stub has
+        to answer it in the registry's own shape: one entry per child, nested
+        descendants included (the registry IS flat). Derived from the same node
+        list the filter is tested against, so this fixture keeps one source of
+        truth; that the real walk is single-pass is pinned on the real registry
+        in ``tests/unit/harness/test_comms.py``.
+        """
+        counts: dict[str, int] = {}
+        for node in self._nodes:
+            counts[node.status] = counts.get(node.status, 0) + 1
+        return counts
+
 
 def _with_roster(session: Any, comms: Any) -> None:
     """Install a roster the real ``subagent_comms`` property will hand back.
@@ -97,12 +113,18 @@ def _with_roster(session: Any, comms: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_the_probe_counts_running_and_queued_off_one_flat_roster(tmp_path: Path) -> None:
-    """``nodes()`` already contains every nested descendant.
+    """The counts come off ONE pass over the registry, and the probe only filters.
 
-    So the count is a ``len()`` over a filter. Adding a recursive child walk on
-    top — the obvious-looking way to "include nested subagents" — would count
-    every node below depth 0 twice. The roster here is three deep for that
-    reason: a recursive implementation would report more than three.
+    ``SubagentComms.status_counts()`` walks the registry once and hands back a
+    histogram, so the count is a ``len()``-style sum over it. Adding a recursive
+    child walk on top — the obvious-looking way to "include nested subagents" —
+    would count every node below depth 0 twice. The roster here is three deep
+    for that reason: a recursive implementation would report more than three.
+
+    The walk used to be ``nodes()``, which read like one flat list and was
+    quadratic underneath (``nodes()`` -> ``node()`` -> ``_describe()`` ->
+    ``_live_twin()`` walked every record once per record). The single-pass
+    property is pinned on the real registry in ``test_comms.py``.
     """
     session, handle, _ = await _rig(tmp_path / "s")
     _with_roster(
@@ -195,6 +217,9 @@ async def test_an_unreadable_roster_publishes_none_rather_than_zero(tmp_path: Pa
 
     class _Exploding:
         def nodes(self) -> list[_Node]:
+            raise RuntimeError("roster unavailable")
+
+        def status_counts(self) -> dict[str, int]:
             raise RuntimeError("roster unavailable")
 
     _with_roster(session, _Exploding())
@@ -317,6 +342,14 @@ async def test_the_probe_counts_a_REAL_SubagentComms_roster(tmp_path: Path) -> N
     assert statuses == {
         row.job_id: row.status for row in comms.roster()
     }, "node() and roster() must agree; two derivations of one fact is how they drift"
+    # ...and the histogram the PROBE reads is that same population. `subagent_counts`
+    # sums `status_counts()` while every other reader filters `nodes()`, so this is
+    # the pair that can drift silently: a histogram counting per registry KEY while
+    # `nodes()` counts per resolved RECORD would publish a total the tree disagrees
+    # with, and nothing else in this file would notice.
+    assert comms.status_counts() == Counter(
+        node.status for node in comms.nodes()
+    ), "status_counts() must count exactly the population nodes() reports"
     assert handle.subagent_counts() == (1, 1), "a live child is not 'gone'"
 
 

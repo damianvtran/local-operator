@@ -116,7 +116,6 @@ async def boot_resume_quit(config_dir: Path) -> str:
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import (
         await_store_maintenance_for_tests,
         create_session,
@@ -136,10 +135,9 @@ async def boot_resume_quit(config_dir: Path) -> str:
 
     config_manager = ConfigManager(config_dir)
     registry = AgentRegistry(config_dir)
-    credentials = CredentialManager(config_dir)
 
     session = await create_session(
-        args(), config_manager, credentials, registry, has_ui=True, defer_mcp_wiring=True
+        args(), config_manager, registry, has_ui=True, defer_mcp_wiring=True
     )
     live_id = getattr(getattr(session, "transcript", None), "directory", Path("?")).name
     await await_store_maintenance_for_tests()
@@ -148,7 +146,6 @@ async def boot_resume_quit(config_dir: Path) -> str:
     resumed = await create_session(
         args(resume="real00"),
         config_manager,
-        credentials,
         registry,
         has_ui=True,
         defer_mcp_wiring=True,

@@ -425,20 +425,20 @@ def build_config(
     )
 
 
-def _open_store(config_dir: Path | None) -> tuple[Any, Any]:
-    """(auth_store, credential_manager) exactly as the CLI builds them.
+def _open_store(config_dir: Path | None) -> tuple[Any, Path]:
+    """(auth_store, config root) exactly as the CLI builds them.
 
-    ``cli._build_auth_stack`` is the reference: ``CredentialManager`` over the
-    config dir feeds ``AuthStore``. Imported lazily so the script's import
-    graph stays free of the application until a store is actually opened.
+    ``cli._build_auth_stack`` is the reference: the config ROOT feeds
+    ``AuthStore``. It used to be a ``CredentialManager`` carrying it, which PR2b
+    deleted. Imported lazily so the script's import graph stays free of the
+    application until a store is actually opened.
     """
 
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir as default_config_dir
     from local_operator.providers.auth_store import AuthStore
 
-    manager = CredentialManager(config_dir or default_config_dir())
-    return AuthStore(credential_manager=manager), manager
+    root = config_dir or default_config_dir()
+    return AuthStore(config_dir=root), root
 
 
 def _model_client(

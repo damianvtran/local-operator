@@ -7,10 +7,11 @@ text path as interactive sessions; private reasoning is never an input here.
 One reply, one shape, however it was framed. The envelope a reply is validated
 against is ``{"actions": [...], "public_observations": ""}``; the
 ``action_batch`` object around the array, a ``reply_version``, a generic
-tool-call wrapper and trailing text are all FRAMING, and framing is normalised
-here rather than refused. Nothing in this module reads a model, a provider or a
-benchmark: the accepted set is a statement about our own contract and about the
-serializations any harness uses to wrap a function call.
+tool-call wrapper, trailing text, and an ``actions`` value the model sent as a
+JSON-encoded STRING rather than as the array are all FRAMING, and framing is
+normalised here rather than refused. Nothing in this module reads a model, a
+provider or a benchmark: the accepted set is a statement about our own contract
+and about the serializations any harness uses to wrap a function call.
 """
 
 from __future__ import annotations
@@ -106,9 +107,9 @@ _MAX_UNWRAP_DEPTH = 2
 #: How many candidate ``{`` positions the trailing-remainder scan may try before
 #: giving up. Each failed decode rescans forward one character, so an unbounded
 #: scan over a remainder full of bare braces goes quadratic -- the same bound,
-#: and the same reason, as ``_iter_json_objects`` in the tool layer. Giving up
-#: means "no competing batch found", which degrades to the tolerant path rather
-#: than to an error.
+#: and the same reason, as ``_iter_json_objects`` in the tool layer. Exhaustion is
+#: distinct from finding no competing batch: when the rest was not checked, the
+#: parser must refuse rather than treat an unchecked tail as harmless.
 _MAX_TRAILING_DECODE_ATTEMPTS = 256
 
 
@@ -408,16 +409,23 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
             ) from error
         raise DecisionParseError(f"decision is not valid JSON: {error}") from error
     trailing = payload[end:].strip()
-    if trailing and _competing_batch_offset(trailing, decoded, decoder) is not None:
-        raise DecisionParseError(
-            "decision carries a second action batch for the same observation; "
-            "send exactly one action batch"
-        )
+    if trailing:
+        observation_ids, uses_string_actions = _batch_observation_ids(decoded)
+        offset, exhausted = _competing_batch_offset(trailing, observation_ids, decoder)
+        if offset is not None or (exhausted and uses_string_actions):
+            raise DecisionParseError(
+                "decision carries a second action batch for the same observation; "
+                "send exactly one action batch"
+            )
     return decoded, trailing
 
 
-def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecoder) -> int | None:
-    """Offset of a second batch in ``trailing`` that competes with ``decoded``.
+def _competing_batch_offset(
+    trailing: str,
+    observation_ids: set[str],
+    decoder: json.JSONDecoder,
+) -> tuple[int | None, bool]:
+    """The competing batch offset and whether unexamined candidates remain.
 
     "Competes" means it names the SAME ``observation_id``: only a decision
     about the screen currently in front of the model can supersede the one
@@ -425,13 +433,16 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
     than adjacency or bare JSON-ness, is the one that separates a superseding
     batch from the harness feedback a model quotes back at itself.
 
-    Returns ``None`` when the remainder is ordinary prose, which is the common
-    case and the one that must stay cheap.
+    Compare candidate object IDs with the supplied observation IDs. Returns
+    the competing object's offset, if found, and whether the candidate
+    budget was exhausted while more objects remained unchecked. Ordinary prose
+    without candidate objects returns ``(None, False)`` and stays cheap. Exhaustion
+    is reported separately so only the new string-coercion path needs to refuse;
+    legacy array replies keep their established bounded best-effort behavior.
     """
 
-    observation_ids = _batch_observation_ids(decoded)
     if not observation_ids:
-        return None
+        return None, False
     # A decision is always an object, so only "{" can start a competing batch;
     # the scan is bounded the same way ``_iter_json_objects`` is bounded, since
     # a remainder full of bare braces would otherwise cost a rescan each.
@@ -440,7 +451,7 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
     while attempts < _MAX_TRAILING_DECODE_ATTEMPTS:
         start = trailing.find("{", index)
         if start < 0:
-            return None
+            return None, False
         attempts += 1
         try:
             candidate, end = decoder.raw_decode(trailing, start)
@@ -454,19 +465,104 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
         index = max(end, start + 1)
         if not isinstance(candidate, Mapping):
             continue
-        if _batch_observation_ids(candidate) & observation_ids:
-            return start
-    return None
+        candidate_ids, _ = _batch_observation_ids(candidate)
+        if candidate_ids & observation_ids:
+            return start, False
+    # Exhaustion matters only when there is at least one candidate that the
+    # bounded scan did not inspect; exactly 256 harmless objects followed by
+    # ordinary prose is fully checked and remains accepted.
+    return None, trailing.find("{", index) >= 0
 
 
-def _batch_observation_ids(value: Any) -> set[str]:
+def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
+    """The action array a JSON-encoded ``actions`` STRING evidently carries.
+
+    A model that writes its actions as a string -- ``{"actions": "[{...}]"}``
+    -- has stated a complete, executable decision in a spelling this decoder
+    used to refuse, and the refusal cost a whole paid call to repair with a
+    re-prompt that then repeated the mistake: 9 of one OSWorld episode's 120
+    calls were exactly this shape (judge5-20260921-231232, 7.5% of that
+    episode's calls), and 30 of the campaign runs' 74 sealed refusals are it
+    (counted 2026-09-22 over ``~/worktrees/osworld/runs/*/evidence/ep-*``). It
+    is a GENERAL tolerance about a spelling of our own contract, so it belongs
+    here, on the boundary every interface's reply crosses -- not at one caller.
+
+    DECODED through :func:`_decode_leading_json`, NOT ``json.loads``, because
+    in every one of those 30 the string is more than the array: it is the tail
+    of the model's OWN envelope -- the array followed by
+    ``, "public_observations": "..."}`` -- because the model double-encoded the
+    rest of the object it was writing. Reusing that decoder means the tolerance
+    keeps the one-sided rule a reply already gets: leading junk is still
+    refused, and a second batch for the same observation inside the string
+    still refuses the reply, so this can never execute a decision the model
+    superseded.
+
+    Returns ``(value, False)`` unless the leading JSON value is a NON-EMPTY
+    ARRAY OF OBJECTS -- which is what an action array is, and the entire claim
+    being made here. A string that does not decode, or decodes to a scalar, to
+    an array of scalars, or to an empty array, comes back UNCHANGED, so that
+    reply keeps the refusal it always had: the tolerance may only accept a
+    decision, never widen a refusal into one, and a string that is not an action
+    structure must stay the malformation it is.
+
+    The claim stops at the ARRAY on purpose: whether the objects inside it are
+    valid actions is the action protocol's question, not the decoder's (this
+    module is framing-only -- see its docstring). A string carrying an array
+    whose objects are not actions is still refused, by ``parse_decision`` and
+    with that class and hint (``unknown-action-kind``, a missing ``kind``, a
+    stale binding) rather than with the generic batch-shape sentence, which is
+    the same layering the identical objects get when the array is not a string.
+
+    No logging here, deliberately. This runs over candidate objects while
+    scanning untrusted trailing text (see :func:`_batch_observation_ids`) as well
+    as over the reply's own decision, and a record that means "a reply was
+    accepted this way" must not fire for text that was merely looked at. The
+    caller that accepts the reply records it.
+
+    The note inside that tail is NOT recovered on purpose: it is a JSON
+    FRAGMENT, so locating where the model's object began is the same guess
+    :func:`_decode_leading_json` refuses to make for leading noise. The decision
+    is what must not cost the turn; the note is memory, and a batch carrying no
+    note is the ordinary legacy shape this module already accepts.
+    """
+
+    if not isinstance(value, str):
+        return value, False
+    try:
+        decoded, trailing = _decode_leading_json(value)
+    except DecisionParseError:
+        return value, False
+    if not isinstance(decoded, list) or not decoded:
+        return value, False
+    if not all(isinstance(action, Mapping) for action in decoded):
+        return value, False
+    if trailing:
+        observation_ids, _uses_string_actions = _batch_observation_ids({"actions": decoded})
+        offset, exhausted = _competing_batch_offset(
+            trailing,
+            observation_ids,
+            # The decoder is built with the same hook as ``_decode_leading_json``'s
+            # so a candidate carrying duplicate keys is refused identically.
+            json.JSONDecoder(object_pairs_hook=_unique_object),
+        )
+        if offset is not None or exhausted:
+            # Unlike the legacy array spelling, this reply is accepted only by
+            # coercing the string to actions; if the bounded scan left candidate
+            # objects unchecked, the ambiguity guarantee cannot be established.
+            return value, False
+    return decoded, True
+
+
+def _batch_observation_ids(value: Any) -> tuple[set[str], bool]:
     """The observation ids an action-batch-shaped object binds to.
 
     Read from the ACTIONS rather than from a top-level ``observation_id``: a
     model reply carries the id per action (the runner supplies the batch-level
     one itself), so a top-level lookup finds nothing on the very shape this
     needs to compare. Returns an empty set for anything that is not batch
-    shaped, which the caller treats as "not a competing decision".
+    shaped, which the caller treats as "not a competing decision". The second
+    result indicates whether an accepted action array came from string coercion;
+    only that new spelling must fail closed when the bounded outer scan expires.
 
     The batch is located through the same normalisation an accepted reply gets,
     so a WRAPPED second batch competes exactly as a bare one does -- otherwise
@@ -480,20 +576,30 @@ def _batch_observation_ids(value: Any) -> set[str]:
         # A wrapper whose payload is not JSON at all cannot be a batch this
         # scan is looking for. Degrading here is required: this runs over
         # untrusted trailing text on the decode hot path.
-        return set()
+        return set(), False
     if not isinstance(value, Mapping):
-        return set()
-    actions = value.get("actions")
-    if not isinstance(actions, list):
-        nested = value.get("action_batch")
-        actions = nested.get("actions") if isinstance(nested, Mapping) else nested
-    if not isinstance(actions, list) or not actions:
-        return set()
-    return {
-        action["observation_id"]
-        for action in actions
-        if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
-    }
+        return set(), False
+    # Match the normaliser's two locations independently. In particular, the
+    # top-level ``actions`` value may be a JSON-encoded string; ignoring it here
+    # would make the outer trailing-batch scan blind to the very spelling that
+    # normalization accepts. Unioning both valid arrays is conservative for an
+    # ambiguous object carrying both locations: either one may bind a competing
+    # decision to this observation.
+    nested = value.get("action_batch")
+    nested_value = nested.get("actions") if isinstance(nested, Mapping) else nested
+    observation_ids: set[str] = set()
+    uses_string_actions = False
+    for raw_actions in (value.get("actions"), nested_value):
+        actions, coerced = _actions_from_json_string(raw_actions)
+        uses_string_actions = uses_string_actions or coerced
+        if not isinstance(actions, list):
+            continue
+        observation_ids.update(
+            action["observation_id"]
+            for action in actions
+            if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
+        )
+    return observation_ids, uses_string_actions
 
 
 def _carries_decision(value: Mapping[str, Any]) -> bool:
@@ -608,12 +714,14 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
 
     What is ACCEPTED here is deliberately framing-blind: a bare action array, a
     bare array under ``action_batch``, the full envelope, any of those inside
-    one generic tool-call wrapper, and any of those with a ``reply_version`` or
-    with extra keys beside them. What is still REFUSED is what cannot be read as
-    a decision: malformed or duplicated JSON, two action arrays that could each
-    be the decision, and a batch that is not an object carrying ``actions``.
-    Those are the refusals that are doing real work, and they are the only ones
-    left in this module.
+    one generic tool-call wrapper, any of those with a ``reply_version`` or with
+    extra keys beside them, and an ``actions`` value that is a JSON-encoded
+    STRING carrying the array (see :func:`_actions_from_json_string`). What is
+    still REFUSED is what cannot be read as a decision: malformed or duplicated
+    JSON, two action arrays that could each be the decision, a batch that is not
+    an object carrying ``actions``, and a string that does not decode to a
+    non-empty array of action objects. Those are the refusals that are doing
+    real work, and they are the only ones left in this module.
     """
 
     framed = _unwrap_tool_call(value)
@@ -625,8 +733,10 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
     if not isinstance(framed, Mapping):
         raise DecisionParseError("decision must be a JSON object")
     batch = framed.get("action_batch")
-    nested_actions = batch.get("actions") if isinstance(batch, Mapping) else batch
-    top_actions = framed.get("actions")
+    nested_actions, nested_from_string = _actions_from_json_string(
+        batch.get("actions") if isinstance(batch, Mapping) else batch
+    )
+    top_actions, top_from_string = _actions_from_json_string(framed.get("actions"))
     if isinstance(top_actions, list) and isinstance(nested_actions, list):
         # Two action arrays in one reply is the SAME ambiguity as two batches in
         # one payload -- which one did the model mean? -- and it is a question
@@ -643,6 +753,20 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
         raise DecisionParseError("decision must carry a non-empty actions array")
     note = _public_note(framed, batch)
     _report_ignored_keys(framed, batch)
+    if top_from_string or nested_from_string:
+        # Tolerated, never silent -- the same rule the tool-call wrapper and the
+        # trailing-text tolerance state above, and it is the one record a
+        # campaign can count this against (a tolerance nobody can observe is
+        # indistinguishable from the harness quietly mangling a reply). Emitted
+        # only once the reply IS accepted, so the line means what it says; the
+        # count and nothing else, because the string's tail is model text and
+        # this module never renders that into a log or an artifact unscanned.
+        logger.warning(
+            "model reply carried its actions as a JSON-encoded string; the leading "
+            "JSON value was decoded and accepted as the decision it states "
+            "(%d action(s))",
+            len(actions),
+        )
     return actions, note
 
 

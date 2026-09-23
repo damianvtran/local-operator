@@ -120,6 +120,11 @@ async def test_nested_child_detail_events_refresh_after_warm(monkeypatch) -> Non
                 launch_message_id=None,
             )
 
+        def roster_pass(self):  # noqa: ANN201
+            # The fold reads one pass; this fake IS the pass, so the same three
+            # members answer (see ``SubagentComms.roster_pass``).
+            return self
+
         def roster(self):  # noqa: ANN201
             return []
 
