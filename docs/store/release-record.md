@@ -69,7 +69,7 @@ of the renumber; the rows here are the submission's own state.
 | Extension version | 0.1.20 |
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; a revision of it) |
 | Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
-| Source commit | `dad3b92f` — the merge commit of PR #1435, the renumber that took the number. `git rev-parse dad3b92ff6ef0e166f5e0caed0ffa8dcd3539402:extension` returns the tree hash below |
+| Source commit | `dad3b92f` — the merge commit of PR #1435, the renumber that **set** this version (`git rev-parse dad3b92ff6ef0e166f5e0caed0ffa8dcd3539402:extension` returns the tree hash below). The **build** ran from `1392324b` instead — this workflow dispatches `ref=main`, and `main` was `1392324b…` at 2026-09-23T13:54:40Z — and the pair is not a contradiction: `git log --oneline dad3b92f..1392324b -- extension/` is empty, so both refs resolve `extension/` to the same tree, and the tree hash is the field that pins the input. Both commits are named so an auditor does not have to work out which one a given sentence means |
 | `extension/` tree hash | `c1b5780a214cb795a19bfe5b0c160ebc904e2d15` |
 | Artifact SHA-256 | *not recoverable — the same automated-path limitation as v0.1.18, v0.1.17 and earlier. The upload is the half that succeeded and the `STAGED_PUBLISH` call is the half that was refused, so a revision was uploaded and no copy of the file is retained* |
 | Artifact size | 13 files, no source maps (`validated Chrome Web Store package v0.1.20 (13 files, no source maps)`) |
@@ -132,9 +132,9 @@ commit (`791a8f14…`, `a7477713…`, `de1ee574…`, `f9af392c…`, `d3664516…
 `c66a89da…`, `270538e3…`). By 2026-09-22 `origin/main:extension` was
 `270538e3dd15870212a4ef35b06b15e4e83f6f21`, a different tree reading the same
 `0.1.19`. That is the ambiguity AGENTS.md forbids, and the same shape as the
-0.1.14 mess below, six trees larger. So the repair is the renumber the 0.1.15
-entry already establishes, not a recall: `0.1.20`
-names the tree this bump lands.
+0.1.14 mess below — three trees there, eight here, five more. So the repair is
+the renumber the 0.1.15 entry already establishes, not a recall: `0.1.20` names
+the tree this bump lands.
 
 | Field | Value |
 | --- | --- |
@@ -212,8 +212,14 @@ half of that claim is true and the second is not: `test_bridge_wedge.py` carries
 `0.1.13`. The conclusion holds on the stronger argument that replaces it: every
 literal in those two files sits below both versions in play — `0.1.19`, the
 capability floor that did not move, and `0.1.20`, the expected version that did
-— so no `extension_older(...)` predicate in them can flip and no version string
-can reach a wall-clock path. Recorded rather than dropped because a
+— so the predicate these tests exercise cannot flip on any literal they carry,
+and no version string can reach a wall-clock path. (The two test files *call*
+`extension_older` nowhere; the call sites are the daemon's advisory checks at
+`daemon.py:1754` and `:4071`, against `EXPECTED_EXTENSION_VERSION`,
+`resources.py:677` against `OWNERSHIP_MIN_EXTENSION_VERSION`, and
+`backend.py:749` against `CAPABILITY_MIN_EXTENSION_VERSION` — so the literals the
+tests carry are what decides, and all of them sit below both floors.) Recorded
+rather than dropped because a
 checkably-false "no literal exists" is what a later reader leans on to dismiss
 a genuinely version-related flake.
 
