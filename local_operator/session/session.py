@@ -2231,6 +2231,18 @@ class Session:
         # ``set_ask_handler`` after that front end has its session, and until
         # it does the ``ask`` tool is simply not advertised.
         self._ask_user: AskUserFn | None = None
+        # PUBLISH THE LIVE ANSWER on the goal holder, for the same reason the
+        # runtime publishes its attachment probe there: the system-prompt provider
+        # closure is built BEFORE this Session exists, so a shared holder is the
+        # only seam through which a fact this session learns LATER can reach the
+        # next turn's block. It has to: a front end that resolves its session in a
+        # worker installs the ask hook from ``set_ask_handler`` after
+        # construction, so the provider's own ``tools`` list (the factory's
+        # snapshot) never gains ``ask``.
+        #
+        # A PROBE, not a copied flag: the hook is installed and uninstalled
+        # mid-session, and the block must follow it in both directions.
+        self._goal_state.ask_probe = lambda: self._ask_user is not None
 
         self._loop = AgentLoop()
         replayed_messages = list(transcript.build_llm_history())
@@ -4533,8 +4545,24 @@ class Session:
         probe — ``_build_child_session`` asks its PARENT this, because a child has
         no control socket and cannot answer it. Live per call: it forwards to the
         holder, so two calls across an attach/detach get the two answers.
+
+        The FAIL-OPEN default is deliberate here (see ``GoalState.is_interactive``):
+        a decision that needs a direction must not resolve to "detached" on a host
+        that simply never installed a probe. The model-facing block asks
+        :meth:`interactivity` instead, where the unmeasured case is its own answer.
         """
         return self._goal_state.is_interactive()
+
+    def interactivity(self) -> bool | None:
+        """Tier A as MEASURED — attached, detached, or ``None`` for unmeasured.
+
+        The model-facing reading, and the one a provider must pass to
+        ``build_system_blocks``: ``None`` means no runtime probe was installed (a
+        plain CLI, an ``exec`` run, a scheduled run), so the block states nothing
+        rather than asserting an interface nobody checked for. A CHILD asks its
+        parent through this, because the attachment it renders is the parent's.
+        """
+        return self._goal_state.interactivity()
 
     @property
     def agent_brief(self) -> str:
@@ -9476,7 +9504,10 @@ class Session:
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs
-            # (``_bridge_access`` asks at result-render time, after a wait).
+            # (``_bridge_access`` asks at TEXT-RENDER time: immediately after the
+            # ``request_access`` RPC, and at the END of an ``await_access`` wait,
+            # so a surface that attached while the model waited is reported as
+            # attached).
             attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,

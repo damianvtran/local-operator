@@ -59,7 +59,7 @@ sys.path.insert(0, str(REPO))
 
 import local_operator  # noqa: E402
 from local_operator.harness.types import AgentTool  # noqa: E402
-from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.prompts_api import CHANNEL_ASK, build_system_blocks  # noqa: E402
 from local_operator.tools.registry import DEFAULT_TOOL_NAMES  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
@@ -321,6 +321,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ``docs/design/attached-interface-signal.md`` §3.4, where it was estimated at
 #: ~90 — that gap is why this raise was not in the plan).
 #:
+#: RE-MEASURED IN ROUND 2 (2026-09-23, review remediation): 84,009 chars =
+#: 30,219 billed, 146 headroom. The block itself is UNCHANGED — the round-2 work
+#: channelled it (six bodies keyed on two measured facts) and left the attached
+#: ``ask`` body byte-identical, which is the shape this guard measures. The 4
+#: characters are the browser tool's own description: "NOTIFY the user" became
+#: "NOTIFY the operator", so one person is named one way across the access flow
+#: (round 1, D8). The ratchet therefore stays where the raise put it — headroom
+#: 146, and NOT re-raised to 147: an addition that costs tokens costs headroom.
+#:
 #: The raise is deliberate and is NOT a loosening: 30,365 restores exactly the
 #: 147-token headroom the tree had at the merge base, so the next addition finds
 #: the ratchet as tight as this one did. It is not paid for out of the block,
@@ -396,6 +405,16 @@ def measure_start_context(
         date_str="2026-01-01",
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        # THE WORST CASE, AND IT MUST BE STATED: ``interactive`` defaults to
+        # ``None``, which renders NO ``<interactivity>`` block at all (a host with
+        # no runtime probe — an ``exec`` run, a scheduled run, a plain CLI). The
+        # guard is here to hold the ceiling for the host that DOES carry the
+        # block, so it renders the attached session's shape explicitly:
+        # ``interactive=True`` and the channel whose body is the longest of the
+        # three (``CHANNEL_ASK``, the TUI/desktop/app case — see
+        # ``prompts_api.build_system_blocks``).
+        interactive=True,
+        channel=CHANNEL_ASK,
     )
     parts: dict[str, Any] = {
         "instructions": len(blocks[0]),

@@ -335,6 +335,14 @@ async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
     was attached to their own session. An absent HOOK is a fact about this
     process, not about the operator. The exact text is asserted, so putting the
     claim back has to be deliberate.
+
+    It must NOT carry a ROSTER either (round 1, D3). It used to say "a subagent,
+    an `exec` run and a scheduler run have none", and that is wrong about one of
+    the three: a supervised ``exec --control`` run DOES have a hook
+    (``exec_control`` builds it with ``install_gates=supervised`` and ``serving``
+    installs it), which ``build_ask_tool``'s own docstring says three lines
+    above that string. A roster is a second copy of a wiring fact; the condition
+    is named instead.
     """
     hook, _seen = await _answer_with(None)
     # Built WITH a hook (the builder refuses to create it without one) and then
@@ -347,11 +355,15 @@ async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
     assert result.is_error is True
     assert result.text == (
         "this host has no way to present a question to a person — no ask hook is "
-        "wired into this session (a subagent, an `exec` run and a scheduler run "
-        "have none), so the user cannot be asked. Decide without them."
+        "wired into this session, so this process cannot put one in front of the "
+        "operator. A delegated child's route to them is `hub` to its parent; "
+        "otherwise decide without them."
     )
     assert "surface" not in result.text
     assert "screen" not in result.text
+    # The roster is gone, and with it the claim the wrong entry made.
+    assert "scheduler run" not in result.text
+    assert "exec" not in result.text
 
 
 def test_no_test_still_pins_the_retired_refusal_sentence() -> None:

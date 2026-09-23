@@ -585,6 +585,175 @@ def host_capability_probes() -> tuple[bool, bool]:
     return (_host_browser_backend_available(), _host_console_available())
 
 
+#: The CHANNEL half of the ``<interactivity>`` block: how THIS session can put a
+#: question in front of a person.
+#:
+#: Stated by the CALLER, because only the caller knows it: ``ask`` is createIf-gated
+#: on the host's ask hook (``build_ask_tool``), and ``hub`` is not a discriminator —
+#: a top-level session holds its own ``hub`` (it is how ITS children reach it), so
+#: "the inventory lists hub" cannot tell a delegated child from a parent. What a
+#: child's ``hub`` reaches is the operator, one hop out; what a top-level session's
+#: ``hub`` reaches is its own subagents.
+#:
+#: Both values are STABLE for a session's life, so the chosen body cannot churn a
+#: block inside the persisted prefix. A reader must never be told to use a tool it
+#: does not have: the round-1 reviews found the positive body advising a SUBAGENT to
+#: use ``ask`` (absent from its inventory, and from every child's) and an
+#: ``exec``/scheduler reader to use a tool it never had either.
+CHANNEL_ASK = "ask"
+CHANNEL_HUB = "hub"
+CHANNEL_NONE = "none"
+
+#: Attached, and this session owns an ``ask`` hook (the TUI, the desktop app):
+#: the original positive body, unchanged. A supervised ``exec --control`` run has
+#: the hook too, but it installs no runtime probe (§3.1), so it renders NO block —
+#: the hook and the measurement are different facts.
+_INTERACTIVITY_ATTACHED_ASK = """<interactivity>
+An interface is attached to this session, so a question you ask WILL be
+presented to the operator: `ask` puts it on that surface and waits for the
+answer, parked for hours if necessary.
+
+- Ask when the answer is genuinely the operator's to give, and not otherwise.
+- The question is presented even if nobody is looking at this exact moment. It
+  waits; it is not lost. A slow answer is not a refusal, and it is not a reason
+  to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+#: Attached, no ``ask`` hook, but a parent channel (a SUBAGENT). The attachment is
+#: a fact about the PARENT's session — the surface the operator is attached to —
+#: and the child's route to it is ``hub``. Saying "attached to this session" here
+#: is a false statement of fact about the child, and it is the propagation mode the
+#: operator's report was made of (a child relaying the parent's claim into its own
+#: messages unchecked).
+_INTERACTIVITY_ATTACHED_HUB = """<interactivity>
+An interface is attached to the session this run was delegated from, so a
+question you cannot settle yourself belongs to the operator: `hub` to that
+session carries it there, and it waits for them — parked if necessary.
+
+- Raise it through `hub` when the answer is genuinely the operator's to give,
+  and not otherwise.
+- Your question reaches the operator even if nobody is looking at this exact
+  moment. It waits; it is not lost. A slow answer is not a refusal, and it is
+  not a reason to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+#: Attached, and NO channel from this process at all — neither ``ask`` nor ``hub``.
+#: The measured fact (something is attached) is still stated, because silence is
+#: read as "probably nobody there"; what changes is the consequence, which must not
+#: promise a presentation this process cannot perform. The wording matches the
+#: ``ask`` refusal's own diagnosis of a missing hook rather than asserting anything
+#: about the operator.
+_INTERACTIVITY_ATTACHED_NONE = """<interactivity>
+An interface is attached to the session this run belongs to, but this run has no
+way to put a question in front of the operator: no ask hook is wired into this
+session, and it holds no channel to one that is.
+
+- Say what you would have asked in your report — the question and the fact that
+  would change your answer — and proceed on the best reading you have.
+- Stating the question is not losing it: the operator reads this conversation
+  when they return.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+#: Detached, with an ``ask`` hook: the original negative body, unchanged. It
+#: deliberately drops "nobody is watching a screen" — the exact false claim the
+#: incident turned on, on evidence that could not support it.
+_INTERACTIVITY_DETACHED_ASK = """<interactivity>
+No interface is attached to this session right now, so a question you ask cannot
+be presented to anyone until a surface attaches: it waits, unread, and the turn
+may block for hours.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over calling `ask`.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+#: Detached, no ``ask`` hook, but a parent channel (a SUBAGENT): the same fact about
+#: the PARENT's session, with the child's own route named. The bullets are shared
+#: with ``_INTERACTIVITY_DETACHED_NONE`` and name no tool, because the useful
+#: instruction for a reader with no ask hook is to state the question where the
+#: operator will read it — not to reach for one.
+_INTERACTIVITY_DETACHED_HUB = """<interactivity>
+No interface is attached to the session this run was delegated from right now,
+so a question raised through `hub` cannot be presented to the operator until a
+surface attaches: it waits, unread.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+#: Detached, no ``ask`` hook and no parent channel: no surface to present on, and
+#: nothing here that could present one even if it attached.
+_INTERACTIVITY_DETACHED_NONE = """<interactivity>
+No interface is attached to the session this run belongs to right now, and this
+run has no way to put a question in front of the operator.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+
+def _interactivity_channel(tools: Sequence[AgentTool], channel: str | None) -> str:
+    """How this session can put a question in front of a person.
+
+    ``channel is None`` means the caller stated nothing, and the fallback is tool
+    MEMBERSHIP — the same rule the inventory block below already follows: the ``ask``
+    tool exists exactly where the host wired the ask hook (``build_ask_tool``), so
+    "holds ``ask``" IS the answer. It can only ever answer "ask" or "nothing"; the
+    ``hub`` body is never inferred, for the reason on the constants above.
+    """
+    if channel is not None:
+        return channel
+    if any(tool.name == "ask" for tool in tools):
+        return CHANNEL_ASK
+    return CHANNEL_NONE
+
+
+def _interactivity_block(attached: bool, channel: str) -> str:
+    """The ``<interactivity>`` body for one measured (attachment, channel) pair.
+
+    SIX constants, keyed on two stable facts, and no interpolation of any kind:
+    the same pair always renders the same bytes, which is what lets the block ride
+    a persisted prompt prefix without ever moving it.
+    """
+    if attached:
+        return {
+            CHANNEL_ASK: _INTERACTIVITY_ATTACHED_ASK,
+            CHANNEL_HUB: _INTERACTIVITY_ATTACHED_HUB,
+            CHANNEL_NONE: _INTERACTIVITY_ATTACHED_NONE,
+        }[channel]
+    return {
+        CHANNEL_ASK: _INTERACTIVITY_DETACHED_ASK,
+        CHANNEL_HUB: _INTERACTIVITY_DETACHED_HUB,
+        CHANNEL_NONE: _INTERACTIVITY_DETACHED_NONE,
+    }[channel]
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -597,7 +766,8 @@ def build_system_blocks(
     team_brief: str = "",
     agent_brief: str = "",
     model_label: str = "",
-    interactive: bool = True,
+    interactive: bool | None = None,
+    channel: str | None = None,
     host_has_browser: bool | None = None,
     host_has_console: bool | None = None,
 ) -> list[str]:
@@ -641,6 +811,29 @@ def build_system_blocks(
     runtime's attachment predicate is the source; see
     ``RuntimeServer.attached_surfaces`` and
     ``docs/design/attached-interface-signal.md``.
+
+    ``interactive is None`` — the DEFAULT, and the tri-state's third value —
+    means NOBODY MEASURED: no runtime probe was installed, so this host has no
+    attachment answer at all (a plain CLI, an ``exec`` run, a scheduled run, a
+    bare test). It renders NO ``<interactivity>`` block, which is the byte-shape
+    those hosts had before this block grew a positive arm, and it is what keeps
+    the block to statements that were measured. Reading ``None`` as attached (the
+    ``is_interactive()`` fail-open, which the PARK decision must keep) is wrong
+    HERE: a scheduled run shipping an ~597-char claim about an attached interface
+    it never probed is the same defect this block exists to remove.
+
+    ``channel`` states HOW this session can put a question in front of a person,
+    because the bodies name the channel and a reader must never be sent to a tool
+    it does not have. One of :data:`CHANNEL_ASK` (this session owns an ask hook),
+    :data:`CHANNEL_HUB` (a delegated child: its route to the operator is the
+    session that delegated it), or :data:`CHANNEL_NONE`. Left ``None`` it is
+    derived from tool MEMBERSHIP — exactly like the inventory block, and for the
+    same reason: ``build_ask_tool`` is gated on the hook, so the ``ask`` tool's
+    presence IS the answer for a caller that cannot read a live one. The session
+    facade, whose ``set_ask_handler`` installs the hook AFTER the provider closure
+    is built, passes the live answer instead: ``tools`` there is the
+    construction-time list and would have said "no ask hook" to every TUI and
+    desktop session.
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
@@ -775,7 +968,7 @@ def build_system_blocks(
         # the more recent, more specific instruction, and later placement is
         # how the model reads precedence when the two briefs disagree.
         tail = f"{tail}\n\n<agent>\n{agent_brief.strip()}\n</agent>"
-    if interactive:
+    if interactive is not None:
         # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
         # one. A question asked now is answered when the operator LOOKS, not when
         # they are looking — so an attached session has to be told its question
@@ -783,7 +976,7 @@ def build_system_blocks(
         # "probably nobody is there", which is the default reading this block
         # exists to displace.
         #
-        # BOTH BODIES ARE CONSTANTS: no timestamp, no session id, no count, no
+        # EVERY BODY IS A CONSTANT: no timestamp, no session id, no count, no
         # surface kind, and no word about who is watching. That last omission is
         # the fix, not a tidy-up: the block used to claim "nobody is watching a
         # screen" on evidence that could not support it (a machine-wide record
@@ -798,39 +991,16 @@ def build_system_blocks(
         # row is written. This block is rebuilt at turn start, so N attach/detach
         # cycles cost exactly what zero cost — a row per transition is the token
         # accumulation this deliberately avoids.
+        #
+        # The CHANNEL half is the other measured fact, and it exists so no reader
+        # is sent to a tool it lacks: a subagent renders its PARENT's attachment
+        # answer, and telling that child "a question you ask WILL be presented:
+        # `ask` ..." names a tool absent from its inventory (``build_ask_tool``
+        # refuses without a hook) and a channel that does not exist — the failure
+        # this whole change removes, reintroduced for the population most
+        # sessions' turns are made of.
         tail = (
-            f"{tail}\n\n<interactivity>\n"
-            "An interface is attached to this session, so a question you ask WILL be\n"
-            "presented to the operator: `ask` puts it on that surface and waits for the\n"
-            "answer, parked for hours if necessary.\n\n"
-            "- Ask when the answer is genuinely the operator's to give, and not otherwise.\n"
-            "- The question is presented even if nobody is looking at this exact moment. It\n"
-            "  waits; it is not lost. A slow answer is not a refusal, and it is not a reason\n"
-            "  to decide on the operator's behalf.\n"
-            "- Write for a reader who may answer minutes later: say what you need and what\n"
-            "  you will do with it.\n"
-            "</interactivity>"
-        )
-    else:
-        # The negative body deliberately drops "nobody is watching a screen": it
-        # is the exact false claim the incident turned on, and the fact actually
-        # measured is the first sentence — no surface is attached — with its
-        # consequence for the turn.
-        tail = (
-            f"{tail}\n\n<interactivity>\n"
-            "No interface is attached to this session right now, so a question you ask cannot\n"
-            "be presented to anyone until a surface attaches: it waits, unread, and the turn\n"
-            "may block for hours.\n\n"
-            "- Prefer to PROCEED with what you have, or finish the turn with a clear\n"
-            "  statement of what you would have asked, over calling `ask`.\n"
-            "- That statement is a decision you already took and the fact that would change\n"
-            "  it, not a question left hanging.\n"
-            "- Do not take an irreversible or destructive action to avoid asking; when the\n"
-            "  choice genuinely needs a person, stop and say so — that is cheaper than a\n"
-            "  wrong guess.\n"
-            "- The operator will read this conversation when they return, so write for\n"
-            "  someone catching up, not for someone watching live.\n"
-            "</interactivity>"
+            f"{tail}\n\n{_interactivity_block(interactive, _interactivity_channel(tools, channel))}"
         )
     names = [name for name in (credentials or ()) if name]
     if names:

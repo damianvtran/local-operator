@@ -1535,8 +1535,10 @@ eligible.
 
    This rung reads ATTENTION ("a person is looking right now") and must keep
    reading it. The runtime also publishes `RuntimeServer.attached_surfaces()` —
-   "an interface could PRESENT a question", with no focus in it and the
-   `attach_clients()` desktop clause — and that is a different question serving
+   "an interface could PRESENT a question", with no focus in it and the desktop
+   clause reduced to the LEASE ("a pane holds this conversation"), which is what
+   keeps that answer from moving when a window is raised — and that is a
+   different question serving
    different consumers: the model's `<interactivity>` block and the gate's park
    decision, never suppression. Routing on it here would silence the banner for
    a conversation nobody is looking at, which is what this rung exists to catch

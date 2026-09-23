@@ -542,6 +542,14 @@ async def test_access_actions_degrade_on_cmux_with_typed_error(monkeypatch) -> N
     assert "not supported on the cmux backend" in result.text
 
 
+async def _never_asked(questions):  # pragma: no cover — the hook is never called here
+    raise AssertionError("the picker must not be reached by a text assertion")
+
+
+#: The notify phrase a host that OWNS an ask hook is given (``_notify_channel``).
+ASK_PHRASE = "a short message, or `ask`"
+
+
 @pytest.mark.asyncio
 async def test_access_actions_require_a_url(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
@@ -572,11 +580,15 @@ async def test_request_access_reports_the_sessions_attachment(monkeypatch) -> No
         "t", {"action": "request_access", "url": "https://example.com"}, None, None, unattached
     )
 
-    assert "No interface is attached to this session right now" in result.text
+    assert "No Local Operator pane is attached to this session" in result.text
     assert "then proceed with what you have" in result.text
     # Still notify-first: the request is what makes the prompt visible when a
     # surface does attach.
-    assert "Notify the operator anyway" in result.text
+    assert "Notify them anyway" in result.text
+    # ...and it must not deny the surface this same message just named (round 1,
+    # D2/U3): the prompt IS on the extension popup, which the operator can click,
+    # while the predicate counts Local Operator PANES only.
+    assert "nobody can act on it" not in result.text
 
 
 def test_the_access_flow_reads_the_live_attached_probe() -> None:
@@ -613,14 +625,21 @@ def test_a_pending_prompt_says_whether_an_interface_is_attached() -> None:
     assert "No interface is attached" not in attached
     assert "make sure they are told" in attached
 
-    assert "No interface is attached to this session right now" in unattached
+    assert "No Local Operator pane is attached to this session" in unattached
     assert "An interface is attached to this session" not in unattached
-    assert "proceed with what you have rather than blocking the turn on it" in unattached
+    assert "proceed with what you have rather than blocking the turn" in unattached
 
     # Both name the surface the prompt is on, and both tell the agent to notify.
     for text in (attached, unattached):
         assert "in the Local Operator extension popup" in text
-    assert "Notify the operator anyway" in unattached
+    assert "Notify them anyway" in unattached
+    # THE UNATTACHED VARIANT MUST NOT DENY THE SURFACE IT JUST NAMED (round 1,
+    # D2/U3). The predicate counts Local Operator PANES — a TUI, a leased desktop
+    # renderer — while the prompt can be sitting in the extension popup, which the
+    # operator can click. "nobody can act on it until a surface attaches" was that
+    # contradiction, and it is the incident's own shape.
+    assert "nobody can act on it" not in unattached
+    assert "the operator can answer it there" in unattached
     # The host-selected sentence still follows the host argument.
     ui = builtin._access_result_text("pending", "https://example.com", host=builtin.HOST_UI_PREFIX)
     assert "desktop app's browser tab" in ui
@@ -632,16 +651,26 @@ def test_the_pending_prompt_names_the_fifteen_minute_wait_and_the_re_request() -
     The cap on ONE call does not move (240 s) — the browser tool is
     ``interruptible=False`` and a prompt cannot outlive the extension's
     10-minute TTL — so the text has to say where the rest of the budget comes
-    from and what re-raises the prompt.
+    from, and it says REPEATED ``await_access`` CALLS, which are executable. It
+    used to name the ``wait`` tool, which awaits a background job and cannot be
+    called at all from a session that has none (round 1, MAJOR 2 / U2).
     """
     text = builtin._access_result_text("pending", "https://example.com", host="")
 
     assert "UP TO 15 MINUTES" in text
-    assert "Use the `wait` tool for the remaining time" in text
-    assert "action='request_access' again with the same url" in text
-    assert "most 240s per call" in text
+    assert "Keep calling action='await_access'" in text
+    assert "most 240s per call" in text or "waits at most 240s" in text
+    assert "action='request_access'" in text
     assert builtin.BROWSER_AWAIT_ACCESS_MAX_S == 240.0
-    assert builtin.BROWSER_AWAIT_ACCESS_DEFAULT_S == builtin.BROWSER_AWAIT_ACCESS_MAX_S
+    # The DEFAULT stays off the cap (round 1, MINOR 4 / U6): an unsized call is
+    # the one the pending text tells the model to make, and the cap is an
+    # uninterruptible block.
+    assert builtin.BROWSER_AWAIT_ACCESS_DEFAULT_S == 120.0
+    # The re-request is BOUNDED (round 1, D5/U5): "keep doing that while the
+    # origin is still needed" was an unbounded loop whose repeat is a silent
+    # no-op until the prompt expires.
+    assert "at most once per 15-minute window" in text
+    assert "notifies nobody" in text
 
 
 def test_an_unanswered_prompt_is_not_reported_as_a_refusal() -> None:
@@ -651,7 +680,42 @@ def test_an_unanswered_prompt_is_not_reported_as_a_refusal() -> None:
             "pending", "https://example.com", host="", attached=attached
         )
         assert "AN UNANSWERED PROMPT IS NOT A REFUSAL" in text
-        assert "Do not report the origin as" in text
+        assert "Do not report it as" in text
+        # ...and it must not forbid the honest admission that the agent went on
+        # without access, which the previous wording did.
+        assert "say plainly if you proceeded without access" in text
+
+
+def test_the_access_advice_names_only_tools_the_caller_has() -> None:
+    """A reader must never be sent to a tool it does not have (round 1, BLOCKER).
+
+    The browser text told subagents to notify through ``ask`` (no child has it)
+    and to "ask the user directly" on a deny. The channel is now read off the
+    declared ``ask_user`` capability, and the unattached paragraph — whose advice
+    is "do not block the turn" — no longer offers ``ask`` at all, because ``ask``
+    parks the turn for hours (round 1, D4/U4).
+    """
+    child = builtin._access_result_text(
+        "pending", "https://example.com", host="", notify=ASK_PHRASE
+    )
+    assert "or `ask`" in child  # the phrase a host with the hook is given
+
+    subagent = builtin._access_result_text(
+        "pending", "https://example.com", host="", notify=builtin._notify_channel(ToolContext())
+    )
+    assert "`ask`" not in subagent
+    assert "a short message" in subagent
+
+    denied = builtin._access_result_text(
+        "denied", "https://example.com", notify=builtin._notify_channel(ToolContext())
+    )
+    assert "the operator denied access" in denied
+    assert "ask the user directly" not in denied
+
+    # A context with the hook is the only one offered `ask`.
+    with_hook = builtin._notify_channel(ToolContext(ask_user=_never_asked))
+    assert "`ask`" in with_hook
+    assert "`ask`" not in builtin._notify_channel(ToolContext())
 
 
 @pytest.mark.asyncio
@@ -680,7 +744,28 @@ async def test_the_await_timeout_names_re_request_not_an_endless_await(monkeypat
     assert "still pending after" in result.text
     assert "action='request_access'" in result.text
     assert "15 MINUTES" in result.text
-    assert "An unanswered prompt is not a refusal." in result.text
+    assert "AN UNANSWERED PROMPT IS NOT A REFUSAL" in result.text
+    # The timeout arm and the pending arm now agree (round 1, U4): both name the
+    # repeated ``await_access`` calls as the budget's mechanism. This context has
+    # no probe, and no probe reads as ATTACHED (the fail-open default), so the arm
+    # it renders is the attached one.
+    assert "action='await_access'" in result.text
+    assert "An interface is attached to this session" in result.text
+
+    # ...and the arm IS attachment-aware, where it used to tell every caller to
+    # keep waiting.
+    detached = ToolContext(browser=BrowserSurface(), attached_probe=lambda: False)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "await_access", "url": "https://example.com", "timeout_s": 0.05},
+        None,
+        None,
+        detached,
+    )
+    assert "No pane is attached to this session" in result.text
+    # The line is hard-wrapped for the TUI receipt, so the assertion stops at the
+    # line break.
+    assert "notify the operator and proceed" in result.text
 
 
 @pytest.mark.asyncio

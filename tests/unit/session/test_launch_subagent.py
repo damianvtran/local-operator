@@ -1195,11 +1195,14 @@ async def test_child_without_parent_mcp_still_builds(tmp_path, monkeypatch):
 
     assert child.mcp_manager is None
     tail = knowledge_tail(child)
-    # The skills listing is still the head of the tail; what trails it now is the
-    # interactivity block, which is the child being told its PARENT's interface
-    # state (a child used to render the ``True`` default unconditionally).
+    # The skills listing is still the head of the tail. What trails it is the
+    # interactivity block ONLY when the parent measured an attachment: this
+    # parent is a bare session with no runtime probe, so the child is told
+    # nothing about an interface rather than inheriting the fail-open default
+    # (round 1, MINOR 6). A parent WITH a probe is pinned in
+    # ``tests/unit/test_session_factory.py``.
     assert tail.startswith("<skills/>")
-    assert "<interactivity>" in tail
+    assert "<interactivity>" not in tail
     assert "<mcps>" not in tail
     await child.dispose()
     await parent.dispose()
@@ -2135,7 +2138,9 @@ async def test_a_parent_with_no_configured_servers_gives_an_empty_tail(tmp_path,
 
     tail = knowledge_tail(child)
     assert tail.startswith("<mcps>Find MCP tools: `mcp://?search=terms`; list: `mcp://`.</mcps>")
-    assert "<interactivity>" in tail
+    # No interactive block: this parent installs no runtime probe, so there is
+    # nothing measured to report (round 1, MINOR 6).
+    assert "<interactivity>" not in tail
     assert resolve(child, "mcp://nope") == "Unknown MCP server: nope. Available: (none)"
     await child.dispose()
     await parent.dispose()

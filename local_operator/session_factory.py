@@ -2841,7 +2841,11 @@ def _make_system_blocks_provider(
         # a deliberate ``set_model`` or a failover fallback is reflected in the
         # env block at the next safe call boundary without rebuilding this
         # closure. The benchmark/preflight caller passes the spec label directly.
-        from local_operator.prompts_api import build_system_blocks
+        from local_operator.prompts_api import (
+            CHANNEL_ASK,
+            CHANNEL_NONE,
+            build_system_blocks,
+        )
 
         task = transcript.latest_user_entry() if hasattr(transcript, "latest_user_entry") else None
         task_id = task.id if task is not None else None
@@ -2877,7 +2881,23 @@ def _make_system_blocks_provider(
             if variable_store is not None and hasattr(variable_store, "credential_names")
             else []
         )
-        interactive = goal_state.is_interactive() if goal_state is not None else True
+        # BOTH halves are read LIVE, at turn start: the answers change when a
+        # viewer attaches or detaches and when a front end installs its ask hook,
+        # and reading them here is what keeps the cost O(1) in the number of those
+        # events (round 2, operator requirement 4). ``interactivity()`` is the
+        # TRI-STATE reading — ``None`` on a host that installed no runtime probe
+        # (an ``exec`` run, a scheduled run, a plain CLI), which renders no
+        # ``<interactivity>`` block at all rather than claiming an interface
+        # nobody measured (review round 1, MINOR 6 / Q3). The channel is the live
+        # ask-hook answer, which THIS closure cannot get from ``tools``: the hook
+        # is installed after construction, so the list below never gains ``ask``.
+        #
+        # ``CHANNEL_NONE`` — not ``CHANNEL_HUB`` — is the right answer for a
+        # top-level session with no hook: a session's own ``hub`` reaches its
+        # SUBAGENTS, so it is no route from here to the operator.
+        interactive = goal_state.interactivity() if goal_state is not None else None
+        can_ask = goal_state.can_ask() if goal_state is not None else None
+        channel = None if can_ask is None else (CHANNEL_ASK if can_ask else CHANNEL_NONE)
         key = (
             knowledge_block,
             date_str,
@@ -2887,6 +2907,7 @@ def _make_system_blocks_provider(
             tuple(names),
             model_label,
             interactive,
+            channel,
             tuple((tool.name, tool.description) for tool in tools),
         )
         if key == cached_key:
@@ -2903,12 +2924,12 @@ def _make_system_blocks_provider(
             team_brief=team_brief,
             agent_brief=agent_brief,
             model_label=model_label,
-            # Read LIVE, at turn start: the answer changes whenever a viewer
-            # attaches or detaches, and reading it here is what keeps the
-            # cost O(1) in the number of those events (round 2, operator
-            # requirement 4). Absent a probe this is True, so every host that
-            # is not a detached runtime is unaffected.
+            # Read LIVE, at turn start. Absent a runtime probe this is ``None``
+            # and the block is omitted, which is the byte-shape every host that
+            # never installed one had before the positive arm existed; see the
+            # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
+            channel=channel,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )
