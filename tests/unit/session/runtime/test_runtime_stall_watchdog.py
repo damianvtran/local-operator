@@ -337,6 +337,17 @@ def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Pa
     the claim is about, not a header-only file), and asserts the verdict's wording
     gone, because that sentence is the reading that shipped.
 
+    AND THE SAME CELL PINS THE OTHER HALF OF THAT CLAIM, because the wording that
+    replaced the verdict carried a false one of its own: it ended *"(this timer is
+    armed with `exit=True`)"*, which was the arm's behaviour before #1439 and is now
+    true of the IDLE arm only -- the header is also written for a runtime HOLDING
+    WORK, whose every arm is ``exit=False``. It is written at ARM time and the leg is
+    re-decided at every re-arm, so it cannot name the leg it will fire under; what it
+    may say is that the leg is answered per re-arm, which is what the assertion below
+    requires, and it may never claim a single arm's flag, which is what the absent-
+    text assertion requires. Measured on this rig rather than assumed: the same
+    sentence is rendered for the held arm and the idle arm (Q-4 follow-up, PR body).
+
     THE MUTATION THIS CELL EXISTS TO CATCH, and it is the reason a presence assert
     is not enough on its own: drop ``{OBSERVATION_NOT_VERDICT}`` from the header in
     ``arm`` and this cell -- and nothing else in the file -- goes red. A cell that
@@ -360,6 +371,15 @@ def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Pa
     assert "ENDED this runtime" not in text, (
         "the header asserts the verdict a fire never computes; a fire can precede a process "
         f"that carries on, which is the incident this wording caused: {text[:400]!r}"
+    )
+    assert "exit=True" not in text, (
+        "the header claims a leg it cannot know at arm time -- the leg is answered at every "
+        "re-arm, and a held runtime's arms are exit=False, so this sentence is false for a "
+        f"fire the file itself precedes: {text[:400]!r}"
+    )
+    assert "ANSWERED AT EVERY RE-ARM" in text, (
+        "the header does not say how a reader can tell what the exit leg will be, so a fire "
+        f"on a held runtime is still read as fatal: {text[:400]!r}"
     )
 
 
@@ -4638,6 +4658,55 @@ def test_the_backoff_counter_is_per_EPISODE_not_per_process(
         "the backoff counter survived the episode, so a later wedge re-arms at up to "
         "twelve times the configured bound"
     )
+
+
+def test_a_marker_that_landed_MID_LINE_still_reads_as_held(tmp_path: Path) -> None:
+    """Q-4 (round 2): the marker can interleave with faulthandler's own flush.
+
+    ``faulthandler`` writes the dump from its own thread through a buffered handle while
+    the sampler appends our marker to the same ``O_APPEND`` descriptor, so the marker
+    lands at the end of whatever faulthandler had written but not flushed — MID-LINE
+    (measured on this fleet: one of four real fires, in exactly the shape built below).
+    A line-start test read that genuine held dump as "not held", which through the
+    product's own readers means no STALLED cell, ``stall_held: false`` beside a set
+    ``stall_dump``, and ``death_verdict`` narrating a still-alive runtime as one that
+    ended ITSELF. The module's own header states the rule this restores: markers are
+    read as SUBSTRINGS, which is why no header quotes one.
+
+    RESTORED BY THE FOLLOW-UP PR, and the reason is disclosure rather than repair. A later
+    commit on the #1439 branch dropped this cell and NEITHER that commit NOR the round's
+    remediation comment said so, so the reader pair a surface actually calls lost its only
+    coverage while the verdict-level case that survived
+    (``test_a_fired_stall_bound_is_narrated_as_its_own_class``) kept the product path
+    guarded. It passes as written on the merged head, which is what a restored cell should
+    do; what it discriminates is the GRANULARITY -- ``held_fire`` and ``held_pids`` over an
+    interleaved dump, which is the pair ``journal`` reads -- and it goes red the moment the
+    reader is degraded back to a line-start test.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    pid = 987_654
+    dump = logs / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+    # The measured interleaving: faulthandler's unflushed tail, then our marker.
+    dump.write_text(
+        "[stall watchdog] armed for 300s\n"
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n"
+        "Thread 0x1 (most recent call first, thread id=1):\n"
+        '  File "/tmp/x.py", line 1 in <module>\n'
+        f'  File "{stall_watchdog.HELD_MARKER}the bound fired at 1.0 and did NOT end this '
+        "runtime\\n",
+        encoding="utf-8",
+    )
+
+    assert stall_watchdog.held_fire(pid, logs) is True, (
+        "a held marker that landed mid-line read as no held fire, so a surviving runtime "
+        "is reported as one the bound ended"
+    )
+    assert pid in stall_watchdog.held_pids(
+        logs
+    ), "the third state vanished from the listing for an interleaved dump"
 
 
 def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
