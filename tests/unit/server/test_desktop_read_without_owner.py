@@ -44,7 +44,11 @@ from local_operator.server.utils.desktop_sessions import (
 from local_operator.session.attached import (
     _DESKTOP_WATCH_ACK_BOUND_S as DESKTOP_WATCH_ACK_BOUND_S,
 )
-from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
+from local_operator.session.attached import (
+    DESKTOP_CONTROL_ATTACH_S,
+    READ_ATTACH_BUDGET_S,
+    AttachedSession,
+)
 from local_operator.session.runtime import launch, registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -338,15 +342,57 @@ async def test_a_rollover_reaches_the_stream_after_a_late_sync(
 
 
 @pytest.mark.asyncio
-async def test_a_control_route_names_the_runtime_unreachable_code(
+@pytest.mark.parametrize("mute", [False, True], ids=["welcomes-then-silent", "never-welcomes"])
+async def test_a_control_route_answers_a_silent_owner_busy_and_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute: bool
+) -> None:
+    """D-F4: a live-but-silent owner is ``runtime_busy`` inside the control envelope.
+
+    Before: the welcome waited ``ACK_TIMEOUT_S`` and the sync
+    ``FRONTEND_SYNC_FOREGROUND_S``, so ``POST /messages`` answered a generic
+    ``503 runtime_unreachable`` at 15.0-15.7 s -- most of the renderer's 20 s
+    deadline, for a runtime that was alive the whole time. Both silent shapes
+    are driven: one that welcomes and never syncs, and one that never welcomes
+    (the SIGSTOPped shape, which only a deadline over the DIAL can bound).
+
+    The copy is unchanged (D8): ``message`` keeps the exact sentence the shipped
+    app matches by prefix; ``code``/``retryable``/``retry_after_ms`` and the
+    ``Retry-After`` header are additive.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        owner = _FakeOwner(harness.session_id, tmp_path, mute=mute)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        url = f"/v1/desktop/sessions/{harness.session_id}/messages"
+
+        started = time.monotonic()
+        response = await harness.client.post(
+            url, json={"request_id": str(uuid.uuid4()), "text": "hi"}
+        )
+        elapsed = time.monotonic() - started
+
+        assert response.status_code == 503, response.text
+        assert elapsed < DESKTOP_CONTROL_ATTACH_S + 1.5, f"the refusal took {elapsed:.2f}s"
+        detail = response.json()["detail"]
+        assert detail["code"] == "runtime_busy"
+        assert detail["retryable"] is True
+        assert detail["retry_after_ms"] == 2000
+        assert response.headers["retry-after"] == "2"
+        assert detail["message"].startswith("Session owner is unavailable.")
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_control_route_still_names_an_unreachable_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D8, without a UI copy change.
+    """The OTHER refusal keeps its code: a record whose socket refuses the dial.
 
-    A control request still refuses when it cannot reach the runtime, and the
-    refusal now carries the CODE the renderer branches on — while ``message``
-    keeps the exact sentence the shipped app matches by prefix, so the two
-    repositories never have to move in step for that paragraph to render.
+    ``runtime_busy`` is reserved for an owner that is alive and reachable; an
+    owner nobody can connect to is not busy, and telling the renderer to retry it
+    would be the overstatement the code split exists to avoid.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     async with _Harness(tmp_path) as harness:
@@ -354,6 +400,8 @@ async def test_a_control_route_names_the_runtime_unreachable_code(
         owner = _FakeOwner(harness.session_id, tmp_path)
         await owner.start()
         _publish_live(tmp_path, owner, session_id=harness.session_id)
+        # The record stays published and the pid alive, but the port is closed.
+        await owner.stop()
         url = f"/v1/desktop/sessions/{harness.session_id}/messages"
 
         response = await harness.client.post(
@@ -363,8 +411,8 @@ async def test_a_control_route_names_the_runtime_unreachable_code(
         assert response.status_code == 503, response.text
         detail = response.json()["detail"]
         assert detail["code"] == "runtime_unreachable"
+        assert "retryable" not in detail
         assert detail["message"].startswith("Session owner is unavailable.")
-        await owner.stop()
 
 
 @pytest.mark.asyncio
@@ -412,9 +460,14 @@ async def test_a_read_route_declares_the_read_envelope(
         budgets: list[tuple[str, float | None]] = []
         real = AttachedSession.attach_existing
 
-        async def spy(self: AttachedSession, *, budget: float | None = None) -> bool:
+        async def spy(
+            self: AttachedSession,
+            *,
+            budget: float | None = None,
+            control_budget: float | None = None,
+        ) -> bool:
             budgets.append(("call", budget))
-            return await real(self, budget=budget)
+            return await real(self, budget=budget, control_budget=control_budget)
 
         monkeypatch.setattr(AttachedSession, "attach_existing", spy)
         base = f"/v1/desktop/sessions/{harness.session_id}"
@@ -699,4 +752,113 @@ async def test_the_mcp_row_answers_from_the_projects_own_config(
         assert data["cold"] is True, data
         assert [server["name"] for server in data["servers"]] == ["synthetic-one"], data["servers"]
         assert data["servers"][0]["source"] == str(project), data["servers"][0]
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_read_never_queues_behind_a_control_attach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-F1: reads answer while a control call is still attaching to a mute owner.
+
+    The reported 17-20 s: a first-keystroke ``/warm`` (or a send) dials an owner
+    whose loop does not answer, and every read of that conversation issued in the
+    meantime queued on the bridge lock behind it, then paid its own read budget.
+    The mute owner is the SIGSTOPped shape. The bound asserted is the operator's
+    300 ms, with the control call demonstrably still in flight when the reads
+    answer.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        owner = _FakeOwner(harness.session_id, tmp_path, mute=True)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+        control = asyncio.create_task(
+            harness.client.post(
+                f"{base}/messages", json={"request_id": str(uuid.uuid4()), "text": "hi"}
+            )
+        )
+        # Wait on the EVENT, not the clock: the control call is inside its dial.
+        deadline = time.monotonic() + DEADLOCK_GUARD_S
+        while owner.conns == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert owner.conns >= 1, "the control call never dialled"
+
+        for url in (base, f"{base}/history"):
+            status, elapsed, body = await _get(harness.client, url)
+            assert status == 200, body
+            assert elapsed < 0.3, f"{url} queued behind the control attach: {elapsed:.2f}s"
+        assert not control.done(), "the reads were not measured during the control attach"
+
+        response = await asyncio.wait_for(control, timeout=DEADLOCK_GUARD_S)
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "runtime_busy"
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_owner_is_painted_cold_at_once_and_goes_live_behind_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-F2: the first frame does not spend ``READ_ATTACH_BUDGET_S`` on a silent owner.
+
+    The read answers inside the first-frame grace with the cold facade and
+    ``attaching`` set; when the owner answers, the stream receives the
+    ``frontend.replace`` whose ``cold`` flag the shipped renderer reads.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(harness.session_id, tmp_path)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+
+        started = time.monotonic()
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            elapsed = time.monotonic() - started
+            subscription = bridge.subscribe(frontend_replace=True)
+            stream = bridge.events(subscription, epoch=None, after_seq=0)
+            try:
+                frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
+                while frame["type"] != "snapshot":
+                    frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
+                assert elapsed < 0.3, f"the first frame waited {elapsed:.2f}s"
+                assert frame["payload"]["cold"] is True
+                assert frame["payload"]["cold_reason"] == "owner-silent"
+                assert frame["payload"]["attaching"] is True
+                # The cold page is FILLED, so first paint needs no /history.
+                assert len(frame["payload"]["history"]["entries"]) == 4
+
+                await owner.send_sync()
+                deadline = time.monotonic() + DEADLOCK_GUARD_S
+                while time.monotonic() < deadline:
+                    frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
+                    if frame["type"] == "frontend.replace" and frame["payload"]["cold"] is False:
+                        break
+                else:  # pragma: no cover — the loop only exits by break
+                    raise AssertionError("no live frontend.replace arrived")
+            finally:
+                await stream.aclose()
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_owner_lands_inside_the_first_frame_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of D-F2's trade: a live owner still paints LIVE first.
+
+    The grace exists so a healthy owner's attach (tens of ms) is in the first
+    frame; a read that always answered cold would flash "attaching" over every
+    running conversation.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(harness.session_id, tmp_path, answer_watch=True, sync_on_connect=True)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            snapshot = await bridge.snapshot()
+        assert snapshot["payload"]["cold"] is False, "a healthy owner was painted cold"
         await owner.stop()

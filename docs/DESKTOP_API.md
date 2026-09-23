@@ -880,6 +880,18 @@ must be able to say so: `503` with `{"detail": {"code": "runtime_unreachable",
 from a `503` that is the server not answering at all. Clients key on the `code`; the sentence rides along
 for the ones that do not.
 
+A control call against an owner that IS reachable but does not answer inside
+the desktop control envelope (`DESKTOP_CONTROL_ATTACH_S`, 3 s over the whole
+dial + sync) is answered `503` with `{"detail": {"code": "runtime_busy",
+"message": <the same sentence>, "retryable": true, "retry_after_ms": 2000}}` and
+a `Retry-After: 2` header, instead of spending 15 s on the welcome and answering
+`runtime_unreachable`. `runtime_busy` means the runtime is alive and busy (a loop
+mid-turn, a long synchronous step): resending the SAME request id is safe
+(admissions are at-most-once by the receipt journal) and will very likely
+succeed shortly. `runtime_unreachable` keeps its meaning — nothing could be
+dialled — and carries no retry fields. Every field is additive: a client that
+predates them reads the unchanged sentence.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -929,9 +941,18 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    Because nothing is cut, the snapshot can no longer report
    `cursor_missing: true` — an evicted or replaced cursor is not a state this
    frame can be in. An EMPTY page still means "reconcile through `/history`":
-   that is now exactly the case where the paired state carries no `history_cursor`
-   at all (no frontend refresh or checkpoint yet), and readers depend on that
-   signal, so it is preserved deliberately rather than inferred.
+   that is now exactly the case where a LIVE owner's paired state carries no
+   `history_cursor` at all (no frontend refresh or checkpoint yet), and readers
+   depend on that signal, so it is preserved deliberately rather than inferred.
+   A COLD frame (`cold: true`) carries the filled page too — the same tail
+   `/history` serves — so first paint of a conversation with no live runtime
+   needs no second round trip. A non-empty page beside a `cold_reason` is how a
+   renderer knows this backend fills it and may skip the duplicate `/history`.
+   A read waits at most `READ_FIRST_FRAME_GRACE_S` (50 ms) for its attach to an
+   existing owner; a busy owner is painted cold with `attaching: true` and the
+   attach carries on behind the frame, ending in a `frontend.replace` whose
+   `cold` flag is the verdict (`false` once it lands, or the classified
+   `cold_reason` if it does not).
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
