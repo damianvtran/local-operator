@@ -75,6 +75,9 @@ vi.mock("./store", async (importOriginal) => {
 		...actual,
 		useProjection: vi.fn(() => slot),
 		retainProjectionStream: vi.fn(() => () => {}),
+		/* Returns the refcount unsubscribe, as the real one does, so a test that
+		   unmounts exercises the effect's cleanup path rather than a no-op
+		   (review round 2, N2-1). */
 		retainSessionListStream: vi.fn(() => () => {}),
 		useDraft: vi.fn(() => ["", () => {}]),
 	};

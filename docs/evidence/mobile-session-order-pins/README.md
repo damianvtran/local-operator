@@ -136,3 +136,26 @@ Agent review posted five findings; all addressed in this PR:
 - **MINOR 3** — parity prose over-reached on the wake band. Narrowed here and in
   `docs/mobile.md` / `docs/SESSION_SIDEBAR.md`.
 - **NIT 1** — `suppressClick` could latch. A new press clears it.
+
+## Review round 2
+
+Verdict **clean (terminal)** — no BLOCKER, no MAJOR. Four MINOR and one NIT, all
+addressed:
+
+- **M2-1** — the narrowed prose still over-claimed tier/section agreement. Both
+  docs now name the two real asymmetries (the wake band, and the phone-woken
+  window) instead of one.
+- **M2-2** — "or a start" was wrong; only the wake path marks
+  `provisional_active`. Prose corrected in `_rank_row`, the merge comment, and
+  the test docstring.
+- **M2-3** — the "free" refcount claim was wrong (React destroys before it
+  creates, so a list↔session navigation reconnects the SSE). The comment now
+  says so with the measurement.
+- **M2-4** — the route half of MAJOR 2 was untested. Added
+  `test_pin_route_wakes_the_list_stream`, mutation-checked (deleting the route's
+  `notify_list_changed` fails it).
+- **N2-1** — the stubs' returned unsubscribe is a no-op, so the effect's unmount
+  path is hit but not observed. Left as-is deliberately: the neighbouring
+  `retainProjectionStream` stubs in these same files do the same, and deepening
+  only this one would make the two stream mocks inconsistent for a nit. A
+  comment now records the choice at each stub.

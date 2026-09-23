@@ -1258,13 +1258,12 @@ def test_pin_route_refuses_an_unknown_session_and_a_non_boolean(tmp_path, monkey
 def test_a_phone_woken_session_is_active_before_its_record_arrives() -> None:
     """The provisional wake window is Active, not a flash of Previous.
 
-    ``retain_provisional_active`` marks a session this daemon accepted a wake
-    (or a start) for but has not yet seen register. It has no ``SessionEntry``,
-    so the shared ``active`` rule — correctly applied — would file it under
-    Previous, and the row would pop into Active a moment later. That is the same
-    kind of jump this whole change exists to remove, so the merge ranks a
-    provisional row as the live row it is about to become (review round 1,
-    MAJOR 1).
+    ``retain_provisional_active`` marks a session this daemon accepted a ``/wake``
+    for but has not yet seen register. It has no ``SessionEntry``, so the shared
+    ``active`` rule — correctly applied — would file it under Previous, and the
+    row would pop into Active a moment later. That is the same kind of jump this
+    whole change exists to remove, so the merge ranks a provisional row as the
+    live row it is about to become (review round 1, MAJOR 1).
     """
     table = SessionTable()
     # A durable row for the woken conversation — a /wake resumes an EXISTING one,
@@ -1308,3 +1307,32 @@ def test_set_pins_does_not_touch_the_event_loop(tmp_path, monkeypatch) -> None:
     assert state is True
     assert read_pins(cfg) == ["durable-1"]
     assert woken == [], "set_pins must not wake the stream; the route does that on the loop"
+
+
+def test_pin_route_wakes_the_list_stream(tmp_path, monkeypatch) -> None:
+    """The route is what wakes the SSE stream, on the loop (review round 2, M2-4).
+
+    ``set_pins`` is worker-thread work and must not touch the asyncio queues
+    (MAJOR 2), so the wake lives in the route. A test that only watched
+    ``set_pins`` would therefore pass with the route's ``notify_list_changed``
+    deleted — the pin would land in the store and the phone's list would never
+    be told. This drives the real HTTP route with a real list subscriber held
+    open and asserts a repaint arrives.
+    """
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    _write_turns(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    # A live list subscriber: ``notify_list_changed`` puts onto each of these
+    # queues, so an empty queue after the POST is the route having failed to wake.
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    assert client.post("/api/sessions/durable-1/pin", json={"pinned": True}).status_code == 200
+    assert not queue.empty(), "the pin route must wake the list SSE stream"
