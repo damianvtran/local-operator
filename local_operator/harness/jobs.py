@@ -596,6 +596,23 @@ class AsyncJobManager:
             return None  # scoping: mismatch is not-found
         return job
 
+    def lookup_snapshot(self) -> dict[str, AsyncJob]:
+        """Copy the non-sweeping lookup table, including attempt aliases.
+
+        ``list()`` is intentionally not used here: it applies retention and may
+        mutate the ledger as a read. The mobile roster instead needs the same
+        point lookups as ``get()`` while walking many nodes, so this snapshot
+        preserves alias precedence without triggering an observable sweep.
+        """
+        rows = dict(self._jobs)
+        for alias, target in self._aliases.items():
+            job = self._jobs.get(target)
+            if job is not None:
+                # ``get(alias)`` resolves aliases before direct row ids; retain
+                # that precedence even for a malformed id collision.
+                rows[alias] = job
+        return rows
+
     def list(self, *, registrant_id: str | None = None) -> list[AsyncJob]:
         """Every job row, oldest first, with retention applied AT READ TIME.
 

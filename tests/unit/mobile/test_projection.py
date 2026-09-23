@@ -2831,3 +2831,204 @@ def test_set_subagent_details_reads_ONE_pass_and_publishes_the_same_fields() -> 
     again = {row.job_id: row for row in fold.projection.subagents}
     assert again["settled"].status == "completed"
     assert again["settled"].result_text == "review posted"
+
+
+@pytest.mark.parametrize("size", [1, 7, 20, 50, 100])
+@pytest.mark.parametrize("shape", ["siblings", "chain"])
+def test_roster_job_snapshot_and_graph_counts_are_deterministic(size: int, shape: str) -> None:
+    """Count real fold work without a timing threshold at representative shapes.
+
+    The indexed manager snapshot makes the per-node job lookup O(1) after one
+    O(N) pass. Peer and ancestor vectors remain intentionally complete because
+    the phone's Agents sheet consumes them; the counts make their unavoidable
+    quadratic wire representation explicit rather than pretending to remove it.
+    """
+
+    class CountingJobs:
+        def __init__(self) -> None:
+            self.rows: dict[str, Any] = {}
+            self.snapshots = 0
+            self.snapshot_rows = 0
+            self.gets = 0
+
+        def lookup_snapshot(self) -> dict[str, Any]:
+            self.snapshots += 1
+            self.snapshot_rows += len(self.rows)
+            return dict(self.rows)
+
+        def get(self, job_id: str) -> Any:
+            self.gets += 1
+            return self.rows.get(job_id)
+
+    manager = CountingJobs()
+    session = SimpleNamespace(jobs=manager)
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(size):
+        job_id = f"job-{index:03d}"
+        parent_id = None if shape == "siblings" or index == 0 else f"job-{index - 1:03d}"
+        manager.rows[job_id] = SimpleNamespace(
+            status="running",
+            start_time=1_000.0,
+            agent_role="task",
+            model_label="",
+            latest_details={},
+            result_text=None,
+            error_text=None,
+        )
+        comms.record_launch(job_id, job_id, parent_job_id=parent_id)
+
+    # Ignore launch-time lookups: the measured operation is one projection fold.
+    manager.gets = 0
+    manager.snapshots = 0
+    manager.snapshot_rows = 0
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    assert manager.snapshots == 1
+    assert manager.snapshot_rows == size
+    # Existing lifecycle/node derivations use three direct gets per record;
+    # the indexed per-node resolution adds no N-by-N manager traversal.
+    assert manager.gets == 3 * size
+    assert len(fold.projection.subagents) == size
+    if shape == "siblings":
+        assert sum(len(row.peer_ids) for row in fold.projection.subagents) == size * (size - 1)
+        assert sum(len(row.ancestor_ids) for row in fold.projection.subagents) == 0
+    else:
+        assert sum(len(row.peer_ids) for row in fold.projection.subagents) == 0
+        assert sum(len(row.ancestor_ids) for row in fold.projection.subagents) == (
+            size * (size - 1) // 2
+        )
+
+
+def test_roster_index_canonicalizes_attempt_alias_before_manager_lookup() -> None:
+    """Resolve a stale attempt through the current id before probing managers."""
+    current = SimpleNamespace(
+        status="running",
+        start_time=1_000.0,
+        agent_role="root",
+        model_label="",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+    later = SimpleNamespace(
+        status="running",
+        start_time=1_000.0,
+        agent_role="child",
+        model_label="",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+
+    class DuckJobs:
+        """A legacy manager with only point lookup, as extension hosts may use."""
+
+        def __init__(self, rows: dict[str, Any]) -> None:
+            self.rows = rows
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    class IndexedJobs(DuckJobs):
+        def lookup_snapshot(self) -> dict[str, Any]:
+            return dict(self.rows)
+
+    root = DuckJobs({"current": current})
+    # A stale alias row in a later manager must not shadow the canonical root
+    # row; the legacy resolver looked up the canonical record id in both.
+    child = IndexedJobs({"previous": later})
+    comms = SubagentComms(cast(Session, cast(Any, SimpleNamespace(jobs=root))))
+    comms.record_launch("current", "current")
+    comms._aliases["previous"] = "current"
+    comms._records["current"].child = cast(
+        Any, SimpleNamespace(jobs=child, session_id="child-session")
+    )
+
+    read = comms.roster_pass()
+    # The root has only the canonical row. The later child has a stale row that
+    # would incorrectly win if the index probed the original alias first.
+    assert read.job("previous") is current
+
+
+def test_roster_index_probes_duck_typed_manager_once_for_missing_id() -> None:
+    """An unindexed miss visits each extension manager once, not twice."""
+
+    class DuckJobs:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, job_id: str) -> Any:
+            self.calls += 1
+            return None
+
+    class IndexedJobs:
+        def __init__(self) -> None:
+            self.rows: dict[str, Any] = {}
+
+        def lookup_snapshot(self) -> dict[str, Any]:
+            return dict(self.rows)
+
+        def get(self, job_id: str) -> Any:
+            # RosterPass separately derives each record's running bit from the
+            # root manager; this lookup is not the fallback miss being measured.
+            return self.rows.get(job_id)
+
+    root = SimpleNamespace(jobs=IndexedJobs())
+    fallback = DuckJobs()
+    comms = SubagentComms(cast(Session, cast(Any, root)))
+    comms.record_launch("known", "known")
+    comms._records["known"].child = cast(
+        Any, SimpleNamespace(jobs=fallback, session_id="fallback-session")
+    )
+
+    read = comms.roster_pass()
+    fallback.calls = 0
+    assert read.job("missing") is None
+    assert fallback.calls == 1
+
+
+def test_roster_index_falls_back_after_a_raising_optional_manager() -> None:
+    """An extension manager failure remains isolated from later child ledgers."""
+    child_job = SimpleNamespace(
+        status="running",
+        start_time=1_000.0,
+        agent_role="child",
+        model_label="",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+
+    class BrokenJobs:
+        calls = 0
+
+        def get(self, job_id: str) -> Any:
+            self.calls += 1
+            raise RuntimeError("optional host lookup failed")
+
+    class IndexedJobs:
+        def __init__(self, rows: dict[str, Any] | None = None) -> None:
+            self.rows = rows or {}
+
+        def lookup_snapshot(self) -> dict[str, Any]:
+            return dict(self.rows)
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    root = SimpleNamespace(jobs=IndexedJobs())
+    broken = BrokenJobs()
+    comms = SubagentComms(cast(Session, cast(Any, root)))
+    comms.record_launch("first", "first")
+    comms.record_launch("child", "child")
+    comms._records["first"].child = cast(
+        Any, SimpleNamespace(jobs=broken, session_id="broken-session")
+    )
+    comms._records["child"].child = cast(
+        Any, SimpleNamespace(jobs=IndexedJobs({"child": child_job}), session_id="child-session")
+    )
+    broken.calls = 0
+
+    assert comms.roster_pass().job("child") is child_job
+    assert broken.calls == 1

@@ -294,6 +294,32 @@ def _task_row(
     )
 
 
+def test_lookup_snapshot_matches_get_without_sweeping_retained_rows() -> None:
+    """Roster indexing must preserve aliases without making a read sweep."""
+    manager = AsyncJobManager(retention_ms=1)
+    current = _task_row("current", status="completed")
+    current.attempt_aliases = ["previous"]
+    manager.restore([current])
+    manager._jobs["expired"] = AsyncJob(
+        id="expired",
+        type="task",
+        status="completed",
+        start_time=1.0,
+        settled_at=time.time() - 86_400.0,
+        label="expired",
+    )
+
+    snapshot = manager.lookup_snapshot()
+
+    assert snapshot["current"] is manager.get("current")
+    assert snapshot["previous"] is manager.get("previous")
+    assert snapshot["expired"] is manager.get("expired")
+    assert "missing" not in snapshot
+    # Unlike list(), building a read index is not an observation that ages the
+    # roster out from under the projection currently being built.
+    assert "expired" in manager._jobs
+
+
 def test_accounting_summary_is_bounded_for_hundred_child_fanout() -> None:
     manager = AsyncJobManager()
     manager.restore(

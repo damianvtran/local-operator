@@ -628,6 +628,32 @@ class RosterPass:
         # for every node's lookup.
         self.sessions: tuple[Any, ...] = tuple(comms._sessions())
         self._root_jobs = comms._jobs()
+        # Per-node ``_job_from`` calls used to visit every child manager even
+        # though this pass already knew the full manager set. Snapshot each
+        # native manager's lookup table once (without retention sweeps), then
+        # merge in session order so the first manager hit and alias behavior
+        # remain identical to the historical resolver. Lightweight/extension
+        # managers without the bulk surface keep the exact caught ``get`` path.
+        self._indexed_jobs: dict[str, tuple[int, Any]] = {}
+        self._fallback_sessions: list[tuple[int, Any]] = []
+        for position, session in enumerate(self.sessions):
+            manager = getattr(session, "jobs", None)
+            try:
+                snapshot = getattr(manager, "lookup_snapshot", None)
+                if callable(snapshot):
+                    # Materialize before merging: a duck-typed mapping that fails
+                    # partway through iteration must fall back without leaving a
+                    # partial index that could shadow a later manager.
+                    rows = tuple(snapshot().items())
+                    for job_id, job in rows:
+                        self._indexed_jobs.setdefault(job_id, (position, job))
+                    continue
+            except Exception:
+                # Keep the historical per-manager exception isolation if an
+                # extension's optional bulk surface is unavailable or fails.
+                pass
+            if manager is not None:
+                self._fallback_sessions.append((position, session))
         running: dict[str, bool] = {}
         twins: dict[Path, list[_ChildRecord]] = {}
         for record in self.records:
@@ -692,13 +718,36 @@ class RosterPass:
         """The projection's per-node job lookup, over the pass's session list.
 
         Same search as :meth:`SubagentComms.job` — root first, then each live
-        child in insertion order, then the record's retained row — but the
-        session list was built ONCE here instead of once per node. The name is
+        child in insertion order, then the record's retained row — but manager
+        rows were snapshotted once instead of searched once per node. The name is
         deliberately the same one the fold already reads, so a registry only has
-        to expose ``roster_pass()`` and this surface is the same three members
-        it had before.
+        to expose ``roster_pass()`` and this surface keeps the same three members.
         """
-        return self._comms._job_from(job_id, self.sessions)
+        record = self._comms._record(job_id)
+        # Resolve attempt aliases before consulting manager snapshots. The
+        # historical resolver canonicalized to the current record id before its
+        # first manager lookup; keeping that rule avoids letting a stale row in
+        # another session shadow the current attempt.
+        lookup_id = record.job_id if record is not None else job_id
+        indexed = self._indexed_jobs.get(lookup_id)
+        indexed_position = indexed[0] if indexed is not None else len(self.sessions)
+        # Probe only duck-typed managers that precede the indexed hit (or every
+        # fallback when there is no indexed hit). A single ordered pass preserves
+        # first-manager-wins behavior and ensures each optional get() is called
+        # at most once for this lookup. Each call remains exception-isolated.
+        for position, session in self._fallback_sessions:
+            if indexed is not None and position >= indexed_position:
+                break
+            manager = getattr(session, "jobs", None)
+            try:
+                job = manager.get(lookup_id) if manager is not None else None
+            except Exception:
+                job = None
+            if job is not None:
+                return job
+        if indexed is not None:
+            return indexed[1]
+        return record.job_ref if record is not None else None
 
     # -- whole-roster reads ---------------------------------------------------
 
