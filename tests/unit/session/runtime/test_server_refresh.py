@@ -217,6 +217,41 @@ async def test_note_leaving_publishes_on_the_record_immediately(stale) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_new_departure_supersedes_the_last_failure(stale) -> None:
+    """A record must not describe an abandoned handover while a NEW one is running.
+
+    ``note_updating``'s own rule (agent review round 1, NIT 4) one rung over, and here
+    it is load-bearing rather than tidy: ``SessionRecord.update_failed`` is read as a
+    PAIR with ``leaving`` by every surface that has to tell a handover still waiting
+    from one that was given up, and an abandon KEEPS the ordinary build phrase by design
+    (``process._abandon_move``). Left beside a freshly latched drain, a stale failure
+    makes that pair report the new attempt as the abandoned one — and the app paints
+    from exactly this pair (``tui.app.drain_notice_for``).
+
+    Keyed on the DEPARTURE rather than on a change of phrase, which is the case that
+    forces it: the second attempt at the same build announces the same words, so a
+    clear-on-change would leave this pair wrong in the one state the pair exists for.
+    """
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD
+
+    handle = RefreshableHandle(reason="busy")
+    server, _sent = _rig(handle)
+    # The state an abandon leaves: the phrase kept, the failed pair published.
+    server.note_leaving(LEAVING_FOR_BUILD)
+    server._record.update_failed = "0.62.9 -> 0.62.12"
+
+    server.note_leaving(LEAVING_FOR_BUILD)
+
+    assert (
+        server._record.leaving == LEAVING_FOR_BUILD
+    ), "the phrase still describes the departure in force"
+    assert server._record.update_failed == "", (
+        "a new departure supersedes the last failure: otherwise this record reads as "
+        "an abandoned handover while a fresh one is refusing work"
+    )
+
+
+@pytest.mark.asyncio
 async def test_announcing_a_drain_publishes_the_record_in_the_same_call(stale) -> None:
     """The frame flag and the record phrase are ONE commit, not two writers.
 
