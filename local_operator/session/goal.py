@@ -74,28 +74,29 @@ GOAL_HISTORY_MAX = 20
 #: still recoverable from the transcript, which is what a history row points AT.
 GOAL_HISTORY_TEXT_CHARS = 400
 
-#: How much of a cleared goal the receipt echoes.
+#: How much of a cleared goal the receipt echoes: THE GOAL'S OWN CAP.
 #:
-#: ``MAX_GOAL_CHARS`` is a spec-sized bound no single receipt should carry: the
-#: echo exists so a mistaken clear is visible and can be retyped by eye, and an
-#: echo long enough to bury the transcript defeats exactly that. 96 is the same
-#: bound the ``goal restored`` notice already clips to, so the two lines the app
-#: prints about the same value read alike.
+#: The echo exists so a mistaken clear is visible and can be retyped by eye, and
+#: there is no undo on the terminal — so it is the user's WHOLE recovery artifact,
+#: and a bound below the goal's own cap made it incomplete exactly where it
+#: mattered: a 152-character goal came back as 96 characters and an ellipsis,
+#: which cannot be retyped (design D4 / UX U2, measured on the real card).
+#:
+#: The old 96 was justified as "the same bound the `goal restored` notice clips
+#: to, so the two lines read alike" — and that is the argument this revision
+#: rejects: the notice is a one-time greeting about a goal that is still there,
+#: while the receipt is the only record of one that is GONE. Two surfaces reading
+#: alike is worth less than one of them being usable.
 #:
 #: CHARACTERS, not cells, because this module is the shared, non-UI half of the
-#: app and the surfaces that paint the string own its cell clipping. The two
-#: bounds are not the same number and it is worth knowing which one is quoted
-#: here: the 14-cell ``goal cleared: `` prefix plus 96 ASCII characters plus the
-#: clip's ``…`` is 111 cells, and the same 96 characters in CJK glyphs is 207.
-#: So a maximum-length receipt WRAPS, and that is intended: measured as a
-#: painted notice, a 96-character goal with no spaces fills 3 rows at both 80 and
-#: 100 columns (Rich drops the unbreakable word to its own rows) and its CJK twin
-#: fills 4 — the continuation indents under the text column and reads as one
-#: notice, which is how a long objective stays legible at all. What the clip
-#: guarantees is a bounded length and one LOGICAL line. This comment and the
-#: helper below used to claim a single terminal ROW, which the code has never
-#: held (round 2: reviewer NIT-6, UX U8).
-CLEARED_GOAL_ECHO_CHARS = 96
+#: app and the surfaces that paint the string own its cell clipping. A
+#: maximum-length receipt therefore WRAPS — measured as a painted notice, a long
+#: goal with no spaces fills several rows (Rich drops the unbreakable word to its
+#: own rows) and its CJK twin more, with the continuation indenting under the text
+#: column so it still reads as one notice. What the clip guarantees is a bounded
+#: length and one LOGICAL line; the record's own cap is what makes the bound
+#: bounded.
+CLEARED_GOAL_ECHO_CHARS = MAX_GOAL_CHARS
 
 
 def cleared_goal_receipt(cleared: str) -> str:
