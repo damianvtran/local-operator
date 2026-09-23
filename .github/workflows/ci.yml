@@ -1187,12 +1187,13 @@ jobs:
         # `if: always()` for the FAILING case: a shard that fails an assertion
         # exits 1 and still writes the XML, with times for every test that ran.
         #
-        # NOT for a hang. A tripped watchdog calls `os._exit(1)`, so pytest
-        # never reaches `sessionfinish` and writes nothing -- and
-        # `if-no-files-found: ignore` then reports this step as a success with
-        # no artifact, which is how that limit would otherwise go unnoticed.
-        # Measured both ways on 2026-09-19 (see the sibling note on the unit
-        # job's upload step).
+        # A diagnostic dump no longer exits from faulthandler's C thread. If the
+        # wrapped operation is able to return after the dump, `bounded` raises a
+        # regular TimeoutError and pytest writes this failure report. A truly
+        # wedged process still relies on the job timeout; its surviving dump is
+        # printed by the always-run reporting step below.
+        # The upload remains `always()` so ordinary assertion failures retain the
+        # per-test timings used to correct shard weights.
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -1201,16 +1202,13 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
       - name: Report a hang's thread dump
-        # A tripped watchdog kills the process, so pytest never gets to print
-        # anything: the stacks of the parked threads live only in a dump file,
-        # and without this step a freeze reports as a bare non-zero exit.
-        #
-        # Safe to run after ANY failure. A dump file survives only when a bound
-        # actually fired (every ordinary exit path removes its own), and only
-        # files carrying faulthandler's `Timeout (` marker are printed — so an
-        # ordinary assertion failure gets an explicit "not a hang" line rather
-        # than a fabricated timeout claim for a test that failed in seconds.
-        if: failure()
+        # Dump-only timers cannot interrupt a GIL-held or kernel-blocked test;
+        # the outer job timeout remains the hard failure boundary. If execution
+        # returns after a fire, bounded raises normally; if the process is still
+        # wedged, this step reports its retained C-thread dump after cancellation.
+        # Safe after any failure: only files with faulthandler's `Timeout (` marker
+        # are printed, so an ordinary assertion failure is never called a hang.
+        if: always()
         run: python -m tests.e2e.watchdog
 
   server-sanity:

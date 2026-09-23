@@ -22,12 +22,12 @@ syscall holding no bytecode, so:
 Measured, not assumed: driving the pre-fix code through ``/resume`` produced a
 process that ignored a 20 s thread watchdog and had to be ``kill -9``'d.
 
-``faulthandler.dump_traceback_later`` is the one bound that survives it. It
-arms a timer in a dedicated **C** thread that writes the stacks of every thread
-with ``write(2)`` directly to a file descriptor and then calls ``_exit(1)`` —
-no GIL, no Python frames, no interpreter state required. That makes a
-deadlocked run fail in seconds with the exact stacks of the parked threads,
-which is precisely the diagnostic a reader needs.
+``faulthandler.dump_traceback_later`` is the one instrument that survives it.
+It arms a timer in a dedicated **C** thread that writes the stacks of every
+thread with ``write(2)`` directly to a file descriptor without the GIL, Python
+frames or interpreter state. E2E bounds are dump-only: pytest cannot safely be
+ended from the native callback, so CI must inspect the retained dump and its
+outer job timeout remains the eventual failure bound.
 
 The GRANULARITY is deliberate: the timer is armed around the specific step
 under test rather than around the whole test, so the dump names the operation
@@ -52,11 +52,10 @@ configuration: it arms only inside the runtime child's ``__main__`` branch, so
 it lives in a spawned runtime process, never in the pytest process this file's
 ``bounded`` blocks run in.
 
-``exit=True`` kills the whole process, so a fired watchdog takes down the
-pytest worker with it. That is the intended behaviour and not a rough edge: a
-deadlocked interpreter cannot report a test failure through any gentler
-channel, and a hard exit carrying the stacks is strictly better than a job that
-sits until the CI wall clock reaps it with no diagnostic at all.
+The watchdog is diagnostic-only. ``exit=True`` would terminate the whole pytest
+worker from a C callback, losing pytest's normal reporting and any unrelated
+work in that process. A fired dump survives for CI to report, while the workflow's
+outer timeout remains the failure boundary for a test that never returns.
 """
 
 from __future__ import annotations
@@ -73,15 +72,14 @@ from pathlib import Path
 #: under a Textual pilot the app owns the terminal and pytest has replaced the
 #: stderr OBJECT, so ``faulthandler``'s fileno() lookup fails outright on it —
 #: the dump has to land somewhere with a genuine descriptor behind it. Kept in
-#: the OS temp dir rather than a tmp_path fixture so the path is stable and
-#: printable in the failure message a surviving process can still emit.
+#: the OS temp dir rather than a tmp_path fixture so the path remains available to
+#: the post-run CI report even when a hung test never returns.
 DUMP_DIR = Path(os.environ.get("TMPDIR", "/tmp"))
 
 #: Filename prefix for one bounded block's dump. Each block gets its OWN file
 #: rather than a single shared path. A shared path is truncated by whichever
 #: block runs next, so a real hang's stacks could be destroyed by a later
-#: block's header — and the dump only survived at all because the hanging test
-#: happened to be the last one in the file.
+#: block's header; preserving per-block files keeps each fired diagnostic attributable.
 DUMP_PREFIX = "lo-tui-e2e-hang"
 
 #: The marker ``faulthandler`` itself writes when the timer actually fires
@@ -93,21 +91,16 @@ FIRED_MARKER = "Timeout ("
 
 @contextlib.contextmanager
 def bounded(seconds: float, what: str) -> Iterator[None]:
-    """Fail loudly, with every thread's stack, if ``what`` takes too long.
+    """Capture every thread's stack if ``what`` outlives its diagnostic bound.
 
-    Wrap the smallest step that can hang, not the whole test: the dump's value
-    is that it names the parked operation, and a bound around ten steps only
-    tells you one of them stopped.
+    Wrap the smallest step that can hang, not the whole test: the dump names the
+    parked operation, while a bound around ten steps only says one of them stopped.
 
-    The dump file's EXISTENCE is the signal, and keeping that honest drives the
-    shape here. ``faulthandler`` writes with a raw file descriptor from a C
-    thread, so the handle and its header must exist BEFORE the timer is armed —
-    the header cannot be deferred to the moment it fires. What can be deferred
-    is the file's survival: every ordinary exit path (success, assertion
-    failure, error) removes it, and only a fired watchdog leaves it behind,
-    because that path exits the process immediately and never reaches the
-    cleanup. So a file that is still there means the bound really tripped,
-    which is exactly what the CI reporting step claims when it prints one.
+    The dump file's EXISTENCE is the signal. ``faulthandler`` writes through a
+    raw file descriptor from a C thread, so the handle and header exist before
+    the timer is armed. Ordinary exit paths remove the file; when the timer fires,
+    this context manager cannot run while the blocked code holds the GIL, so the
+    diagnostic remains for CI to report. The C callback does not exit the worker.
     """
     # Unique per block and per process: pytest may run several bounded blocks,
     # and under a fired watchdog the surviving file must be attributable to the
@@ -117,22 +110,28 @@ def bounded(seconds: float, what: str) -> Iterator[None]:
     try:
         handle.write(f"[e2e watchdog] {what!r} exceeded {seconds:g}s; every thread follows.\n")
         handle.flush()
-        # cancel_dump_traceback_later() in the finally is what makes this
-        # re-entrant-safe across sequential steps in one test: each `bounded`
-        # block owns the single process-wide timer for its own duration.
-        faulthandler.dump_traceback_later(seconds, file=handle, exit=True)
+        # cancel_dump_traceback_later() in the finally makes sequential bounds
+        # re-entrant-safe. A diagnostic must not terminate pytest from the C thread:
+        # normal assertion reporting and the CI dump reporter stay in control.
+        faulthandler.dump_traceback_later(seconds, file=handle, exit=False)
         try:
             yield
         finally:
             faulthandler.cancel_dump_traceback_later()
+        # A cooperative operation may return after the native timer wrote its
+        # diagnostic. Keep the test red in that case; the C callback itself must
+        # not terminate pytest to report the bound.
+        if _is_real_dump(path):
+            raise TimeoutError(
+                f"{what!r} exceeded {seconds:g}s; thread dump retained at {path}"
+            )
     finally:
         handle.close()
-        # Reached on success AND on an ordinary failure, never on a fired
-        # watchdog (which _exit()s from the C thread). This is what stops a
-        # green run or a plain assertion failure from leaving behind a file
-        # that reads as a hang report.
-        with contextlib.suppress(OSError):
-            path.unlink()
+        # The timer's C thread may have written a real dump before the step returned.
+        # Keep that diagnostic for CI; only a header without a fire is disposable.
+        if not _is_real_dump(path):
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 #: Distinguishes concurrent bounded blocks within one process.
@@ -143,11 +142,9 @@ def report_previous_hang() -> str:
     """The stacks of a bound that actually fired, or an explicit statement that
     none did.
 
-    Reads back what the dying process wrote: a fired watchdog ``_exit``s
-    immediately, so nothing in that process can attach the dump to a test
-    report. Only files carrying :data:`FIRED_MARKER` are reported, so this can
-    never present a header-only file as a timeout — the failure mode that made
-    an ordinary 3-second assertion failure look like a 45-second hang.
+    Reads back what the C timer wrote while the tested operation was blocked. Only
+    files carrying :data:`FIRED_MARKER` are reported, so a header-only file cannot
+    turn an ordinary assertion failure into a timeout claim.
     """
     dumps = sorted(
         (path for path in DUMP_DIR.glob(f"{DUMP_PREFIX}-*.log") if _is_real_dump(path)),
