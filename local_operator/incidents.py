@@ -1132,6 +1132,12 @@ def format_shape_incident_message(
 
     ``reached_model`` defaults to True — the escalated reading — because a caller
     that cannot classify must not make the quieter claim.
+
+    An EMPTY ``labels`` on the escalated path is a real state, not a caller error:
+    a hit whose mask cannot be claimed (``complete=False``) is dropped from
+    ``ShapeReport.labels`` while it still escalates if any readable material
+    survived (``exposed=True``), so ``labels=()`` with ``reached_model=True``
+    reaches here — see the shape-clause note in the body.
     """
     shapes = ", ".join(labels) if labels else "credential-shaped content"
     tool_name = tool or "a tool"
@@ -1144,6 +1150,20 @@ def format_shape_incident_message(
     # on "[credential redaction] " (``harness/rows.py``), and a row that painted as
     # the user's own words would be worse than a jargon-first one.
     if reached_model:
+        # WHEN THE TABLE COULD NOT NAME THE SHAPE, SAY SO — do not assert a generic
+        # one. The reader's first question is "what matched?", and the ``shapes``
+        # fallback above ("credential-shaped content") reads as a shape the table
+        # DID identify, leaving an operator unable to tell an un-named hit from a
+        # named one. This state is reachable on the shipped path, measured this
+        # session on the corpus's own escalating case (the ``amqp`` DSN whose
+        # username is its password): its hit grades ``complete=False, exposed=True``,
+        # so ``shape_report`` yields ``labels=()`` with ``reached_model=True`` — an
+        # ESCALATION naming no shape. Only the provenance clause changes; what the
+        # guard MEASURED, and the rotate instruction below, are untouched.
+        if labels:
+            credential = f"a credential ({shapes})"
+        else:
+            credential = "a credential the shape table could not name"
         # The CAUSE has to be true in both directions the escalation covers. The
         # `amqp` DSN case masks its password whole and still escalates, because the
         # DSN rule keeps the userinfo username by design and an operator who used
@@ -1155,7 +1175,7 @@ def format_shape_incident_message(
         # the notice does not pick one it cannot distinguish. The rotate
         # instruction is untouched — it is the reason the wording exists.
         return (
-            f"[credential redaction] rotate it — a credential ({shapes}) reached "
+            f"[credential redaction] rotate it — {credential} reached "
             f"{tool_name} and its value is readable in this session's context: "
             f"either the mask did not cover it fully, or it survives in the text "
             f"another way.{where} A value that reached the model may be in "
