@@ -824,6 +824,64 @@ _DRAIN_NOTICES: dict[str, str] = {
     LEAVING_FOR_BUILD_OVERDUE: OVERDUE_DRAIN_NOTICE,
 }
 
+#: The notice for a runtime whose handover was GIVEN UP — the record PAIR
+#: ``LEAVING_FOR_BUILD`` with a non-empty ``update_failed``, which is the state
+#: ``process._abandon_move`` leaves behind: the latch released, the failure published,
+#: and the session serving again on the build it loaded.
+#:
+#: WHY THE TABLE ABOVE CANNOT ANSWER THIS, and why the key is the PAIR rather than a
+#: phrase. The abandon KEEPS the ordinary build phrase on the record BY DESIGN — the
+#: drain object stays latched, so the runtime still leaves at the first idle instant,
+#: and the phrase is true of that commitment (``process._abandon_move``'s docstring
+#: carries the argument, and the wake-rearm loss a re-latch would cost). So the phrase
+#: is identical before and after the abandon and :data:`DRAIN_NOTICE` is painted for
+#: both — telling the operator "a new message will not start a turn until the new
+#: build is up" at the one instant that is FALSE, because releasing the latch is
+#: exactly what makes admissions work again. The second half of the record's pair is
+#: what distinguishes them, and it is the half the frame now carries.
+#:
+#: WHAT IT SAYS, and the two facts it may not drop. It names the abandoned UPDATE
+#: (the build pair the handover was for) and what the operator can do — nothing needs
+#: doing: the session is serving, so their next message is an ordinary message. It
+#: deliberately claims NOTHING about a successor: there is none coming, the lease is
+#: still held, and the newer build is retried on the runtime's own ticks. Shape it
+#: does NOT take: the word "stalled", or any number — the bound that fired is either
+#: the movement bound or the dwell, and a sentence that named one would be wrong for
+#: the other arm by construction (the same split ``incidents._update_failed_cause_sentence``
+#: documents); the incident row is where the bound the runtime actually spent is read.
+DRAIN_NOTICE_ABANDONED = (
+    "the handover to the newer build was given up — this session kept the build it "
+    "loaded and is serving again, so your next message starts a turn as usual"
+)
+
+
+def drain_notice_for(leaving: str, update_failed: str = "") -> str:
+    """The sentence a draining frame earns, from the record PAIR it carried.
+
+    THE ONE READER of both tables above, so a call site cannot pick the phrase half
+    and forget the second: a phrase WITHOUT a failed update is what the table says
+    (:data:`DRAIN_NOTICE_OTHER` for one this build cannot name — never another
+    trigger's sentence, which is the correction design round 3's D6 filed), and the
+    only pair that changes the answer is the abandoned handover's, because it is the
+    only pair whose two halves CONTRADICT each other (``LEAVING_FOR_BUILD`` says work
+    is refused, a published failure says the refusal was given up).
+
+    ``update_failed`` is the record's ``SessionRecord.update_failed`` — the pair a
+    handover could not move to — and an EMPTY one means no handover has failed on
+    this runtime, so the phrase decides alone.
+
+    STATED LIMIT, because it is a real window and not a nitpick: this is the sentence
+    for a frame that arrives CARRYING an already-failed handover — a viewer joining
+    or re-announcing after the abandon. A viewer that was already attached when the
+    abandon fired keeps the row it was painted at the latch, because there is no
+    "staying" frame on this wire (``process.py`` refuses to invent one) and the
+    abandon is therefore not announced. Repainting that row needs an event this
+    change deliberately does not add.
+    """
+    if leaving == LEAVING_FOR_BUILD and update_failed:
+        return DRAIN_NOTICE_ABANDONED
+    return _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
 #: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
@@ -18632,7 +18690,9 @@ class OperatorApp(App[None]):
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
-    def _on_runtime_draining(self, leaving: str = "", updating: str = "") -> None:
+    def _on_runtime_draining(
+        self, leaving: str = "", updating: str = "", update_failed: str = ""
+    ) -> None:
         """A runtime has committed to leaving while it still has work: say so.
 
         TWO DEPARTURES REACH THIS, AND THEY NEED OPPOSITE SENTENCES. ``leaving`` is
@@ -18666,6 +18726,16 @@ class OperatorApp(App[None]):
         was painted the build sentence while its record said the opposite
         (agent review round 4, MAJOR-1; UX round 4, U13).
 
+        ``update_failed`` IS THE OTHER HALF OF THAT KEY, and it is the half that
+        makes the sentence true about the HANDOVER rather than only about the
+        trigger: a runtime whose build move was given up keeps the ordinary build
+        phrase BY DESIGN (``process._abandon_move``), so the phrase alone earns the
+        sentence that says a new message will not start a turn — false from the
+        instant the latch was released, which is the state
+        :data:`DRAIN_NOTICE_ABANDONED` exists for. Which sentence that pair earns,
+        and the one window in which it is reachable, are
+        :func:`drain_notice_for`'s docstring.
+
         One row, while the composer still accepts text that will be refused.
         """
         if self._interaction is None:
@@ -18673,10 +18743,15 @@ class OperatorApp(App[None]):
         # THE WINDOW FIRST, and the ordering is the contract: a runtime that opened a
         # window and then latched a drain sends both, and only the window's sentence
         # is true of the message the operator just sent (it is queued, not refused).
+        #
+        # ``update_failed`` is the record pair's second half and reaches the sentence
+        # through ``drain_notice_for``, which is the only reader of both tables: the
+        # phrase alone cannot tell a handover that is still waiting from one that was
+        # given up, because the abandon keeps the ordinary build phrase by design.
         notice = (
             update_phrase(UPDATING, updating)
             if updating
-            else _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+            else drain_notice_for(leaving, update_failed)
         )
         self._notice_for(self._interaction, notice, "note")
         self._announce_queued_elsewhere(self._interaction)
