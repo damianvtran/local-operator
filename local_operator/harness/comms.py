@@ -596,10 +596,9 @@ class RosterPass:
     innermost frame is this work — the ``TRANSCRIPT_FILENAME`` probe in
     ``_describe`` most often, then ``_live_twin``'s genexpr, ``_is_running`` and
     the ``Path.__eq__`` comparisons inside the scan. Cite the FRAMES, not a
-    census of them: the dump files rotate (a count taken at 10:45 and another at
-    11:20 differ by an order of magnitude on this host), and two readers
-    recounted them independently on the day this shipped and got 21 of 128 and
-    28 of 134. One pass makes each of those callers linear.
+    census of them: the dump files rotate, and independent readers recounted
+    them within hours of each other and got 21 of 128 and 28 of 134. One pass
+    makes each of those callers linear.
 
     A pass is a SNAPSHOT and is deliberately never retained across calls: it
     hoists state that cannot change *within* one pass — a job row's running bit
@@ -670,9 +669,15 @@ class RosterPass:
     def transcript_present(self, record: _ChildRecord) -> bool:
         """Whether the record's transcript file is on disk, memoised for the pass.
 
-        Keyed by directory: two records sharing one transcript directory can
-        only ever agree, and the filesystem cannot change its mind inside one
-        pass.
+        The memo's guarantee is narrower than "the answer cannot change inside a
+        pass", and worth stating exactly. What it now holds is AGREEMENT: two
+        records sharing one transcript directory are answered from one probe, so
+        they cannot disagree — where the old per-record probe could answer Yes for
+        one and No for the other if the file was unlinked between its two calls.
+        What it saves is the syscall: one per distinct directory per pass instead
+        of one per record per walk, and that probe is the dominant innermost frame
+        in the stall dumps. It is NOT a claim about the filesystem: another
+        process can still unlink the file mid-pass, and a later pass re-probes it.
         """
         session_dir = record.session_dir
         if session_dir is None:

@@ -27064,8 +27064,8 @@ class OperatorApp(App[None]):
         return job
 
     def _roster_read(self, comms: Any) -> Any:
-        """One linear pass over the comms graph for a whole dock tick, or the
-        graph itself where there is no pass to build.
+        """A linear pass over the comms graph for this resolver, or the graph
+        itself where there is no pass to build.
 
         WHY THE RESOLVERS TAKE ONE. Every dock path resolves a job row per node
         it shows, and ``comms.job`` rebuilds the live-child session list by
@@ -27073,12 +27073,31 @@ class OperatorApp(App[None]):
         cap, once per tick and once per ``Subagent*`` handler. One pass answers
         all of them from the single scan it had to make anyway.
 
-        Total by design, like the readers that use it: this feeds a status
-        surface, so a graph that cannot build a pass is the graph, not an
-        exception. The follower's ``SnapshotSubagentComms`` is that case — it
-        has no ``roster_pass`` and does not need one (its ``job`` is a dict
-        lookup), and returning it unchanged is what keeps a follower and an
-        owner reading the same members.
+        NOT ONE PASS PER TICK, one per resolver call: each of the two resolvers
+        builds its own here, and ``paused_child_ids(comms)`` builds a third
+        through ``comms.nodes()``, so a tick pays four linear walks where it
+        used to pay two quadratic sweeps. The complexity claim is about the
+        walks being linear and is unchanged by the count; the count is stated so
+        a reader counting them is not surprised.
+
+        TOTAL FOR THE BUILD ONLY, not for the readers that use it. A graph that
+        cannot build a pass is the graph, not an exception — but the pass is a
+        convenience, not the only route back into the registry: ``read.children``
+        and ``read.nodes`` on a class without them still reach
+        ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` raises
+        outside this guard. Both callers wrap their whole body, so that is a
+        blanked dock rather than an exception in a Textual handler — which is the
+        behaviour this must keep, and the reason the guard is a ``getattr`` and
+        not a cast.
+
+        The follower's ``SnapshotSubagentComms`` is the case that has no
+        ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
+        what makes the follower cheap is that ``_subagent_job`` then falls
+        through to ``SnapshotJobs.get``, a dict lookup (its own comment records
+        the last time a linear lookup there made a paint quadratic). Returning
+        the facade unchanged is what keeps a follower and an owner reading the
+        same members, and it is load-bearing: an unconditional build raises
+        ``AttributeError`` out of the follower path and blanks the dock.
         """
         build = getattr(comms, "roster_pass", None)
         if callable(build):
@@ -27185,8 +27204,10 @@ class OperatorApp(App[None]):
         manager = getattr(session, "jobs", None)
         view = self._subagent_view
         try:
-            # ONE pass for the whole tick: the child list, every node's job row
-            # and the ``children()`` scan below all come off it.
+            # This resolver's own pass: the child list, every node's job row and
+            # the ``children()`` scan below all come off it. ``paused_child_ids``
+            # builds one of its own (through ``comms.nodes()``), so the tick pays
+            # two linear walks here rather than one — see ``_roster_read``.
             read = self._roster_read(comms)
 
             if comms is not None and callable(getattr(comms, "children", None)):
@@ -27263,10 +27284,12 @@ class OperatorApp(App[None]):
         nodes = getattr(comms, "nodes", None)
         if not callable(nodes):
             return {}
-        # One pass for the tick: the grouping walk and the per-row resolvers
-        # below both read it (see ``_roster_read``).
-        read = self._roster_read(comms)
         try:
+            # Built INSIDE the try, like the roster resolver's: ``_roster_read``
+            # cannot raise today, but this method's totality claim is about its
+            # whole body, and a build moved back out would escape it into a
+            # Textual message handler instead of blanking the marks.
+            read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
             for node in cast(Sequence[Any], read.nodes()):
                 parent_id = str(getattr(node, "parent_job_id", "") or "")

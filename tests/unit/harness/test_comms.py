@@ -3283,3 +3283,61 @@ def test_the_roster_and_the_nodes_keep_insertion_order() -> None:
 
     assert [row.job_id for row in comms.roster()] == ["job-c", "job-a", "job-b"]
     assert [node.job_id for node in comms.nodes()] == ["job-c", "job-a", "job-b"]
+
+
+def _nested_roster() -> SubagentComms:
+    """A root with two children and a grandchild, plus an alias pair.
+
+    The shapes ``children`` resolves differently: a parent id, a leaf, the root
+    (``None``), an id that is not in the registry, an ALIAS of a real id, and an
+    id the alias table points at a record that is gone.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    for job_id in ("job-0000", "job-0001", "job-0002", "job-0003"):
+        jobs.add(job_id, status="completed")
+    comms.record_launch("job-0000", "manager", prompt="plan")
+    comms.record_launch("job-0001", "coder", parent_job_id="job-0000")
+    comms.record_launch("job-0002", "reviewer", parent_job_id="job-0000")
+    comms.record_launch("job-0003", "scout", parent_job_id="job-0001")
+    comms._aliases["job-0000-alias"] = "job-0000"
+    comms._aliases["job-0000-gone"] = "job-0000-nothere"
+    return comms
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        None,
+        "",
+        "job-0000",
+        "job-0001",
+        "job-0002",
+        "job-0003",
+        "job-0000-alias",
+        "job-0000-gone",
+        "no-such-record",
+    ],
+)
+def test_the_pass_children_mirrors_the_registry_children(target) -> None:
+    """``RosterPass.children`` is a mirror, not a re-implementation.
+
+    The dock reads ``read.children(...)`` off the tick's pass (review round 1,
+    M1), so a divergence here silently changes WHICH rows the dock shows — and
+    the failure mode that matters is an empty list, which reads as "this child
+    has no children" rather than as a bug. Asserted as equality with the method
+    it mirrors, across the id shapes that resolve differently, because the
+    parent resolution is the part that could drift: an aliased parent, an id the
+    alias table points past, a leaf, and the root.
+    """
+    comms = _nested_roster()
+
+    assert comms.roster_pass().children(target) == comms.children(target)
+    # ...and the equality is not two empty lists on the shapes that have rows.
+    if target in ("job-0000", "job-0000-alias"):
+        assert [node.job_id for node in comms.roster_pass().children(target)] == [
+            "job-0001",
+            "job-0002",
+        ]
+    if target is None:
+        assert [node.job_id for node in comms.roster_pass().children(target)] == ["job-0000"]

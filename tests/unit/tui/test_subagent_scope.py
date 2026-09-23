@@ -790,18 +790,27 @@ class _SpyComms(SubagentComms):
         return super().job(job_id)
 
 
-def _docked_registry(n: int, tmp_path: Any) -> tuple[Any, Any]:
+def _docked_registry(n: int, tmp_path: Any, *, nested: bool = False) -> tuple[Any, Any]:
     """An app whose session carries a real registry of ``n`` settled children.
 
     Each child gets a real transcript file: the roster's resumable verdict probes
     the filesystem, and that probe is part of what the old per-record walk paid.
+
+    ``nested`` PARENTS every child but the first to ``job-0000``, which is the
+    shape the dock actually runs on and the only shape that reaches
+    ``_subagent_child_counts``' per-row resolver: its bucket map is keyed by
+    ``parent_job_id``, so a flat registry buckets NOTHING and the whole per-row
+    half of the dock goes unexercised (review round 2, R2-2; QA Q-1). A guard
+    built on the flat shape cannot go red for a regression confined to that half.
     """
     jobs = _fake_jobs(*[_Job(f"job-{i:04d}", f"child-{i}", "completed") for i in range(n)])
     session = FakeSession()
     session.jobs = jobs
     comms = _SpyComms(session)
     for i in range(n):
-        comms.record_launch(f"job-{i:04d}", f"child-{i}")
+        job_id = f"job-{i:04d}"
+        parent = "job-0000" if nested and i else None
+        comms.record_launch(job_id, f"child-{i}", parent_job_id=parent)
     for i in range(n):
         session_dir = tmp_path / f"job-{i:04d}"
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -821,15 +830,23 @@ def _docked_registry(n: int, tmp_path: Any) -> tuple[Any, Any]:
 
 
 def test_the_dock_resolves_its_rows_from_ONE_pass(tmp_path) -> None:
-    """A dock tick reads one linear pass, not one session scan per node.
+    """A dock tick reads linear passes, not one session scan per node.
 
     Counted rather than timed, and on the two methods review round 1 named
-    (``_subagent_roster``, ``_subagent_child_counts``). Base, same instrument:
-    the 256 node tick touched the registry 197,888 times in ``_subagent_roster``
-    and 132,096 in ``_subagent_child_counts`` (x3.95 and x3.97 per doubling), with
-    256 per-node ``comms.job`` calls; head is 2,304 and 2,048 (exactly x2 per
-    doubling) and ZERO ``comms.job`` calls. The zero is the assertion that
-    matters: it is the call that rebuilt the session list per node.
+    (``_subagent_roster``, ``_subagent_child_counts``), on a FLAT roster — the
+    nested shape is ``test_every_child_row_the_marks_resolve_reads_them_off_the_pass``,
+    which the flat one cannot exercise at all.
+
+    The ``before`` column this guards is **``origin/main``**, the pre-PR base,
+    measured with this same fixture and instrument (QA re-derived it there
+    digit for digit): the 256 node tick touched the registry 197,888 times in
+    ``_subagent_roster`` and 132,096 in ``_subagent_child_counts`` (x3.95 and
+    x3.97 per doubling), with 256 per-node ``comms.job`` calls. Head is 2,304 and
+    2,048 (exactly x2 per doubling) and ZERO per-node ``comms.job`` calls. The
+    zero is the assertion that matters: it is the call that rebuilt the session
+    list per node. (``84321616``, the branch's first commit, sits between the
+    two: the registry's own readers were linear there, but the dock still took
+    the per-call route, which is what review round 1 filed as M1.)
     """
     small_app, small_comms = _docked_registry(64, tmp_path / "small")
     large_app, large_comms = _docked_registry(128, tmp_path / "large")
@@ -862,4 +879,57 @@ def test_the_dock_resolves_its_rows_from_ONE_pass(tmp_path) -> None:
     assert large_touches <= 3 * small_touches, (
         f"doubling the roster multiplied the tick's work by "
         f"{large_touches / small_touches:.1f}x — that is the quadratic shape back"
+    )
+
+
+def test_every_child_row_the_marks_resolve_reads_them_off_the_pass(tmp_path) -> None:
+    """The per-row half of the dock, which a FLAT roster cannot reach.
+
+    ``_subagent_child_counts`` resolves a job row per child row it counts, and
+    its bucket map is keyed by ``parent_job_id`` — so on a flat registry the map
+    is empty, no row resolves anything, and a regression confined to that
+    resolver leaves every other assertion green. That is not hypothetical: on
+    the round-2 mutant, reverting only the per-row ``_subagent_job(..., read)``
+    re-created the pre-PR cost (68,093 touches, x3.856 per doubling, 255
+    per-node ``comms.job`` calls) while the flat guard above AND the
+    ``CountingComms`` walk test both stayed green.
+
+    So this drives the NESTED shape and asserts the resolver's exact cost rather
+    than a touches-per-record bound: the per-node ``comms.job`` calls must be
+    zero, and the marks must still be the real child counts. An exact zero needs
+    no calibration on a host at load 100+, which is why it is the assertion here
+    instead of another bound — the flat guard's bound is calibrated for the flat
+    shape and head measures 20.9 touches per record once nested.
+    """
+    app, comms = _docked_registry(64, tmp_path / "nested", nested=True)
+
+    jobs, _ = app._subagent_roster()
+    assert [job.id for job in jobs] == ["job-0000"], "the fixture must nest under one row"
+
+    comms.job_calls = 0
+    comms._records.touches = 0
+    counts = app._subagent_child_counts(jobs)
+
+    assert counts == {"job-0000": 63}, f"the marks must be real child counts, not zeros: {counts}"
+    assert comms.job_calls == 0, (
+        "every child row must resolve off the tick's pass: per-row comms.job "
+        f"rebuilt the session list {comms.job_calls} times for 63 children"
+    )
+    small_touches = comms._records.touches
+
+    # The nested shape is the expensive one, so pin that it stays LINEAR too:
+    # doubling the roster doubles the marks' work, where the per-row call made
+    # it quadruple.
+    large_app, large_comms = _docked_registry(128, tmp_path / "nested-large", nested=True)
+    large_jobs, _ = large_app._subagent_roster()
+    large_comms.job_calls = 0
+    large_comms._records.touches = 0
+    large_counts = large_app._subagent_child_counts(large_jobs)
+
+    assert large_counts == {"job-0000": 127}
+    assert large_comms.job_calls == 0
+    assert large_comms._records.touches <= 3 * small_touches, (
+        f"doubling the nested roster multiplied the marks' work by "
+        f"{large_comms._records.touches / small_touches:.1f}x — that is the "
+        "quadratic shape back on the per-row half"
     )
