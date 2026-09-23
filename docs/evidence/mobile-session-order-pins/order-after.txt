@@ -1,0 +1,14 @@
+# GET /api/sessions on the fixed tree (synthetic fixture, port 4200)
+# session_id   section   unseen  pinned  created_at
+done-new     active    True    False   1000.0
+done-old     active    True    False   999.0
+cold-unread  active    True    False   998.0
+busy-a       active    False   False   996.0
+cold-read    previous  False   False   997.0
+
+# POST /fixture/tick x5 — order must not move
+done-new done-old cold-unread busy-a cold-read
+done-new done-old cold-unread busy-a cold-read
+done-new done-old cold-unread busy-a cold-read
+done-new done-old cold-unread busy-a cold-read
+done-new done-old cold-unread busy-a cold-read
