@@ -1839,6 +1839,14 @@ class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
     status: str  # completed | failed | cancelled
     result_text: str | None = None
     error_text: str | None = None
+    #: Why the child was CUT OFF, when it was: the machine token
+    #: (``incidents.CUT_OFF_CAUSES``) and its rendered operator sentence. Both
+    #: ``""`` for a clean completion or a deliberate stop, which is also what an
+    #: OLD child runtime produces — the same backwards-compatibility story
+    #: ``AgentEndEvent.cut_off`` states at length, and the reason an additive
+    #: field here needs no ``PROTOCOL_VERSION`` bump.
+    cut_off: str = ""
+    cut_off_cause: str = ""
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
@@ -2152,7 +2160,19 @@ class LoopConfig(BaseModel):
     deadline: float | None = None
 
     # Guardrails.
+    # Steering + asides: parent/peer-driven re-entries at the outer-loop yield
+    # boundary. Each is a NEW instruction rather than a retry, so the budget is
+    # generous, but it stays BOUNDED — a producer that speaks faster than the
+    # child consumes is the runaway this exists for.
     max_paused_turn_continuations: int = 8
+    # Follow-ups (the todo reminder): self-limiting already, because the
+    # producer latches on a byte-identical list (``Session._todo_continuation``
+    # returns ``[]`` while the list does not move). This budget is a backstop
+    # against a model that keeps the latch open with trivial edits, not the main
+    # bound, so it is deliberately the larger one — and it is SEPARATE from the
+    # steering/aside budget so a chatty parent cannot spend a child's todo
+    # allowance (the defect the split exists to fix).
+    max_follow_up_continuations: int = 64
     # Bound live tool work even when the model emits a very wide batch.
     max_parallel_tools: int = Field(default=DEFAULT_MAX_PARALLEL_TOOLS, ge=1)
 

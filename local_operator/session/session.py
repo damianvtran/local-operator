@@ -7578,13 +7578,38 @@ class Session:
         the live row instead of naming a different failure.
         """
         cause = self._cut_off_cause
+        if not cause and not self._deliberate_stop_noted:
+            # A cause can also be STAMPED ON THE EVENT by the harness itself —
+            # the loop's own continuation guard is the first writer of that
+            # shape (``harness/loop.py``, ``CONTINUATION_LIMIT_CAUSE``). Nothing
+            # armed it: no process is going away and no rung noted it, so the
+            # event IS the only record. Without reading it here the stamped
+            # token would be dropped on the floor and the end would keep
+            # ``aborted=True, error=None`` — i.e. read as a DELIBERATE stop on
+            # every surface, which is the misclassification this taxonomy calls
+            # worse than the bug it fixes.
+            #
+            # The deliberate-stop guard is the same one ``note_cut_off`` applies:
+            # positive evidence of a user's own stop outranks anything.
+            cause = event.cut_off_cause
         if not cause:
             return event
         if not event.aborted:
             return event
         if event.error:
             return event
-        detail = self._cut_off_detail
+        # ADOPT a cause that only the event carried, so every downstream reader
+        # that consults the flag (``_publish_attention_outcome``'s durable
+        # reason, ``_last_turn_outcome``'s siblings) names the same cause this
+        # event does. Consumption on the end event is the established rule for
+        # this field.
+        #
+        # The DETAIL is deliberately not adopted: an event-carried cause has no
+        # parenthetical, and ``_cut_off_detail`` may still hold the process's own
+        # note for a cause that lost to this one.
+        if not self._cut_off_cause:
+            self._cut_off_cause = cause
+        detail = self._cut_off_detail if self._cut_off_cause == cause else ""
         return event.model_copy(
             update={
                 "aborted": False,
@@ -10456,10 +10481,14 @@ class Session:
         Fires only while the list is MOVING. A model that yields twice with a
         byte-identical list is telling you it cannot proceed — usually it needs
         a decision only the user can make — and nudging it again would burn the
-        loop's ``max_paused_turn_continuations`` budget (default 8), end the turn
-        with a continuation-limit warning notice, and delay the user's answer by
-        up to eight model calls. Any progress earns another nudge; a fresh user
-        turn re-arms the latch (see ``_run_turn_pipeline``).
+        loop's ``max_follow_up_continuations`` budget (its own, and the larger
+        one: 64 against the 8 the steering/aside producers share), end the turn
+        with a continuation-limit notice, and delay the user's answer by up to
+        that many model calls. The larger budget is safe precisely because the
+        latch above is what really bounds this producer — a chatty parent can no
+        longer spend the allowance a still-moving list needs. Any progress earns
+        another nudge; a fresh user turn re-arms the latch (see
+        ``_run_turn_pipeline``).
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which

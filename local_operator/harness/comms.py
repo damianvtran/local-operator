@@ -317,6 +317,12 @@ class ChildInfo:
     age_s: float | None = None
     #: Why ``resumable`` is False, when it is False for an interesting reason.
     detail: str | None = None
+    #: Why the child stopped, when it was not a clean completion or a
+    #: deliberate stop — a machine token from ``incidents.CUT_OFF_CAUSES``, or
+    #: ``""``. Read by a parent asking "why did that child stop?" after the job
+    #: row was swept, which is exactly when this roster is the only surface
+    #: left that can answer.
+    cut_off_cause: str = ""
     #: Terminal payloads resolved with the same lifecycle precedence as
     #: ``status``. These survive the job-manager sweep so reconnecting readers
     #: do not have to merge an ephemeral row with durable comms state again.
@@ -478,6 +484,13 @@ class _ChildRecord:
     #: finished cleanly from one that crashed, which is exactly the question
     #: "which of my subagents failed?" needs answered.
     outcome: str | None = None
+    #: WHY the child stopped, when it was not a clean completion or a
+    #: deliberate stop: a machine token from ``incidents.CUT_OFF_CAUSES``. Kept
+    #: beside ``outcome`` for the same reason and with the same lifetime — the
+    #: job manager sweeps settled rows after its retention window while this
+    #: record outlives them, so without it ``hub op='list'`` could say a child
+    #: failed but never WHY once its row aged out.
+    cut_off_cause: str = ""
     #: The child's terminal payload. Kept with the outcome because status and
     #: content are one durable fact after the ephemeral job row is swept.
     result_text: str | None = None
@@ -917,6 +930,7 @@ class SubagentComms:
         status: str,
         error_text: str | None = None,
         result_text: str | None = None,
+        cut_off_cause: str = "",
     ) -> tuple[str, str | None, str | None] | None:
         """Remember how a child settled, before its job row is swept.
 
@@ -959,10 +973,21 @@ class SubagentComms:
                 record.result_text = result_text
             if error_text is not None:
                 record.error_text = error_text
+            if cut_off_cause:
+                record.cut_off_cause = cut_off_cause
             return current, record.error_text, record.result_text
         record.outcome = status
         record.result_text = result_text
         record.error_text = error_text
+        # The cause belongs to the WINNING fact, and precedence was decided
+        # above — so this line inherits it rather than repeating the rule. Stated
+        # plainly, because an earlier draft of this comment claimed a property
+        # the code does not have (review minor): a higher-precedence write (a
+        # genuine ``completed``) that carries NO cause WILL clear a cause recorded
+        # by the write it supersedes, and that is intended — a child that
+        # completed was not cut off. A cause-less write that LOSES on precedence
+        # never reaches this line, which is the case the race actually produces.
+        record.cut_off_cause = cut_off_cause
         return status, error_text, result_text
 
     def roster(self) -> list[ChildInfo]:
@@ -1020,6 +1045,9 @@ class SubagentComms:
                     "restricted": record.restricted,
                     "session_dir": str(record.session_dir),
                     "outcome": record.outcome,
+                    # Rides with the outcome: both are the same durable fact,
+                    # and both must outlive the job row the manager sweeps.
+                    "cut_off_cause": record.cut_off_cause,
                     "result_text": record.result_text,
                     "error_text": record.error_text,
                     "paused": record.paused,
@@ -1109,6 +1137,10 @@ class SubagentComms:
                 settled_at=row.get("settled_at"),
                 paused=bool(row.get("paused")),
                 outcome=(str(row["outcome"]) if row.get("outcome") is not None else None),
+                # Missing defaults to "", which is right for a sidecar written
+                # before this field existed: it reproduces today's behaviour for
+                # old rows and cannot invent a cut-off that was never recorded.
+                cut_off_cause=str(row.get("cut_off_cause") or ""),
                 result_text=(
                     str(row["result_text"]) if row.get("result_text") is not None else None
                 ),
@@ -1365,6 +1397,7 @@ class SubagentComms:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            cut_off_cause=record.cut_off_cause,
             result_text=result_text,
             error_text=error_text,
             session_id=record.session_dir.name if record.session_dir is not None else None,
