@@ -189,9 +189,12 @@ _EXPECTED_DEGRADED_FRAME_DIGEST = "db0a3d83fcc3916c77105fa70ce8d1b59810c14690b64
 _HEARTBEAT_INTERVAL_S = 0.005
 
 #: The floor the fixed tree clears and the parked one cannot: a free loop serves
-#: a build's worth of 5 ms ticks, a parked loop serves none. Not a wall-clock
-#: assertion — a SERVED count is what makes it load-insensitive.
-_MIN_HEARTBEATS = 3
+#: at least one 5 ms tick while the build runs, a parked loop serves none. ONE,
+#: not a larger count, because the assertion's job is to tell "the loop ran"
+#: from "the loop was parked" — not to measure how fast the build was. Used by
+#: the corroborating liveness assertion below (the thread-identity check is the
+#: gate).
+_MIN_HEARTBEATS = 1
 
 
 def _near_cap_projection() -> SessionProjection:
@@ -321,7 +324,7 @@ async def test_projection_push_does_not_park_the_runtime_loop(monkeypatch) -> No
     )
     # Corroboration, not the gate: a loop that was free while the build ran
     # served ticks. Reported so the comment above is falsifiable.
-    assert heartbeats >= 1, (
+    assert heartbeats >= _MIN_HEARTBEATS, (
         "the loop served no heartbeat at all across the push — worth investigating "
         "even though the thread assertion above is the gate"
     )
