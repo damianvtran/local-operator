@@ -23,7 +23,7 @@ import pytest
 from rich.style import Style
 from textual.containers import Container
 
-from local_operator.session.goal import MAX_GOAL_CHARS, GoalState
+from local_operator.session.goal import MAX_GOAL_CHARS
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp, slash_command_for
 from local_operator.tui.widgets.editor import Editor, InlineCommandRequested
