@@ -27143,11 +27143,12 @@ class OperatorApp(App[None]):
         cannot build a pass is the graph, not an exception — but the pass is a
         convenience, not the only route back into the registry: ``read.children``
         and ``read.nodes`` on a class without them still reach
-        ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` raises
-        outside this guard. Both callers wrap their whole body, so that is a
-        blanked dock rather than an exception in a Textual handler — which is the
-        behaviour this must keep, and the reason the guard is a ``getattr`` and
-        not a cast.
+        ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` may raise
+        outside this guard. Both callers wrap their whole resolver work, so a
+        raising reader blanks the dock rather than escaping into a Textual handler;
+        ``paused_child_ids`` separately guards its own node read and degrades to an
+        empty set. That is the behavior this must keep, and why the capability
+        check is a ``getattr`` rather than a cast.
 
         The follower's ``SnapshotSubagentComms`` is the case that has no
         ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
