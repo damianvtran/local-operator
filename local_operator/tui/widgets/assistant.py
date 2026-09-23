@@ -45,6 +45,7 @@ from textual.content import Content
 from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.markdown_theme import brand_markdown_theme
 from local_operator.tui.settings import settings_get
 from local_operator.tui.widgets import _copy_markdown
@@ -240,6 +241,23 @@ def flatten(renderable: RenderableType, width: int, console: Console | None = No
     while text.plain.endswith("\n"):
         text.right_crop(1)
     return text
+
+
+def _markdown(text: str) -> Markdown:
+    """``text`` as a rich ``Markdown``, with bare URLs promoted to autolinks.
+
+    The ONE place this block turns source into markdown, so the promotion
+    cannot be applied on the whole-message path and missed on the streaming
+    one — which would make a link clickable only until the next flush settled
+    it, the most confusing shape this bug could take.
+
+    Safe across the freeze split (:func:`find_stable_boundary`) even though the
+    two halves are rendered separately: a URL contains no whitespace, boundaries
+    fall on blank lines, and fenced blocks are never split by a candidate — so
+    no URL and no code fence can straddle the seam and be seen as prose by one
+    half and code by the other.
+    """
+    return Markdown(autolink_bare_urls(text))
 
 
 def _scan_fences(
@@ -804,13 +822,13 @@ class AssistantBlock(TranscriptBlock):
             return self._flat_whole(width)
         console = self._flat_console()
         if self._frozen_flat is None or self._frozen_width != width:
-            self._frozen_rendered = Markdown(self._frozen_text)
+            self._frozen_rendered = _markdown(self._frozen_text)
             self._frozen_flat = flatten(self._frozen_rendered, width, console)
             self._frozen_width = width
         tail = self._full_text[len(self._frozen_text) :]
         rows = self._frozen_flat.copy()
         rows.append("\n")
-        rows.append_text(flatten(Markdown(tail), width, console))
+        rows.append_text(flatten(_markdown(tail), width, console))
         return rows
 
     def on_resize(self, event: object) -> None:
@@ -974,7 +992,7 @@ class AssistantBlock(TranscriptBlock):
         if not self._full_text:
             return Text("")
         lane = width if width is not None else self._flat_width()
-        return flatten(Markdown(self._full_text), lane, self._flat_console())
+        return flatten(_markdown(self._full_text), lane, self._flat_console())
 
     def retheme(self) -> None:
         """Re-flatten in the new ramp, dropping every theme-baked cache.
