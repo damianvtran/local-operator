@@ -401,3 +401,38 @@ async def test_a_restored_waiting_goal_is_not_re_armed_at_boot() -> None:
         await _settle(pilot, 20)
         assert session.judge_calls == 0
         assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_session_is_not_silenced_by_the_old_judgement() -> None:
+    """Agent review round 2, MINOR-1: the in-flight flag belongs to the SOURCE.
+
+    ``/reload`` and ``/resume`` replace the session MID-JUDGE. While the flag
+    lived on the app, a judgement still running for the OLD session swallowed the
+    NEW session's first turn end, so that goal was skipped once — and a session
+    with no further turns never reached the next one. Scoped to the binding, the
+    replacement judges its own first turn end.
+    """
+    first = _armed()
+    second = _armed()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        # The state an in-flight judgement leaves behind, staged on the binding
+        # that is about to be replaced: the OLD session's judge has not released
+        # its claim yet.
+        app._interaction.goal.judge_in_flight = True
+        stale = app._interaction
+
+        app._adopt_session(second)
+        await _settle(pilot, 2)
+
+        assert app._interaction is not stale, "a replacement leases a new source"
+        assert app._interaction.goal.judge_in_flight is False, (
+            "the new session's own binding must not start silenced"
+        )
+        app.post_message(TurnEnded(aborted=False, error=None))
+        await _settle(pilot)
+        assert second.judge_calls == 1, "the new session's first turn end is judged"
+        assert second.goal_status == "done"
+        assert first.judge_calls == 0, "and the replaced session is not judged again"

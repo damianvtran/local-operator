@@ -195,6 +195,11 @@ async def test_an_agent_end_admits_a_continuation_through_the_prompt_queue(tmp_p
         ]
         assert len(continuation) == 1
         assert continuation[0].provider_payload == {"harness_injected": True}
+        # MINOR-3: the handle carries no judge-only command id. The id was minted,
+        # stored and cleared and read by nothing; what tells the judge's turn from
+        # a user's is the STRUCTURAL stamp asserted above, and the id is now local
+        # to the prompt call that needs it.
+        assert not hasattr(handle, "_goal_judge_command_id")
     finally:
         await handle.dispose()
         await session.dispose()

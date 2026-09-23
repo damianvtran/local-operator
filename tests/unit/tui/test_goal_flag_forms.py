@@ -22,6 +22,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.goal_panel import GoalPanel
 
 from .test_app_pilot import FakeSession, _factory
+from .test_goal_panel import _card_body, _struck_spans
 from .test_slash_goal_loop_flags import (
     _boot,
     _draft,
@@ -283,3 +284,51 @@ async def test_the_picker_offers_only_the_acts_the_record_allows() -> None:
         await _boot(pilot, app2)
         editor = await _draft(app2, pilot, "/goal ")
         assert _row_names(editor) == ["--history", "--dismiss", "--clear"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_goal_over_a_settled_one_is_armed_on_either_host() -> None:
+    """Agent review round 2, MAJOR-5, on the TUI's two hosts.
+
+    `/goal <text>` reaches the record's own `arm_goal` on both (the LOCAL
+    handler and the routed one), so this is the state that had no cell: a new
+    objective set while the PREVIOUS one is still settled. MAJOR-5's symptom was
+    visible on exactly this surface — the card struck the NEW text through and
+    tagged it `— done`, over work nothing had finished — so the assertion is the
+    symptom's absence, read off the rendered card, beside the record's own state.
+    """
+    new = "land the new billing migration"
+    local, routed = _armed(), _armed()
+    for session in (local, routed):
+        session.mark_goal_done("the judge said so")
+
+    app = OperatorApp(lambda: _factory(local))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _local(pilot, app, f"/goal {new}")
+        # Open the card on the record the submit just left, which is what the
+        # user's own `/goal` (bare) would do.
+        app._open_goal_panel()
+        await pilot.pause()
+        local_body = _card_body(app.query_one(GoalPanel))
+    app2 = OperatorApp(lambda: _factory(routed))
+    async with app2.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app2)
+        await app2.run_slash_authoritative("goal", new)
+        app2._open_goal_panel()
+        await pilot.pause()
+        routed_body = _card_body(app2.query_one(GoalPanel))
+
+    for session in (local, routed):
+        assert session.goal == new
+        assert session.goal_status == "active", "the new objective is not a settled one"
+        assert session._goal_state.judge.state == "waiting"
+        # The settled goal the user asked to keep is the HISTORY row, tagged as
+        # finished — which is where a strike belongs.
+        assert [(row["text"], row["status"]) for row in session.history_view()] == [
+            (GOAL, "done")
+        ]
+    assert new in local_body.plain and "\u2014 active" in local_body.plain
+    assert new not in _struck_spans(local_body), "an armed goal must not read as achieved"
+    assert GOAL in _struck_spans(local_body), "the settled goal it replaced is the struck one"
+    assert new not in _struck_spans(routed_body)

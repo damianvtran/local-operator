@@ -281,6 +281,62 @@ def test_exec_team_count_loop_and_resume(exec_server):
     )
 
 
+def test_exec_goal_over_a_settled_goal_is_judged_again(exec_server):
+    """Agent review round 2, MAJOR-5, end to end through the real CLI.
+
+    The unit half is ``tests/unit/test_exec_startup.py``'s ``apply_startup`` pin.
+    What only the real thing can show is that a SECOND ``--goal`` over a goal the
+    judge already settled is actually JUDGED: the judge's own provider call, the
+    ``<goal>`` block on the wire, and the two durable halves still naming the same
+    objective. Before the fix the new objective kept the settled goal's ``done``,
+    so the judge's aside never came and the block was withheld — a goal silently
+    inert on a documented CLI path.
+    """
+    run, requests, root = exec_server
+    first = run("exec", "Ship the first objective", "--goal", "Ship safely", "--json", stdin="")
+    assert first.returncode == 0
+    kinds = provider_call_kinds(requests, goal="Ship safely")
+    assert kinds.count("judge") == 1
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    directory = root / "sessions" / session_id
+    # The state MAJOR-5 is about, asserted rather than assumed: the goal this run
+    # set is SETTLED, so the next objective lands on top of a settled record.
+    settled = json.loads((directory / "goal.json").read_text())
+    assert settled["goal"] == "Ship safely"
+    assert settled["status"] == "done"
+
+    before = len(requests)
+    second = run(
+        "exec",
+        "Land the new objective",
+        "--resume",
+        session_id,
+        "--goal",
+        "Land the new billing migration",
+        "--json",
+        stdin="",
+    )
+    assert second.returncode == 0
+    second_requests = requests[before:]
+    kinds = provider_call_kinds(second_requests, goal="Land the new billing migration")
+    assert kinds.count("judge") == 1, "the new objective gets its own verdict"
+    wire = json.dumps(second_requests[0])
+    assert "Land the new billing migration" in wire, "the new objective is the one in the prompt"
+    assert "The user's standing objective" in wire, "the <goal> block is not withheld"
+    record = json.loads((directory / "goal.json").read_text())
+    # The judge's ACHIEVED verdict settled the NEW goal, and the goal it replaced
+    # is kept as history — the two halves of the record agree about which goal is
+    # current, which is what the attachment used to contradict.
+    assert record["goal"] == "Land the new billing migration"
+    assert record["status"] == "done"
+    assert [row["text"] for row in record["history"]] == [
+        "Land the new billing migration",
+        "Ship safely",
+    ]
+    attachment = json.loads((directory / "attachment.json").read_text())
+    assert attachment["goal"] == "Land the new billing migration"
+
+
 def test_exec_unknown_and_goal_only_do_not_call_provider(exec_server):
     run, requests, _ = exec_server
     for args in [
