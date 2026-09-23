@@ -298,6 +298,11 @@ class _PromptCommand:
     images: list["ImageContent"] | None
     admitted: asyncio.Future[None]
     completed: asyncio.Future[bool] | None = None
+    #: Whether this row was minted by the harness rather than typed by a person
+    #: (the goal judge's continuation is the producer). Threaded to
+    #: ``Session.prompt``'s own keyword so the row carries the STRUCTURAL
+    #: provenance stamp from the one place a row is born.
+    harness_injected: bool = False
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -2492,6 +2497,7 @@ class ServingSessionHandle(SessionHandle):
         command_id: str | None = None,
         *,
         wait_complete: bool = False,
+        harness_injected: bool = False,
     ) -> str:
         self._check_loop_thread()
         if not command_id:
@@ -2667,7 +2673,7 @@ class ServingSessionHandle(SessionHandle):
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
-        command = _PromptCommand(command_id, text, blocks, admitted, completed)
+        command = _PromptCommand(command_id, text, blocks, admitted, completed, harness_injected)
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -2942,6 +2948,13 @@ class ServingSessionHandle(SessionHandle):
                     }
                     if "producer_command_id" in parameters:
                         fields["producer_command_id"] = command.command_id
+                    if "harness_injected" in parameters:
+                        # Probed like the two above rather than passed
+                        # unconditionally: a reduced or third-party session that
+                        # predates the keyword would raise on it, and the
+                        # keyword's whole job is to stamp a marker those hosts
+                        # never read.
+                        fields["harness_injected"] = command.harness_injected
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;

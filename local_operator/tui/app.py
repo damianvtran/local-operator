@@ -99,7 +99,11 @@ from local_operator.harness.intent import (
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.harness.rows import is_harness_notice_row, output_limit_call_receipt
+from local_operator.harness.rows import (
+    is_harness_chrome,
+    is_harness_notice_row,
+    output_limit_call_receipt,
+)
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -42088,6 +42092,24 @@ class OperatorApp(App[None]):
             # end of the state the marker asserted (design round 1, D2).
             self._settle_queued_prompt(message.message_id)
             return  # our own echo — the row is already painted
+        # HARNESS CHROME — the harness minted this row, no person typed it, and
+        # the transcript records it while NO surface paints it. Placed after the
+        # echo check because an echo this app registered is by definition a row
+        # the user's own send produced.
+        #
+        # TWO LEGS, ONE DECISION, and both are needed. ``injected`` is the
+        # STRUCTURAL stamp on the announced message, exact wherever it exists;
+        # ``is_harness_chrome`` is the shared recogniser, which also covers rows
+        # written by a build that predates the stamp and every continuation
+        # prompt whose text is interpolated per goal. This leg closes the SLOW
+        # half of the gap the transcript has always had on a follower: a
+        # runtime-hosted owner admits a continuation, this terminal is attached,
+        # and before this the harness's own sentence appeared as the user's
+        # words. The owner's own announce site withholds the event now, so this
+        # fires for an owner on an older build (or a differently-shaped host),
+        # which is exactly the case a per-surface decision exists to survive.
+        if message.injected or is_harness_chrome(message.prompt):
+            return
         block = UserBlock(message.prompt, message.image_count)
         block.navigation_anchor_id = message.message_id
         self._append_block(block)
