@@ -175,7 +175,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
-from local_operator.session.goal import GoalHistoryEntry, GoalState
+from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
 from local_operator.session.naming import (
@@ -4216,6 +4216,42 @@ class Session:
     def goal_history(self) -> "list[dict[str, Any]]":
         """Settled goals, newest first, as wire dicts (see :meth:`history_view`)."""
         return self._goal_state.history_view()
+
+    @property
+    def goal_token(self) -> str:
+        """The identity of the ACTIVE goal, re-minted on every arming.
+
+        The judge captures this before its provider call and drops a verdict whose
+        token has moved. It is the identity the goal's ``text`` cannot provide: a
+        user may set the SAME words twice, and the second arming is new work whose
+        in-flight verdict must not be applied to it.
+        """
+        return self._goal_state.token
+
+    @property
+    def goal_turn_serial(self) -> int:
+        """The monotone turn counter (``_generation``) a host reads for the judge.
+
+        Published because the ``AgentEndEvent`` that carries it does not reach
+        every host in the shape that needs it: the runtime reads it off the event,
+        while the TUI's own turn-end message carries no counter at all, so its
+        hook samples the session instead. Same number, one accessor.
+        """
+        return self._generation
+
+    @property
+    def goal_judge_state(self) -> GoalJudgeState:
+        """The judge's RECORD object, for the driver that reads and writes it.
+
+        Distinct from :attr:`goal_judge` on purpose: that one is the WIRE shape,
+        which is ``None`` with no goal and deliberately omits the breaker's
+        ``failures`` counter (a number whose only meaning is internal). The
+        driver needs the record itself — it reads ``state`` to decide whether to
+        re-arm and ``failures`` to honour the breaker across a restart — and
+        giving it a subscription of the wire dict would make it read a document
+        that was never meant to carry what it needs.
+        """
+        return self._goal_state.judge
 
     def set_goal(self, text: str) -> str:
         """Set (or clear, with an empty string) the standing objective.
