@@ -1370,7 +1370,12 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # contract is about the STATE ("a viewer was here and left"), so it
             # must not depend on a viewer outliving the sampling interval. One
             # re-draw, and only when this drain is not already the keep-alive's.
-            if not redrawn and lru_cap == 0:
+            # must not depend on a viewer outliving the sampling interval. One
+            # re-draw, and only when this drain is neither already the
+            # keep-alive's nor on a runtime that still has no stamp — the
+            # attribute read is free, and asking the policy again for a runtime
+            # nobody has looked at would put a config read on every drain.
+            if not redrawn and lru_cap == 0 and _detached_at(runtime) is not None:
                 redrawn = True
                 window_s, lru_cap = _drain_window_s(grace_s, runtime)
                 deadline = time.monotonic() + window_s
