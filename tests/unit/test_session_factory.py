@@ -2504,6 +2504,15 @@ async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir
         attached = {"value": True}
         session._goal_state.interactive_probe = lambda: attached["value"]
 
+        # ...and with the ASK HOOK a served session has, so the row carries the
+        # body the operator's own sessions see. Without it the block is the
+        # no-channel variant, which is a real state but not this one
+        # (``serving`` installs the gate on every session it serves).
+        async def _never_answered(_questions):  # pragma: no cover — never called
+            return None
+
+        session.set_ask_handler(_never_answered)
+
         first = await session._prepare_system_blocks()
         attached["value"] = False
         moved = await session._prepare_system_blocks()
@@ -2518,7 +2527,7 @@ async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir
         assert len(rows) == 1
         payload = str(rows[0].payload)
         assert "<interactivity>" in payload
-        assert "No interface is attached to this session" in payload
+        assert "No interface is attached to this session right now" in payload
     finally:
         await session.dispose()
 
@@ -2569,13 +2578,54 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
     attached_body = await child_tail(True)
     assert "<interactivity>" in attached_body
-    assert "An interface is attached to this session" in attached_body
-    assert "No interface is attached to this session" not in attached_body
+    # The attachment is the PARENT's, and the child's route to the operator is
+    # named — not ``ask``, which the child does not have (round 1, BLOCKER).
+    assert "An interface is attached to the session this run was delegated from" in attached_body
+    assert "`hub`" in attached_body
+    assert "`ask`" not in attached_body
+    assert "No interface is attached" not in attached_body
 
     unattached_body = await child_tail(False)
     assert "<interactivity>" in unattached_body
-    assert "No interface is attached to this session" in unattached_body
-    assert "An interface is attached to this session" not in unattached_body
+    assert "No interface is attached to the session this run was delegated from" in unattached_body
+    assert "An interface is attached" not in unattached_body
+    assert "`ask`" not in unattached_body
+
+
+@pytest.mark.asyncio
+async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: Path) -> None:
+    """A parent with no runtime probe answers "nothing measured", and that is
+    not the same as "attached" — the fail-open default belongs to the PARK
+    decision, not to a block that states what was measured (round 1, MINOR 6).
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    # No probe installed, exactly as a plain CLI or an exec run leaves it.
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-unmeasured",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+            assert "<interactivity>" not in str(blocks[-1])
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
 
 
 def test_a_bom_does_not_survive_into_the_prompt(

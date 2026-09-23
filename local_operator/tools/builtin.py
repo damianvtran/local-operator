@@ -13327,7 +13327,7 @@ async def _bridge_open(
 #: await_access defaults and cap.
 #:
 #: THE CAP DELIBERATELY DOES NOT MOVE WITH THE 15-MINUTE RECOMMENDATION (design
-#: §5.4). Three measured reasons, any one sufficient:
+#: §5.4). Two measured reasons, either sufficient:
 #:
 #: 1. The ``browser`` tool is ``interruptible=False`` (see the tool builder
 #:    below): a call that sits for fifteen minutes cannot be cut by a steer, a
@@ -13338,14 +13338,21 @@ async def _bridge_open(
 #:    (``extension/src/driver/access-queue.ts``, ``ACCESS_REQUEST_TTL_MS``): one
 #:    prompt cannot serve the wait anyway, so the extra cap would buy five
 #:    minutes of nothing at all.
-#: 3. ``wait`` is the tool built for holding a turn open and it *is*
-#:    interruptible. The 15-minute budget lives in the RESULT TEXT, which is
-#:    where a recommendation belongs: nothing consumes it but the sentence.
 #:
-#: The DEFAULT rises to the cap so an unsized call gets the longest wait this
-#: tool can honestly serve; the text tells the model the remainder is ``wait``'s
-#: job and that re-requesting is what pings the operator again.
-BROWSER_AWAIT_ACCESS_DEFAULT_S = 240.0
+#: (A third reason used to stand here — that the remainder of the budget belongs
+#: to the ``wait`` tool, which is interruptible. It was wrong twice over: ``wait``
+#: awaits a background JOB and ``WaitParams.job_id`` is required, so a session
+#: with nothing running cannot call it at all, and the pending text that sent the
+#: model there was pointing at an unexecutable step. The budget is carried by
+#: REPEATED ``await_access`` calls, which is what the text now says; see
+#: ``_access_result_text``.)
+#:
+#: The DEFAULT therefore stays at 120s rather than rising to the cap (round 1,
+#: reviewer MINOR 4 / U6). An unsized ``await_access`` is the call the pending text
+#: tells the model to make, and moving the default to the cap would double an
+#: uninterruptible block for the commoner case, for nothing the deliverable needs —
+#: the 15 minutes are carried by repeated calls, each of which the model chooses.
+BROWSER_AWAIT_ACCESS_DEFAULT_S = 120.0
 BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 
 #: One extension-side wait slice (mirrors access.ts AWAIT_SLICE_MS). The tool
@@ -13360,9 +13367,11 @@ def _attached_here(context: ToolContext | None) -> bool:
     """Whether an interface is attached to the session this call runs in.
 
     Reads the declared ``ToolContext.attached_probe`` — a live view of
-    ``RuntimeServer.attached_surfaces`` through the session's goal state, so it
-    is re-read per call rather than snapshotted per turn (this flow asks AFTER
-    it has waited).
+    ``RuntimeServer.attached_surfaces`` through the session's goal state. It is
+    called WHERE THE TEXT IS RENDERED, not once up front: an ``await_access``
+    that waited 240s must report the attachment at the end of that wait, not the
+    one it started with, or a surface that attached while the model waited is
+    told the session is unattached and advised to give up (round 1, MINOR 3).
 
     ``True`` when the context carries no probe (a bare tool test, a host that
     never wired one), which is the pre-existing default AND the direction every
@@ -13384,6 +13393,29 @@ def _attached_here(context: ToolContext | None) -> bool:
         return True
 
 
+def _notify_channel(context: ToolContext | None) -> str:
+    """How THIS caller can tell the operator something, from declared capabilities.
+
+    ``ask_user`` is the hook behind ``ask``, declared on ``ToolContext`` and
+    createIf-gated on exactly that field by ``build_ask_tool``. Naming a tool the
+    reader does not have is the defect this exists to stop: round 1 found this
+    text telling SUBAGENTS to notify through ``ask`` (no child has it) and to
+    "ask the user directly" on a deny, for a reader whose only route out is
+    ``hub`` to its parent.
+
+    It deliberately says no more than "a short message" when there is no ask
+    hook. ``hub`` is NOT offered here: a top-level session holds ``hub`` too (it
+    is how ITS children reach it), the two are indistinguishable from this
+    context, and the child-shaped phrase would be a false instruction for a
+    parent. A reader that has ``hub`` knows its route — and the pending text tells
+    every reader without an ask hook that nothing in this session can present the
+    question, which is the fact that matters.
+    """
+    if getattr(context, "ask_user", None) is not None:
+        return "a short message, or `ask`"
+    return "a short message"
+
+
 def _access_result_text(
     state: str,
     origin: str,
@@ -13392,6 +13424,8 @@ def _access_result_text(
     pending_count: int | None = None,
     host: str = "",
     attached: bool = True,
+    notify: str = "a short message",
+    total_s: float = 0.0,
 ) -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation.
@@ -13404,62 +13438,126 @@ def _access_result_text(
     that is not there.
 
     ``attached`` selects whether the model is told an interface can PRESENT the
-    prompt. It changes the ADVICE, never the notify-first instruction: an
-    unattached session must still tell the operator, because the request is what
-    makes the prompt visible when a surface does attach.
+    prompt, and it must never deny a surface this same message just named: the
+    predicate counts Local Operator PANES (a TUI, a leased desktop renderer),
+    while the prompt may be sitting in the extension popup or the app's browser
+    tab — a surface the operator can click. "Nobody can act on it" was that
+    contradiction, and it is the incident's own shape (round 1, D2/U3).
+
+    ``notify`` is the channel this caller can actually use, from
+    :func:`_notify_channel`, and ``total_s`` is the wait an ``await_access`` just
+    spent. Both the pending and the timeout arms are rendered HERE rather than
+    inline, so the two cannot give contradictory next steps — which they did:
+    one said "proceed without blocking", the other told every caller to keep
+    waiting (round 1, U4 / MAJOR 2).
     """
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
         return f"{origin} is allowed. 'open' or 'goto' the URL now."
     if state == "denied":
         return (
-            f"the user denied access to {origin}. Do not retry or re-request this "
-            "origin; ask the user directly if it is essential."
+            f"the operator denied access to {origin}. Do not retry or re-request this "
+            f"origin; raise it with them if it is essential ({notify})."
         )
     if state == "pending":
         # NOTIFY-FIRST is load-bearing: the browser's own notification banner is
         # best-effort (macOS suppresses it without Notification Center
-        # authorization), so if the agent does not message the user the prompt
+        # authorization), so if the agent does not message the operator the prompt
         # sits unseen until its TTL — the exact incident this flow replaces.
+        #
+        # HARD-WRAPPED, and short. The TUI receipt paints ONE ROW PER RAW LINE and
+        # clips each to the measure (94 cells at 100 columns), so a paragraph
+        # authored as one long line loses its tail on the card: measured in round 1
+        # (D6), the unattached line lost "proceed with what you have" and the
+        # timeout line lost BOTH "15 MINUTES" and "not a refusal". Line breaks are
+        # free to the model and are what keep the load-bearing clause inside the
+        # first row.
         where = (
-            "in the Local Operator extension popup (toolbar icon, numbered badge showing "
-            "the pending count) — the badge alone is not reliably seen"
+            "in the Local Operator extension popup (toolbar icon,\n"
+            "numbered badge showing the pending count) — the badge alone\n"
+            "is not reliably seen"
             if extension_host
-            else "in the Local Operator desktop app's browser tab — the prompt alone is not "
-            "reliably seen"
+            else "in the Local Operator desktop app's browser tab — the\n"
+            "prompt alone is not reliably seen"
         )
         slots = f" ({position} of {pending_count})" if position and pending_count else ""
+        head = f"approval for {origin} is pending{slots}.\nThe prompt is showing {where}.\n\n"
         if attached:
             return (
-                f"approval for {origin} is pending{slots}. The prompt is showing {where}.\n\n"
-                "An interface is attached to this session, so the operator can see and "
-                "answer it — make sure they are told (a short message, or `ask`).\n\n"
-                "- Then call action='await_access' with the same url, and wait UP TO 15 "
-                "MINUTES in total for the decision: a person may be away from the desk. "
-                "Use the `wait` tool for the remaining time (await_access itself waits at "
-                "most 240s per call).\n"
-                '- The prompt expires after about 10 minutes. If await_access returns "no '
-                "live access request\", call action='request_access' again with the same "
-                "url to re-raise it and ping the operator again, and keep doing that while "
-                "the origin is still needed.\n"
-                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report the origin as "
-                "unavailable while an interface is attached."
+                f"{head}"
+                "An interface is attached to this session, so the operator can answer\n"
+                f"it as soon as they look — make sure they are told ({notify}).\n\n"
+                "- Wait UP TO 15 MINUTES in total for the decision: a person may be\n"
+                "  away from the desk, and a slow answer is NOT a refusal.\n"
+                "- Keep calling action='await_access' with the same url for that\n"
+                "  budget — each call waits at most 240s, so about four calls span\n"
+                "  it. That is the mechanism: there is no sleep shortcut here,\n"
+                "  because the `wait` tool awaits a background job and this flow\n"
+                "  has none.\n"
+                "- The prompt expires after about 10 minutes. If await_access\n"
+                "  returns \"no live access request\", call action='request_access'\n"
+                "  with the same url to raise a NEW prompt — that is what pings the\n"
+                "  operator again. Re-requesting while the old prompt is still live\n"
+                "  changes nothing and notifies nobody, so do it only once it has\n"
+                "  expired, and at most once per 15-minute window: after that,\n"
+                "  report what you have and move on.\n"
+                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as\n"
+                "  refused — the request is still pending while an interface is\n"
+                "  attached — but say plainly if you proceeded without access."
             )
-        # UNATTACHED: the prompt is queued, so the 15-minute wait would be a wait
-        # on nobody. The notify instruction and the re-request stay — they are
-        # what pings the operator the moment a surface attaches.
+        # UNATTACHED. What is measured is that no PANE of this session is
+        # attached; the prompt named above is still on a surface the operator uses,
+        # so the text must not claim that nobody can act on it. The notify
+        # instruction stays (it is what reaches them when nothing of theirs is
+        # watching this session), and so does the re-request, which is what pings
+        # them again once a surface attaches.
         return (
-            f"approval for {origin} is pending{slots}. The prompt is showing {where}.\n\n"
-            "No interface is attached to this session right now, so the prompt is queued "
-            "and nobody can act on it until a surface attaches. Notify the operator anyway "
-            "(a message, or `ask`) so the decision is waiting for them — then proceed with "
-            "what you have rather than blocking the turn on it.\n\n"
-            "- The prompt expires after about 10 minutes. Re-raise it with "
-            "action='request_access' (the same url) when the origin is next needed, so "
-            "the operator is pinged again rather than finding a dead prompt.\n"
-            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report the origin as "
-            "unavailable: an interface may attach later, and the request is what makes it "
-            "visible."
+            f"{head}"
+            "No Local Operator pane is attached to this session right now, so\n"
+            "nothing here will present the question — the prompt above is the\n"
+            "surface, and the operator can answer it there. Notify them anyway, in\n"
+            "a short message they will read, so the decision is waiting for them;\n"
+            "then proceed with what you have rather than blocking the turn.\n\n"
+            "- The prompt expires after about 10 minutes. Re-raise it with\n"
+            "  action='request_access' (the same url) when the origin is next\n"
+            "  needed — that is what pings the operator again rather than leaving\n"
+            "  them a dead prompt.\n"
+            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused:\n"
+            "  an interface may attach later, and this request is what makes it\n"
+            "  visible — but say plainly if you proceeded without access."
+        )
+    if state == "await_timeout":
+        # The arm that used to disagree with the pending text (round 1, U4): it
+        # told every caller to wait again, including sessions this flow had just
+        # told not to block. It is now attachment-aware and names the executable
+        # path — repeated await_access calls — where it used to send the model to
+        # the `wait` tool, which needs a background job it does not have
+        # (round 1, MAJOR 2 / U2).
+        check = (
+            "the Local Operator extension popup"
+            if extension_host
+            else "the Local Operator desktop app's browser tab"
+        )
+        if attached:
+            advice = (
+                "- An interface is attached to this session: keep calling\n"
+                "  action='await_access' — each call waits at most 240s — until\n"
+                "  about 15 MINUTES in total have gone by.\n"
+            )
+        else:
+            advice = (
+                "- No pane is attached to this session, so nothing here will\n"
+                "  present it: notify the operator and proceed with what you\n"
+                "  have rather than blocking the turn.\n"
+            )
+        return (
+            f"still pending after {total_s:.0f}s, and the operator has not decided\n"
+            f"on this origin yet:\n{origin}\n"
+            f"Remind them to check {check}. Then:\n"
+            f"{advice}"
+            "- Once the prompt has expired, call action='request_access' with\n"
+            "  the same url to raise a new one: that is what pings them again.\n"
+            "AN UNANSWERED PROMPT IS NOT A REFUSAL."
         )
     if state == "superseded":
         # A DIFFERENT session's request replaced this one's prompt slot (one
@@ -13506,10 +13604,14 @@ async def _bridge_access(
     host = _host_of_client(client)
     url = params.url.strip()
     identity = _browser_identity_params(context, tool_call_id)
-    # READ ONCE PER CALL, and pass it to every render below so a single call's
-    # request_access and await_access cannot disagree about whether anyone can be
-    # shown the prompt.
-    attached = _attached_here(context)
+    # Read WHERE EACH TEXT IS RENDERED, never once here (round 1, MINOR 3). The
+    # attachment answer decides whether the model is told the operator can answer,
+    # so an await_access that spent 240s waiting must report the state at the END
+    # of that wait — reading it up front told a session whose surface attached
+    # mid-wait to give up, and made the probe's own "live view" claim false.
+    # ``_attached_here`` falls back to True without a probe, so the fail-open
+    # direction is unchanged.
+    notify = _notify_channel(context)
     if action == "request_access":
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
@@ -13528,7 +13630,8 @@ async def _bridge_access(
                 position=result.get("position"),
                 pending_count=result.get("pending_count"),
                 host=host,
-                attached=attached,
+                attached=_attached_here(context),
+                notify=notify,
             ),
             details={
                 "origin": origin,
@@ -13552,7 +13655,13 @@ async def _bridge_access(
         return _text(
             tool_call_id,
             "browser",
-            _access_result_text(state_value, origin, host=host),
+            _access_result_text(
+                state_value,
+                origin,
+                host=host,
+                attached=_attached_here(context),
+                notify=notify,
+            ),
             details={
                 "origin": origin,
                 "state": state_value,
@@ -13569,19 +13678,22 @@ async def _bridge_access(
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
-            check = (
-                "the Local Operator extension popup"
-                if host != HOST_UI_PREFIX
-                else "the Local Operator desktop app's browser tab"
-            )
+            # RENDERED BY ``_access_result_text`` rather than inline: this arm and
+            # the pending one must not give contradictory next steps, and they did
+            # — the pending text said "proceed without blocking the turn", this one
+            # told every caller to keep waiting, and neither knew whether an
+            # interface was attached (round 1, U4).
             return _text(
                 tool_call_id,
                 "browser",
-                f"still pending after {total_s:.0f}s: the operator has not decided on {url} "
-                f"yet. Remind them to check {check}, then either call await_access again "
-                "(the total recommended wait is 15 MINUTES) or — if the prompt has "
-                "expired — call action='request_access' with the same url to re-raise it "
-                "and ping them again. An unanswered prompt is not a refusal.",
+                _access_result_text(
+                    "await_timeout",
+                    url,
+                    host=host,
+                    attached=_attached_here(context),
+                    notify=notify,
+                    total_s=total_s,
+                ),
                 details={"origin": url, "state": "pending"},
             )
         wire = {
@@ -13605,7 +13717,8 @@ async def _bridge_access(
                     position=result.get("position"),
                     pending_count=result.get("pending_count"),
                     host=host,
-                    attached=attached,
+                    attached=_attached_here(context),
+                    notify=notify,
                 ),
                 details={
                     "origin": origin,
@@ -15641,7 +15754,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "download directory, and 'upload' attaches local files to a page's file "
             "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
             "it, and 'await_access' before navigating again. "
             "Never install or script a browser engine instead."
         ),
@@ -19482,19 +19595,30 @@ async def execute_ask(
         # would "fall back to its recommendation" on a session where the user
         # was never shown anything.
         #
-        # IT MUST ALSO CLAIM NOTHING ABOUT WHO IS AT A SCREEN. It used to read
-        # "No interactive surface is attached to this session, so the user cannot
-        # be asked", and that sentence was repeated into ``hub`` messages by
-        # parents that had a perfectly good surface attached — an absent HOOK is
-        # a fact about this process, not about the operator. The condition being
-        # reported is the missing wiring, so the text names that and what follows
-        # from it.
+        # IT MUST ALSO CLAIM NOTHING ABOUT WHO IS AT A SCREEN, AND NOTHING ABOUT A
+        # ROSTER. It used to read "No interactive surface is attached to this
+        # session, so the user cannot be asked", and that sentence was repeated
+        # into ``hub`` messages by parents that had a perfectly good surface
+        # attached — an absent HOOK is a fact about this process, not about the
+        # operator. The condition being reported is the missing wiring, so the text
+        # names that and what follows from it.
+        #
+        # It also used to list the hosts that have no hook — "a subagent, an
+        # `exec` run and a scheduler run have none" — and that roster was WRONG:
+        # a supervised ``exec --control`` run DOES have one (``exec_control``
+        # installs the gates and ``serving`` calls ``set_ask_handler`` with them),
+        # which the builder's own docstring three lines above says. A roster is a
+        # second copy of a wiring fact that drifts from the wiring; the condition
+        # is named instead, and the delegated child's real route is stated because
+        # "the operator cannot be asked" is false for it — its parent is one
+        # ``hub`` call away (design §4).
         return _error(
             tool_call_id,
             "ask",
             "this host has no way to present a question to a person — no ask hook is "
-            "wired into this session (a subagent, an `exec` run and a scheduler run "
-            "have none), so the user cannot be asked. Decide without them.",
+            "wired into this session, so this process cannot put one in front of the "
+            "operator. A delegated child's route to them is `hub` to its parent; "
+            "otherwise decide without them.",
         )
     answers = await ask_user(params.questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):

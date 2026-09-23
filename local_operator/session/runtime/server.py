@@ -4296,11 +4296,26 @@ class RuntimeServer:
         the model carries on every request. A window that is merely not frontmost
         still holds a mounted pane this conversation can be painted into.
 
-        The desktop clause is THE :meth:`attach_clients` CLAUSE VERBATIM. Both
-        ask "could this front end present something", so both must compute it the
-        same way; the machine-wide presence record decides NEITHER, because an
-        empty ``session_id`` there is absence of evidence rather than evidence
-        against (:meth:`_desktop_visible`).
+        THE DESKTOP CLAUSE IS THE LEASE AND NOTHING ELSE (round 1, MINOR 5). It
+        used to read ``lease and (desktop_visible or desktop_can_notify)`` — the
+        ``attach_clients()`` clause, on the theory that both asked "could this
+        front end present something". That theory costs the model-facing answer
+        its stability: ``desktop_visible`` is the app's ``visible &&
+        focused``, so on a host with no OS-notification channel
+        (``can_notify`` false — the JSON transport, browser dev) the clause
+        collapses to ``visible``, and raising and lowering the window flips the
+        persisted block and writes a ``[session-state]`` row. The lease is what
+        the question actually asked for: it is renewed by a heartbeat that names
+        THIS session's subscription and is withdrawn when the pane leaves
+        (``desktop_watch``), so "lease live" IS "a pane holds this
+        conversation", with no window state and no notification capability in
+        it. ``can_notify`` belongs to reachability (:meth:`notification_surfaces`)
+        and ``visible`` to attention; neither is attachment.
+
+        The reaper's own count (:meth:`attach_clients`) keeps the extra clause:
+        it answers a RESIDENCY question, where an app that can neither show nor
+        notify is not a reason to stay up, and the two are now deliberately not
+        the same expression.
 
         A terminal attach is counted even while it is displaying ANOTHER session
         (``terminal_displaying`` False): the connection is the process that can
@@ -4315,9 +4330,7 @@ class RuntimeServer:
             if conn.kind != "attach":
                 continue
             if conn.surface == "desktop":
-                if self._desktop_lease_live(conn) and (
-                    conn.desktop_visible or conn.desktop_can_notify
-                ):
+                if self._desktop_lease_live(conn):
                     attached.add("desktop")
             else:
                 attached.add("attach")

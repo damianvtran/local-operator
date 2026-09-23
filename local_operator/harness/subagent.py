@@ -1783,7 +1783,7 @@ async def _construct_child_session(
 
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
-    from local_operator.prompts_api import build_system_blocks
+    from local_operator.prompts_api import CHANNEL_HUB, build_system_blocks
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
@@ -2074,11 +2074,20 @@ async def _construct_child_session(
             # reason ``goal=`` above is: a child cannot answer this itself (no
             # control socket, no registrant), and whether an interface is attached
             # is a fact about the PARENT's session — the surface the operator is
-            # attached to. Passing nothing here left the child on the ``True``
-            # default unconditionally, which is the same defect from the other
-            # side: a child silently told a question can be presented, or silently
-            # told the operator is unavailable, with no view of the truth.
-            interactive=parent_session.is_interactive(),
+            # attached to. ``interactivity()`` rather than ``is_interactive()``:
+            # a parent with no runtime probe answers "unmeasured", and a child of
+            # one must render nothing rather than inherit the fail-open default.
+            #
+            # ``CHANNEL_HUB`` is stated HERE rather than derived, because only this
+            # call site knows it is a child: a top-level session also holds ``hub``
+            # (it is how ITS children reach it), so inventory membership cannot tell
+            # the two apart, and the child's hub is the one that reaches the
+            # operator — one hop out, through the parent. The alternative the
+            # builder would infer (``ask``) is a tool no child has
+            # (``build_ask_tool`` refuses without a hook), which is exactly what the
+            # round-1 reviews found this child being told to use (BLOCKER).
+            interactive=parent_session.interactivity(),
+            channel=CHANNEL_HUB,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )

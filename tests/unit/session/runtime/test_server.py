@@ -2260,13 +2260,66 @@ async def test_a_daemon_connection_is_never_attached() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fifty_real_focus_changes_move_neither_tier_a_nor_its_answer() -> None:
+    """FIFTY REAL FOCUS CHANGES ON THE REAL WIRE (round 1, MINOR 5 / NIT 8).
+
+    The churn requirement is that raising and lowering the window cannot move the
+    block inside the persisted system prompt. The desktop arm used to be
+    ``lease and (visible or can_notify)``, and the wire's ``visible`` is already
+    the app's ``visibilityState === 'visible' && hasFocus()`` — so on a host with
+    no OS-notification channel that arm WAS focus, and fifty flaps flipped the
+    model-facing answer fifty times, writing a ``[session-state]`` row each way.
+
+    The churn test in ``test_prompts_api`` cannot see this: it feeds the renderer
+    a constant. This one drives the real ``desktop_watch`` handler with both
+    notification configurations and both window states, and asserts the answer
+    never moves — while the ATTENTION tier, which is supposed to follow the
+    window, does.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        answers: set[frozenset[str]] = set()
+        for can_notify in (False, True):
+            for index in range(50):
+                await desktop.desktop_watch(visible=bool(index % 2), can_notify=can_notify)
+                answers.add(runtime.attached_surfaces())
+        assert answers == {frozenset({"desktop"})}
+
+        # The two tiers stay separable: the window is now unfocused/hidden, so
+        # nothing is being LOOKED AT — while the pane is still the surface a
+        # question would appear on.
+        await desktop.desktop_watch(visible=False, can_notify=True)
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_the_reaper_still_sees_no_viewer_without_a_visible_panel() -> None:
     """THE NEGATIVE THAT MUST NOT MOVE: residency was not loosened (§1.5).
 
     ``attach_clients()`` is the predicate that keeps a runtime resident. A
     desktop connection that is neither visible nor notification-capable is not a
-    front end, so it must count for nothing in EITHER predicate — a runtime with
-    no panel attached still exits.
+    front end, so it still counts for nothing THERE — a runtime with no panel on
+    screen still exits.
+
+    TIER A SPLITS FROM IT HERE, deliberately (round 1, MINOR 5). The LEASE is a
+    heartbeat that names this session's own subscription and is withdrawn when
+    the pane leaves, so "lease live" IS "a pane holds this conversation" — the
+    fact the model-facing block is about — and ``visible``/``can_notify`` are
+    attention and reachability, which is why the two predicates are no longer the
+    same expression. The churn the old clause caused is the reason it had to
+    change: ``desktop_visible`` is the app's ``visible && focused``, so on a host
+    with no notification channel the arm collapsed to focus, and raising and
+    lowering that window moved the block inside the persisted system prompt.
     """
     from local_operator.mobile.attach_client import AttachClient
 
@@ -2278,7 +2331,7 @@ async def test_the_reaper_still_sees_no_viewer_without_a_visible_panel() -> None
         await desktop.connect(record, "s1")
         await desktop.desktop_watch(visible=False, can_notify=False)
         assert runtime.attach_clients() == 0
-        assert runtime.attached_surfaces() == frozenset()
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
     finally:
         await desktop.detach()
         runtime.close()
@@ -2359,6 +2412,13 @@ async def test_a_presence_record_that_cannot_name_a_session_does_not_suppress_an
         try:
             record = await _wait_record()
             await desktop.connect(record, "s1")
+            # THE UNFOCUSED CASE IS EXPRESSED THROUGH ``visible=False``, NOT
+            # ``focused=False``, because that is what the app actually SENDS: the
+            # desktop host computes the wire ``visible`` as
+            # ``visibilityState === 'visible' && hasFocus()``
+            # (``local-operator-ui/src/main/desktop-notifier.ts``), so focus is
+            # already folded into it. Flipping the RECORD's ``focused=`` would
+            # test a different seam (Tier B's presence read), not this one.
             await desktop.desktop_watch(visible=False, can_notify=True)
             assert runtime._desktop_visible(_desktop_connection(runtime)) is False
             assert runtime.watching_surfaces() == frozenset()

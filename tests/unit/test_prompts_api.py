@@ -8,6 +8,9 @@ import pytest
 
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.prompts_api import (
+    CHANNEL_ASK,
+    CHANNEL_HUB,
+    CHANNEL_NONE,
     build_system_blocks,
     render_string,
     render_template,
@@ -499,7 +502,7 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     """The model must be able to tell a command the USER ran (bang-mode) from
     one it issued itself: a `! <command>` user message + bash call + result is
     user-produced context, never the model's own earlier action."""
-    blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE, interactive=True, channel=CHANNEL_ASK)
     head = blocks[0]
     assert "bang-mode" in head
     assert "the USER ran directly" in head
@@ -568,7 +571,7 @@ def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
     # The block list is fixed-arity: an empty selection emits the constant
     # placeholder, never drops the block (breakpoint derivation counts
     # blocks).
-    blocks = build_system_blocks(TOOLS, "", ENV, DATE)
+    blocks = build_system_blocks(TOOLS, "", ENV, DATE, interactive=True, channel=CHANNEL_ASK)
     assert len(blocks) == 4
     assert "- bash" in blocks[1]
     assert blocks[2].startswith(f"Today is {DATE}.")
@@ -1042,7 +1045,9 @@ def test_a_detached_session_is_not_told_the_operator_is_unavailable() -> None:
     not NAME the conversation was reported as unattended — and the sentence
     models repeated into ``hub`` messages.
     """
-    detached = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+    detached = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
+    )
 
     assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY)
     # Belt and braces on the two claims this block may never make again, in
@@ -1063,7 +1068,9 @@ def test_an_attached_session_is_told_a_question_will_be_presented() -> None:
     a deliberate, permanent cost on every request of an attached session; it is
     the counterweight that makes "is an interface attached" answerable at all.
     """
-    attached = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+    attached = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK
+    )
 
     assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
     # The positive text says the question WAITS; it never claims the operator is
@@ -1080,11 +1087,13 @@ def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
     per turn rather than appended, the block is byte-identical no matter how
     many transitions preceded it.
     """
-    first = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+    first = build_system_blocks([], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK)
     # Fifty transitions' worth of rebuilds, alternating, as a live session does.
     for index in range(100):
-        build_system_blocks([], "", "env", "2026-01-01", interactive=bool(index % 2))
-    last = build_system_blocks([], "", "env", "2026-01-01", interactive=False)
+        build_system_blocks(
+            [], "", "env", "2026-01-01", interactive=bool(index % 2), channel=CHANNEL_ASK
+        )
+    last = build_system_blocks([], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK)
 
     assert last == first
     assert len(last[-1]) == len(first[-1])
@@ -1093,10 +1102,181 @@ def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
     # every request of an attached session: the probe re-reads per turn, so
     # focus changes and reattaches that leave Tier A unchanged must cost the
     # same bytes, and therefore write no ``session-state`` row.
-    attached_first = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+    attached_first = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK
+    )
     for _ in range(100):
-        build_system_blocks([], "", "env", "2026-01-01", interactive=True)
-    attached_last = build_system_blocks([], "", "env", "2026-01-01", interactive=True)
+        build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK)
+    attached_last = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK
+    )
 
     assert attached_last == attached_first
     assert attached_last[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+
+
+#: The child's two bodies, VERBATIM, for the same reason as the pair above.
+#: ``CHANNEL_HUB`` is what a delegated child states about itself: the interface
+#: belongs to the session that delegated it, and the child's route to the operator
+#: is ``hub``. Naming ``ask`` here was round 1's BLOCKER — no child has it.
+CHILD_ATTACHED_INTERACTIVITY = """<interactivity>
+An interface is attached to the session this run was delegated from, so a
+question you cannot settle yourself belongs to the operator: `hub` to that
+session carries it there, and it waits for them — parked if necessary.
+
+- Raise it through `hub` when the answer is genuinely the operator's to give,
+  and not otherwise.
+- Your question reaches the operator even if nobody is looking at this exact
+  moment. It waits; it is not lost. A slow answer is not a refusal, and it is
+  not a reason to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+CHILD_UNATTACHED_INTERACTIVITY = """<interactivity>
+No interface is attached to the session this run was delegated from right now,
+so a question raised through `hub` cannot be presented to the operator until a
+surface attaches: it waits, unread.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+#: The no-channel bodies, VERBATIM: an interface the block can see and this
+#: process cannot use. The measured fact is still stated (silence reads as
+#: "probably nobody there"), and the consequence deliberately stops short of
+#: "WILL be presented", which nothing here can do. The wording of the cause
+#: matches the ``ask`` refusal's own diagnosis of a missing hook.
+NO_CHANNEL_ATTACHED_INTERACTIVITY = """<interactivity>
+An interface is attached to the session this run belongs to, but this run has no
+way to put a question in front of the operator: no ask hook is wired into this
+session, and it holds no channel to one that is.
+
+- Say what you would have asked in your report — the question and the fact that
+  would change your answer — and proceed on the best reading you have.
+- Stating the question is not losing it: the operator reads this conversation
+  when they return.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+NO_CHANNEL_UNATTACHED_INTERACTIVITY = """<interactivity>
+No interface is attached to the session this run belongs to right now, and this
+run has no way to put a question in front of the operator.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+
+def test_a_host_with_no_probe_is_told_nothing_about_attachment() -> None:
+    """THE THIRD STATE: nobody measured, so the block says nothing at all.
+
+    ``exec`` runs, scheduled runs and plain CLI sessions install no runtime probe,
+    and the fail-open ``is_interactive()`` default (which the PARK decision needs)
+    would have told every one of them that an interface is attached. A block is a
+    claim about what was measured; with no measurement the honest block is no
+    block, which is also the byte-shape those hosts had before the positive arm
+    existed — so nothing they carry changes (round 1, MINOR 6 / QA Q3).
+    """
+    for tools in ([], [_tool("ask", "Ask the user.")], [_tool("hub", "Message the parent.")]):
+        unmeasured = build_system_blocks(tools, "", "env", "2026-01-01")
+        assert "<interactivity>" not in unmeasured[-1]
+        # ...and the extreme case reads the same way: even WITH a live ask hook,
+        # an unmeasured attachment is not asserted.
+        assert (
+            "<interactivity>"
+            not in build_system_blocks(tools, "", "env", "2026-01-01", channel=CHANNEL_ASK)[-1]
+        )
+
+
+def test_a_delegated_child_is_told_the_route_it_actually_has() -> None:
+    """A child renders the PARENT's attachment answer and its OWN channel.
+
+    Two facts, and round 1 found both wrong on a real child: the positive body
+    told it a question "you ask WILL be presented ... `ask` puts it on that
+    surface" when its inventory holds no ``ask`` (``build_ask_tool`` refuses
+    without a hook) and the surface belongs to the session that delegated it, and
+    neither body named ``hub``, the one channel it does have.
+    """
+    child_tools = [_tool("hub", "Message the parent."), _tool("bash", "Run a shell command.")]
+
+    attached = build_system_blocks(
+        child_tools, "", "env", "2026-01-01", interactive=True, channel=CHANNEL_HUB
+    )
+    assert attached[-1].endswith("\n\n" + CHILD_ATTACHED_INTERACTIVITY)
+    assert "`ask`" not in attached[-1]
+    assert "attached to this session" not in attached[-1]
+
+    detached = build_system_blocks(
+        child_tools, "", "env", "2026-01-01", interactive=False, channel=CHANNEL_HUB
+    )
+    assert detached[-1].endswith("\n\n" + CHILD_UNATTACHED_INTERACTIVITY)
+    assert "`ask`" not in detached[-1]
+
+
+def test_a_session_with_no_channel_promises_no_presentation() -> None:
+    """NEITHER ``ask`` NOR ``hub``: the fact is stated, the promise is not.
+
+    Reachable on a served session with no ask hook (``lop -p`` through the owned
+    runtime) — a live probe with no way to put a question on the surface it
+    reports. The block may not inherit the positive body's "WILL be presented",
+    because nothing here can present one.
+    """
+    attached = build_system_blocks(
+        [_tool("bash", "Run a shell command.")],
+        "",
+        "env",
+        "2026-01-01",
+        interactive=True,
+        channel=CHANNEL_NONE,
+    )
+    assert attached[-1].endswith("\n\n" + NO_CHANNEL_ATTACHED_INTERACTIVITY)
+    body = attached[-1]
+    assert "`ask`" not in body and "`hub`" not in body
+    assert "WILL be presented" not in body
+
+    detached = build_system_blocks(
+        [],
+        "",
+        "env",
+        "2026-01-01",
+        interactive=False,
+        channel=CHANNEL_NONE,
+    )
+    assert detached[-1].endswith("\n\n" + NO_CHANNEL_UNATTACHED_INTERACTIVITY)
+
+
+def test_an_unstated_channel_is_read_off_the_tool_inventory() -> None:
+    """``channel=None`` falls back to membership, the way ``tools`` is already read.
+
+    The rule the inventory block follows, applied to the one fact here that is
+    equally derivable: ``build_ask_tool`` is gated on the host's ask hook, so
+    "holds ``ask``" IS "this session can present a question". It never infers
+    ``hub``, because a TOP-LEVEL session holds that tool too (it is how its own
+    children reach it) and inferring it would render a parent the child's
+    "delegated from" sentence.
+    """
+    with_ask = build_system_blocks(
+        [_tool("ask", "Ask the user.")], "", "env", "2026-01-01", interactive=True
+    )
+    assert with_ask[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+
+    parent_with_hub = build_system_blocks(
+        [_tool("hub", "Message a subagent.")], "", "env", "2026-01-01", interactive=True
+    )
+    assert parent_with_hub[-1].endswith("\n\n" + NO_CHANNEL_ATTACHED_INTERACTIVITY)
+    assert "delegated from" not in parent_with_hub[-1]

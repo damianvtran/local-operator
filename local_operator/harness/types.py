@@ -1182,8 +1182,12 @@ class ToolContext(BaseModel):
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
-    #: turn. ``None`` means no session stands behind this context (a bare tool
-    #: test), which reads as attached: the pre-existing default, and the
+    #: turn. The read SITE matters and is the contract's other half: the browser
+    #: flow calls it where the text is rendered, so an ``await_access`` that waited
+    #: reports the attachment at the end of the wait, not at the start (round 1,
+    #: MINOR 3 — it used to be read once before the wait while three comments
+    #: claimed otherwise). ``None`` means no session stands behind this context (a
+    #: bare tool test), which reads as attached: the pre-existing default, and the
     #: direction every uncertain answer must fall (a wrong "attached" costs a
     #: parked gate, a wrong "unattached" costs a question the operator was ready
     #: to answer).

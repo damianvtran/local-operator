@@ -1,11 +1,17 @@
 # Design: an attached interface is not an attended one
 
-Status: **proposal (architect)**. Base: `origin/main` `1392324b`, read in the
-worktree `~/local-operator-worktrees/attached-interface-signal` (branch
-`fix/attached-interface-signal`). Scope: **one backend PR** (§9), plus an
-optional second commit that the reviewer may split out (§9 change 2, the rung-1
-deny arm). No `pyproject.toml` bump. No UI change is required for the model-facing
-fix, though §8 names the one UI fact that would make it moot.
+Status: **shipped on `fix/attached-interface-signal`, remediated in round 2**.
+This file began as a proposal (architect) against `origin/main` `1392324b` in the
+worktree `~/local-operator-worktrees/attached-interface-signal`; it is now the
+**in-branch authority for what the branch does**, so every body, predicate and
+number below is written to match the code on the branch, and a round that changes
+the code changes this file in the same commit. Round 2 (review remediation,
+2026-09-23) changed four things it documents: §2.2's desktop clause, §3's state
+set and bodies, §5's browser text and wait budget, and §5.5's two hard-coded
+sentences. Scope: **one backend PR** (§9), plus a second commit the reviewer may
+split out (§9 change 2, the rung-1 deny arm). No `pyproject.toml` bump. No UI
+change is required for the model-facing fix, though §8 names the one UI fact that
+would make it moot.
 
 Operator's requirement, verbatim:
 
@@ -202,8 +208,9 @@ Unchanged from today, in every respect.
 | Signal | Read at | Trustworthy for A? | For B? |
 |---|---|---|---|
 | Terminal `attach` conn, `kind=="attach"`, `surface!="desktop"` | `server.py:3720-3750` | **Yes.** The connection is the process that can paint the card; it stays counted while the socket lives, and `viewer_watch` is a *displaying* hint, not a membership test. | Only while `conn.terminal_displaying` — a multiplexer holding another session is not somebody reading this one (`server.py:3735-3740`). |
-| Desktop `attach` conn, lease live, `desktop_can_notify` | `server.py:3692-3712`; op at `server.py:3947-3959` | **Yes.** The renderer sends this heartbeat only while it holds a live subscription **for this session** (`~/local-operator-ui/src/renderer/src/shared/hooks/use-desktop-watch-lease.ts:24-56`, withdrawn on pane leave at `:66-80`). "This conversation is open in a pane" is precisely presence. | No. `can_notify` is reachability, not attention (`presence.py:113-118`). |
-| Desktop `attach` conn, lease live, `desktop_visible` | same | Yes (a subset of the row above) | Yes, as today, **and** it is the sound fallback when the machine-wide record cannot name a conversation (§2.3). |
+| Desktop `attach` conn, **lease live** | `server.py::_desktop_lease_live`; op at the `desktop_watch` handler | **Yes, and the lease alone** — see §2.2. The renderer sends this heartbeat only while it holds a live subscription **for this session** (`~/local-operator-ui/src/renderer/src/shared/hooks/use-desktop-watch-lease.ts:24-56`, withdrawn on pane leave at `:66-80`). "This conversation is open in a pane" is precisely presence, and it is the only desktop fact Tier A reads. | No. A lease is not attention. |
+| Desktop `attach` conn, lease live, `desktop_visible` | same | Yes (a subset of the row above) — but **not read**: §2.2 | Yes, as today, **and** it is the sound fallback when the machine-wide record cannot name a conversation (§2.3). |
+| Desktop `attach` conn, lease live, `desktop_can_notify` | same | Yes (a subset of the first row) — but **not read**: `can_notify` is reachability and it made the arm focus-dependent (§2.2) | No. `can_notify` is reachability, not attention (`presence.py:113-118`). |
 | Machine-wide presence record, `present ∧ session_id == this session` | `presence.py:345, 360` | Yes — but redundant: an app showing this conversation holds the per-session lease above. Kept OUT of Tier A (§2.2), and used only where it already is: Tier B. | Yes, subject to `attended` (§2.3). |
 | Machine-wide presence record with `session_id == ""` | `presence.py:345` | **No signal — absence of evidence.** Must not deny (§2.3). | Same. |
 | Phone `watch` (`watch_supported ∧ phone_watchers > 0`) | `server.py:3811-3840` | **Yes.** | **Yes.** |
@@ -234,9 +241,8 @@ def attached_surfaces(self) -> frozenset[str]:
         if conn.kind != "attach":
             continue
         if conn.surface == "desktop":
-            if self._desktop_lease_live(conn) and (
-                conn.desktop_visible or conn.desktop_can_notify
-            ):
+            # THE LEASE AND NOTHING ELSE (round 1, MINOR 5).
+            if self._desktop_lease_live(conn):
                 attached.add("desktop")
         else:
             attached.add("attach")
@@ -245,9 +251,23 @@ def attached_surfaces(self) -> frozenset[str]:
     return frozenset(attached)
 ```
 
-The desktop clause is **the `attach_clients()` clause verbatim**
-(`server.py:3705-3711`). That is not a coincidence to be tidied away: both ask
-"could this front end present something", so both must compute it the same way.
+The desktop clause is **the lease alone**, and that is a round-2 correction: it
+was originally the `attach_clients()` clause verbatim
+(`self._desktop_lease_live(conn) and (conn.desktop_visible or
+conn.desktop_can_notify)`), on the theory that both callers asked "could this
+front end present something". The theory cost Tier A its stability. The wire's
+`desktop_visible` is the app's `visibilityState === 'visible' && hasFocus()`
+(`~/local-operator-ui/src/main/desktop-notifier.ts`), so on a host with no
+OS-notification channel (`can_notify` false — the JSON transport, browser dev)
+the clause collapses to focus, and raising and lowering the window flips the
+persisted block and writes a `[session-state]` row each way — the churn §3.3
+forbids, in exactly the configuration §2.1 calls "reachability". The lease is
+what the question asked for: it is renewed by a heartbeat naming THIS session's
+own subscription and withdrawn when the pane leaves, with no window state and no
+notification capability in it. `attach_clients()` keeps the extra clause, because
+it answers a RESIDENCY question where an app that can neither show nor notify is
+not a reason to stay up; the two expressions are now deliberately different.
+
 The terminal clause deliberately **drops** `terminal_displaying`.
 
 `serving.py` gains the matching reader next to `_watching_surfaces()`
@@ -325,22 +345,57 @@ attached, and only a positively-observed absence resolves to unattached.
 
 ## 3. The model-facing block: states, bytes, and cost
 
-### 3.1 Two states, and why not three
+### 3.1 THREE states and TWO channels, and why not more
 
-The block is a function of **Tier A only**: `attached` / `unattached`. A third
-"attached but nobody is looking" state is **rejected**, because it is keyed on
-focus and therefore flaps: it would move a block inside the persisted system
-prefix on every window focus change, and §3.4 shows what a moved block costs.
-The information is not lost — it is folded into the positive text as a standing
-sentence ("the question still arrives; it waits").
+The block is a function of two **stable, measured** facts and nothing else.
+
+**Tier A (three values).** `attached` / `unattached` / **`None` = nothing was
+measured**. The third value is not a display convenience: `exec` runs, scheduled
+runs and plain CLI sessions install no runtime probe (`_install_interactivity_probe`
+lives on `ServingSessionHandle`), and the fail-open `is_interactive()` default —
+which the PARK decision must keep, because a wrong "unattached" there costs the
+incident — would otherwise ship a ~597-char claim about an attached interface to
+every one of them. A block is a statement about what was measured, so with no
+measurement it renders **nothing at all**, which is also the byte-shape those
+hosts had before the positive arm existed. The model-facing reading is therefore
+its own accessor (`GoalState.interactivity()`, `Session.interactivity()`) beside
+the fail-open `is_interactive()`.
+
+**The channel (three values).** `ask` / `hub` / `none`, stated by the caller
+(`build_system_blocks(..., channel=...)`) from a fact only the caller has:
+
+- `CHANNEL_ASK` — the live ask hook (`GoalState.can_ask()`, published by
+  `Session.__init__` because `set_ask_handler` installs the hook AFTER the
+  prompt-provider closure is built and the closure's `tools` list never gains
+  `ask`). Read live, so the body follows the hook in both directions.
+- `CHANNEL_HUB` — a delegated child (`harness/subagent.py`). Its attachment
+  answer is the PARENT's, and its route to the operator is the session that
+  delegated it. Inventory membership cannot derive this: a top-level session
+  holds `hub` too (it is how ITS children reach it).
+- `CHANNEL_NONE` — a served session with no ask hook, or a caller that stated
+  nothing while holding no `ask` tool. `channel=None` falls back to tool
+  membership, the same rule the inventory block already follows.
+
+**A fourth state keyed on focus is still rejected** — it flaps (§3.3) — and so is
+any state keyed on the surface KIND: a kind in the block would move the bytes when
+the operator switched from the TUI to the app.
 
 ### 3.2 Exact bytes
 
-Both bodies are constants: no timestamp, no session id, no count, no host name,
-no surface kind. `build_system_blocks` (`prompts_api.py:710-737`) replaces the
-current `if not interactive:` arm with `if interactive: … else: …`:
+Six constants, keyed on those two facts, with no timestamp, no session id, no
+count, no host name, no surface kind and **no tool the reader does not have**:
 
-**Attached:**
+| attachment | channel | constant |
+|---|---|---|
+| attached | `ask` | `_INTERACTIVITY_ATTACHED_ASK` |
+| attached | `hub` | `_INTERACTIVITY_ATTACHED_HUB` |
+| attached | `none` | `_INTERACTIVITY_ATTACHED_NONE` |
+| unattached | `ask` | `_INTERACTIVITY_DETACHED_ASK` |
+| unattached | `hub` | `_INTERACTIVITY_DETACHED_HUB` |
+| unattached | `none` | `_INTERACTIVITY_DETACHED_NONE` |
+| not measured | any | *no block* |
+
+**Attached, channel `ask`** (byte-identical to round 1):
 
 ```
 <interactivity>
@@ -357,7 +412,42 @@ answer, parked for hours if necessary.
 </interactivity>
 ```
 
-**Unattached:**
+**Attached, channel `hub`** (a child — round 1 told it to use `ask`):
+
+```
+<interactivity>
+An interface is attached to the session this run was delegated from, so a
+question you cannot settle yourself belongs to the operator: `hub` to that
+session carries it there, and it waits for them — parked if necessary.
+
+- Raise it through `hub` when the answer is genuinely the operator's to give,
+  and not otherwise.
+- Your question reaches the operator even if nobody is looking at this exact
+  moment. It waits; it is not lost. A slow answer is not a refusal, and it is
+  not a reason to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>
+```
+
+**Attached, channel `none`:**
+
+```
+<interactivity>
+An interface is attached to the session this run belongs to, but this run has no
+way to put a question in front of the operator: no ask hook is wired into this
+session, and it holds no channel to one that is.
+
+- Say what you would have asked in your report — the question and the fact that
+  would change your answer — and proceed on the best reading you have.
+- Stating the question is not losing it: the operator reads this conversation
+  when they return.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>
+```
+
+**Unattached, channel `ask`** (unchanged):
 
 ```
 <interactivity>
@@ -377,16 +467,54 @@ may block for hours.
 </interactivity>
 ```
 
-The negative body **drops the sentence "nobody is watching a screen"**. It is a
-claim the evidence does not support (it is the exact false negative of §1.1) and
-it is the phrase the models parrot into `hub` messages. What remains is the fact
-that was actually measured — no surface is attached — and its consequence.
+**Unattached, channel `hub`:**
 
-The signature keeps `interactive: bool` (`prompts_api.py:561`). Renaming it to a
-state enum buys nothing here: two states is one boolean, and `is_interactive()`
-(`goal.py:128`) already answers exactly this question once its probe is Tier A.
-`prompts_api.py:710-737` is the only emitter, and
-`tests/unit/test_prompts_api.py:961-996` is its owner.
+```
+<interactivity>
+No interface is attached to the session this run was delegated from right now,
+so a question raised through `hub` cannot be presented to the operator until a
+surface attaches: it waits, unread.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>
+```
+
+**Unattached, channel `none`:**
+
+```
+<interactivity>
+No interface is attached to the session this run belongs to right now, and this
+run has no way to put a question in front of the operator.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over stalling on a question.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, stop and say so — that is cheaper than a
+  wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>
+```
+
+The unattached bodies still **drop the sentence "nobody is watching a screen"** —
+a claim the evidence does not support (the exact false negative of §1.1) and the
+phrase the models parrot into `hub` messages. What remains is the fact that was
+measured — whether a surface of THIS session is attached, or that none was
+measured — and its consequence.
+
+`prompts_api.py::_interactivity_block` renders them; `_interactivity_channel`
+resolves the channel; `tests/unit/test_prompts_api.py` asserts each of the six
+verbatim, so reintroducing a claim has to be deliberate.
 
 ### 3.3 Byte stability under churn — confirmed from the code, not asserted
 
@@ -399,14 +527,21 @@ state enum buys nothing here: two states is one boolean, and `is_interactive()`
   and emits a `[session-state]` custom message only for indices that differ
   (`session.py:3584-3589`). Byte-identical state ⇒ empty `changes` ⇒ **no
   transcript row, no message**.
-- **The provider is cached on the same key.** `session_factory.py:2843-2871`
-  keys the closure on `(…, interactive, …)` and returns `list(cached_blocks)`
-  when the key is unchanged, so a rebuild that changes nothing costs nothing.
+- **The provider is cached on the same key.** `session_factory.py` keys the
+  closure on `(…, interactive, channel, …)` and returns `list(cached_blocks)`
+  when the key is unchanged, so a rebuild that changes nothing costs nothing —
+  and the channel is in the key because the hook can be installed or removed
+  mid-session.
 - **50 focus changes cost zero.** Focus is not an input to Tier A (§2.2), so
   `attached_surfaces()` returns the same `frozenset`, the key is unchanged, the
-  block is byte-identical, and `_system_state_delta` returns `{}`. The existing
-  test `tests/unit/test_prompts_api.py::test_interactivity_costs_the_same_whatever_the_attach_churn`
-  asserts the byte property; §7 adds the row-count property at the session level.
+  block is byte-identical, and `_system_state_delta` returns `{}`.
+  `test_prompts_api.py::test_interactivity_costs_the_same_whatever_the_attach_churn`
+  asserts the byte property against a CONSTANT; round 1 found that too weak
+  (its NIT 8), so
+  `tests/unit/session/runtime/test_server.py::test_fifty_real_focus_changes_move_neither_tier_a_nor_its_answer`
+  now drives fifty real `desktop_watch` flips on a real connection in BOTH
+  notification configurations and asserts the answer never moves — which is what
+  the desktop clause change in §2.2 was for.
 - **A genuine state change costs one row** and is thereafter silent. That is the
   intended trade and it is bounded by the number of *transitions*, not by the
   number of reattaches.
@@ -415,7 +550,12 @@ state enum buys nothing here: two states is one boolean, and `is_interactive()`
 
 Today `attached` renders no block at all, so the model receives no confirmation
 that a question is answerable. After this change the positive block rides the
-tail on **every** request of an attached session: approximately 90 tokens. This
+tail on **every** request of an attached session: **measured at 597 chars = 215
+billed tokens** at the guard's 2.78 chars/token (§5 of the PR body; the ~90-token
+estimate here was wrong, which is why the ratchet was raised rather than
+discovered in CI), and unchanged by round 2 — the attached `ask` body is
+byte-identical and the guard re-measured 84,009 chars = 30,219 billed against
+30,365, i.e. 146 headroom. This
 is a deliberate, permanent cost — it is the counterweight to the negative
 block's existing advice, and without it the model's default reading of silence is
 "probably nobody there". Stated here so the footprint is not discovered in
@@ -520,116 +660,188 @@ declared field is actually populated; it gets the new row.
 
 ### 5.2 `request_access` and the pending text
 
-`_access_result_text` (`builtin.py:11051-11119`) is the single place the agent
-learns this flow (`:11055-11062`). Its `pending` arm (`:11077-11095`) gains the
-attachment fact, the 15-minute wait, and the re-request, in two variants keyed on
-one boolean:
+`_access_result_text` is the single renderer for every access state, and the
+`pending` arm has two variants keyed on one measured fact (the attachment of the
+session, read through `ToolContext.attached_probe` AT RENDER TIME — see §5.3).
+Both are hard-wrapped at ≤72 cells: the TUI receipt paints one row per raw line
+and clips each to the measure, and round 1 measured the unwrapped versions losing
+their load-bearing clauses on the card ("proceed with what you have", and the
+whole timeout receipt) — a green test cannot see that.
+
+Shipped (attached), `{where}` naming the extension popup or the app's browser tab:
 
 ```
-approval for {origin} is pending ({position} of {pending_count}). The prompt is
-showing {where}.
+approval for {origin} is pending ({position} of {pending_count}).
+The prompt is showing {where}.
 
-An interface is attached to this session, so the operator can see and answer it
-— make sure they are told (a short message, or `ask`).
+An interface is attached to this session, so the operator can answer
+it as soon as they look — make sure they are told ({notify}).
 
-- Then call action='await_access' with the same url, and wait UP TO 15 MINUTES
-  in total for the decision: a person may be away from the desk. Use the `wait`
-  tool for the remaining time (await_access itself waits at most 240s per call).
-- The prompt expires after about 10 minutes. If await_access returns "no live
-  access request", call action='request_access' again with the same url to
-  re-raise it and ping the operator again, and keep doing that while the origin
-  is still needed.
-- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report the origin as
-  unavailable while an interface is attached.
+- Wait UP TO 15 MINUTES in total for the decision: a person may be
+  away from the desk, and a slow answer is NOT a refusal.
+- Keep calling action='await_access' with the same url for that
+  budget — each call waits at most 240s, so about four calls span
+  it. That is the mechanism: there is no sleep shortcut here,
+  because the `wait` tool awaits a background job and this flow
+  has none.
+- The prompt expires after about 10 minutes. If await_access
+  returns "no live access request", call action='request_access'
+  with the same url to raise a NEW prompt — that is what pings the
+  operator again. Re-requesting while the old prompt is still live
+  changes nothing and notifies nobody, so do it only once it has
+  expired, and at most once per 15-minute window: after that,
+  report what you have and move on.
+- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as
+  refused — the request is still pending while an interface is
+  attached — but say plainly if you proceeded without access.
 ```
 
-with the second paragraph swapped for, when unattached:
+Shipped (unattached):
 
 ```
-No interface is attached to this session right now, so the prompt is queued and
-nobody can act on it until a surface attaches. Notify the operator anyway (a
-message, or `ask`) so the decision is waiting for them — then proceed with what
-you have rather than blocking the turn on it.
+approval for {origin} is pending ({position} of {pending_count}).
+The prompt is showing {where}.
+
+No Local Operator pane is attached to this session right now, so
+nothing here will present the question — the prompt above is the
+surface, and the operator can answer it there. Notify them anyway, in
+a short message they will read, so the decision is waiting for them;
+then proceed with what you have rather than blocking the turn.
+
+- The prompt expires after about 10 minutes. Re-raise it with
+  action='request_access' (the same url) when the origin is next
+  needed — that is what pings the operator again rather than leaving
+  them a dead prompt.
+- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused:
+  an interface may attach later, and this request is what makes it
+  visible — but say plainly if you proceeded without access.
 ```
+
+Three round-2 corrections are visible in that text, and each is the fix for a
+review finding:
+
+- **`{notify}` is what THIS caller can actually use** (`_notify_channel`): "a
+  short message, or `ask`" where the session owns an ask hook, and only "a short
+  message" otherwise. It used to name `ask` unconditionally, which a SUBAGENT
+  does not have — and the same text told a child to "ask the user directly" on a
+  deny.
+- **The unattached variant no longer denies the surface it just named.** "the
+  prompt is queued and nobody can act on it until a surface attaches"
+  contradicted its own first sentence: `attached` counts Local Operator PANES,
+  while the prompt is sitting in the extension popup (or the app's browser tab),
+  which the operator can click. What is measured is that no pane of this session
+  is attached, and that is what it says. The same correction removed the mirror
+  over-claim from the attached variant ("the operator can see and answer it" was
+  never what the predicate measured).
+- **`ask` is no longer offered as a notify channel in the UNATTACHED variant**,
+  whose advice is "do not block the turn": `ask` parks the turn for hours. The
+  two arms now agree about whether to hold.
 
 ### 5.3 The await timeout text
 
-The `remaining_ms <= 0` arm (`builtin.py:11198-11212`) currently ends "Remind
-them to check {check}, then call await_access again", which invites an unbounded
-retry loop. It becomes: name the elapsed total, restate the 15-minute budget, and
-name the **re-request** rather than another await:
+The `remaining_ms <= 0` arm is now rendered by `_access_result_text`
+(`state="await_timeout"`) rather than inline, because the two arms have to agree
+and they did not: the pending text said "proceed with what you have rather than
+blocking the turn", while the timeout arm told every caller — attached or not —
+to keep waiting. It is attachment-aware, it names the wait that happened, and its
+next step is executable:
 
 ```
-still pending after {total_s:.0f}s: the operator has not decided on {url} yet.
-Remind them to check {check}, then either call await_access again or — if the
-prompt has expired — call action='request_access' with the same url to re-raise
-it and ping them again. An unanswered prompt is not a refusal.
+still pending after {total_s:.0f}s, and the operator has not decided
+on this origin yet:
+{origin}
+Remind them to check {check}. Then:
+- An interface is attached to this session: keep calling
+  action='await_access' — each call waits at most 240s — until
+  about 15 MINUTES in total have gone by.
+- Once the prompt has expired, call action='request_access' with
+  the same url to raise a new one: that is what pings them again.
+AN UNANSWERED PROMPT IS NOT A REFUSAL.
 ```
 
-The `"none"` arm (`builtin.py:11114-11119`, "no live access request … Call
-action='request_access' … to raise a new prompt") already says the right thing and
-is what the 10-minute extension TTL produces mid-wait; the new sentences above
-are written to join it rather than contradict it.
+with the first bullet replaced, when unattached, by:
+
+```
+- No pane is attached to this session, so nothing here will
+  present it: notify the operator and proceed with what you
+  have rather than blocking the turn.
+```
+
+The read of the attachment happens **here**, at render time, not once at the top
+of `_bridge_access` (round 1, MINOR 3): an `await_access` that spent 240s waiting
+must report the state at the END of that wait, or a surface that attached while
+the model waited is told the session is unattached and advised to give up. The
+three comments that claimed it was read after the wait (here, `harness/types.py`
+and `session/session.py`) are now true of the code, and the `attached=` argument
+no longer exists on the await-terminal call site where it could never be used.
 
 ### 5.4 The wait budget — decided, and the cap deliberately does NOT move
 
-**Recommendation: keep `BROWSER_AWAIT_ACCESS_MAX_S = 240.0` (`builtin.py:11041`)
-and put the 15 minutes in the `wait` tool, not in this call.** Three measured
-reasons, any one of which is sufficient:
+**`BROWSER_AWAIT_ACCESS_MAX_S = 240.0` stays, and the DEFAULT goes BACK to
+`120.0`.** Three measured reasons for the cap, any one sufficient:
 
-1. **The `browser` tool is `interruptible=False`** (`builtin.py:13289`). A call
-   that sits 15 minutes cannot be cut by a steer, a stop or an abort — the
-   failure `ask`'s own builder documents at `builtin.py:17065-17069`. Raising
-   the cap without flipping that flag converts a bounded wait into a hang.
-2. **Each slice is a real RPC**, `_BRIDGE_AWAIT_SLICE_MS = 20_000`
-   (`builtin.py:11048`), so 15 minutes is 45 round trips, and the extension's
-   request TTL is 10 minutes (`extension/src/driver/access-queue.ts:25`,
-   `ACCESS_REQUEST_TTL_MS = 10 * 60_000`). One prompt cannot serve a 15-minute
-   wait anyway: at ~10 minutes the tool sees `state="none"` and returns, so the
-   extra cap would buy five minutes of nothing.
-3. **`wait` is the tool built for holding a turn open** and *is* interruptible:
-   `default=600_000, le=3_600_000` (`builtin.py:15290-15301`).
+1. **The `browser` tool is `interruptible=False`.** A call that sits 15 minutes
+   cannot be cut by a steer, a stop or an abort — the failure `ask`'s own builder
+   documents. Raising the cap without flipping that flag converts a bounded wait
+   into a hang.
+2. **Each slice is a real RPC**, `_BRIDGE_AWAIT_SLICE_MS = 20_000`, so 15 minutes
+   is ~45 round trips, and the extension's request TTL is 10 minutes
+   (`extension/src/driver/access-queue.ts`, `ACCESS_REQUEST_TTL_MS = 10 * 60_000`).
+   One prompt cannot serve a 15-minute wait anyway: at ~10 minutes the tool sees
+   `state="none"` and returns.
+3. **The budget is carried by REPEATED `await_access` CALLS**, which the pending
+   text now says explicitly (about four calls of 240s). This replaces the original
+   recommendation, which put the remainder in the `wait` tool and was **wrong**:
+   `wait` awaits a background JOB (`WaitParams.job_id` is required) and a session
+   awaiting an operator's click has none, so the named mechanism could not be
+   called at all. The text states the executable path and names `wait` only to say
+   why it is not it.
 
-The operator's ask is satisfied literally by the text: the recommended wait is
-15 minutes and the re-request is named. If the operator wants one call to cover
-the wait, that is a **separate change with its own evidence**: flip
-`interruptible=True` on the browser tool, add a between-slice abort check in the
-`await_access` loop, prove a cancelled await leaves no dangling request
-(`cancel_access` exists at `builtin.py:11170-11190` and the extension expires its
-own queue), and *then* raise the cap to 900.0. I do not recommend folding that
-into this change: it widens cancellation semantics for `click`/`type`/
-`screenshot` as well, which is well outside the operator's report.
-
-`BROWSER_AWAIT_ACCESS_DEFAULT_S` (`builtin.py:11040`) is raised from
-`120.0` to the cap (`240.0`) so an unsized call gets the longest wait the tool
-can honestly serve; the text tells the model that the remainder is `wait`'s job.
+Round 1 also raised the DEFAULT to the cap "so an unsized call gets the longest
+wait the tool can honestly serve". That is reverted: an unsized `await_access` is
+exactly the call the pending text tells the model to make, so raising the default
+doubles the uninterruptible block for the commoner case, which is the argument
+reason 1 makes against touching the cap at all.
 
 ### 5.5 The `ask` refusal, and the only other hard-coded sentence
 
 `rg "interactive surface"` over `local_operator/` returns exactly **two** hits:
-`prompts_api.py:723` (the block, §3.2) and `builtin.py:17097`. There is no third
-in `hub`, `comms.py`, `render.py` or `control.py`.
+`prompts_api.py` (the block, §3.2) and `builtin.execute_ask`. There is no third
+in `hub`, `comms.py` or `control.py`.
 
-`builtin.py:17097` sits in the `ask_user is None` branch of `execute_ask`
-(`builtin.py:17088-17103`), which the builder above it makes **unreachable
-through the advertised tool** (`builtin.py:17017-17023`): it is a host-wiring
+`execute_ask`'s `ask_user is None` branch is unreachable through the advertised
+tool (the builder refuses to create it without a hook): it is a host-wiring
 fault, and the branch's own comment says so. But its text is the sentence the
-models repeat, so it must stop claiming anything about a screen:
+models repeat, so it claims nothing about a screen and nothing about a ROSTER:
 
 ```
-this host has no way to present a question to a person — no ask hook is wired
-into this session (a subagent, an `exec` run and a scheduler run have none), so
-the user cannot be asked. Decide without them.
+this host has no way to present a question to a person — no ask hook is
+wired into this session, so this process cannot put one in front of the
+operator. A delegated child's route to them is `hub` to its parent;
+otherwise decide without them.
 ```
 
-Related but unchanged: `harness/render.py:186-199` renders an expired gate as
-"nobody was attached to this session and it expired". That sentence is *true* —
-it is emitted after a gate timed out because nothing presented the card — and it
-should keep saying it; note that under §2.2 it can now only be reached after a
-genuine absence, and the `ask` arm's final instruction ("Decide yourself … then
-say in one line what you assumed") stays.
+The roster it used to carry ("a subagent, an `exec` run and a scheduler run have
+none") was **wrong about one of the three**: a supervised `exec --control` run
+DOES have a hook (`exec_control.py` builds the handle with
+`install_gates=supervised` and `serving.py` installs it via `set_ask_handler`),
+which `build_ask_tool`'s own docstring says three lines above that string. A
+roster is a second copy of a wiring fact, and this one had already drifted; the
+condition is named instead, and the delegated child's real route is stated
+because "the operator cannot be asked" is false for a child whose parent is one
+`hub` call away.
 
----
+**The gate-expiry notice, corrected.** `harness/render.py` rendered an expired
+gate as "[system] … nobody was attached to this session and it expired", and this
+document originally blessed it as true. That blessing was wrong once §2.2 and the
+parking change land: attachment-first parking holds a gate for the configured
+`unattended_gate_timeout` (24 h by default) when a pane IS attached, so the gate
+can expire with a pane on it and the model is told nobody was there — the
+sentence class this whole change exists to stop. Both arms now report the wait
+they measured ("it expired unanswered after 24h"), through
+`harness/rows.py::gate_waited_text` — ONE formatter, shared with the human row
+(`gate_timeout_notice`), which carried the same unsupported "with nobody
+attached" clause and now reads "waited 2h for approval, then expired unanswered".
 
 ## 6. Nothing else changes
 
@@ -644,6 +856,11 @@ say in one line what you assumed") stays.
   (`desktop-notifier.ts:951-977`) would make the empty-name case rarer; it would
   not have fixed the incident's second cause (§1.3, focus), and it is not a
   dependency of this design.
+- **Round 2 does change two files this plan did not list**, both of them copy:
+  `harness/render.py` and `harness/rows.py` (§5.5 — the expired-gate sentence in
+  two renderers of one event), and `scripts/bench_context_budget.py`'s ratchet
+  comment (§3.4). The brief's own "one backend PR, four commits" shape is
+  otherwise unchanged.
 
 ---
 
@@ -675,11 +892,14 @@ exhibit **before** the change (AGENTS.md, "Prove the test can still fail").
 - `test_a_daemon_connection_is_never_attached` — mirrors the rung-1 reasoning at
   `server.py:3811-3840`, so a machine running `lop mobile` cannot make every
   session claim an interface.
-- **The negative that must not move:**
+- **The negative that must not move (RESIDENCY):**
   `test_the_reaper_still_sees_no_viewer_without_a_visible_panel` — a desktop conn
   with `desktop_visible=False, desktop_can_notify=False` gives
-  `attach_clients() == 0` and `attached_surfaces() == frozenset()`. This is the
-  test that proves residency was not loosened (§1.5).
+  `attach_clients() == 0`. That is the half that proves residency was not
+  loosened (§1.5). Since round 2 the same test also pins the SPLIT: the same
+  connection has a LIVE lease, so `attached_surfaces() == {"desktop"}` — the pane
+  holds this conversation, the reaper has no reason to stay up for it, and the
+  two predicates are deliberately no longer one expression (§2.2).
 
 **The deny arm (change 2).** `tests/unit/session/runtime/test_server.py`:
 `test_a_presence_record_that_cannot_name_a_session_falls_back_to_the_connection`
@@ -745,6 +965,21 @@ prefer `scripts/ci_scope.py --run`; the whole-tree suite remains CI's job.
 
 ---
 
+### 7.1 Round 2 (remediation) — what the new tests pin
+
+| test | the failure it exhibits before the round-2 change |
+|---|---|
+| `test_prompts_api.py::test_a_host_with_no_probe_is_told_nothing_about_attachment` | `interactive` had no unmeasured value, so an `exec`/scheduled/CLI host shipped the positive body |
+| `test_prompts_api.py::test_a_delegated_child_is_told_the_route_it_actually_has` | the child's body named `ask`, which no child has, and said "attached to this session" about the parent's |
+| `test_prompts_api.py::test_a_session_with_no_channel_promises_no_presentation` | the no-channel session inherited "a question you ask WILL be presented" |
+| `test_prompts_api.py::test_an_unstated_channel_is_read_off_the_tool_inventory` | `channel=None` had no rule; `hub` must never be inferred (a parent holds it too) |
+| `test_session_factory.py::test_a_child_of_an_unmeasured_parent_is_told_nothing` | a probe-less parent's child rendered the fail-open `True` default |
+| `test_session_factory.py::test_one_attachment_transition_journals_exactly_one_row` | (extended) the row now carries the attached-`ask` body of a served session |
+| `test_tool_selection.py::test_the_access_advice_names_only_tools_the_caller_has` | the browser text named `ask` for callers without a hook |
+| `test_tool_selection.py::test_a_pending_prompt_says_whether_an_interface_is_attached` | (extended) the unattached text denied the surface it named |
+| `test_tool_selection.py::test_the_await_timeout_names_re_request_not_an_endless_await` | (extended) the arm is attachment-aware and names the executable path |
+| `test_server.py::test_fifty_real_focus_changes_move_neither_tier_a_nor_its_answer` | focus flapping moved Tier A on a `can_notify=False` host (NIT 8: the old test fed the renderer a constant) |
+
 ## 8. Configuration
 
 **No new key.** Every knob this design touches already exists:
@@ -775,8 +1010,8 @@ commits, in this order, each independently reviewable.
 **Change 1 — `feat(runtime): an attached interface is not an attended one`**
 *Files: `local_operator/session/runtime/server.py`, `serving.py`.*
 1. Add `RuntimeServer.attached_surfaces()` exactly as §2.2, with the docstring
-   that says why focus is absent and why the desktop clause is shared with
-   `attach_clients()`.
+   that says why focus is absent and why the desktop clause is the LEASE alone —
+   **not** the `attach_clients()` clause it originally shared (§2.2, round 2).
 2. Add `LocalOperatorHandle._attached_surfaces()` beside `_watching_surfaces()`
    (`serving.py:3594`), with the old-registrant fallback through the existing
    `_attached_clients()` (`serving.py:3621`).
@@ -861,6 +1096,17 @@ fleet-scale before/after that needs no rig.
    `attach_clients()`, which counts a desktop conn with `desktop_can_notify` even
    if the app never sends `desktop_watch`. That is the intended bias (§2.4), and
    it is worth stating in the PR so nobody "fixes" it into a false negative.
+5. **Tier A now counts a leased pane whose window is hidden.** That is the point
+   of the §2.2 change — the pane holds the conversation and the operator returns
+   to it — but it does mean a gate on such a session parks for the configured
+   `unattended_gate_timeout` where it used to fall back to the 30 s cap. The
+   direction is the documented one (§2.4: a wrong "attached" costs a parked gate,
+   a wrong "unattached" costs the incident), and `watching_surfaces()` still
+   governs what has a human on it right now.
+6. **The three-state block changes no bytes on the hosts it is meant to protect.**
+   `interactive=None` renders nothing, which is what those hosts had before the
+   positive arm existed; the only population that gains a body is the one with a
+   probe, and its attached-`ask` body is byte-identical to round 1.
 
 ## 11. What I could NOT establish
 
