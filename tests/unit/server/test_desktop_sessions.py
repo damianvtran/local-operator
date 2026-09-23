@@ -32,7 +32,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     SubagentChildUnavailable,
 )
-from local_operator.session.errors import SessionStoreUnavailable
+from local_operator.session.errors import RuntimeRetiring, SessionStoreUnavailable
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
@@ -7165,3 +7165,121 @@ async def test_the_served_runtime_probe_memoises_only_a_final_verdict(tmp_path, 
         assert probes == [424242, 424242, 424242], "a final verdict was probed again"
         assert attempts == [False], "an unclean exit was re-spawned inside the pace"
     await pool.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trigger", "shipped"),
+    [
+        pytest.param(
+            RuntimeRetiring.BUILD,
+            "This session is switching to a newer build; the one it loaded is gone from "
+            "disk. The message was not admitted — send it again once the new build is up.",
+            id="build",
+        ),
+        pytest.param(
+            RuntimeRetiring.SIGNAL,
+            "This session was signalled to stop; it will not start a new turn. "
+            "The message was not admitted — send it again once the session is running "
+            "again.",
+            id="signal",
+        ),
+    ],
+)
+async def test_a_retiring_refusal_answers_its_code_on_the_message_route(
+    tmp_path, monkeypatch, trigger, shipped
+) -> None:
+    """The category a client has to be able to key on, over the REAL route.
+
+    ``RuntimeRetiring`` is a ``ValueError`` (``errors.py``), so it landed in the
+    409 arm of the shared ladder and — never having been listed there — fell to
+    its last line, ``HTTPException(409, str(error))``: a PLAIN STRING detail.
+    Every other refusal in that arm carries ``{code, message}``, and the design of
+    record read THIS one the same way (``docs/design-ownerless-session-attach.md``
+    §1.6/F5, §6 U1: *the routes already answer 409 with* ``{code, message}``), so a
+    renderer written against it could not fire: the app's ``runtime_retiring``
+    branch keys on ``detail.code``, which was nowhere in the body. The message was
+    provably NOT admitted, which is the whole reason the distinction matters — a
+    held draft in the composer rather than a retried id.
+
+    Driven through ``POST /messages`` with the bridge's remote a STUB that raises
+    the real category, because the subject is the ROUTE's arm: the refusal's real
+    provenance — a draining runtime raising it from ``_retiring_refusal`` — is
+    covered in ``tests/unit/session/runtime/test_serving_drain.py``. The trigger is
+    parametrised because the sentence is composed per departure and the route must
+    carry whichever one it was handed: ``shipped`` is that sentence, pinned
+    verbatim, since it is copy the two repositories share and the shipping app
+    paints it straight from this field.
+    """
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "[redacted]")
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    sid = await pool.create(str(tmp_path))
+
+    refusal = RuntimeRetiring(trigger=trigger)
+
+    async def retire(*_args: object, **_kwargs: object) -> None:
+        raise refusal
+
+    class RetiringRemote(SimpleNamespace):
+        """A remote whose admission is refused by a session that is leaving.
+
+        Only ``admit_prompt`` is anything in particular — it is the method the
+        owner-side drain refuses — and everything else answers with an inert
+        coroutine, so this test does not have to be revisited every time the
+        bridge touches one more member of its remote's surface.
+        """
+
+        def __getattr__(self, name: str) -> Any:
+            if name.startswith("_"):
+                raise AttributeError(name)
+
+            async def inert(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            return inert
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer [redacted]"},
+        ) as client:
+            async with pool.session(sid) as bridge:
+                bridge.remote = cast(
+                    Any,
+                    RetiringRemote(
+                        is_cold=False,
+                        frontend_state=SimpleNamespace(epoch="epoch-1"),
+                        admit_prompt=retire,
+                    ),
+                )
+                response = await client.post(
+                    f"/v1/desktop/sessions/{sid}/messages",
+                    json={
+                        "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "text": "does this reach the successor?",
+                        "mode": "prompt",
+                    },
+                )
+    finally:
+        await pool.close()
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "runtime_retiring", detail
+    # The category's OWN sentence, never one this route composed, and
+    # character-for-character the text the bare-string arm answered with — which
+    # is what makes the object additive for a client that reads `detail` as a
+    # string: it loses nothing it was reading before.
+    assert detail["message"] == str(refusal), detail
+    assert detail["message"] == shipped, detail
