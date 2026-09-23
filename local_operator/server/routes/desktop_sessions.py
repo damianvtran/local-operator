@@ -1361,9 +1361,31 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         from local_operator.session.errors import (
             AttachmentUnavailable,
             ProfileRegistryUnavailable,
+            RuntimeRetiring,
         )
 
-        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)):
+            # ``RuntimeRetiring`` IS IN THIS TUPLE FOR THE REASON THE ARM'S
+            # OTHER FOUR REFUSALS ARE: the code is the contract. A retiring runtime refuses an
+            # admission the client can ACT on differently from a broken one —
+            # the message was provably not admitted, so the app restores its
+            # echo and retries the same id instead of holding the text in the
+            # composer as a draft the backend already took (design of record
+            # ``docs/design-ownerless-session-attach.md`` §1.6/F5, §6 U1, which
+            # read this route as carrying ``{code: "runtime_retiring", ...}``).
+            # It reached the bare ``str(error)`` answer below only because it
+            # was never listed here, and that answer is the one shape a renderer
+            # cannot key on: the category it needs was nowhere in the body.
+            #
+            # ADDITIVE FOR OLDER CLIENTS, which is what makes listing it here
+            # safe rather than a wire change: such a client read ``detail`` as a
+            # string and read it as nothing more than that here — the sentence a
+            # refusal object carries in ``message`` is character-for-character
+            # the one the bare 409 carried, so the only difference it can observe
+            # is an object where it expected prose, which it ignores. The same
+            # claim the ``MoveIndeterminate`` arm above states for the same
+            # body shape ("The client is already built for this shape: it reads
+            # ``detail.message`` when ``detail`` is an object").
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,
