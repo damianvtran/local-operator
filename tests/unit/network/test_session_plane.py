@@ -1189,9 +1189,13 @@ def test_the_session_plane_listing_has_a_header_and_says_the_state_in_words(
             == 0
         )
         out = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-        # Imported rather than restated: a reword of the header fails HERE.
-        assert out[0] == network_cli.SESSIONS_HEADER, out
+        # The header is one line of the listing's own grid (review round 9, NIT), so
+        # it is asserted where it LANDS rather than as a literal: a reworded label
+        # fails here, and so does a column that stops lining up with its values.
+        header = out[0]
         row = next(line for line in out if line.startswith(SESSION))
+        assert header.index("SESSION") == row.index(SESSION), (header, row)
+        assert header.index("STATE") == row.index("not running"), (header, row)
         # The words, and not the peer's 34-character id in place of its name.
         assert "not running" in row, row
         assert "stored" not in row, row

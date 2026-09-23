@@ -3936,9 +3936,22 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
         payload = reply.get("detail") or {}
         remote = list(payload.get("sessions") or [])
         blocks = payload.get("peers") or {}
+        # THE WORDS, NOT THE TOKEN, on the third surface that printed it (UX round 5
+        # U28; QA round 21 Q-R21-1 for the compound shape). These notes and the
+        # refusal below are what ``lop sessions --peer/--all-peers`` writes to
+        # stderr, and they printed the relay's ``reason`` field raw — so a peer whose
+        # several addresses failed differently said
+        # ``unreachable: 127.0.0.1:0 connect_failed:OSError; …``, an address and a
+        # Python class name in place of a fact. ``resume.peer_reason_words`` is the
+        # gloss the federated listing and the sidebar already read, so the three
+        # surfaces of one peer's reachability cannot drift into three vocabularies —
+        # and it is never empty, so the old ``no reason recorded`` fallback is gone
+        # with it rather than kept beside a second spelling of the same absence.
+        from local_operator.resume import peer_reason_words
+
         notes = [
             f"{str((block or {}).get('name') or device_id)}: unreachable "
-            f"({str((block or {}).get('reason') or 'no reason recorded')})"
+            f"({peer_reason_words(str((block or {}).get('reason') or ''))})"
             for device_id, block in blocks.items()
             if isinstance(block, dict) and not block.get("reachable")
         ]
@@ -3971,7 +3984,8 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
                     notes,
                     refusal=(
                         f"{block.get('name') or matched} is in the network but cannot be "
-                        f"reached from here ({block.get('reason') or 'no reason recorded'})"
+                        f"reached from here "
+                        f"({peer_reason_words(str(block.get('reason') or ''))})"
                     ),
                 )
             remote = [

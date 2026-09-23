@@ -973,7 +973,8 @@ def test_an_unasked_device_is_named_in_every_empty_listing(
         # ConnectionRefusedError`` — on the surface a user reads, while the
         # network panel beside it said the same fact in words. The gloss is the
         # shared one (`resume.peer_reason_words`), so the sibling family is one
-        # voice; the raw token is still what ``lop network peers`` prints.
+        # voice; the raw reason survives in each verb's ``--json`` payload, which is
+        # the machine surface (U28's whole point — no human line prints it).
         assert "ConnectionRefusedError" not in merged, merged
         assert "unreachable (it did not answer)" in merged, merged
 
@@ -982,6 +983,44 @@ def test_an_unasked_device_is_named_in_every_empty_listing(
         assert "lop-mesh-peer-b: unreachable" in named, named
         assert "ConnectionRefusedError" not in named, named
         assert "no sessions are held by" not in named, named
+    finally:
+        server.stop()
+
+
+def test_the_ordinary_listing_glosses_a_compound_reason(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 21, Q-R21-1's THIRD surface: the ordinary listing printed the token.
+
+    ``lop sessions --all-peers``/``--peer`` (``local_operator/cli.py::_remote_listing``)
+    wrote the relay's ``reason`` field to stderr RAW while its sibling shipped the
+    gloss — so a member whose several addresses failed differently told the operator
+    ``127.0.0.1:1 connect_failed:ConnectionRefusedError; 127.0.0.1:not-a-port
+    bad_endpoint`` where the answer is "no address of it answered".
+
+    THE MEMBER DECLARES TWO ADDRESSES ON PURPOSE. Several candidates is a DESIGNED
+    state (``relay.advertise_endpoints`` returns the operator's declared hosts and
+    then the live ones), and it is the shape that broke the gloss — a single-address
+    row reports one code and glossed correctly all along. One dead port beside one
+    address that cannot be parsed is the cheapest way to fail differently twice: no
+    dial is waited on, and the two codes differ, which is what makes the reason a
+    list rather than a code. The exact line is asserted, because the bare-word gloss
+    would satisfy a substring check while proving the compound case never ran.
+    """
+    from local_operator import cli as main_cli
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        _admit_a_member_that_cannot_answer(
+            server,
+            name="lop-mesh-peer-b",
+            endpoints=["127.0.0.1:1", "127.0.0.1:not-a-port"],
+        )
+
+        assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True, json=False)) == 0
+        err = capsys.readouterr().err
+        note = next(line for line in err.splitlines() if "lop-mesh-peer-b" in line)
+        assert note == "lop-mesh-peer-b: unreachable (no address of it answered)", err
     finally:
         server.stop()
 
