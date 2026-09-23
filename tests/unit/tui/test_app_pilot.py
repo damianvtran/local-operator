@@ -3012,8 +3012,9 @@ async def test_empty_composer_accepts_textual_super_d_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ctrl_d_in_nonempty_composer_still_deletes_forward() -> None:
-    """Ctrl+D remains TextArea's forward-delete when draft text is present."""
+@pytest.mark.parametrize("key", ["ctrl+d", "super+d"])
+async def test_forward_delete_keys_in_nonempty_composer_do_not_quit(key: str) -> None:
+    """Ctrl+D and Cmd+D delete forward without exiting on a non-empty draft."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
@@ -3023,7 +3024,7 @@ async def test_ctrl_d_in_nonempty_composer_still_deletes_forward() -> None:
         editor.cursor_location = (0, 0)
         await pilot.pause()
 
-        await pilot.press("ctrl+d")
+        await pilot.press(key)
 
         assert app.is_running
         assert editor.text == "raft"
@@ -9137,13 +9138,15 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
         ("!", "shell command"),
         ("option+left/right", "by word"),
         ("shift+tab", "reasoning effort"),
-        ("ctrl/cmd+d", "empty composer"),
+        ("ctrl/cmd+d", "empty: quit; draft: delete forward"),
     ):
         row = next(
             (row for row in painted if row.strip().startswith(f"{key} ")),
             None,
         )
         assert row is not None, f"the {key} row is missing from /help"
+        if key == "ctrl/cmd+d":
+            assert "empty: quit" in row and "draft: delete forward" in row, row
         assert tail in row, (
             f"the {key} help row wrapped at 80 columns: {row.strip()!r} does not "
             f"carry {tail!r}, so the tail hangs at column 0 in the KEY gutter "
