@@ -231,7 +231,7 @@ async def test_info_route_serves_a_host_snapshot_in_the_reply_envelope(desktop):
 async def test_info_route_creates_nothing_on_the_host_it_describes(desktop, tmp_path):
     """A read path must not leave the store it reads behind.
 
-    ``CredentialManager.__init__`` creates the config directory and an empty
+    The retired ``CredentialManager.__init__`` created the config directory and an empty
     ``credentials.env``, so the credential probe used to WRITE while answering a
     question about a host — the fault class this collector's own comment bans.
     The store is absent before the call and absent after it.
@@ -391,7 +391,7 @@ async def test_info_route_names_credentials_without_carrying_one(desktop, tmp_pa
     client, _ = desktop
     secret = "sk-DIAGPROBE-0123456789abcdef-PREFIX"
     # A provider-class STORE ROW is the shape a stored key takes now
-    # (PR2a): the legacy CredentialManager file view the probe used to
+    # (PR2a): the legacy credentials.env file view the probe used to
     # union is gone, so the probe reads the store directly and this is
     # where the name must appear.
     from local_operator.providers.registry import store_provider_key

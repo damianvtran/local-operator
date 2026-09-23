@@ -1580,7 +1580,7 @@ async def test_upload_agent_to_radient_missing_api_key(
             store_provider_key,
         )
 
-        root = app.state.credential_manager.config_dir
+        root = app.state.config_manager.config_dir
         remove_provider_key("RADIENT_API_KEY", base=root)
         try:
             response = await test_app_client.post(f"/v1/agents/{agent_id}/upload")

@@ -35,7 +35,7 @@ from local_operator.providers import radient_credentials
 def isolated_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A config dir no run of these tests can escape from.
 
-    The CLI handlers below construct real ``ConfigManager``/``CredentialManager``
+    The CLI handlers below construct real ``ConfigManager``/``AgentRegistry``
     instances from the directory they are handed, and both derive nothing from
     the ambient environment — but ``Path.home()`` is redirected anyway so that
     an accidental un-redirected read cannot reach the operator's live store.

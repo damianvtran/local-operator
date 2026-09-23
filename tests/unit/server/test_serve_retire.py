@@ -30,7 +30,6 @@ from httpx import ASGITransport, AsyncClient, Timeout
 
 from local_operator import buildwatch
 from local_operator import update as update_mod
-from local_operator.credentials import CredentialManager
 from local_operator.server import registry as serve_registry
 from local_operator.server import retire
 from local_operator.server.registry import ServeRecord
@@ -1448,9 +1447,8 @@ async def test_every_route_that_reaches_the_door_refuses_once_latched(
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     # The rows that declare `Depends(get_desktop_auth)` resolve it before the
     # handler runs — before the door, which is inside the handler — so the plane's
-    # credential manager is part of the harness rather than an accident of the
-    # route order (`entities` is the one row that needs it).
-    app.state.credential_manager = CredentialManager(tmp_path)
+    # config manager is part of the harness rather than an accident of the route
+    # order (`entities` is the one row that needs it).
     # The route's OWN probe (the expression `host()` builds), so this test drives
     # the real wiring rather than a pool that agrees with itself. The session is
     # created BEFORE the latch, because a latched daemon cannot create one — the
@@ -1536,9 +1534,8 @@ async def test_the_spawn_seam_spy_catches_a_route_the_door_does_not_cover(
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     # The rows that declare `Depends(get_desktop_auth)` resolve it before the
     # handler runs — before the door, which is inside the handler — so the plane's
-    # credential manager is part of the harness rather than an accident of the
-    # route order (`entities` is the one row that needs it).
-    app.state.credential_manager = CredentialManager(tmp_path)
+    # config manager is part of the harness rather than an accident of the route
+    # order (`entities` is the one row that needs it).
     app.state.serve_retiring = False
     pool = DesktopSessions(
         tmp_path,
@@ -1598,7 +1595,6 @@ async def test_a_duplicate_aside_request_answers_409_and_claims_nothing(
 
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "matrix-token")
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
-    app.state.credential_manager = CredentialManager(tmp_path)
     # The claim the duplicate check reads, in the shape the route itself leaves: the
     # store is keyed by request id and the route only asks whether it is there.
     app.state.desktop_asides = {

@@ -105,7 +105,6 @@ from pathlib import Path
 t0 = time.perf_counter()
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.session_factory import create_session
 
 args = argparse.Namespace(
@@ -118,7 +117,7 @@ async def build():
     session = await create_session(
         args,
         ConfigManager(Path(config_dir)),
-        CredentialManager(Path(config_dir)),
+        Path(config_dir),
         AgentRegistry(Path(config_dir)),
     )
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -153,7 +152,6 @@ os.environ["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
 t0 = time.perf_counter()
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.session_factory import create_session
 from local_operator.tui.app import OperatorApp
 
@@ -168,7 +166,7 @@ async def boot():
         return await create_session(
             args,
             ConfigManager(Path(config_dir)),
-            CredentialManager(Path(config_dir)),
+            Path(config_dir),
             AgentRegistry(Path(config_dir)),
             has_ui=True,
         )

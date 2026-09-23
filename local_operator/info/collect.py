@@ -936,12 +936,14 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
     from local_operator.paths import config_dir
 
     # Same guard as `collect_agents`, for the same reason (review round 1, B1).
-    # The fallback is `_UNREADABLE_ROOT`, NOT `Path(".")`: `CredentialManager`
-    # CREATES its store on construction, so a relative fallback made this
-    # read-only diagnostic write a `credentials.env` into whatever directory the
-    # user happened to be in — observed for real while testing the B1 guard.
-    # A diagnostic that mutates the machine it is describing is the same class
-    # of fault as `check_latest()` rewriting the cache, which §2.1 bans.
+    # The fallback is `_UNREADABLE_ROOT`, NOT `Path(".")`: the retired
+    # `CredentialManager` CREATED a `credentials.env` on construction, so a
+    # relative fallback made this read-only diagnostic write one into whatever
+    # directory the user happened to be in — observed for real while testing the
+    # B1 guard. A diagnostic that mutates the machine it is describing is the
+    # same class of fault as `check_latest()` rewriting the cache, which §2.1
+    # bans, and the guard stays now that the recreator is deleted (PR2b): the
+    # equivalent future mistake is one line away in any path-rooted helper.
     root = _safe("env.config_dir", config_dir, _UNREADABLE_ROOT, errors)
 
     def browser() -> tuple[str, str, bool]:
@@ -998,11 +1000,10 @@ def collect_env(live: "LiveState", errors: list[tuple[str, str]]) -> EnvInfo:
         mobile_installed=installed,
         mobile_healthy=healthy,
         mobile_port=port,
-        # KEY NAMES ONLY. ``get_credentials`` returns SecretStr values and this
-        # screen is pasted into issues; a name answers the diagnostic question
-        # ("is it even set?") and a value answers nothing this screen asks.
-        # Read through ``_credential_key_names`` because constructing the manager
-        # CREATES its store — see that function.
+        # KEY NAMES ONLY. A name answers the diagnostic question ("is it even
+        # set?") and a value answers nothing this screen asks; this screen is
+        # pasted into issues. Read through ``_credential_key_names``, which opens
+        # the store read-only and creates nothing — see that function.
         credential_keys=_safe("env.credentials", lambda: _credential_key_names(root), (), errors),
         guides=_safe("env.guides", lambda: len(discover_guides()), 0, errors),
         skills=live.skills,
@@ -1023,14 +1024,14 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     that union is GONE (PR2a) — the file is no longer a credential source, so a
     name only the file holds would be one no reader could resolve.
 
-    Nothing here is created or rewritten. ``CredentialManager.__init__`` calls
-    ``_ensure_config_exists()``, which makes the config directory and an empty
-    ``credentials.env`` (and tightens the mode of a loose file it finds). On this
-    path that is a WRITE on a read: ``/info`` exists to describe a host —
-    including a broken one — and leaving new state on it is the same fault class
-    as ``check_latest()`` rewriting the cache, which this module's docstring bans
-    outright. The legacy read is therefore the class's own read-only
-    and the store is opened only when it already exists.
+    Nothing here is created or rewritten. On this path a WRITE on a read would
+    be the fault: ``/info`` exists to describe a host — including a broken one —
+    and leaving new state on it is the same fault class as ``check_latest()``
+    rewriting the cache, which this module's docstring bans outright. So the
+    store is opened only when it already exists, and the plaintext
+    ``credentials.env`` reader this module used to reach is GONE (PR2a) — the
+    file is no longer a credential source at all, and PR2b deleted the module
+    that held its reader.
 
     ``_require_root`` FIRST, and it is load-bearing rather than defensive. The
     previous form short-circuited on ``is_file()``, which is False on the
@@ -1049,8 +1050,8 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     from local_operator.secrets.keys import store_path
     from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
 
-    # An errno comparison rather than ``is_file()``/``exists()``, for the reason
-    # the retired ``read_key_names`` documented at length: a path probe answers
+    # An errno comparison rather than ``is_file()``/``exists()``, for a reason
+    # worth keeping in view: a path probe answers
     # ``False`` for `ENOENT` AND for `ENOTDIR`, `ELOOP` and `EACCES`, so an
     # untraversable root or a symlink loop would read as "no store" and this
     # probe would state an authoritative empty list about a host it never looked
@@ -1076,9 +1077,9 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
 
 #: Stand-in config root for when `config_dir()` itself cannot be resolved.
 #: Deliberately a path that cannot exist and cannot be created, so a probe whose
-#: constructor would otherwise MATERIALISE a store (``CredentialManager`` writes
-#: a ``credentials.env``) fails into `_safe` and is reported as degraded,
-#: instead of silently writing into the process's current directory.
+#: constructor would otherwise MATERIALISE a store fails into `_safe` and is
+#: reported as degraded, instead of silently writing into the process's current
+#: directory.
 #:
 #: What `/info` may leave behind on the host it describes is nothing
 #: credential-shaped: the credential store is neither created nor re-tightened,

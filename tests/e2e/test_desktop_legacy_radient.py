@@ -100,7 +100,10 @@ async def test_legacy_radient_readers_use_central_store(headless_tui_env, monkey
             app.state.desktop_auth.store.upsert_credential(
                 "radient", {"type": "api_key", "source": "login", "key": key}
             )
-            assert not app.state.credential_manager.get_credential("RADIENT_API_KEY")
+            # The one-time plaintext view of this key is gone (PR2b deleted
+            # the class that exposed it); what must still hold is that no
+            # plaintext file is created or consulted on this path.
+            assert not (app.state.config_manager.config_dir / "credentials.env").exists()
             speech = await client.post("/v1/tools/speech", json=speech_body)
             assert speech.status_code == 200 and speech.content == b"fixture-audio"
             assert speech.headers["cache-control"] == "no-store"
@@ -113,7 +116,10 @@ async def test_legacy_radient_readers_use_central_store(headless_tui_env, monkey
             assert uploaded.status_code == 200, uploaded.status_code
             assert ("GET", "/v1/models") in calls
             assert ("POST", "/v1/agents/upload") in calls
-            assert not app.state.credential_manager.get_credential("RADIENT_API_KEY")
+            # The one-time plaintext view of this key is gone (PR2b deleted
+            # the class that exposed it); what must still hold is that no
+            # plaintext file is created or consulted on this path.
+            assert not (app.state.config_manager.config_dir / "credentials.env").exists()
             # The CLI intentionally retains its old endpoint joining behavior;
             # this fixture verifies the changed credential path, not a new API.
             app.state.config_manager.set_config_value("radient_base_url", base)
