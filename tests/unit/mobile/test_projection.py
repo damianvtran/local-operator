@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.jobs import AsyncJob, AsyncJobManager
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
@@ -3032,3 +3033,52 @@ def test_roster_index_falls_back_after_a_raising_optional_manager() -> None:
 
     assert comms.roster_pass().job("child") is child_job
     assert broken.calls == 1
+
+
+def test_roster_index_agrees_with_get_and_the_ordered_resolver_on_a_swept_alias() -> None:
+    """Snapshot, ``get()`` and the manager-ordered resolver must agree (R1-1).
+
+    ``_sweep_due()`` drops an expired row but LEAVES the ``_aliases`` entry that
+    pointed at it, and a later row may reuse the swept alias's key. ``get()``
+    resolves aliases BEFORE direct row ids, so a direct row filed under that key
+    is unreachable; the index the roster pass builds from ``lookup_snapshot()``
+    must not resurrect it over the later manager's real row — the answer the
+    historical manager-ordered resolver gives — or a node would be described
+    from a row the sender's own ``get()`` cannot see.
+
+    Three-way agreement is the assertion, because each leg can be "right" alone:
+    the historical resolver, ``get()`` on the root manager, and the snapshot the
+    index is merged from are read by three different callers.
+    """
+
+    def row(label: str) -> AsyncJob:
+        # Same id as the key it is filed under, so the collision is between the
+        # two MANAGERS (and the alias) rather than between a key and a row id.
+        return AsyncJob(id="alias", type="task", status="running", start_time=1_000.0, label=label)
+
+    root = AsyncJobManager()
+    # The post-sweep state: the alias target is gone while the mapping and a
+    # stale direct row under the same key both remain.
+    root._aliases["alias"] = "already-swept-target"
+    root._jobs["alias"] = row("stale-direct-alias-key")
+    later = AsyncJobManager()
+    later_row = row("later-manager-current-row")
+    later._jobs["alias"] = later_row
+
+    # Leg 1: the alias's absent target wins over the colliding direct row.
+    assert root.get("alias") is None
+    snapshot = root.lookup_snapshot()
+    assert snapshot.get("alias") is root.get("alias")
+    assert "alias" not in snapshot
+
+    comms = SubagentComms(cast(Session, cast(Any, SimpleNamespace(jobs=root))))
+    comms.record_launch("alias", "alias")
+    comms._records["alias"].child = cast(
+        Any, SimpleNamespace(jobs=later, session_id="later-session")
+    )
+
+    # Leg 2: ``comms.job`` IS the historical manager-ordered resolver (root
+    # first, then each live child in insertion order) that the pass replaced.
+    assert comms.job("alias") is later_row
+    # Leg 3: the roster pass's indexed lookup must answer the same row.
+    assert comms.roster_pass().job("alias") is later_row
