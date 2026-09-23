@@ -16,11 +16,11 @@ store's agent namespace, so a ``LOP_PROVIDER_*`` row is deliberately NOT visible
 here: the evaluation runner resolves the names its spec lists, and a provider
 key is not one of them.
 
-The legacy ``CredentialManager`` mapping (``~/.local-operator/credentials.env``)
-is NO LONGER consulted (PR2a). It used to be a TRANSITION fallback for a name
-the store did not hold; the plaintext file is no longer a credential source, so
-a ref the store does not hold is reported missing rather than served from the
-file. This is the last reader leg to leave, and it leaves with the rest.
+The legacy plaintext mapping (``~/.local-operator/credentials.env``) is NO LONGER
+consulted (PR2a). It used to be a TRANSITION fallback for a name the store did
+not hold; the plaintext file is no longer a credential source, so a ref the store
+does not hold is reported missing rather than served from the file. This was the
+last reader leg to leave, and its holder is now deleted outright (PR2b).
 
 The store resolver never touches the environment: the runner's contract is that
 the environment is reachable only through an explicit ``EnvSecretResolver`` over
@@ -40,17 +40,24 @@ from local_operator.evaluation.runner.secrets import build_resolved_secret
 class CredentialStoreResolver:
     """Resolve ``SecretRef`` names from the harness secret store.
 
-    ``credential_manager`` is the object whose ``config_dir`` locates the
-    encrypted store. It is typed ``Any`` so this module never imports
-    ``local_operator.credentials`` at module scope; the store is imported
-    lazily in :meth:`resolve` for the same reason.
+    ``config_dir`` locates the encrypted store, or ``None`` for the
+    HOME-derived default. It used to be a ``CredentialManager`` whose
+    ``config_dir`` this read, and is now the bare PATH that class used to carry
+    (PR2b) — the readers only ever needed the root, and ``ConfigManager`` owns it.
 
     The encrypted store is read in the AGENT namespace, so a
     ``LOP_PROVIDER_*`` row can never satisfy an evaluation ref.
     """
 
-    def __init__(self, credential_manager: Any) -> None:
-        self._manager = credential_manager
+    def __init__(self, config_dir: Any) -> None:
+        # Accepts the config ROOT (a ``Path``, the post-PR2b shape) or any object
+        # that carries a ``config_dir`` — ``ConfigManager``, or an evaluation
+        # host's stand-in. The attribute read is kept because a host builds this
+        # before it needs the config stack, so this module imports no
+        # configuration machinery at module scope.
+        if hasattr(config_dir, "config_dir"):
+            config_dir = config_dir.config_dir
+        self._config_dir = config_dir
 
     def _stored_secrets(self) -> dict[str, str]:
         """Agent-class store values by name, or ``{}`` when no store is readable.
@@ -67,7 +74,7 @@ class CredentialStoreResolver:
         from local_operator.secrets.keys import store_path
         from local_operator.secrets.store import is_provider_secret_name
 
-        base = getattr(self._manager, "config_dir", None)
+        base = self._config_dir
         values: dict[str, str] = {}
         try:
             if not store_path(base).exists():

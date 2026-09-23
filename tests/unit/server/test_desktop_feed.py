@@ -1384,6 +1384,84 @@ def test_a_heartbeat_rewrite_publishes_nothing(tmp_path):
     asyncio.run(feed.close())
 
 
+def test_a_count_change_publishes_exactly_one_status_edge(tmp_path):
+    """U3: the count rides the LABEL, so a count change is an EDGE.
+
+    The requirement this pins is a latency one. The glyph reaches a client in
+    under a second, while the list it could instead read its count from is on a
+    30 s poll — so a count that travelled as a LIST field would be up to 30 s
+    stale beside a mark that was already correct. The channel's dedupe key is
+    ``(code, label)`` with the clock term removed, which is what makes the count
+    an edge only because it is spelled INTO the label.
+
+    Three claims, in order: ``0 -> 2`` publishes once and ``2 -> 1`` publishes
+    once (not twice, and not zero times); a heartbeat rewrite at an unchanged
+    count publishes nothing; and a record that reports NO count is neither a
+    zero nor a state — it republishes the rung it leaves behind.
+
+    The frame is asserted to be a ``{code, label, revision}`` TRIPLE. That is
+    not decoration either: a count carried as a fourth payload field would be a
+    shape change every client has to know about, and the design deliberately
+    keeps the count inside the label instead.
+    """
+    root = tmp_path
+    sid = "c1" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+
+    def publish(**fields: Any) -> Path:
+        return _record_publish(root, sid, detached=True, **fields)
+
+    publish(subagents_running=0, subagents_queued=0)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    # A reported ZERO is the idle row the client already has: no edge. This is
+    # the assertion that would fail if ``None``/0 were folded into the state.
+    _tick(feed)
+    assert _statuses(_queued(subscription)) == []
+
+    # 0 -> 2
+    publish(subagents_running=2)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["code"] == "delegating"
+    assert frames[0]["payload"]["label"] == "2 subagents running"
+    assert set(frames[0]["payload"]) == {"code", "label", "revision"}, frames[0]["payload"]
+
+    # 2 -> 1: one edge, and it carries the SINGULAR.
+    publish(subagents_running=1)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["label"] == "1 subagent running"
+
+    # A heartbeat rewrite of the same record changes nothing the pair is read
+    # from, so it must publish on NEITHER channel — the anti-aggressive-poll
+    # property, here at the one rung whose label is not a constant.
+    for _ in range(3):
+        publish(subagents_running=1)
+        assert _fingerprint(feed._registry_dir) != feed._registry_fingerprint
+        _tick(feed)
+        assert _queued(subscription) == []
+
+    # A record from a build that reports no count at all: an absent KEY, written
+    # straight to the file the way an older runtime's record looks. It must
+    # return the row to ``idle`` rather than publishing a zero — and it does
+    # publish, because the pair genuinely moved off the delegating rung.
+    path = publish(subagents_running=1)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload["subagents_running"], payload["subagents_queued"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert [frame["payload"]["code"] for frame in frames] == ["idle"], frames
+    assert frames[0]["payload"]["label"] == "Ready"
+    assert "0" not in frames[0]["payload"]["label"]
+    asyncio.run(feed.close())
+
+
 def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
     """PARITY: the frame is a second CALLER of the precedence, never a home.
 
@@ -1395,9 +1473,19 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
     a disagreement instead of as a green suite.
     """
     root = tmp_path
-    gate, working, resident, armed, dormant, finished, failed, cold, wedged, dead = (
-        f"{index:012x}" for index in range(10)
-    )
+    (
+        gate,
+        working,
+        resident,
+        armed,
+        dormant,
+        finished,
+        failed,
+        cold,
+        wedged,
+        dead,
+        delegating,
+    ) = (f"{index:012x}" for index in range(11))
     for session_id in (
         gate,
         working,
@@ -1409,19 +1497,38 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
         cold,
         wedged,
         dead,
+        delegating,
     ):
         _listable_session(root, session_id)
     feed = _feed(root)
     feed._take_baseline()
     subscription = feed.subscribe()
 
-    # Five live pids, because a record is keyed by one: this process, pid 1, and
-    # two spawned sleepers. Each session below gets its own, so no write can
+    # SIX live pids, because a record is keyed by one: this process, pid 1, and
+    # three spawned sleepers. Each session below gets its own, so no write can
     # clobber another's record.
-    with _extra_live_pid() as spare, _extra_live_pid() as aged:
+    with (
+        _extra_live_pid() as spare,
+        _extra_live_pid() as aged,
+        _extra_live_pid() as counting,
+    ):
         _record_publish(root, gate, pending="approval")
         _record_publish(root, working, pid=_FOREIGN_LIVE_PID, busy=True)
         _record_publish(root, resident, pid=spare, detached=True)
+        # THE ARM THAT CARRIES A COUNT. A parent whose own turn is idle while it
+        # owns running children — the state the whole channel change is for, and
+        # the one arm whose label is built from numbers rather than constants.
+        # `detached=True` so the row is genuinely `idle` and the rung under test
+        # is the one that owns it; a second live pid, because records are keyed
+        # by pid and reusing one would clobber another arm's record.
+        _record_publish(
+            root,
+            delegating,
+            pid=counting,
+            detached=True,
+            subagents_running=2,
+            subagents_queued=1,
+        )
         # THE ARM THAT CARRIES A CLOCK. A quiet beat is what makes the verdict
         # ``wedged``, and the label that comes with it embeds the age — so this
         # is the one arm where the two surfaces could disagree about a STRING
@@ -1447,7 +1554,17 @@ def test_the_frame_and_the_list_derive_the_status_from_one_home(tmp_path):
 
         listed = {entry.id: (entry.status_code, entry.status) for entry in load_catalog(root)}
     # Every state with an EVENT behind it is announced...
-    assert set(frames) == {gate, working, resident, armed, dormant, finished, failed, wedged}
+    assert set(frames) == {
+        gate,
+        working,
+        resident,
+        armed,
+        dormant,
+        finished,
+        failed,
+        wedged,
+        delegating,
+    }
     # ...and each frame carries exactly what the list derives for the same
     # on-disk state. Nothing else in this file needs to know what the vocabulary
     # is, which is the point: there is one precedence and both surfaces call it.

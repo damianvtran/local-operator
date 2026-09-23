@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from local_operator.classification.vendors import VENDOR_CLASSES
-from local_operator.credentials import CredentialManager
 from tests.unit.classification.support import (
     TEST_KEY,
     LegBehaviour,
@@ -24,7 +23,7 @@ from tests.unit.classification.support import (
 
 
 @pytest.fixture
-def bare_manager(tmp_path) -> CredentialManager:
+def bare_manager(tmp_path):
     """A credential manager with NOTHING in it — for the credential-tier tests.
 
     Real, not a stub: a leg resolves the provider-class store row first and then
@@ -32,12 +31,16 @@ def bare_manager(tmp_path) -> CredentialManager:
     ``OPENROUTER_API_KEY_DEV``, ``RADIENT_API_KEY``) are precisely what those
     tests are about. ``tests/conftest.py`` clears those names from the ambient
     environment, so an empty store really means "no credential" here.
+
+    This is the config ROOT (a ``Path``), which is what the classification seam
+    takes now that PR2b deleted the ``CredentialManager`` it used to be — the
+    legs only ever read the root.
     """
-    return CredentialManager.readonly(tmp_path)
+    return tmp_path
 
 
 @pytest.fixture
-def manager(bare_manager: CredentialManager) -> CredentialManager:
+def manager(bare_manager):
     """The same manager, armed with every leg's primary credential.
 
     The default for tests about the wire shape: a leg with no credential refuses

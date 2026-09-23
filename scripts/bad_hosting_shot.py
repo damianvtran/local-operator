@@ -78,7 +78,7 @@ async def main() -> None:
             argparse.Namespace(hosting=None, model=None),
             cast("ConfigManager", _Config(hosting)),
         )
-        configure_model(hosting=resolved, model_name=model, credential_manager=None)
+        configure_model(hosting=resolved, model_name=model, config_dir=None)
         raise AssertionError("boot chain accepted a bad hosting value")
 
     app = OperatorApp(_factory, provider_controller=FakeProviderController())

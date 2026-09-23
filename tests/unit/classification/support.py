@@ -5,9 +5,10 @@ by name.
 
 Two things every test here needs and none wants to re-derive:
 
-* a :class:`~local_operator.credentials.CredentialManager` pointed at a temp dir
-  (the real class — its env fallback is part of what the credential tests
-  exercise, and ``tests/conftest.py`` already clears the ambient keys);
+* a config ROOT (a ``Path``) pointed at a temp dir, which is what the
+  classification seam takes (the store-first reader and the env fallback are
+  part of what the credential tests exercise, and ``tests/conftest.py`` already
+  clears the ambient keys);
 * a way to replace the three cascade legs without a socket, via
   ``vendors.VENDOR_CLASSES`` (see the ``install_legs`` fixture for why that is
   the single patch point).
@@ -39,16 +40,16 @@ def store_row(manager: Any, env_key: str, value: str) -> None:
     """Arm a manager with a PROVIDER-CLASS STORE ROW for ``env_key``.
 
     The consolidation retired the plaintext ``credentials.env`` file and the
-    in-memory mapping ``CredentialManager.set_credential(write=False)`` used to
-    seed, so a fixture that wants a leg to find a static key must now write the
-    row a real ``lop credential update`` would. This is that writer, routed
+    in-memory mapping the deleted ``CredentialManager.set_credential(write=False)``
+    used to seed, so a fixture that wants a leg to find a static key must write
+    the row a real ``lop credential update`` would. This is that writer, routed
     through the production ``store_provider_key`` so a test cannot disagree with
-    the reader about the row's name or namespace, and pointed at the manager's
-    OWN config root so two managers in one test stay independent.
+    the reader about the row's name or namespace, and pointed at the caller's OWN
+    config root so two roots in one test stay independent.
     """
     from local_operator.providers.registry import store_provider_key
 
-    store_provider_key(env_key, value, base=manager.config_dir)
+    store_provider_key(env_key, value, base=manager)
 
 
 def candidate(

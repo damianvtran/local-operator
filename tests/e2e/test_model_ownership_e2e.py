@@ -18,7 +18,6 @@ import pytest
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.config_watch import process_watcher
-from local_operator.credentials import CredentialManager
 from local_operator.providers.clients import MockClient
 from local_operator.session_factory import create_session
 
@@ -163,7 +162,6 @@ async def test_factory_resume_preserves_effort_journalling_for_explicit_selectio
                 resume=resume,
             ),
             ConfigManager(config),
-            CredentialManager(config),
             AgentRegistry(config),
             has_ui=False,
             cwd=str(config),
@@ -206,7 +204,6 @@ async def test_persisted_server_adapters_do_not_treat_defaults_as_explicit_flags
     agent = registry.create_agent(
         _agent_fields("stable-server").model_copy(update={"hosting": None, "model": None})
     )
-    credentials = CredentialManager(headless_tui_env)
     calls = []
     original_stream = MockClient.stream
 
@@ -220,7 +217,6 @@ async def test_persisted_server_adapters_do_not_treat_defaults_as_explicit_flags
         operator = create_operator(
             "",
             "",
-            credentials,
             config,
             registry,
             get_env_config(),
@@ -265,7 +261,6 @@ async def test_factory_routes_existing_and_resumed_conversations_to_saved_model(
                 resume=resume,
             ),
             ConfigManager(config_dir),
-            CredentialManager(config_dir),
             AgentRegistry(config_dir),
             has_ui=False,
             cwd=str(config_dir),

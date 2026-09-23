@@ -732,6 +732,61 @@ def test_live_fold_keeps_failed_child_error_text_generous() -> None:
     assert "\n" in wire_row["error_text"]  # multi-line structure preserved
 
 
+def test_a_capacity_parked_child_is_not_drawn_as_running() -> None:
+    """UX round 3: the roster header COUNTS this field, so ``queued`` ≠ ``running``.
+
+    ``mobile/projection.py``'s mapping is what the session view's roster header
+    counts — it prints ``{running}/{direct.length} running`` over these rows — so
+    folding a capacity-parked child into ``running`` made the view claim a child
+    waiting for a slot was spending, one tap after a list chip that had just been
+    taught to keep the two apart (UX round 3's contradiction). The runtime keeps
+    them apart in ``RUNNING_SUBAGENT_STATUSES`` and the phone's summary does too;
+    only the fold disagreed.
+
+    ``starting`` is deliberately left in the running lane by the mapping (an
+    admitted child spinning up IS spending); this route cannot produce that
+    status from a job row, so it is stated in the mapping rather than asserted
+    here.
+    """
+
+    def job(*, queued: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(
+            status="running",
+            queued=queued,
+            agent_role="coder",
+            model_label="test/model",
+            latest_details={},
+            result_text=None,
+            error_text=None,
+        )
+
+    jobs = {
+        "admitted": job(),
+        "waiting": job(queued=True),
+    }
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: jobs[job_id]))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for job_id in jobs:
+        comms.record_launch(job_id, job_id)
+
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    statuses = {row.job_id: row.status for row in fold.projection.subagents}
+    assert statuses == {"admitted": "running", "waiting": "queued"}, statuses
+
+    # The roster header's own arithmetic, over the same rows: one of the two
+    # direct children is spending, so the view reads `1/2 running · 1 queued`
+    # rather than `2/2 running`.
+    direct = [row for row in fold.projection.subagents if row.parent_job_id is None]
+    assert sum(1 for row in direct if row.status == "running") == 1, [
+        (row.job_id, row.status) for row in direct
+    ]
+    assert sum(1 for row in direct if row.status == "queued") == 1, [
+        (row.job_id, row.status) for row in direct
+    ]
+
+
 def test_recorded_terminal_outcome_never_regresses_to_running_job_row() -> None:
     """The runner records terminal state before the manager stamps its row."""
 

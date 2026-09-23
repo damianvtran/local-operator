@@ -54,13 +54,17 @@ class LoginOperation:
 
 
 class DesktopAuth:
-    def __init__(self, store: AuthStore, credential_manager: Any = None):
+    def __init__(self, store: AuthStore, config_dir: Any = None):
         self.store = store
-        self.credential_manager = credential_manager
+        # The config ROOT ``ProviderController`` resolves its store-first
+        # readers under. It used to be a ``CredentialManager``, deleted in PR2b;
+        # ``Any`` keeps this module free of a config import and ``None`` means
+        # the HOME-derived default.
+        self.config_dir = config_dir
         self.operations: dict[str, LoginOperation] = {}
 
     def controller(self) -> ProviderController:
-        return ProviderController(self.store, self.credential_manager)
+        return ProviderController(self.store, self.config_dir)
 
     def start(self, provider: str) -> LoginOperation:
         definition = get_provider_definition(provider)
@@ -119,7 +123,7 @@ class DesktopAuth:
             on_manual_code_input=on_input if definition.accepts_paste_prompt else None,
         )
         controller = ProviderController(
-            self.store, self.credential_manager, login_callbacks=lambda _definition: callbacks
+            self.store, self.config_dir, login_callbacks=lambda _definition: callbacks
         )
         try:
             async with asyncio.timeout(LOGIN_TIMEOUT_S):

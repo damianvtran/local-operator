@@ -27,7 +27,6 @@ from local_operator import session_factory
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -164,7 +163,6 @@ class FakeSessionFactory:
         self,
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         *,
         has_ui=False,
@@ -180,9 +178,7 @@ class FakeSessionFactory:
 class SlowSessionFactory(FakeSessionFactory):
     """Factory whose session's prompt hangs forever (for the timeout test)."""
 
-    async def __call__(
-        self, args, config_manager, credential_manager, agent_registry, *, has_ui=False, cwd=None
-    ):
+    async def __call__(self, args, config_manager, agent_registry, *, has_ui=False, cwd=None):
         session = FakeSession()
 
         async def _hanging_prompt(text: str) -> None:
@@ -251,7 +247,6 @@ def _make_service(
     return SchedulerService(
         agent_registry=registry,
         config_manager=ConfigManager(registry.config_dir),
-        credential_manager=CredentialManager(registry.config_dir),
         env_config=EnvConfig(),
         operator_type=OperatorType.CLI,
         verbosity_level=VerbosityLevel.QUIET,

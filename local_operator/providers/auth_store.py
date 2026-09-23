@@ -79,8 +79,7 @@ from local_operator.providers.registry import (
     provider_env_key,
 )
 
-if TYPE_CHECKING:  # the legacy reader stays an optional, import-guarded tier
-    from local_operator.credentials import CredentialManager
+if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
     from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
@@ -651,13 +650,17 @@ class _SerializedConnection:
 class AuthStore:
     """Credential persistence + the 7-step cascade.
 
-    ``credential_manager`` supplies the config ROOT the env tier resolves its
-    provider-class store rows under (``config_dir``). It no longer feeds a
-    plaintext leg: the env tier reads store rows then the process environment,
-    and the legacy ``credentials.env`` rung is GONE (PR2a).
+    ``config_dir`` supplies the config ROOT the env tier resolves its
+    provider-class store rows under. It no longer feeds a plaintext leg: the env
+    tier reads store rows then the process environment, and the legacy
+    ``credentials.env`` rung is GONE (PR2a).
     ``config_stored_values`` seeds the config-derived tier. All DB access is
     local and synchronous; async methods only exist where refresh/network
     happens.
+
+    ``config_dir`` is a bare PATH, not a manager: PR2b deleted the
+    ``CredentialManager`` that used to carry it, and every caller already has the
+    path (``ConfigManager.config_dir``) or can take ``None`` for the HOME default.
 
     .. note::
         Refresh is single-flight per process (``asyncio.Lock``) and across
@@ -669,12 +672,12 @@ class AuthStore:
         self,
         db_path: str | Path | None = None,
         *,
-        credential_manager: "CredentialManager | None" = None,
+        config_dir: Path | None = None,
         config_overrides: dict[str, str] | None = None,
         usage_cache: "UsageCacheStore | None" = None,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
-        self._credential_manager = credential_manager
+        self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
@@ -3177,8 +3180,7 @@ class AuthStore:
         # ``base`` is the manager's own config root, so a store the caller
         # configured elsewhere is the one consulted; unset means the
         # HOME-derived default, which is what a CLI invocation wants.
-        base = getattr(self._credential_manager, "config_dir", None)
-        return provider_env_key(provider, base=base)
+        return provider_env_key(provider, base=self._config_dir)
 
     # -- failover support --------------------------------------------------------
 

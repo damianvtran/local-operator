@@ -1022,8 +1022,8 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     if name.startswith("_") and re.fullmatch(r"[a-z]+(?:-[a-z]+)+", value):
         return True
     # A CLASS or TYPE name is a reference, whatever the name beside it says:
-    # ``refresh_token: RefreshFn | None = None``, ``_credentials:
-    # CredentialManager``, ``reasoning_tokens: SafeCount``, ``refresh_token:
+    # ``refresh_token: RefreshFn | None = None``, ``_store:
+    # AuthStore``, ``reasoning_tokens: SafeCount``, ``refresh_token:
     # SecretStr``. CamelCase and single-capital identifiers are how a TYPE is
     # spelled; a credential value is lowercase or random, and the mixed-case
     # secrets that do exist carry a symbol (``wJalrXUtnFEMI/K7MDENG``).

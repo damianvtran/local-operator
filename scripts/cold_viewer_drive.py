@@ -141,12 +141,10 @@ async def main() -> None:
     def _app() -> OperatorApp:
         # The real provider controller, as `cli.py` wires it: `/model default`
         # resolves its selector through it before writing config.
-        from local_operator.credentials import CredentialManager
         from local_operator.providers.auth_store import AuthStore
         from local_operator.providers.controller import ProviderController
 
-        credentials = CredentialManager(CONFIG)
-        controller = ProviderController(AuthStore(credential_manager=credentials), credentials)
+        controller = ProviderController(AuthStore(config_dir=CONFIG), CONFIG)
         return OperatorApp(_viewer_factory(CONFIG), provider_controller=controller)
 
     # ---- cell 1: /team lopdev <request>, pasted at t=0 on a cold viewer ----

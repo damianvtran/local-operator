@@ -463,6 +463,24 @@ def _frame_bytes(data: dict[str, Any]) -> int:
     return len(json.dumps(data).encode("utf-8"))
 
 
+def _subtree_bytes(value: Any) -> int:
+    """The wire size of ONE edited subtree, for incremental accounting.
+
+    ``_frame_bytes`` measures the WHOLE frame, and the degradation cascade used
+    to call it after every tier — a full ``json.dumps`` of a payload that can
+    sit near the 1 MB wire cap, up to eleven times per push. That is the cost
+    this module's cascade now avoids: a tier that edits one list computes the
+    size of THAT list and adjusts a running total, so the frame is dumped once
+    on entry and once at the closing correctness check.
+
+    Encoding is the same one ``_frame_bytes`` uses (``json.dumps`` defaults to
+    ``ensure_ascii=True``), so a subtree's measured size is exactly the bytes it
+    contributes to the frame's own serialisation — the accounting cannot drift
+    from the measurement it is standing in for.
+    """
+    return len(json.dumps(value).encode("utf-8"))
+
+
 #: Worst-case wire bytes per NON-ASCII character. ``_frame_bytes`` measures
 #: ``json.dumps(...).encode("utf-8")`` and ``json.dumps`` defaults to
 #: ``ensure_ascii=True``, so the wire never sees UTF-8 for these — it sees
@@ -675,6 +693,34 @@ def cap_projection_frame(
     if _frame_bytes(data) <= cap_bytes:
         return data, False
 
+    # INCREMENTAL ACCOUNTING. The cascade below used to re-measure the WHOLE
+    # frame after every tier — up to eleven full ``json.dumps`` of a payload
+    # that can sit near the 1 MB wire cap, on the runtime's shared event loop.
+    # Measured from the operator's own store, that is what parks the loop: 13 of
+    # 50 runtime-stall dumps in one 24 h window hold the loop thread in
+    # ``json.dumps → _frame_bytes → cap_projection_frame``, and one of those
+    # fired the 300 s stall bound and killed the runtime. A tier edits ONE
+    # top-level key, so the running total is adjusted by that key's own subtree
+    # delta instead of re-serialising everything. ``fixture`` (the entry dump
+    # above) seeds ``total`` from a REAL full measurement, and the closing check
+    # below is still a real full measurement, so a bug in this bookkeeping
+    # cannot pass an oversized frame — it can only make an intermediate tier
+    # decision, which the final check overrides.
+    sizes = {key: _subtree_bytes(value) for key, value in data.items()}
+    total = _frame_bytes(data)
+    dirty: set[str] = set()
+
+    def fits() -> bool:
+        """Whether the frame fits ``cap_bytes``, measuring only dirty keys."""
+        nonlocal total
+        if dirty:
+            for key in dirty:
+                measured = _subtree_bytes(data.get(key))
+                total += measured - sizes.get(key, 0)
+                sizes[key] = measured
+            dirty.clear()
+        return total <= cap_bytes
+
     # Tier 1: subagent text previews down to minimal bounds.
     for row in data.get("subagents") or []:
         row["prompt"] = _compact(str(row.get("prompt") or ""), FRAME_CAP_PROMPT_CHARS)
@@ -687,7 +733,8 @@ def cap_projection_frame(
         # A hydrated child transcript on the wire predates the lazy /history
         # fetch; if one is still embedded it is pure frame weight.
         row["transcript"] = []
-    if _frame_bytes(data) <= cap_bytes:
+    dirty.add("subagents")
+    if fits():
         return data, True
 
     # Tier 1b: the pending card's option prose. The card is the loudest thing
@@ -704,7 +751,8 @@ def cap_projection_frame(
                 option["description"] = _compact(
                     str(option.get("description") or ""), FRAME_CAP_PENDING_DETAIL_CHARS
                 )
-        if _frame_bytes(data) <= cap_bytes:
+        dirty.add("pending")
+        if fits():
             return data, True
 
     # Tier 1c: roster todo text, then the todo lists themselves. Kept on the
@@ -717,17 +765,20 @@ def cap_projection_frame(
             for item in phase.get("items") or []:
                 item["text"] = _compact(str(item.get("text") or ""), FRAME_CAP_TODO_TEXT_CHARS)
                 item["reason"] = _compact(str(item.get("reason") or ""), FRAME_CAP_TODO_TEXT_CHARS)
-    if _frame_bytes(data) <= cap_bytes:
+    dirty.add("subagents")
+    if fits():
         return data, True
     for row in data.get("subagents") or []:
         row["todos"] = []
-    if _frame_bytes(data) <= cap_bytes:
+    dirty.add("subagents")
+    if fits():
         return data, True
 
     # Tier 2: drop the expand payload of every transcript row.
     for entry in data.get("transcript") or []:
         entry["details"] = {}
-    if _frame_bytes(data) <= cap_bytes:
+    dirty.add("transcript")
+    if fits():
         return data, True
 
     # Tier 3: halve the transcript tail toward the floor, pinning the opening
@@ -740,7 +791,8 @@ def cap_projection_frame(
         if first_user is not None and first_user not in entries:
             entries = [first_user, *entries[1:]]
         data["transcript"] = entries
-        if _frame_bytes(data) <= cap_bytes:
+        dirty.add("transcript")
+        if fits():
             return data, True
         limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, limit // 2)
 
@@ -757,7 +809,8 @@ def cap_projection_frame(
                         # Keep this fact across runtime -> relay serialization.
                         # The retained ID names a prefix, not the final result end.
                         entry["text_complete"] = False
-        if _frame_bytes(data) <= cap_bytes:
+        dirty.add("transcript")
+        if fits():
             return data, True
         if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:
             break
@@ -774,7 +827,8 @@ def cap_projection_frame(
     for row in data.get("subagents") or []:
         for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
             row[field] = []
-    if _frame_bytes(data) <= cap_bytes:
+    dirty.add("subagents")
+    if fits():
         return data, True
 
     # Tier 6: identity rows. What stays is what a reader can neither derive nor
@@ -797,11 +851,10 @@ def cap_projection_frame(
             {key: row[key] for key in FRAME_CAP_ROSTER_IDENTITY_FIELDS if key in row}
             for row in rows
         ]
-    if _frame_bytes(data) <= cap_bytes:
+    dirty.add("subagents")
+    if fits():
         return data, True
 
-    # Every tier is spent. The frame is as small as this function can make it;
-    # say so loudly rather than handing the socket a line it will drop whole.
     final_size = _frame_bytes(data)
     if final_size > cap_bytes:
         logger.warning(
@@ -2155,8 +2208,22 @@ class ProjectionFold:
                 # running default, and prevents stale live rows from reopening a
                 # terminal outcome during the runner/manager settle window.
                 status = lifecycle.status
-                if status in ("running", "queued", "starting"):
+                if status in ("running", "starting"):
                     mobile_status = "running"
+                elif status == "queued":
+                    # A CAPACITY-PARKED CHILD IS NOT RUNNING, and the fold is where
+                    # that has to be true, because this field is what the session
+                    # view's roster header COUNTS: it prints
+                    # ``{running}/{direct.length} running`` over the rows this
+                    # mapping produces. Folding ``queued`` into ``running`` made the
+                    # header claim a child waiting for a slot was spending — the
+                    # same contradiction as the list chip reading ``N queued``
+                    # beside it (UX round 3). The runtime already keeps them apart
+                    # (``RUNNING_SUBAGENT_STATUSES`` excludes ``queued``) and so does
+                    # the phone's own summary, so the fold was the odd one out.
+                    # ``starting`` stays in the running lane: a child that has been
+                    # admitted and is spinning up IS spending.
+                    mobile_status = "queued"
                 elif status in ("paused", "pausing"):
                     mobile_status = "parked"
                 elif status in ("interrupted", "gone"):

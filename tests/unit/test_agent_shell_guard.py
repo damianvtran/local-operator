@@ -700,7 +700,6 @@ def _factory_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **override
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import create_session
 
     config_dir = tmp_path / ".local-operator"
@@ -717,7 +716,6 @@ def _factory_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **override
     return create_session(
         args,
         ConfigManager(config_dir),
-        CredentialManager(config_dir),
         AgentRegistry(config_dir),
     )
 

@@ -3,18 +3,13 @@ from fastapi import Depends, Request
 from local_operator.agents import AgentRegistry
 from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.utils.event_broker import EventBroker
 
-
 # Dependency functions to inject managers into route handlers
-def get_credential_manager(request: Request) -> CredentialManager:
-    """Get the credential manager from the application state."""
-    return request.app.state.credential_manager
 
 
 def get_config_manager(request: Request) -> ConfigManager:
@@ -49,7 +44,7 @@ def get_scheduler_service(request: Request) -> SchedulerService:
 
 async def get_provider_auth_store(
     request: Request,
-    manager: CredentialManager = Depends(get_credential_manager),
+    manager: ConfigManager = Depends(get_config_manager),
 ) -> AuthStore:
     # The managers are DECLARED rather than read off `app.state` inside the
     # chain below. `dependency_overrides` only substitutes what a signature
@@ -77,10 +72,10 @@ async def get_radient_client(request: Request) -> RadientClient:
     """Use canonical credential precedence without duplicating a refresh store."""
     from local_operator.providers.radient_credentials import resolve_radient_credential
 
-    credential_manager = get_credential_manager(request)
+    config_manager = get_config_manager(request)
     env_config = get_env_config(request)
     store = await get_provider_auth_store(request)
     api_key = await resolve_radient_credential(
-        credential_manager, env_config.radient_api_base_url, store=store
+        config_manager.config_dir, env_config.radient_api_base_url, store=store
     )
     return RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
