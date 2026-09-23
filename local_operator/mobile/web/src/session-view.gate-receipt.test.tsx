@@ -70,6 +70,7 @@ vi.mock("./store", async (importOriginal) => {
 		...actual,
 		useProjection: vi.fn(() => slot),
 		retainProjectionStream: vi.fn(() => () => {}),
+		retainSessionListStream: vi.fn(() => () => {}),
 		useDraft: vi.fn(() => ["", () => {}]),
 	};
 });

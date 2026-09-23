@@ -1253,3 +1253,58 @@ def test_pin_route_refuses_an_unknown_session_and_a_non_boolean(tmp_path, monkey
     for bad in ({"pinned": "yes"}, {"pinned": 1}, {}):
         assert client.post("/api/sessions/durable-1/pin", json=bad).status_code == 422
     assert read_pins(cfg) == []
+
+
+def test_a_phone_woken_session_is_active_before_its_record_arrives() -> None:
+    """The provisional wake window is Active, not a flash of Previous.
+
+    ``retain_provisional_active`` marks a session this daemon accepted a wake
+    (or a start) for but has not yet seen register. It has no ``SessionEntry``,
+    so the shared ``active`` rule — correctly applied — would file it under
+    Previous, and the row would pop into Active a moment later. That is the same
+    kind of jump this whole change exists to remove, so the merge ranks a
+    provisional row as the live row it is about to become (review round 1,
+    MAJOR 1).
+    """
+    table = SessionTable()
+    # A durable row for the woken conversation — a /wake resumes an EXISTING one,
+    # so the row is in the listing and only its SECTION is in question.
+    durable = {"woken": _durable_record("woken", 500.0)}
+    table.provisional_active.add("woken")
+    rows = {r["session_id"]: r for r in table._merge_summaries(durable)}
+    assert rows["woken"]["section"] == "active"
+
+    # And the marker is what does it: without it the same row is Previous.
+    table.provisional_active.discard("woken")
+    rows = {r["session_id"]: r for r in table._merge_summaries(durable)}
+    assert rows["woken"]["section"] == "previous"
+
+
+def test_set_pins_does_not_touch_the_event_loop(tmp_path, monkeypatch) -> None:
+    """The pin write is worker-thread work and must not put onto asyncio queues.
+
+    ``notify_list_changed`` calls ``asyncio.Queue.put_nowait``, which is only
+    safe on the loop, and ``api_session_pin`` runs ``set_pins`` inside
+    ``asyncio.to_thread``. Doing the notify there would be a cross-thread queue
+    write whose repaint can be dropped (review round 1, MAJOR 2). So this pins
+    the SPLIT: ``set_pins`` reads/writes/invalidates only, and the route wakes
+    the stream afterwards on the loop.
+    """
+    from local_operator.tui.sidebar_pins import read_pins
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    _write_turns(session_dir, 1)
+
+    table = SessionTable()
+    woken: list[int] = []
+    monkeypatch.setattr(table, "notify_list_changed", lambda: woken.append(1))
+
+    state = table.set_pins("durable-1", True)
+
+    assert state is True
+    assert read_pins(cfg) == ["durable-1"]
+    assert woken == [], "set_pins must not wake the stream; the route does that on the loop"

@@ -307,6 +307,7 @@ def _rank_row(
     mtime: float,
     attention: dict[str, Any],
     pending_kind: str,
+    provisional: bool = False,
 ) -> tuple[tuple[int, int, float, str], bool]:
     """``(rank, active)`` for one merged summary, taken from the SHARED home.
 
@@ -349,6 +350,22 @@ def _rank_row(
     ``pending`` prefers the RECORD (what the catalogue reads) and falls back to
     the live projection's gate for the window where the record has not caught
     up, so a phone-visible gate is never unranked.
+
+    ``provisional`` is the PHONE-WOKEN window: a /wake (or a start) accepted by
+    this daemon but not yet published as a live record. That row has no
+    ``SessionEntry`` yet, so the shared ``active`` rule would file it under
+    Previous and it would pop into Active a moment later — the same jump this
+    change exists to remove, arriving by another route. It is ranked as a live
+    ``idle`` row instead, which is what it is about to become and what the wake
+    path's own comment promises the list shows.
+
+    ONE DELIBERATE DIVERGENCE FROM THE SIDEBAR, stated rather than hidden: the
+    catalogue's key carries a ``wake_rank`` band inside Previous, and these
+    summaries carry no wake data at all (``decorate_rows`` reads the wake index;
+    the mobile durable rows come from ``recent_session_rows``, which does not).
+    So the wake band is a constant here. See ``CatalogEntry.rank``'s docstring,
+    which names this asymmetry itself. Order within Active and Previous is
+    otherwise identical to the sidebar's, because it is the same key.
     """
     from local_operator.resume import SessionRow
     from local_operator.session.catalog import entry_for
@@ -370,6 +387,9 @@ def _rank_row(
         else:
             live_state = "idle"
         pending = getattr(record, "pending", None) or None
+    if entry is None and provisional:
+        # The phone-woken window: ranked as the live idle row it is becoming.
+        live_state = "idle"
     if pending is None and pending_kind:
         # The record has not carried the gate yet (the live projection saw it
         # first). Same vocabulary the catalogue ranks on, so the row is ranked
@@ -759,17 +779,26 @@ class SessionTable:
         preference, and a second store would make the surfaces disagree about
         which conversations are pinned.
 
-        Returns the state the store now holds (``set_pin``'s own answer), and
-        invalidates the summaries cache so the next list frame carries it — the
-        pin is membership in a display section, so the row must move even
-        though nothing else about it changed.
+        BLOCKING WORK ONLY — the disk write and the read-back. It is called
+        through ``asyncio.to_thread`` (see ``api_session_pin``), so it must NOT
+        touch the loop: ``notify_list_changed`` does ``asyncio.Queue.put_nowait``
+        on the SSE queues, and doing that from a foreign thread is not safe and
+        can drop the repaint until the next keepalive (review round 1, MAJOR 2).
+        The caller wakes the stream on the loop, right after this returns.
+
+        Invalidates the summaries cache here rather than in the caller because
+        that is plain in-memory state (``_summaries_cache = None``), which is
+        safe off-loop and belongs beside the change that made it stale: the pin
+        is membership in a display section, so the row must move even though
+        nothing else about it changed.
+
+        Returns the state the store now holds (``set_pin``'s own answer).
         """
         from local_operator.paths import config_dir
 
         state = set_pin(config_dir(), session_id, pinned)
         self.pins = tuple(read_pins(config_dir()))
         self.invalidate_summaries_cache()
-        self.notify_list_changed()
         return state
 
     def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
@@ -823,6 +852,11 @@ class SessionTable:
                 mtime=mtime,
                 attention=attention,
                 pending_kind=(p.pending.kind if p and p.pending else ""),
+                # THE PHONE-WOKEN WINDOW (review MAJOR 1): a /wake or a start this
+                # daemon accepted but has not yet seen register a record. Ranking it
+                # as a live row is what makes it land in Active at once instead of
+                # flashing under Previous until the runtime publishes.
+                provisional=session_id in self.provisional_active,
             )
             ranks[session_id] = (rank, is_active)
             out.append(
@@ -3178,8 +3212,12 @@ def build_app(daemon: MobileDaemon):
         if not isinstance(pinned, bool):
             return JSONResponse({"error": "pinned (a boolean) is required"}, status_code=422)
         state = await asyncio.to_thread(daemon.table.set_pins, session_id, pinned)
-        # ``set_pins`` already invalidated the cache and woke the list stream; the
-        # caller gets the state the store now holds so a retry is idempotent.
+        # THE STREAM WAKE IS THE LOOP'S, not the worker's (review round 1, MAJOR 2).
+        # ``notify_list_changed`` puts onto asyncio queues, which is only safe on the
+        # loop; doing it inside the ``to_thread`` above could drop the repaint until
+        # the next keepalive, so the pin would appear late for no reason.
+        daemon.table.notify_list_changed()
+        # The caller gets the state the store now holds, so a retry is idempotent.
         return JSONResponse({"ok": True, "pinned": state})
 
     async def api_subagent_detail(request: Request) -> Response:
