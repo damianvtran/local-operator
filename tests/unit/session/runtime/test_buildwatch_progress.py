@@ -343,7 +343,9 @@ def disk(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_drain_whose_work_stops_moving_ABANDONS_the_move(rig) -> None:
+async def test_a_drain_whose_work_stops_moving_ABANDONS_the_move(
+    rig, caplog: pytest.LogCaptureFixture
+) -> None:
     """THE PINNING TEST, and its subject is the operator's rule about build moves.
 
     A busy runtime whose work reports nothing for the bound used to be released BY
@@ -377,9 +379,19 @@ async def test_a_drain_whose_work_stops_moving_ABANDONS_the_move(rig) -> None:
     ), "one second short of the bound is not the bound"
     assert not rig.stop.is_set() and not rig.handle.disposed
 
-    assert (
-        await _tick(rig, T0 + BOUND) is False
-    ), "the bound retired a runtime whose turn was still in flight"
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.runtime.process"):
+        assert (
+            await _tick(rig, T0 + BOUND) is False
+        ), "the bound retired a runtime whose turn was still in flight"
+    # THE ARM THAT FIRES FIRST CARRIES THE PID TOO (QA round 1, Q-5): the dwell line got
+    # it in round 1's fix, and a pid-filtered scan of a shared, rotated runtime log
+    # returned nothing for THIS arm — the one an operator meets most often, since it is
+    # the bound 15 minutes of silence reaches.
+    assert "no movement" in caplog.text and "ABANDONING the handover" in caplog.text, caplog.text
+    assert str(os.getpid()) in caplog.text, (
+        "the staleness abandon line has to name the process, like every other latch and "
+        "exit line in this module: " + caplog.text
+    )
     assert rig.handle.releases == 1, "the drain latch was never released"
     assert rig.handle.draining is False, "the handle still believes it is leaving"
     assert not rig.stop.is_set(), "the process must keep serving, not stop"
@@ -707,6 +719,56 @@ async def test_a_spooled_message_resets_the_clock(rig) -> None:
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
     ), "the bound was never reached, so this cell says nothing about what resets it"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_readmission_still_leaves_the_failure_published(
+    rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ORDER THE ABANDON OWES, pinned by the one failure it has to survive.
+
+    ``_keep_loaded_build`` publishes the failure BEFORE the spooled work comes back in
+    (QA round 1, Q-2), because the re-admission can run real turns for 27-37 s while the
+    reaper may exit a tick after they land — published second, the record's account of the
+    failure could be missed entirely. Round 2 measured that NOTHING pinned that order:
+    putting the two steps back left 86 cells green across the five abandon-rung files.
+
+    This cell is the pin, and it is shaped so the reverted order cannot pass it: the
+    re-admission RAISES, so on the reverted tree the publish is exactly what the raise
+    skips. Both claims are required — the failure is published with the bound the arm ran
+    out of, and the raise reaches the caller, which is what makes the first claim
+    discriminating rather than incidental. Nothing here argues the escape is desirable:
+    ``_drain_inbox_into`` swallows per-ROW failures and this is a step-level one, and the
+    cell records that shape so a later change which swallows it fails here instead of
+    quietly restoring the order that could lose the record's account.
+    """
+    rig.handle.begin_drain(rig.drain.cause, rig.drain.detail)
+    assert await _tick(rig, T0) is False, "the drain takes its clock here"
+
+    async def _raise_on_readmission(_handle: object) -> int:
+        raise RuntimeError("the spooled work could not be brought back in")
+
+    monkeypatch.setattr(child_mod, "_drain_inbox_into", _raise_on_readmission)
+
+    with pytest.raises(RuntimeError):
+        await _tick(rig, T0 + BOUND)
+
+    assert (
+        rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    ), "the staleness arm never ran, so this cell measured nothing"
+    assert rig.runtime.failures, (
+        "the failure was never published: the publish runs AFTER the re-admission again, "
+        "so a re-admission that raises takes the record's account with it (QA round 1, "
+        "Q-2; agent review round 2, R2-MINOR-1)"
+    )
+    assert rig.runtime.failures[0][1] == BOUND, (
+        "the failure was published without the bound it ran out of, so no surface can "
+        "say why the update did not happen"
+    )
+    assert rig.handle.draining is False, (
+        "the latch is released before either step runs, which is what makes the failure "
+        "reportable rather than the state it was abandoned from"
+    )
 
 
 @pytest.mark.asyncio

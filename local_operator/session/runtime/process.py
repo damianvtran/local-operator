@@ -3050,10 +3050,15 @@ async def _abandon_move(
         bound = BUILD_DRAIN_PROGRESS_S
         logger.warning(
             "session runtime: the build drain for %s held with no movement for %.0fs "
-            "(bound %.0fs); ABANDONING the handover and keeping %s",
+            "(bound %.0fs, pid %d); ABANDONING the handover and keeping %s",
             drain.reason,
             spent,
             bound,
+            # THE PID, as the dwell arm's line carries it and as every latch and exit line
+            # in this module does: this is the line an operator greps for in a shared,
+            # rotated runtime log, and the arm that fires FIRST of the two abandon bounds
+            # was the one a pid-filtered scan could not find (QA round 1, Q-5).
+            os.getpid(),
             _loaded_build_label(runtime),
         )
     end = getattr(handle, "end_drain", None)

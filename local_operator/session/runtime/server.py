@@ -3987,9 +3987,11 @@ class RuntimeServer:
         cites, and the field is re-published if THIS attempt fails too. The handle's
         own memo is NOT part of that account — it is the WINDOW rung's
         (``serving.ServingSessionHandle.note_update_failed``, written by
-        ``_abandon_update_window`` only, so the automatic rung does not re-open a
-        window that already burned its bound) and the drain rung deliberately does
-        not write it (agent review round 1, NIT-2).
+        ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
+        rung's ONE permitted retry: the pair is refused only once ``_update_retried``
+        already holds it, so the memo stops a THIRD attempt rather than "re-opening a
+        window that burned its bound") and the drain rung deliberately does
+        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
         """
         superseded = bool(phrase) and bool(self._record.update_failed)
         if superseded:
