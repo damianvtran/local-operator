@@ -824,6 +824,39 @@ _DRAIN_NOTICES: dict[str, str] = {
     LEAVING_FOR_BUILD_OVERDUE: OVERDUE_DRAIN_NOTICE,
 }
 
+#: NO SENTENCE FOR THE ABANDONED HANDOVER, and that is the round-2 correction rather
+#: than an omission (agent review round 1, MAJOR-1; QA round 1, Q-1, which measured it
+#: independently at wire level).
+#:
+#: WHAT WAS TRIED. `process._abandon_move` keeps `LEAVING_FOR_BUILD` on the record when
+#: it gives the handover up — the drain object stays latched and the departure still
+#: lands at the first idle instant — so the phrase alone earned :data:`DRAIN_NOTICE`,
+#: whose second clause ("a new message will not start a turn until the new build is
+#: up") is false from the instant the latch is released. A sentence keyed on the record
+#: PAIR (`leaving` plus a non-empty `update_failed`) was added for that state, and the
+#: selection for the pair was correct — but NOTHING COULD PAINT IT: the only producer
+#: of `retiring` frames composes them at the latch, before any failure exists, and a
+#: viewer that arrives after the abandon receives no frame at all. A sentence table
+#: with no reachable painter is the same class of defect this module deleted once
+#: already (see the round-1 MINOR-3 note above), so the sentence and its key are gone
+#: rather than kept for a wire addition that has not happened.
+#:
+#: WHAT THE ABANDONED STATE IS TOLD, TODAY. The record and the incident row carry it,
+#: where every other fleet surface already reads it: `lop sessions` prints the phrase
+#: (true — the commitment survives) beside `update failed` in its own column, and the
+#: incident row names the bound the runtime actually spent. The viewer's row is the
+#: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
+#: drain sentence after the abandon, and **nothing takes that row down** — it is painted
+#: once, through `_notice_for`, which appends a block to the transcript, and the only
+#: retraction in this app is `_retire_unsent_runtime_notice`, for the unsent-runtime row
+#: (matched by its own private text). So the claim is not corrected on screen: the
+#: operator's next message starts a turn, and the row's second clause is contradicted by
+#: what they see rather than reworded (agent review round 2, R2-NIT-2). Repainting it
+#: truthfully needs a frame the renderer acts on at the moment the latch comes off —
+#: either `draining=True`, which would be false, or a NEW "the departure ended" op —
+#: i.e. a two-repo wire addition with its own design round, deferred in the PR thread
+#: rather than half-built here.
+
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
 #: owns below itself (`padding: 0 0 1 0` in the sheet). Added to a panel's
