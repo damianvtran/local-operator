@@ -776,7 +776,17 @@ class RosterPass:
             # polling across the settle boundary looks.
             resumable, detail = False, "still settling; it becomes resumable in a moment"
         elif record.session_dir is None:
-            resumable, detail = False, "never started, so it has no transcript"
+            # NOT resumable, and that is honest — there is no transcript to
+            # replay — but the ROW still exists and still names WHY it died.
+            # Carrying the recorded error here is the point of keeping the
+            # record: a pre-attach failure ("No package metadata was found for
+            # local-operator", a launch inside an install swap) was previously
+            # reported as a bare "never started", so a parent could not tell a
+            # packaging/install failure from a child it had simply never run.
+            resumable = False
+            detail = "never started, so it has no transcript"
+            if record.error_text:
+                detail = f"never started ({record.error_text}), so it has no transcript"
         elif not self.transcript_present(record):
             resumable, detail = False, "transcript is gone from disk"
         else:
@@ -1393,14 +1403,48 @@ class SubagentComms:
         (``child``, ``unsubscribe``, ``ask``, ``pending``) are deliberately
         omitted — they belong to a running loop and cannot cross a restart.
 
-        ``session_dir`` is stored as a string (``Path`` is not JSON-native) and
-        a record with none (a child that never started, so has no transcript)
-        is skipped entirely: it is not resumable and carries nothing a resumed
-        session could act on.
+        ``session_dir`` is stored as a string (``Path`` is not JSON-native).
+        A record with NONE is kept only when it has a recorded terminal
+        ``outcome``: such a child settled before it attached (a launch that
+        failed inside an install swap), and its outcome and error text are what
+        its parent needs to diagnose it — the missing transcript makes it not
+        resumable, which is a different fact from "this child did not exist".
+        A record with no transcript AND no outcome is a child still parked
+        behind the capacity gate; it is live, carries nothing a resumed session
+        could act on, and is skipped as before.
         """
         rows: list[dict[str, Any]] = []
         for record in self._records.values():
-            if record.session_dir is None:
+            # A record with NO transcript directory is dropped UNLESS it has a
+            # recorded terminal outcome.
+            #
+            # Two classes have no transcript, and they must be treated
+            # differently:
+            #
+            # * a child that SETTLED before it attached — it died during the
+            #   launch, and a launch that failed inside an install swap is the
+            #   measured case (job ``f6ed760e3449``, "No package metadata was
+            #   found for local-operator"). Dropping it made the class invisible
+            #   AND unreachable: ``hub op=list`` could not name it, ``hub op=peek``
+            #   by id or label returned "unknown subagent", and ``resume`` was
+            #   impossible, so the parent could only re-dispatch from scratch and
+            #   lose whatever the child had done. Its OUTCOME and its
+            #   ``error_text`` are durable facts and are what its parent needs to
+            #   diagnose it, so the row survives. It still never claims
+            #   ``resumable`` (see ``_describe``): there is no transcript to
+            #   replay, and the write below carries no ``session_dir``.
+            #
+            # * a child that is PARKED — queued behind the capacity gate and
+            #   never started, so it has no recorded ``outcome``. It has no
+            #   outcome and no
+            #   transcript, and ``record_launch`` runs before the gate clears, so
+            #   keeping it would plant a ghost row that renders ``gone — never
+            #   started`` after a restart with the job row swept — exactly the
+            #   row ``main`` deliberately drops, and the contract
+            #   ``test_a_never_started_child_is_not_snapshotted`` pins. A parked
+            #   child needs no durable record: it is live, and the live job row
+            #   is its home.
+            if record.session_dir is None and record.outcome is None:
                 continue
             rows.append(
                 {
@@ -1422,7 +1466,13 @@ class SubagentComms:
                     # and a resumed grandchild that can activate the writes it
                     # was refused (review round 3, R6).
                     "restricted": record.restricted,
-                    "session_dir": str(record.session_dir),
+                    # ``None`` — NOT the string "None" — when the child never
+                    # attached. ``restore`` and the row guard both read this as
+                    # "no transcript", so a stringified ``None`` would make a
+                    # directory named "None" out of a child that has none.
+                    "session_dir": (
+                        str(record.session_dir) if record.session_dir is not None else None
+                    ),
                     "outcome": record.outcome,
                     # Rides with the outcome: both are the same durable fact,
                     # and both must outlive the job row the manager sweeps.
@@ -1572,12 +1622,23 @@ class SubagentComms:
             return PeekWindow(job_id, job_id, "gone", 0, error=f"unknown subagent {job_id!r}")
         info = self._describe(record, time.time())
         if record.session_dir is None:
+            # Two classes reach here and they are NOT the same: a child still
+            # PARKED has not started, but a child that SETTLED before attaching
+            # (a launch that failed inside an install swap) DID run and is the
+            # diagnosed case this record is kept for. Telling its parent it
+            # "has not started yet" hides the very failure the roster now names,
+            # so the settled arm reports its recorded reason instead.
+            if record.outcome is not None:
+                reason = record.error_text or record.result_text or "it never attached"
+                detail = f"the subagent ended before it attached ({reason}) — no transcript"
+            else:
+                detail = "the subagent has not started yet, so it has no transcript to read"
             return PeekWindow(
                 job_id,
                 record.label,
                 info.status,
                 0,
-                error="the subagent has not started yet, so it has no transcript to read",
+                error=detail,
             )
         transcript_file = record.session_dir / TRANSCRIPT_FILENAME
         if not transcript_file.exists():
@@ -1994,6 +2055,17 @@ class SubagentComms:
         if record is None:
             return None, f"unknown subagent {job_id!r}"
         if record.session_dir is None:
+            # Distinguish the two no-transcript classes, as the roster and peek
+            # already do: a child that SETTLED before attaching did run, and
+            # telling its parent it "never started" hides the very failure this
+            # PR surfaces. Both are genuinely not resumable (no transcript), so
+            # the verdict is unchanged — only the sentence was wrong.
+            if record.outcome is not None:
+                reason = record.error_text or record.result_text or "it never attached"
+                return None, (
+                    f"subagent {record.label} ended before it attached ({reason}), so "
+                    "there is no transcript to resume; launch a new one with 'task'"
+                )
             return None, (
                 f"subagent {record.label} never started, so it has no transcript to resume; "
                 "launch a new one with 'task'"
