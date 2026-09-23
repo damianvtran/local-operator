@@ -5086,9 +5086,7 @@ class ServingSessionHandle(SessionHandle):
         if not arg:
             return SlashResult(
                 kind="notice",
-                text=goal_report(
-                    getattr(session, "goal", ""), getattr(session, "goal_status", "")
-                ),
+                text=goal_report(getattr(session, "goal", ""), getattr(session, "goal_status", "")),
                 style="info",
             )
         # A FLAG is matched as the WHOLE argument (`goal_flag_form`), so `--clear`
@@ -5116,9 +5114,7 @@ class ServingSessionHandle(SessionHandle):
         if form == "dismiss":
             dismissed = session.dismiss_goal()
             self._notify()
-            return SlashResult(
-                kind="notice", text=goal_dismissed_receipt(dismissed), style="info"
-            )
+            return SlashResult(kind="notice", text=goal_dismissed_receipt(dismissed), style="info")
         if form == "history":
             rows = goal_history_items(session.history_view())
             # The `team_list` shape: rows in `data.items`, so both existing hosts

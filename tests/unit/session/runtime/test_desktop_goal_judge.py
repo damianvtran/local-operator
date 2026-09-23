@@ -134,9 +134,7 @@ def make_handle(session: Session) -> ServingSessionHandle:
 def _user_rows(session: Session) -> list[str]:
     """Every user-role row the session's own context carries, in order."""
     return [
-        getattr(row, "text", "")
-        for row in session.history()
-        if getattr(row, "role", "") == "user"
+        getattr(row, "text", "") for row in session.history() if getattr(row, "role", "") == "user"
     ]
 
 
@@ -212,9 +210,7 @@ async def test_the_continuation_runs_after_a_message_admitted_during_the_judge(t
         stream.judge_gate.set()
         await wait_for(lambda: session.goal_status == "done")
         rows = _user_rows(session)
-        assert rows.index("actually, do X first") < rows.index(
-            goal_continuation_prompt("Ship it")
-        )
+        assert rows.index("actually, do X first") < rows.index(goal_continuation_prompt("Ship it"))
     finally:
         await handle.dispose()
         await session.dispose()

@@ -193,9 +193,7 @@ def is_goal_continuation_instruction(text: str) -> bool:
     documents, and vanishingly unlikely.
     """
     stripped = text.strip()
-    return stripped.startswith(GOAL_CONTINUATION_HEAD) and stripped.endswith(
-        GOAL_CONTINUATION_TAIL
-    )
+    return stripped.startswith(GOAL_CONTINUATION_HEAD) and stripped.endswith(GOAL_CONTINUATION_TAIL)
 
 
 def _never() -> bool:
@@ -306,9 +304,7 @@ class GoalJudge:
         """
         if not self._claim():
             return
-        task = asyncio.ensure_future(
-            self._drive(error=error, aborted=aborted, reset_streak=True)
-        )
+        task = asyncio.ensure_future(self._drive(error=error, aborted=aborted, reset_streak=True))
         self._task = task
         task.add_done_callback(self._on_task_done)
 
@@ -540,9 +536,7 @@ class GoalJudge:
         the hot path (the rule ``Session._persist_goal_record`` documents, which
         binds harder here than it does for the attachment).
         """
-        moved = {
-            key: value for key, value in fields.items() if self._mirror.get(key) != value
-        }
+        moved = {key: value for key, value in fields.items() if self._mirror.get(key) != value}
         if not moved:
             return
         if moved.get("state") == "stalled" and "reason" in fields:
