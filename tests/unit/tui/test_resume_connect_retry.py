@@ -1479,7 +1479,11 @@ async def _paint_first(monkeypatch, tmp_path, frozen: _FrozenOwner) -> OperatorA
     )
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", frozen)
     monkeypatch.setattr(app_module, "ATTACH_BEHIND_NARRATE_S", 0.2)
-    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 0.6)
+    # Room between the two marks, because the tests read "still trying" and
+    # the verdict as separate states: at 0.6 s, a host at load ~200 fired both
+    # timers inside one `pilot.pause()`, and the narration was never observable
+    # (the round-2 suite run, 2 of these tests, pre-existing on `63bc96f4`).
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 3.0)
     return _app(monkeypatch, tmp_path)
 
 
@@ -1586,3 +1590,184 @@ async def test_a_prompt_sent_before_the_attach_keeps_the_pending_cue(monkeypatch
         release.set()
         assert await _pump(pilot, lambda: not app._starting_shown)
         frozen.thaw(fail=ConnectionError("gone"))
+
+
+# --- A message sent during the paint-first wait (UX round 2, U6/U8) ---
+#
+# The message's own FOREGROUND bind preempts the background engage, which then
+# fails by design. Before: the watch settled on that failure (no row, no bound,
+# no verdict for as long as the bind took), and when the bind itself failed —
+# "owner did not send its state", the welcome read against a frozen owner — the
+# generic branch printed that transport sentence, left the echo standing as if
+# sent and did not give the text back: the message was gone, 4/4 in UX round 2.
+
+
+def _user_rows(app: OperatorApp) -> list[str]:
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    views = list(app.query(TranscriptView))
+    if not views:
+        return []
+    return [block.text() for block in views[0].blocks() if isinstance(block, UserBlock)]
+
+
+async def _compose_and_send(pilot, app: OperatorApp, text: str) -> None:  # noqa: ANN001
+    """Type into the REAL composer and press enter: the echo row and the accepted
+    draft are painted by the submit path, which is the half U6 lost."""
+    from local_operator.tui.widgets.editor import Editor
+
+    editor = app.query_one(Editor)
+    editor.focus()
+    await pilot.pause()
+    editor.text = text
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+async def _send_during_attach(  # noqa: ANN001
+    monkeypatch, tmp_path, frozen, prompt, *, bound_s: float = 2.0
+):
+    """`/resume` a frozen owner, then SUBMIT a message while it is still pending.
+
+    ``prompt`` stands in for the facade's send, so the test controls what the
+    message's own bind does. The engage is failed the way a preempted
+    background engage fails — the moment the prompt is in flight.
+    """
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    # AFTER `_paint_first`, which sets its own; and before the attach, because
+    # the watch arms its timers from the module values when it is created. The
+    # narration and the verdict are read as separate states, so the bound sits
+    # well past the narrate mark on a loaded host.
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", bound_s)
+    ctx = _running(app)
+    pilot = await ctx.__aenter__()
+    await app._attach_or_refuse(tmp_path, "frozen-1")
+    assert await _pump(pilot, lambda: frozen.calls == 1)
+    monkeypatch.setattr(type(app._session), "prompt", prompt)
+    await _compose_and_send(pilot, app, "sent while attaching")
+    # The background engage yields to the foreground bind and fails.
+    frozen.thaw(fail=ConnectionError("preempted"))
+    await _pump(pilot, lambda: not app._warm_engage_started)
+    return app, pilot, ctx
+
+
+@pytest.mark.asyncio
+async def test_a_message_sent_early_in_the_wait_keeps_the_narration(monkeypatch, tmp_path):
+    """U6: a preempted engage must not silence the wait while the attach is pending."""
+    frozen = _FrozenOwner()
+    release = asyncio.Event()
+
+    async def parked(self, *_a, **_k):  # noqa: ANN001
+        await release.wait()
+        raise ConnectionError("owner did not send its state")
+
+    app, pilot, ctx = await _send_during_attach(monkeypatch, tmp_path, frozen, parked)
+    try:
+        # The engage has FAILED; the narration and the bound must still come.
+        assert not app._warm_engage_started, "the fixture must fail the engage first"
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app))), (
+            "the preempted engage silenced the narration",
+            _notices(app),
+        )
+        assert await _pump(
+            pilot, lambda: any("is not answering" in n for n in _notices(app))
+        ), _notices(app)
+        assert not app._starting_shown, "`starting…` outlived the verdict"
+        release.set()
+        assert await _pump(pilot, lambda: any("back in the composer" in n for n in _notices(app)))
+        rows = [n for n in _notices(app) if "frozen-1" in n]
+        assert len(rows) == 1, ("one account of the wait, restated, not a stack", rows)
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_message_whose_bind_fails_during_the_wait_comes_back(monkeypatch, tmp_path):
+    """U6/U8: never delivered ⇒ echo down, draft back, one row in product words."""
+    frozen = _FrozenOwner()
+
+    async def refused(self, *_a, **_k):  # noqa: ANN001
+        raise ConnectionError("owner did not send its state")
+
+    app, pilot, ctx = await _send_during_attach(monkeypatch, tmp_path, frozen, refused)
+    try:
+        assert await _pump(pilot, lambda: any("back in the composer" in n for n in _notices(app)))
+        from local_operator.tui.widgets.editor import Editor
+
+        assert app.query_one(Editor).text.strip() == "sent while attaching", "the text was lost"
+        assert _user_rows(app) == [], "the echo of a message nobody received still stands"
+        texts = _notices(app)
+        assert not any("owner did not send its state" in n for n in texts), texts
+        assert not app._starting_shown
+        # A second attempt against the same silent owner is the same state again.
+        await _compose_and_send(pilot, app, "again")
+        assert await _pump(pilot, lambda: not app._interaction.active_workers)
+        assert len([n for n in _notices(app) if "back in the composer" in n]) == 1, _notices(app)
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_message_whose_bind_lands_settles_the_narration(monkeypatch, tmp_path):
+    """U6: the preempting message's successful bind settles the wait it took over."""
+    frozen = _FrozenOwner()
+    release = asyncio.Event()
+
+    async def delivered(self, *_a, **_k):  # noqa: ANN001
+        await release.wait()
+        monkeypatch.setattr(type(self), "is_cold", property(lambda _self: False))
+        return ""
+
+    app, pilot, ctx = await _send_during_attach(
+        monkeypatch, tmp_path, frozen, delivered, bound_s=30.0
+    )
+    try:
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        release.set()
+        assert await _pump(pilot, lambda: app._attach_behind_watch is None)
+        assert await _pump(pilot, lambda: not [n for n in _notices(app) if "frozen-1" in n])
+        assert _user_rows(app) == ["sent while attaching"], "a delivered message lost its row"
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_the_paint_first_verdict_keeps_its_next_step_whole_at_eighty_columns(
+    monkeypatch, tmp_path
+):
+    """U9: at an 80-column pane "send a message to retry" split across two rows.
+
+    Measured in UX round 2 on the one-sentence verdict. The next step is now its
+    own authored row, the redial give-up's pattern, and this pins the RENDERED
+    rows at 80 columns rather than the authored string.
+    """
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    async with app.run_test(size=(80, 24)) as pilot:  # type: ignore[attr-defined]
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("is not answering" in n for n in _notices(app)))
+        rows = [row.strip() for row in _rendered_notice_rows(app)]
+        assert "Send a message to retry." in rows, rows
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+@pytest.mark.asyncio
+async def test_the_paint_first_narration_quotes_its_own_bound(monkeypatch, tmp_path):
+    """U7/D5: the row said "about 42 s in total" and was judged at 27 s."""
+    frozen = _FrozenOwner()
+    app = await _paint_first(monkeypatch, tmp_path, frozen)
+    monkeypatch.setattr(app_module, "ATTACH_BEHIND_BOUND_S", 27.0)
+    async with _running(app) as pilot:
+        await app._attach_or_refuse(tmp_path, "frozen-1")
+        assert await _pump(pilot, lambda: any("still trying" in n for n in _notices(app)))
+        row = next(n for n in _notices(app) if "still trying" in n)
+        assert "about 27\u00a0s in total" in row, row
+        assert f"{app_module.RESUME_CONNECT_BOUND_S:g}\u00a0s" not in row, row
+        frozen.thaw(fail=ConnectionError("gone"))
+        await _pump(pilot, lambda: not app._warm_engage_started)

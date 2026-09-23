@@ -2158,6 +2158,14 @@ class _PaintLog:
         from textual.screen import Screen
 
         self.frames: list[tuple[int, bool, str | None]] = []
+        #: EMPTY transcript frames painted AFTER the first content frame. Kept
+        #: rather than skipped (review round 2, M3): a frame with no rows is the
+        #: one blank-transcript artefact this family can produce, and skipping
+        #: it made "no more than that" unpinnable. Frames before the first
+        #: content are the boot composition, not a regression, so not counted.
+        self.blank_after_content = 0
+        #: Frames skipped because the newest row was not mounted yet (see below).
+        self.mid_mount = 0
         original = Screen._compositor_refresh
 
         def recording(screen) -> None:  # noqa: ANN001
@@ -2168,6 +2176,20 @@ class _PaintLog:
                 return
             blocks = view.blocks()
             if not blocks:
+                if self.frames:
+                    self.blank_after_content += 1
+                return
+            if not blocks[-1].is_mounted:
+                # A frame composited while the batch mount is still IN FLIGHT:
+                # the view's list already names the newest row, the DOM has not
+                # placed it (region 0x0), so "is it on screen" has no answer yet.
+                # Under host load a refresh can land between the list append and
+                # the mount (measured at load ~170: `is_mounted=False`, region
+                # 0x0, scroll exactly on the tail target) on the pre-remediation
+                # head as well, 3/8 runs. Judging it as "off the tail" made this
+                # instrument flaky rather than discriminating; the placement the
+                # tail hold owns is judged on every frame whose rows exist.
+                self.mid_mount += 1
                 return
             head = blocks[0].text() if isinstance(blocks[0], NoticeBlock) else None
             newest_painted = blocks[-1] in screen._compositor.visible_widgets
@@ -2213,6 +2235,8 @@ async def test_the_first_painted_frame_is_the_screenful_cut_on_the_tail(
             log.frames[:3],
         )
         assert not log.off_tail(), ("a painted frame left the tail", log.off_tail())
+        # The backfill mounts INTO the painted screenful; it never clears it.
+        assert log.blank_after_content == 0, "the fill painted an empty transcript"
 
 
 @pytest.mark.asyncio

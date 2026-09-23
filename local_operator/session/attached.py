@@ -791,12 +791,18 @@ def frontend_attach_refusal(record: SessionRecord) -> str | None:
     mirrors — and the disagreement would be silent, since both spellings would
     keep compiling.
     """
-    if (
-        record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL
-        or FRONTEND_CAPABILITY not in record.capabilities
-    ):
+    if FRONTEND_CAPABILITY not in record.capabilities:
         return (
             f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs "
+            f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
+        )
+    if record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL:
+        # Its own clause, because "lacks <capability>" is FALSE here: the owner
+        # announces the capability and is merely too old a protocol to attach
+        # canonically. `lop --resume` prints this sentence to the user (#1474,
+        # review round 2, N1), so it has to name the gap that actually exists.
+        return (
+            f"owner runs protocol v{record.protocol}; canonical full-TUI attach needs "
             f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
         )
     return None

@@ -2893,8 +2893,11 @@ def test_migrate_is_registered_in_the_parser() -> None:
     [
         # An owner on an OLDER build: the dial must still run, because `connect`
         # raising its static refusal is the only thing that tells the user why
-        # the conversation opened inert.
-        (1, True, True),
+        # the conversation opened inert. v3, not v1: `find_runtime_record`
+        # drops any record below protocol 2 before `cli.py` sees it, so a v1
+        # row here would be a logic probe of a shape production never delivers
+        # (review round 2, M2). v2-v4 with the capability is the reachable gap.
+        (3, True, True),
         (5, False, True),
         # A current owner: paint first, attach behind (no dial on this path).
         (5, True, False),
@@ -2988,6 +2991,12 @@ def test_resume_onto_a_refused_owner_keeps_the_compatibility_notice(
     if expect_dial:
         assert seen["dials"] == 1, "a refused owner must still be dialled for its sentence"
         assert f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}" in reason, reason
+        # The sentence names the gap that exists (review round 2, N1): an owner
+        # that ANNOUNCES the capability must not be told it lacks it.
+        if capable:
+            assert "lacks" not in reason and f"v{protocol}" in reason, reason
+        else:
+            assert "lacks" in reason, reason
     else:
         assert seen["dials"] == 0, "a current owner paints first; the dial is behind"
         assert reason == ""

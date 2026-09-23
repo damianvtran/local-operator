@@ -2389,10 +2389,25 @@ ATTACH_BEHIND_NARRATE_S = 10.0
 ATTACH_BEHIND_BOUND_S = RESUME_CONNECT_WALL_S
 #: The verdict, and its restatement once the owner answers after all. "session",
 #: never "runtime": it is the user's word for what they opened (UX round 1, U5).
+#:
+#: The next step is its OWN authored row, the pattern the redial's give-up
+#: sentence already uses (design D2 there): as one flowing sentence an 80-column
+#: pane split "send a message to retry" across two rows (UX round 2, U9), and the
+#: half that splits is the half the user acts on.
 ATTACH_BEHIND_VERDICT = (
-    "session {session_id} is not answering — the conversation is here; " "send a message to retry"
+    "session {session_id} is not answering — the conversation is here.\n" "Send a message to retry."
 )
 ATTACH_BEHIND_RECOVERED = "session {session_id} is answering again"
+#: A message sent while the paint-first attach was still pending, whose bind
+#: then failed: it NEVER reached the owner, so it comes back to the composer and
+#: its echo row comes down (UX round 2, U6). The transport's own reason ("owner
+#: did not send its state") is logged, not shown — it names an owner and a
+#: protocol step, and says nothing about the one thing the user needs to know,
+#: which is where their text went (U8).
+ATTACH_BEHIND_UNSENT = (
+    "session {session_id} did not answer — your message is back in the composer.\n"
+    "Send it again to retry."
+)
 
 
 def _resume_redial_clock() -> float:
@@ -2757,6 +2772,7 @@ class _AttachBehindWatch:
         self._concrete = binding[1]
         self._narrate_timer = app.set_timer(ATTACH_BEHIND_NARRATE_S, self._narrate)
         self._bound_timer = app.set_timer(ATTACH_BEHIND_BOUND_S, self._judge)
+        app._attach_behind_watch = self
 
     def _current(self) -> bool:
         app = self._app
@@ -2778,9 +2794,15 @@ class _AttachBehindWatch:
             return
         # The dialling arm's own sentence and bound, verbatim: the user is on the
         # same wait with the same owner, only now behind a painted conversation.
+        #
+        # The NUMBER is this path's own bound, not the redial's: the redial's
+        # "about 42 s" is its wall plus one dial envelope, while this row is
+        # judged at `ATTACH_BEHIND_BOUND_S` (the redial's wall, 27 s). Quoting
+        # 42 promised a total the row then stopped honouring 15 s early (UX
+        # round 2, U7; design round 2, D5).
         self._post(
             f"reconnecting to session {self._concrete} — still trying, about "
-            f"{RESUME_CONNECT_BOUND_S:g}\u00a0s in total"
+            f"{ATTACH_BEHIND_BOUND_S:g}\u00a0s in total"
         )
 
     def _judge(self) -> None:
@@ -2797,7 +2819,27 @@ class _AttachBehindWatch:
         # to a sentence saying the owner is not answering would contradict it.
         # The engage keeps its own envelope; a bind that lands after this still
         # attaches and settles the row below.
-        self._app._set_starting(False)
+        #
+        # A message's hold on the cue ends here too, and for the same reason:
+        # `starting…` held up by a prompt still binding would sit beside
+        # "is not answering" (the pairing design round 2 checked was absent).
+        # The prompt's own send still settles this watch when it returns.
+        app = self._app
+        for marker, token in list(app._prompts_awaiting_bind.items()):
+            if token == self._token:
+                app._prompts_awaiting_bind.pop(marker, None)
+        app._set_starting(False)
+        app._push_starting_band()
+
+    def _prompt_holds_bind(self) -> bool:
+        """A message sent on this binding is still waiting on its own bind.
+
+        That prompt's FOREGROUND bind preempts the background engage — the
+        engage is cut to ``_BACKGROUND_YIELD_BUDGET_S`` and fails by design — so
+        the engage failing says nothing about the attach: the attach is still
+        pending, now carried by the prompt.
+        """
+        return self._current() and self._token in self._app._prompts_awaiting_bind.values()
 
     def absorb_failure(self) -> bool:
         """The engage FAILED: restate an already-posted row as the verdict.
@@ -2807,8 +2849,13 @@ class _AttachBehindWatch:
         own failure sentence underneath it. ``False`` leaves the ordinary report
         path in charge: a failure faster than the narration has said nothing
         yet, and the patience filter decides whether it is worth a line.
+
+        A PREEMPTED engage is absorbed without a verdict: a message is still
+        binding, so "not answering" would be premature (see ``settle``).
         """
         row = self._row
+        if self._prompt_holds_bind():
+            return True
         if not self._current() or row is None or not row.is_attached:
             return False
         if not self._judged:
@@ -2817,10 +2864,48 @@ class _AttachBehindWatch:
         return True
 
     def settle(self) -> None:
-        """The attach finished (or was abandoned): end the timers, settle the row."""
+        """The attach finished (or was abandoned): end the timers, settle the row.
+
+        EXCEPT when a message took the attach over. The engage that armed this
+        watch fails by design the moment a prompt's foreground bind arrives, and
+        settling then stopped both timers before the narration had posted — so a
+        user who typed in the first ~10 s got no row, no bound and no verdict,
+        the pre-U1 screen, for as long as the bind took (UX round 2, U6). The
+        attach is still pending, so the narration stays armed and the PROMPT
+        settles it when its send returns (:meth:`finish_for_prompt`).
+        """
         if self._settled:
             return
+        if self._prompt_holds_bind() and getattr(self._app._session, "is_cold", False):
+            return
+        self._settle()
+
+    def finish_for_prompt(self, *, unsent: bool) -> None:
+        """The prompt that took this attach over has returned.
+
+        ``unsent`` is its bind failing with the viewer still cold: nothing is
+        trying any more, so the row (the narration, the verdict, or none yet)
+        becomes the one sentence saying the message came back. Otherwise the
+        ordinary settle applies — a bind that landed removes or restates the row.
+        """
+        if self._settled:
+            return
+        if unsent and self._current():
+            self._settled = True
+            if self._app._attach_behind_watch is self:
+                self._app._attach_behind_watch = None
+            self._narrate_timer.stop()
+            self._bound_timer.stop()
+            self._app._set_starting(False)
+            self._app._post_attach_behind_unsent(self._token, self._row)
+            self._row = None
+            return
+        self._settle()
+
+    def _settle(self) -> None:
         was_current = self._current()
+        if self._app._attach_behind_watch is self:
+            self._app._attach_behind_watch = None
         self._settled = True
         self._narrate_timer.stop()
         self._bound_timer.stop()
@@ -4880,6 +4965,12 @@ class OperatorApp(App[None]):
         #: A paint-first attach's verdict row still on screen, with the binding
         #: it was posted for; see :meth:`_retire_attach_behind_verdict`.
         self._attach_behind_verdict: tuple[tuple[int, str], NoticeBlock] | None = None
+        #: The paint-first attach watch still narrating, if any. Held by the APP
+        #: (not only by the engage worker that armed it) because a message sent
+        #: during the wait carries the attach from then on, and its send is what
+        #: settles the watch — whether the engage has failed yet or not
+        #: (``_AttachBehindWatch.finish_for_prompt``, UX round 2, U6).
+        self._attach_behind_watch: _AttachBehindWatch | None = None
         #: Prompts sent while their viewer was cold, keyed by a per-send marker,
         #: valued by the binding they were sent on; see :meth:`_push_starting_band`.
         self._prompts_awaiting_bind: dict[object, tuple[int, str]] = {}
@@ -19288,6 +19379,35 @@ class OperatorApp(App[None]):
             return None
         return _AttachBehindWatch(self, binding_token)
 
+    def _post_attach_behind_unsent(
+        self, for_binding: tuple[int, str], row: NoticeBlock | None
+    ) -> None:
+        """Say ONCE that a message sent during the paint-first wait came back.
+
+        Restates the watch's own row when it posted one, so the wait keeps ONE
+        account rather than a narration above a refusal; otherwise reuses the
+        previous unsent row while it is still on screen, so a second attempt
+        against the same silent owner is the same state reached twice, not a
+        second event (the rule `_notice_unsent_runtime` follows). Registered as
+        this binding's verdict so the bind that finally lands restates it as
+        answering again instead of leaving "your message is back" above a reply.
+        """
+        text = ATTACH_BEHIND_UNSENT.format(session_id=for_binding[1])
+        held = self._attach_behind_verdict
+        if row is None and held is not None and held[0] == for_binding:
+            row = held[1]
+        if row is not None and row.is_attached:
+            row.restate(text, "warning")
+        else:
+            row = self._system_notice_block(text, "warning")
+        self._attach_behind_verdict = (for_binding, row)
+
+    def _finish_attach_behind_for_prompt(self, *, unsent: bool) -> None:
+        """Hand a preempted paint-first attach's outcome to its watch, if one waits."""
+        watch = self._attach_behind_watch
+        if watch is not None:
+            watch.finish_for_prompt(unsent=unsent)
+
     def _retire_attach_behind_verdict(self) -> None:
         """Restate a paint-first verdict once this binding is live after all.
 
@@ -25874,6 +25994,9 @@ class OperatorApp(App[None]):
                 # A prompt that went through is a BIND that landed, so a
                 # paint-first verdict still claiming the owner is not answering
                 # is now false (UX round 1, U3).
+                if awaiting_bind is not None:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._finish_attach_behind_for_prompt(unsent=False)
                 self._retire_attach_behind_verdict()
                 if awaiting_bind is not None:
                     self._prompts_awaiting_bind.pop(awaiting_bind, None)
@@ -26036,6 +26159,40 @@ class OperatorApp(App[None]):
                     # a live owner, and each append made the screen longer
                     # without making it truer (QA round 2, U6).
                     self._notice_unsent_runtime(source)
+                elif (
+                    awaiting_bind is not None
+                    and getattr(session, "attach_behind", False)
+                    and getattr(session, "is_cold", False)
+                    and isinstance(error, (ConnectionError, TimeoutError))
+                    and not getattr(error, "actionable", False)
+                ):
+                    # SENT DURING A PAINT-FIRST ATTACH, AND NEVER DELIVERED
+                    # (UX round 2, U6). The prompt was dispatched against a cold
+                    # viewer and its own bind failed — the owner is alive but
+                    # silent, so the welcome read timed out ("owner did not send
+                    # its state") or the sync did. Still cold means the bind
+                    # never landed, so `send_command` never ran: the message is
+                    # certainly unsent. The generic branch below printed the
+                    # transport's sentence and left the echo standing with the
+                    # composer empty — the user's text gone, under a row that
+                    # looked sent, 4/4 in UX round 2's runs.
+                    #
+                    # So it gets the in-pattern refusal the siblings above give
+                    # an undelivered message: echo down, draft back, and one row
+                    # in the product's words. Scoped to `attach_behind` because
+                    # this arm's verdict is what invites the send ("send a
+                    # message to retry"); an ordinary cold open's failures keep
+                    # the copy their own tests pin.
+                    logger.info("prompt bind failed during a paint-first attach: %s", error)
+                    self._withdraw_user_echo_for(source)
+                    if self._attach_behind_watch is not None:
+                        self._finish_attach_behind_for_prompt(unsent=True)
+                    else:
+                        self._post_attach_behind_unsent(
+                            (self._binding_epoch, str(getattr(session, "session_id", "") or "")),
+                            None,
+                        )
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 else:
                     # THROUGH the same helper the `agent_end` path uses. This
                     # branch printed a bare `str(error)` while the event path
@@ -26054,6 +26211,12 @@ class OperatorApp(App[None]):
                 if awaiting_bind is not None and awaiting_bind in self._prompts_awaiting_bind:
                     self._prompts_awaiting_bind.pop(awaiting_bind, None)
                     self._push_starting_band()
+                if awaiting_bind is not None:
+                    # Every other way the send can end (cancelled, oversize,
+                    # stopped): the watch must not keep narrating "still trying"
+                    # for an attempt that is over. A no-op when a branch above
+                    # already finished it.
+                    self._finish_attach_behind_for_prompt(unsent=False)
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
                 # The echo is only withdrawable while the send's outcome is

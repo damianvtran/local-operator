@@ -72,7 +72,13 @@ ENGAGE_START_BUDGET_S = 20.0
 #: admitting a failure at all, and the six unit cases in
 #: `tests/unit/session/runtime/test_eager_runtime.py` are what discriminate the
 #: gates. A copy reword must not be able to turn this green or red on its own.
-FAILURE_NOTICE_FRAGMENT = "no runtime yet"
+#:
+#: The SAME fragment as the unit twin's ``FAIL_START_FRAGMENT``: the two pin one
+#: sentence, so they move together. #1474 reworded "no runtime yet" to the
+#: product's word "session" and updated only the unit copy, which left this e2e
+#: shard red in CI — a fragment that lives in two files has to be grepped for
+#: tree-wide on every reword, not just in the file beside the change.
+FAILURE_NOTICE_FRAGMENT = "may still be starting"
 
 #: The candidate the engage spawns, in place of the runtime entry point.
 #:
