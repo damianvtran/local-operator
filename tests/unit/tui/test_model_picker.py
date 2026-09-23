@@ -219,10 +219,17 @@ def test_a_substring_match_beats_a_merely_fuzzy_one() -> None:
     """`opus` is a SUBSEQUENCE of `anthropic/claude-sonnet-4` — o and p from
     "anthropic", u from "claude", s from "sonnet". Ranking subsequence hits
     alongside substring hits therefore answered a query naming one model with a
-    list containing several unrelated ones."""
+    list containing several unrelated ones.
+
+    SUBSTRING HITS LEAD, and the subsequence rows follow rather than vanish. The
+    old form asserted `names == [...]` exactly, which held because the base code
+    chose `pool = exact or fuzzy` and DROPPED every fuzzy row once one exact match
+    existed — the R1-1 eviction. Membership is now "matched anything at all", so
+    this pins the leading rows and that they are the substring ones.
+    """
     names = [row.model_id for row in rank_rows(_rows(), "opus")]
-    assert names == ["claude-opus-5", "claude-opus-4-1"]
-    assert all("opus" in name for name in names)
+    assert names[:2] == ["claude-opus-5", "claude-opus-4-1"]
+    assert all("opus" in name for name in names[:2])
 
 
 def test_the_fuzzy_fallback_still_resolves_typos_and_elisions() -> None:
@@ -1314,3 +1321,38 @@ def test_the_pickers_price_column_reads_the_rows_own_schedule(
         output_price=1.10,
     )
     assert picker._price(flat) == "$0.27/1.1"
+
+
+def test_the_picker_filters_on_the_listings_human_name() -> None:
+    """REPRODUCTION (D2) through the WIDGET, not the ranker alone.
+
+    The operator typed the model's human name — `grok 4.7` for the row the
+    listing publishes as `SpaceXAI: Grok 4.7` — and the picker showed nothing,
+    because the match scored the selector (`x-ai/grok-4.7`) only. This is the
+    surface they actually use, so the fix is asserted here and not only on
+    ``rank_rows``: a change that repaired the ranker while the widget passed
+    something else would leave the operator's symptom in place.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [
+            ModelRow(
+                provider="openrouter",
+                model_id="x-ai/grok-4.7",
+                label="openrouter/x-ai/grok-4.7",
+                context_window=2_000_000,
+                input_price=3.0,
+                output_price=15.0,
+                connected=True,
+                aggregated=True,
+                listing_name="SpaceXAI: Grok 4.7",
+            ),
+            ModelRow("openai", "gpt-5.4", "GPT-5.4", 400_000, 1.25, 10.0, True),
+        ]
+    )
+    picker.open("grok 4.7")
+    assert [row.selector for row in picker.suggestions()] == ["openrouter/x-ai/grok-4.7"]
+    # A query that names nothing still narrows to nothing: the name target is an
+    # ADDITION to the matcher, not a matcher that now matches anything.
+    picker.set_query("gpt 6 luna")
+    assert picker.suggestions() == []
