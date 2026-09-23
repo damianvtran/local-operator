@@ -2423,6 +2423,56 @@ class ServingSessionHandle(SessionHandle):
         """
         return self._session.subscribe_frontend(on_update, display_window=display_window)
 
+    def subscribe_frontend_nowait(self, on_update: Callable[[Any], None]) -> Any:
+        """Bind a viewer from THIS thread when the session loop cannot answer.
+
+        THE FALLBACK FOR A BUSY OWNER, and it exists because the on-loop bind
+        is only as fast as the owner's own turn. ``subscribe_frontend`` marshals
+        its whole body onto the loop that owns the session
+        (``@_on_session_loop``), which is required for the refresh it publishes
+        — but it makes the caller wait out whatever synchronous step the turn is
+        inside. Measured on a blocked owner: 15.0 s and a failed control attach,
+        while the session was merely busy and the serving plane was idle.
+
+        The SUBSCRIBE half needs no loop at all. ``subscribe_threadsafe`` admits
+        the callback and captures the snapshot in one critical section of the
+        store's publish lock, so this returns immediately and the loop is left
+        carrying only the refresh.
+
+        THE REFRESH IS DEFERRED, NOT LOST. ``Session.subscribe_frontend``
+        refreshes BEFORE snapshotting so a joiner sees the freshest state at its
+        own sequence; here the refresh is scheduled onto the session loop and
+        lands as an ordinary delta (sequence +1) whenever that loop frees. That
+        is correct by the same exact-``+1`` rule every client already enforces,
+        and it is the ONLY semantic difference from the on-loop path.
+
+        NO DISPLAY WINDOW, deliberately: ``capture_window`` reads the loop-owned
+        transcript, so it stays on the loop. A viewer bound this way falls back
+        to its own durable replay (``_load_frontend_history``), which is what it
+        already does for an owner that never negotiated the capability.
+
+        A handle whose session exposes no store raises rather than binding
+        nothing: the caller has already decided the on-loop bind is too slow,
+        and a silent no-op would leave the connection waiting for a frame
+        nobody is going to send.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            raise RuntimeError("session exposes no frontend state store")
+        subscription = store.subscribe_threadsafe(on_update)
+        loop = getattr(self, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            try:
+                # Fire-and-forget on purpose: the point of this path is that the
+                # caller never waits on the session loop. A loop that closes
+                # between the check and the call loses only the extra refresh —
+                # the snapshot this bind already carries is the freshest state
+                # that loop published, so the bind itself stands.
+                loop.call_soon_threadsafe(self._session.refresh_frontend_state)
+            except RuntimeError:
+                logger.debug("deferred frontend refresh could not be scheduled", exc_info=True)
+        return subscription
+
     @_on_session_loop
     async def record_shell(self, command: str, result: Any) -> None:
         await self._session.record_shell(command, result)
