@@ -486,11 +486,11 @@ BUILD_DRAIN_PROGRESS_S = 15 * 60.0
 #: dwell bounds the HOLD itself, which is the only thing left to bound once movement
 #: is no longer a signal of "this will finish soon".
 #:
-#: WHY IT IS GENEROUS, AND WHY IT DOES NOT CUT ANYTHING. 30 min, which is D7's own
-#: proposed ceiling for this state (``BUILD_DRAIN_MAX_S``, default 1800 s, in
-#: ``docs/design-ownerless-session-attach.md``) adopted for a different arm. The
-#: length is not free to choose from below: the bound above is 15 min and the dwell
-#: must sit strictly ABOVE it, or the staleness arm could never fire and this one
+#: HOW LONG IS NOT A FREE CHOICE. 30 min, which is D7's own proposed ceiling for this
+#: state (``BUILD_DRAIN_MAX_S``, default 1800 s, in
+#: ``docs/design-ownerless-session-attach.md``), adopted here for the arm that keeps
+#: serving rather than exiting. From below it is pinned by the bound above: the dwell
+#: must sit strictly ABOVE 15 min, or the staleness arm could never fire and this one
 #: would become the only clock — abandoning holds that were merely silent at the
 #: 15-minute mark, which reports the weaker observation for the sharper state. It
 #: reads no work at all, so the residual it must tolerate is the opposite of the
@@ -501,16 +501,16 @@ BUILD_DRAIN_PROGRESS_S = 15 * 60.0
 #: should be told about rather than made to wait out.
 #:
 #: WHAT FIRING COSTS, which is what makes a bound this short defensible where a
-#: force-cut was not. Firing in a COMPLETE state still happens: the ticks below keep
-#: asking (``process._reaper`` keeps the drain object and its commitment), so the
-#: departure lands at the first idle instant and the newer build still gets the
-#: handover. Firing while work continues releases the latch, so the session takes
-#: work again, and publishes the failure under :data:`UPDATE_FAILED_CAUSE` so the
-#: state is reportable instead of silent. It does NOT exit the process and does NOT
-#: cut the turn in flight: a runtime is replaced when its turn is COMPLETE, never on
-#: a heuristic of inactivity (the operator's rule for every build move), and it is
-#: the reason the arm this bound drives abandons the handover rather than taking the
-#: signal drain's bounded exit.
+#: force-cut was not. The departure is NOT lost: ``process._reaper`` keeps the drain
+#: object and the commitment it carries, so the runtime still leaves at the first idle
+#: instant it reaches and the newer build still gets the handover — firing only means
+#: the wait stops being one the operator is locked out of. Firing while work continues
+#: releases the latch, so the session takes work again, and publishes the failure under
+#: :data:`UPDATE_FAILED_CAUSE` so the state is reportable instead of silent. It does
+#: NOT exit the process and does NOT cut the turn in flight: a runtime is replaced
+#: when its turn is COMPLETE, never on a heuristic of inactivity (the operator's rule
+#: for every build move), and it is the reason the arm this bound drives abandons the
+#: handover rather than taking the signal drain's bounded exit.
 #:
 #: HERE, beside the two bounds it is measured against, for their own reason: an
 #: operator comparing what a runtime promises against what a bound can take away has
