@@ -36,6 +36,72 @@ from local_operator.evaluation.receipts import RedactionSet
 logger = logging.getLogger(__name__)
 
 MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
+LEGACY_ACTION_BINDING = "legacy"
+COMPACT_ACTION_BINDING = "compact"
+_ACTION_BINDING_MODES = frozenset({LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING})
+_BINDING_KEY = "observation_id"
+
+
+def _validate_action_binding(action_binding: str) -> str:
+    if action_binding not in _ACTION_BINDING_MODES:
+        raise ValueError("action_binding must be 'legacy' or 'compact'")
+    return action_binding
+
+
+def _compact_action_schema(schema: dict[str, Any], models: tuple[Any, ...]) -> dict[str, Any]:
+    """Remove repeated action IDs and require one batch-level binding instead."""
+    members = schema["properties"]["actions"]["items"]["anyOf"]
+    # The top-level field borrows the exact field schema from the same action
+    # models; maintaining a second regex or bound would let provider validation
+    # and the canonical protocol accept different identifiers.
+    binding_schema = _inlined_action_schema(models[0])["properties"][_BINDING_KEY]
+    for member in members:
+        properties = member.get("properties")
+        if isinstance(properties, dict):
+            properties.pop(_BINDING_KEY, None)
+        required = member.get("required")
+        if isinstance(required, list):
+            member["required"] = [name for name in required if name != _BINDING_KEY]
+    schema["properties"] = {
+        _BINDING_KEY: binding_schema,
+        **schema["properties"],
+    }
+    schema["required"] = [_BINDING_KEY, *schema["required"]]
+    return schema
+
+
+def bind_compact_actions(
+    value: Mapping[str, Any], actions: list[Any], expected_observation_id: str
+) -> list[Any]:
+    """Validate every supplied binding, then fill canonical per-action IDs.
+
+    The compact reply requires the ID at its outer object, regardless of whether
+    its action array is nested under ``action_batch``. Legacy per-action IDs are
+    accepted as input only after each is checked against that same pending ID.
+    """
+    framed = _unwrap_tool_call(value)
+    if not isinstance(framed, Mapping):
+        raise ValueError("decision must be a JSON object")
+    binding = framed.get(_BINDING_KEY)
+    if not isinstance(binding, str) or binding != expected_observation_id:
+        raise ValueError("action batch does not bind to the current observation_id")
+    batch = framed.get("action_batch")
+    if isinstance(batch, Mapping) and _BINDING_KEY in batch:
+        nested = batch[_BINDING_KEY]
+        if not isinstance(nested, str) or nested != binding:
+            raise ValueError("action batch does not bind to the current observation_id")
+    bound: list[Any] = []
+    for action in actions:
+        if not isinstance(action, Mapping):
+            bound.append(action)
+            continue
+        if _BINDING_KEY in action:
+            supplied = action[_BINDING_KEY]
+            if not isinstance(supplied, str) or supplied != binding:
+                raise ValueError("action batch does not bind to the current observation_id")
+        bound.append({**action, _BINDING_KEY: binding})
+    return bound
+
 
 #: The keys that mark a reply as the PUBLIC-OBSERVATION envelope rather than a
 #: bare action batch. Reserved for exactly one job now: a REJECTED reply
@@ -679,7 +745,9 @@ def _public_note(framed: Mapping[str, Any], batch: Any) -> str | None:
     return note
 
 
-def _report_ignored_keys(framed: Mapping[str, Any], batch: Any) -> None:
+def _report_ignored_keys(
+    framed: Mapping[str, Any], batch: Any, *, action_binding: str = LEGACY_ACTION_BINDING
+) -> None:
     """Report -- never refuse -- keys the reply contract has no use for.
 
     Tolerated is not the same as silent. An unexpected key is a signal worth
@@ -693,9 +761,15 @@ def _report_ignored_keys(framed: Mapping[str, Any], batch: Any) -> None:
     diagnostic this class of reply was refused with.
     """
 
-    stray = sorted(set(framed) - _REPLY_KEYS)
+    known_reply_keys = _REPLY_KEYS | (
+        {_BINDING_KEY} if action_binding == COMPACT_ACTION_BINDING else set()
+    )
+    nested_keys = {"actions", "public_observations"}
+    if action_binding == COMPACT_ACTION_BINDING:
+        nested_keys.add(_BINDING_KEY)
+    stray = sorted(set(framed) - known_reply_keys)
     if isinstance(batch, Mapping):
-        stray += sorted(set(batch) - {"actions", "public_observations"})
+        stray += sorted(set(batch) - nested_keys)
     if stray:
         logger.warning(
             "model reply carried %d key(s) the reply contract does not use; ignored: %s",
@@ -704,7 +778,9 @@ def _report_ignored_keys(framed: Mapping[str, Any], batch: Any) -> None:
         )
 
 
-def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
+def normalise_public_reply(
+    value: Any, *, action_binding: str = LEGACY_ACTION_BINDING
+) -> tuple[list[Any], str | None]:
     """The one accepted reply shape, however the reply was framed.
 
     Returns the action array and the model's public note -- ``None`` for the
@@ -724,6 +800,7 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
     real work, and they are the only ones left in this module.
     """
 
+    action_binding = _validate_action_binding(action_binding)
     framed = _unwrap_tool_call(value)
     if framed is not value:
         logger.warning(
@@ -752,7 +829,7 @@ def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
             raise DecisionParseError(_BATCH_SHAPE_ACCEPTED)
         raise DecisionParseError("decision must carry a non-empty actions array")
     note = _public_note(framed, batch)
-    _report_ignored_keys(framed, batch)
+    _report_ignored_keys(framed, batch, action_binding=action_binding)
     if top_from_string or nested_from_string:
         # Tolerated, never silent -- the same rule the tool-call wrapper and the
         # trailing-text tolerance state above, and it is the one record a
@@ -975,7 +1052,9 @@ def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
 _ALL_ACTION_MODELS = get_args(get_args(ComputerAction)[0])
 
 
-def public_reply_schema(action_surface: ActionSurface | None = None) -> dict[str, Any]:
+def public_reply_schema(
+    action_surface: ActionSurface | None = None, action_binding: str = LEGACY_ACTION_BINDING
+) -> dict[str, Any]:
     """The reply contract's JSON Schema, shared by the contract and the channel.
 
     One definition with two readers. It is published in the evidence bundle's
@@ -1006,8 +1085,9 @@ def public_reply_schema(action_surface: ActionSurface | None = None) -> dict[str
     fixed for the episode — and recomputing keeps a new action kind from
     drifting out.
     """
+    action_binding = _validate_action_binding(action_binding)
     models = action_surface.models if action_surface is not None else _ALL_ACTION_MODELS
-    return {
+    schema = {
         "type": "object",
         "additionalProperties": False,
         "required": ["actions"],
@@ -1033,6 +1113,11 @@ def public_reply_schema(action_surface: ActionSurface | None = None) -> dict[str
             "public_observations": {"type": "string", "maxLength": MAX_PUBLIC_OBSERVATIONS_CHARS},
         },
     }
+    return (
+        _compact_action_schema(schema, models)
+        if action_binding == COMPACT_ACTION_BINDING
+        else schema
+    )
 
 
 def _inlined_action_schema(model: Any) -> dict[str, Any]:
@@ -1076,7 +1161,7 @@ def _inlined_action_schema(model: Any) -> dict[str, Any]:
     return resolve(schema)
 
 
-def public_reply_contract() -> dict[str, Any]:
+def public_reply_contract(action_binding: str = LEGACY_ACTION_BINDING) -> dict[str, Any]:
     """Publish a reproducible reply identity separately from the tool surface.
 
     The action array schema is borrowed, not copied: its vocabulary and bounds
@@ -1088,7 +1173,8 @@ def public_reply_contract() -> dict[str, Any]:
     be able to tell, without reading this module, why a reply with extra keys or
     a stale ``observation_id`` was accepted rather than refused.
     """
-    schema = public_reply_schema()
+    action_binding = _validate_action_binding(action_binding)
+    schema = public_reply_schema(action_binding=action_binding)
     contract = {
         "schema": schema,
         "accepted_framings": (
@@ -1109,6 +1195,13 @@ def public_reply_contract() -> dict[str, Any]:
             "concise new observed facts/progress only; no deliberation or credentials"
         ),
     }
+    if action_binding == COMPACT_ACTION_BINDING:
+        contract["action_binding"] = COMPACT_ACTION_BINDING
+        contract["binding"] = (
+            "the required top-level observation_id must equal the current observation; "
+            "any supplied legacy per-action IDs must also match before canonical actions "
+            "are materialized"
+        )
     return {
         "model_reply_contract": canonical_bytes(contract).decode("utf-8"),
         "model_reply_contract_digest": canonical_digest("runner-model-reply-v1", contract),

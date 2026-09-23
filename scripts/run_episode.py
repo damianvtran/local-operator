@@ -453,6 +453,7 @@ def _model_client(
     task_id: str,
     keep_recent_frames: int,
     reasoning_effort: str | None = None,
+    action_binding: str = "legacy",
 ) -> Any:
     from local_operator.evaluation.runner.provider_client import (
         create_provider_model_client,
@@ -492,6 +493,7 @@ def _model_client(
         task_id=task_id,
         fallback_policy="forbid",
         keep_recent_frames=keep_recent_frames,
+        action_binding=action_binding,
     )
 
 
@@ -615,6 +617,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-wall-s", type=int, default=18000)
     parser.add_argument("--max-cycle-usd", type=float, default=None, help="per-cycle cap")
     parser.add_argument("--keep-recent-frames", type=int, default=3)
+    parser.add_argument(
+        "--action-binding",
+        choices=("legacy", "compact"),
+        default="legacy",
+        help="evaluation reply binding format; compact uses one validated batch-level ID",
+    )
     parser.add_argument(
         "--reasoning-effort",
         default=None,
@@ -822,6 +830,7 @@ async def run(args: argparse.Namespace) -> int:
                 task_id=args.task_id,
                 keep_recent_frames=args.keep_recent_frames,
                 reasoning_effort=args.reasoning_effort,
+                action_binding=args.action_binding,
             )
         except ValueError as error:
             # An unusable effort level is the operator's to fix before anything
