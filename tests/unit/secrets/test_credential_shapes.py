@@ -2708,7 +2708,20 @@ def _corpus_grading() -> str:
 #: could not see any of them because every flag-carrying row it already had was either a
 #: VALUE (which still masks) or a NAME whose tail was a credential word (which was
 #: already released), which is exactly why the rows were added rather than argued about.
-_CORPUS_GRADING_DIGEST = "4cc31872ca5962882a767254a6f2967ea83a43b2c8caeceda08f95e6aeba19d4"
+#:
+#: **The constant the recovered commit carried was STALE, and it is re-derived here
+#: rather than trusted.** That commit's module and corpus were recovered from a subagent
+#: killed mid-task, and no test had been run against them before it was committed. Graded
+#: as they stand, the corpus produces ``946670a4…``, not the ``4cc31872…`` the commit
+#: recorded — written before its last corpus edit, and invisible to the suite for exactly
+#: the reason this constant exists: the one arm that would have caught it is the arm the
+#: constant belongs to, and a wrong constant fails only when someone runs it.
+#: The ARGUMENT above is what makes the correction safe, and it survives re-derivation
+#: unchanged: replaying it through this same function with the base module loaded beside
+#: the head one reproduces ``2a29fe4c…`` for the 423 rows that existed at ``bf48ca47``
+#: under BOTH modules, field for field, so the move is the corpus's growth (423 -> 438)
+#: and not a behaviour change on any pre-existing row.
+_CORPUS_GRADING_DIGEST = "946670a43b804aebea1482161ec8802a4dcb93d31148e1ac4997f3392d1c6114"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
