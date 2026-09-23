@@ -888,8 +888,10 @@ def test_the_header_says_how_to_read_a_fired_value_and_the_deadline_sibling(
     """A fire's numbers are useless to a reader who does not know what armed them.
 
     This is the clause that makes the two classes readable FROM THE FILE — the bound when
-    no beat re-armed the timer (a runtime that never engaged), a smaller remainder when a
-    beat recomputed it from the oldest plane's stamp — and that points the reader at the
+    no beat re-armed the timer, PROVIDED the re-arm succeeded (a runtime that never
+    engaged; an engaged runtime whose replacement FAILED can carry the same bound, see
+    design review D2), a smaller remainder when a beat recomputed it from the oldest
+    plane's stamp — and that points the reader at the
     sibling, whose absence means the first of those and whose mtime is the last beat. It
     is written at ARM time, so it is present whether or not this runtime ever fires.
 
@@ -1948,6 +1950,15 @@ def test_engagement_rearm_failure_qualifies_a_boot_bound_fire(
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert _fired_seconds(text) == pytest.approx(float(boot)), text[:900]
     assert stall_watchdog.REARM_FAILED_MARKER in text, text[-800:]
+    # Assert on the actual C-timer artifact, not only on the source constant: the
+    # separate boot note is insufficient if this general reading stays unconditional.
+    assert "PROVIDED THE RE-ARM SUCCEEDED" in text, text[:1600]
+    assert "An ENGAGE whose timer replacement FAILED is the exception" in text, text[:1600]
+    assert "that line's absence is what makes the never-engaged reading safe" in text, text[:1600]
+    assert stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE in text, text[:1600]
+    assert text.index(stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE) < text.index(
+        stall_watchdog.REARM_FAILED_MARKER
+    ), text[:1600]
     boot_note = text.split("THIS IS THE BOOT BOUND", 1)[1].split(
         stall_watchdog.OBSERVATION_NOT_VERDICT, 1
     )[0]

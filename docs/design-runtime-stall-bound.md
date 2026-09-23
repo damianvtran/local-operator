@@ -127,7 +127,7 @@ ENGAGEMENT — the publication boundary in `process.amain`, where `_live_handle`
 set — calls `stall_watchdog.engage()`, which moves the bound down to the steady one
 and stamps BOTH planes, so the steady bound is measured from engagement rather than
 from boot. That is also what makes the never-engaged class NAMEABLE: a fire that
-engaged has the deadline sibling `engage` writes, and one that never engaged has
+RE-ARMED has the deadline sibling `engage` writes, and one that never did has
 none. Engagement never widens the bound.
 
 *Exception, measured (design review round 1, D1):* engagement is not atomic. `engage()`
@@ -135,14 +135,21 @@ moves the bound in memory and stamps both planes, THEN replaces the C timer, so 
 replacement that FAILS leaves the original boot-bound timer in force while the bound
 reads steady. A single fire can therefore carry the boot value on a runtime that DID
 engage. The dump names this (`[stall watchdog] re-arm failed: the engage could not
-re-arm the timer, ...`), which is why every statement of the never-engaged reading —
-the boot note, the comment above it, and `HOW_TO_READ_THE_FIRED_VALUE` — is qualified
-on the re-arm having SUCCEEDED rather than stated flatly.
+re-arm the timer, ...`). This is why the never-engaged reading is qualified on the
+re-arm having SUCCEEDED wherever the file states it as a reading of a fire — the boot
+note, the comment above it, and `HOW_TO_READ_THE_FIRED_VALUE` — and not at every site
+that merely describes the class: statements of its *identity* (a runtime whose main
+thread never reported) stay as they are.
 
-`engage()` is also **not idempotent**: an unguarded second call after a successful
-first one would compute a negative remainder from the already-reset stamp and fire
-early. `engage()` returns early when the bound is already at steady, so only the first
-call moves it.
+`engage()` relies on its early return for its “idempotent” contract (see the
+function's own docstring). It returns before moving anything when the bound is
+already at steady, so a second call is a no-op. Measured against the real object with
+that early return bypassed, an unguarded second call does **not** fire early: it
+RE-stamps both planes to `now` and hands `_rearm` a **positive remainder — the full
+fresh steady bound** (+9.9999… s of a 10 s steady bound), and on a runtime already
+1 s from its deadline it **pushes the fire out by that whole bound** (+9.000 s
+measured). The hazard is a fire delayed past the moment a real participant went
+silent, not an early cut.
 
 **What that bound does with a hung boot: it DUMPS it and HOLDS it, it does not cut
 it.** The exit leg answers through `process._busy_probe`, which reports work in
