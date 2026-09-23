@@ -829,15 +829,24 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
 # digit predicate against `\d` over the whole code space, and the cost of the
 # ungated path itself, which no gate-based arm could see (round 1's R1-1).
 #
-# WHAT IS NOT FIXED HERE, measured rather than implied: the shape TABLE's own PEM
-# block rules (`_MULTILINE_SHAPES`) embed the same ambiguous fragment, so a read
-# carrying an anchored `private_key` spelling AND a digit-dense line still costs
-# seconds there — 320 ms for a SIX-column row at head, and past 20 s at base; an
-# eight-column row is past 25 s at both. That is pre-existing, byte-identical at
-# both revisions, and closing it needs linear versions of the two block rules
-# rather than of the classifiers, so it is `deferred` on the PR. The rewrite arm
-# below is there because that path is where the whitespace rewrite is still the
-# thing keeping the cost at tens of milliseconds.
+# THE THIRD HALF, and it was reachable through the PIPE rather than beside it: the
+# shape TABLE's `-open` rule embeds the same ambiguous fragment, and
+# `_PipeRedactor._release_point` runs that rule through `_shape_safe_spans` on any
+# read past the deferral cap — the fatal class by another door (QA round 2, Q3 on
+# #1427). It is also the road the scrub takes on the bytes that release hands it,
+# so the walk was measured on both: past a 60 s cap for a 9,152-byte read and past
+# a 60 s cap for a THREE-row one, because nothing on that path is gated by a
+# classifier — an anchored `private_key` spelling puts the header where the
+# line-anchored block loop cannot see it, and the rule's own walk is 2**(digits-1)
+# partitions per digit run of a dense line. What closes it is the SPELLING the rule
+# uses: `_PEM_DIGIT_MAX_PREFIX` requires each digit run to be maximal, which is the
+# same language (a split inside a contiguous run always has an equivalent one-unit
+# parse) and takes the walk from past 60 s to tens of milliseconds. The arms below
+# hold it: the fragment sweep and the rule-level differential in BOTH directions,
+# the rule's own answer and cost on the dense population, and masking parity
+# through the real pipe filter at four chunk policies. The rewrite arm below is
+# there because that path is where the whitespace rewrite is still the thing
+# keeping the cost at tens of milliseconds.
 
 #: The character KINDS these three languages are functions of. A sequence of kinds
 #: stands for every string built from the same kinds, which is what lets a bounded
@@ -969,6 +978,332 @@ def test_the_linear_deciders_agree_with_the_patterns_they_replace() -> None:
                 _assert_deciders_agree(text)
     for text in _decider_fixtures():
         _assert_deciders_agree(text)
+
+
+# --- the `-open` rule's digit-maximal spelling -------------------------------
+#
+# `gcp-service-account-value-open` is the table's ONE rule that runs the prefix
+# fragment over text nobody shaped, and the fragment's digit-run ambiguity is what
+# made it exponential (Q3 on #1427). Its body therefore uses
+# `_PEM_DIGIT_MAX_PREFIX` / `_PEM_DIGIT_MAX_LINE_CONTENT` — the same fragments with
+# every digit run required to be maximal — which is a SECOND SPELLING of a language
+# that was already written once, so it carries the same obligation the deciders do:
+# a divergence in either direction is a released mask (over-accepting) or a
+# published body line (rejecting). The arms below enumerate both directions, and
+# they are pinned against the RELEASED spelling rather than against hand-written
+# expectations.
+
+#: Kinds for the fragment sweep: the fragment's own alphabet, BOTH digit predicates
+#: (`\d` takes `\u0661` and `[0-9]` does not — the fault the whole-code-space arm
+#: above guards), the separators with a longer spelling (`->`, `.]`), and the box
+#: glyph. A sequence of kinds stands for every string built from those kinds, which
+#: is what lets a bounded sweep stand for the digit runs a wider one would cover.
+_OPEN_RULE_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "M", ",", "|", ":")
+
+#: The rule under test, by label — never by position, since the table's order is
+#: load-bearing for the guards and a reorder must not repoint these arms.
+_OPEN_RULE_LABEL = "gcp-service-account-value-open"
+
+
+def _open_rule_shape() -> Any:
+    return next(
+        shape for shape in redaction_shapes.CREDENTIAL_SHAPES if shape.label == _OPEN_RULE_LABEL
+    )
+
+
+def _released_open_rule_pattern() -> re.Pattern[str]:
+    """The `-open` rule with the RELEASED fragment, built from the SHARED pieces.
+
+    Written out from the fragments rather than derived from the shipped source, so
+    the reference is INDEPENDENT of what the shipped rule says: the differential
+    arm below is then a comparison against the released rule, not against the
+    shipped rule compared with itself. `_open_rule_source_is_the_released_spelling`
+    is what ties the two together, and it holds the shipped source to this build
+    plus exactly the digit-maximal substitution — so an unrelated edit to the rule
+    (its header tail, its anchor, its lookahead) reddens there instead of quietly
+    redefining what the differential compares.
+    """
+    return re.compile(
+        r'(?i)("?private[_-]?key"?\s*:\s*")'
+        r"(-{1,4}[\x27\x22]?-{1,4}BE" + "GIN [A-Z0-9 ]*PRIV" + r"ATE KEY-{1,4}[\x27\x22]?-{1,4}"
+        r"(?:"
+        r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+        r"(?:"
+        + redaction_shapes.LINE_PREFIX
+        + r"(?:"
+        + redaction_shapes._PEM_LINE_CONTENT
+        + r")[ \t]*)+"
+        r"(?=" + redaction_shapes.LINE_SEP + r"|[\x27\x22]|$)"
+        r")*)"
+    )
+
+
+def _open_rule_source_is_the_released_spelling() -> bool:
+    """The shipped rule, with the substitutions inverted, IS the independent reference."""
+    source = _open_rule_shape().pattern.pattern
+    inverted = source.replace(
+        redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT, redaction_shapes._PEM_LINE_CONTENT
+    ).replace(redaction_shapes._PEM_DIGIT_MAX_PREFIX, redaction_shapes.LINE_PREFIX)
+    return inverted == _released_open_rule_pattern().pattern
+
+
+def _open_rule_matches(pattern: re.Pattern[str], text: str) -> list[tuple[Any, ...]]:
+    """Every match as the MASK and the GUARD read it: span, anchor, and group 2.
+
+    Group 2 is the masked region and the group the guard tests, so a comparison
+    over `(start, end, group 1, group 2)` is a comparison over the bytes that reach
+    a surface, not over match counts.
+    """
+    return [
+        (match.start(), match.end(), match.group(1), match.group(2))
+        for match in pattern.finditer(text)
+    ]
+
+
+def test_the_digit_maximal_prefix_spells_the_released_fragment_language() -> None:
+    r"""The FREQUENT obligation, swept in both directions and not sampled.
+
+    The rewrite is `\d+` to `\d+(?!\d)` — a unit's digit run may no longer end in
+    the middle of a run — and the merging argument for that being the same language
+    is that a split inside a contiguous run always has an equivalent one-unit
+    parse, because the characters between the two chunks are the unit's own `]`,
+    whitespace and separator, all epsilon exactly when the next character is still
+    a digit. A restriction on the unit END is the change that DOES drop strings
+    (`12 34 MIIEowIBAAKCA` needs the first unit to end immediately before `34`), and
+    telling those two apart is what this arm is for.
+
+    The last block is the arm's own SENSITIVITY check: the same sweep is run against
+    a spelling whose digit class is `[0-9]`, which differs from `\d` on the
+    Arabic-Indic digit in the alphabet, and a witness must be found. Without it a
+    sweep that had silently stopped seeing anything would pass.
+    """
+    released = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
+    maximal = re.compile("(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX + ")")
+
+    def witnesses(left: re.Pattern[str], right: re.Pattern[str]) -> list[str]:
+        found: list[str] = []
+        strings = ["".join(combo) for combo in itertools.product(_OPEN_RULE_KINDS, repeat=3)]
+        # the digit-run locus itself, at widths the kind sweep cannot reach
+        for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+            for separator in ("", " ", "|", ".", "-", "]", " [", "\t"):
+                strings.append("1" * left_run + separator + "1" * right_run)
+        strings += [
+            "12 34 MIIEowIBAAKCA",
+            "12 34",
+            "1234",
+            "[12]34",
+            "12]34",
+            "1]2",
+            "1.]2",
+            "1->2",
+            "\u2502 1 \u2502",
+            "10000000 10000001",
+            "   1000    1008    1016",
+        ]
+        for text in strings:
+            if bool(left.fullmatch(text)) != bool(right.fullmatch(text)):
+                found.append(text)
+        return found
+
+    assert not witnesses(released, maximal), "the digit-maximal prefix changed the language"
+    # SENSITIVITY: an ASCII digit class is a DIFFERENT language on this alphabet,
+    # so the sweep above is shown to be able to see a divergence at all.
+    ascii_class = re.compile(
+        "(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX.replace("\\d", "[0-9]") + ")"
+    )
+    assert witnesses(maximal, ascii_class), "the sweep cannot see a language difference"
+
+
+def test_the_open_rule_is_its_released_spelling_with_the_digits_maximal() -> None:
+    """The drift pin, and the structural half of Q3.
+
+    Two assertions, and the first is the one QA's Q3 asked for: the RELEASED
+    fragment must not appear in this rule's source at all. A rule that keeps the
+    ambiguous fragment anywhere — the body unit, or the short arm's lookahead, which
+    carries the same ambiguity and is reached by the same walk — reaches
+    `_shape_safe_spans` and the scrubber with a walk that is exponential in the
+    digits of a dense line, which is the fatal class by another door.
+
+    The second is that the shipped source IS the released spelling with exactly
+    those substitutions, so the differential arm below compares against the same
+    rule it claims to.
+    """
+    source = _open_rule_shape().pattern.pattern
+
+    assert (
+        redaction_shapes.LINE_PREFIX not in source
+    ), "this rule still walks the ambiguous fragment"
+    assert (
+        source.count(redaction_shapes._PEM_DIGIT_MAX_PREFIX) == 2
+    ), "both the body unit and the short arm's lookahead must use the maximal fragment"
+    assert source.count(redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT) == 1
+    assert (
+        _released_open_rule_pattern().pattern != source
+    ), "the shipped rule IS the released spelling; nothing to compare"
+    assert _open_rule_source_is_the_released_spelling(), (
+        "the shipped rule is not the released spelling plus the digit-maximal substitution "
+        "(an edit to the rule that is not that substitution redefines what the differential "
+        "arm compares, so it has to redden here)"
+    )
+
+
+def _open_rule_fixtures() -> dict[str, str]:
+    """The shapes this rule exists for, plus the two families that burn.
+
+    The numbered/boxed/indented bodies are the LINE_PREFIX cases the rule is
+    written for (and the only ones where it is the deciding rule at all — measured,
+    removing it from `_MULTILINE_SHAPES` moves the settled output of these and no
+    others), and the `%8d` rows are the digit-dense population Q3 measured.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    cases = {
+        "body": f"{anchor}{banner}\n{_PEM_BODY}\n{_PEM_BODY}\n",
+        "indented": f"{anchor}{banner}\n   {_PEM_BODY}\n   {_PEM_BODY}\n",
+        "cat_n": f"{anchor}{banner}\n1\t{_PEM_BODY}\n2\t{_PEM_BODY}\n",
+        "boxed": f"{anchor}{banner}\n\u2502 1 \u2502 {_PEM_BODY}\n\u2502 2 \u2502 {_PEM_BODY}\n",
+        "short_mid": f"{anchor}{banner}\n3| Qw9z\n4| {_PEM_BODY}\n",
+        "short_final": f"{anchor}{banner}\n{_PEM_BODY}\n12| done\n",
+        "prose_after": f"{anchor}{banner}\n{_PEM_BODY}\n{_PEM_BODY}\nNOT A KEY, prose\n",
+        "header_only": f"{anchor}{banner}\n",
+        "escaped": anchor + banner + "\\n" + _PEM_BODY + "\\n" + _PEM_BODY,
+        "no_anchor": f"{banner}\n{_PEM_BODY}\n",
+        "unquoted": "private" + f"_key: {banner}\n{_PEM_BODY}\n",
+        "dense_4col": f"{anchor}{banner}\n{_numeric_rows(1, columns=4, start=1000)}",
+        # A read past the deferral CAP, which is the one state where this rule is the
+        # only masker in the pipe: the release point normally cuts AT the banner, so
+        # the pending piece starts with a header line and the pipe's own block loop
+        # masks the body itself (measured: removing this rule from the table moves no
+        # other fixture here). The cap cuts at `len - 8192` instead, which lands the
+        # anchored spelling MID-piece — where the line-anchored loop cannot see it and
+        # this rule is what stands between a numbered body and the model.
+        "numbered_capped": f"{anchor}{banner}\n" + f"1\t{_PEM_BODY}\n" * 400,
+    }
+    return cases
+
+
+def _open_rule_generated() -> list[str]:
+    """A generated sweep of the rule, in the shape a caller actually produces.
+
+    Every string is an anchored spelling and a header followed by ONE generated
+    line, which is where the per-line decision lives: the released rule does not
+    terminate on the dense members of this family, so a differential over them is
+    impossible (recorded, not glossed) and the sweep stays in the region BOTH rules
+    decide.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    out: list[str] = []
+    for length in range(4):
+        for combo in itertools.product(_OPEN_RULE_KINDS, repeat=length):
+            out.append(f"{anchor}{banner}\n{''.join(combo)}\n")
+    for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+        for separator in (" ", "|", ".", "-", "]", " ["):
+            out.append(f"{anchor}{banner}\n{'1' * left_run}{separator}{'1' * right_run}\n")
+    return out
+
+
+def test_the_open_rule_matches_its_released_spelling_on_every_fixture() -> None:
+    """The rule-level differential, in both directions, over fixtures and a sweep.
+
+    The fragment arm above compares the two PREFIX languages; this one compares the
+    two RULES, which is the obligation that matters — the body unit, the short arm's
+    lookahead and the header tail interact, and a divergence in either direction is
+    a released mask or a published body line. The dense members are asserted by SPAN
+    instead of differentially, with the reason stated rather than papered over: the
+    released rule has no answer to compare against on them (that is the defect), so
+    the span it DOES give on the smallest member of the family is the reference, and
+    every denser member must give the same one — the empty-body match, anchored
+    spelling and header, which is what a `%8d` row leaves by construction.
+    """
+    shipped = _open_rule_shape().pattern
+    released = _released_open_rule_pattern()
+    cases = _open_rule_fixtures()
+    for name, text in cases.items():
+        assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), name
+    for text in _open_rule_generated():
+        assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), repr(text)
+
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    reference = _open_rule_matches(shipped, cases["dense_4col"])
+    assert _open_rule_matches(released, cases["dense_4col"]) == reference, (
+        "the released rule disagrees on the member of the family it CAN decide, so the "
+        "reference span for the dense payloads is wrong"
+    )
+    assert reference == [(0, len(anchor) + len(banner), anchor, banner)]
+    for text in (
+        f"{anchor}{banner}\n{_numeric_rows(1, columns=8, start=1000)}",
+        f"{anchor}{banner}\n{_numeric_rows(140, columns=8, start=1000)}",
+    ):
+        assert (
+            _open_rule_matches(shipped, text) == reference
+        ), "the dense payload moved the rule's span"
+
+
+def _pipe_settled(raw: bytes, chunk: int) -> str:
+    """One input through the real pipe filter, at one chunk policy."""
+    redactor = builtin._PipeRedactor([])
+    pieces = [redactor.feed(raw[offset : offset + chunk]) for offset in range(0, len(raw), chunk)]
+    pieces.append(redactor.feed(b"", final=True))
+    return b"".join(pieces).decode("utf-8", "replace")
+
+
+def test_the_open_rules_spelling_does_not_move_a_pipe_byte_at_any_chunk_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Masking parity through the real filter, and the arm is shown to discriminate.
+
+    The rule-level differential fixes what the rule MATCHES; this arm fixes what the
+    real pipe PAINTS with it — live and settled, at four chunk policies, since the
+    release point's partition is what a shape can be split by. And it carries its own
+    sensitivity check, because the first version of this corpus did not: measured,
+    the round's earlier corpus is masked by the OTHER rules (the assignment rule
+    masks the same values), so removing this rule from `_MULTILINE_SHAPES` moved no
+    cell and a parity arm over it would have compared the shipped rule with itself.
+    The fixtures above are the ones where this rule is the deciding rule, and the
+    last block asserts that dropping it moves at least one cell — so the arm cannot
+    silently go vacuous again.
+    """
+    original = redaction_shapes._MULTILINE_SHAPES
+    released = _released_open_rule_pattern()
+    cases = _open_rule_fixtures()
+    policies = (7, 64, 4096, 65536)
+
+    shipped_cells = {
+        name: [_pipe_settled(text.encode(), c) for c in policies] for name, text in cases.items()
+    }
+
+    monkeypatch.setattr(
+        redaction_shapes,
+        "_MULTILINE_SHAPES",
+        tuple(
+            (
+                redaction_shapes.Shape(
+                    shape.label, released, shape.replacement, shape.secret_group, shape.guard
+                )
+                if shape.label == _OPEN_RULE_LABEL
+                else shape
+            )
+            for shape in original
+        ),
+    )
+    for name, text in cases.items():
+        assert [_pipe_settled(text.encode(), c) for c in policies] == shipped_cells[
+            name
+        ], f"the two spellings paint different bytes for {name}"
+
+    monkeypatch.setattr(
+        redaction_shapes,
+        "_MULTILINE_SHAPES",
+        tuple(shape for shape in original if shape.label != _OPEN_RULE_LABEL),
+    )
+    moved = [
+        name
+        for name, text in cases.items()
+        if [_pipe_settled(text.encode(), c) for c in policies] != shipped_cells[name]
+    ]
+    assert moved, "dropping the rule moved nothing, so this arm compares nothing"
 
 
 def test_the_prefix_machine_reads_digits_the_way_the_pattern_does() -> None:
@@ -1109,18 +1444,48 @@ def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
     test that failed without it. The pipe's classifiers no longer run the fragment
     (the deciders do), so the arm belongs where the fragment is still the thing
     being measured: the shape TABLE's PEM block rules, which embed it verbatim.
-    Measured there, an anchored `private_key` spelling followed by ONE `%8d` row of
-    four-digit values costs 42 ms with the current spelling and past 20 s (the cap)
-    with the released one; six columns is 320 ms here and also past 20 s at base.
-    The ceiling is ~12x the current cost and at least 40x under the released one,
-    and a regression fails in seconds rather than hanging.
+
+    Round 2's Q3 is that this arm measured the wrong POPULATION and said so in its
+    own docstring: five columns sat under the ceiling while the shape it is named
+    for was unbounded two columns away (a six-column row was 221 ms, eight past
+    45 s), so a green run here proved nothing about the shape. The fixtures are
+    therefore the ones the defect lives in — up to eight columns and the 140-row
+    payload that a real read past the deferral cap hands `_release_point` — and the
+    ceiling is set from the measured linear cost of that population (26 ms of CPU
+    for the 140-row payload) rather than from the smallest thing that passes.
+
+    The single-row ceiling is 50 ms and NOT the 0.5 s this file's other cost arms
+    use, and that is the whole finding: measured on the released spelling, a
+    six-column row is 222 ms of CPU — under a 0.5 s ceiling, which is how the arm
+    stayed green while the walk was exponential. The shipped cost of the same row is
+    0.7 ms, so 50 ms is a ~70x margin on CPU time (which load does not inflate the
+    way it inflates wall time) and still two orders under the released spelling.
+
+    The rule's ANSWER is asserted too, not only its time: a `%8d` row cannot
+    complete a body line, so what must come back is the empty-body match — the
+    anchored spelling and the header, masked — and a change that made the walk
+    cheap by dropping that match would publish a credential rather than burn.
     """
     header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
-    text = f"{header}\n{_numeric_rows(1, columns=5, start=1000)}"
+    for columns in (5, 6, 8):
+        rows = _numeric_rows(1, columns=columns, start=1000)
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(f"{header}\n{rows}")
+        cpu = time.process_time() - start
+        assert cpu < 0.05, f"an anchored {columns}-column row cost {cpu:.3f} s of CPU in the table"
+        assert (
+            REDACTION_MARKER in scrubbed
+        ), f"the anchored spelling stopped being masked at {columns}"
+        assert rows in scrubbed, "only the header is a credential here; the row must survive"
+    payload = f"{header}\n{_numeric_rows(140, columns=8, start=1000)}"
     start = time.process_time()
-    redaction_shapes.scrub_shapes(text)
+    scrubbed = redaction_shapes.scrub_shapes(payload)
     cpu = time.process_time() - start
-    assert cpu < 0.5, f"an anchored five-column row cost {cpu:.3f} s of CPU in the shape table"
+    assert cpu < 0.5, f"the 140-row dense payload cost {cpu:.3f} s of CPU in the table"
+    assert (
+        REDACTION_MARKER in scrubbed
+    ), "the dense payload's anchored spelling stopped being masked"
+    assert "1056" in scrubbed, "the row content must survive; only the header is a credential here"
 
 
 def test_an_unclosed_block_is_masked_and_the_text_before_it_is_released() -> None:

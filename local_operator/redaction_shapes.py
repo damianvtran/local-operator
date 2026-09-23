@@ -1741,6 +1741,56 @@ _PEM_SHORT_MID_LINE = (
 #: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
 #: survive, which is why the end-of-run allowance is not a free-standing alternative.
 _PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
+
+#: The `-open` rule's OWN body grammar: the two fragments above with every digit run
+#: required to be MAXIMAL (`\d+(?!\d)`).
+#:
+#: WHY IT EXISTS. This is the one rule in the table that runs the prefix fragment
+#: over text nobody shaped — a tool result, a grep hit, a README quoting a banner —
+#: and `LINE_PREFIX`'s digit runs are ambiguous BY CONSTRUCTION (see the fragment's
+#: own comment: `12` is one unit or two, and every split is a live path). For the
+#: pipe's classifiers that ambiguity is bounded by the linear deciders; inside a
+#: PATTERN it is a backtracking walk of 2**(digits-1) paths per digit run, and the
+#: walk is EXHAUSTED rather than pruned whenever a body line does not parse — so the
+#: cost is not a constant factor away, it is unbounded in the input. Measured
+#: through the real `_PipeRedactor` (QA round 2, Q3 on #1427): an anchored
+#: `"private_key": ` spelling plus a header phrase plus ONE `%8d` row of four-digit
+#: columns costs 23 s of CPU at six columns and runs past a 60 s cap at eight, and
+#: the 140-row payload that `_release_point` hands this rule once a read exceeds the
+#: deferral cap is past 60 s at `bdf3b6cd` (past 45 s at the base revision, so the
+#: worst of it is pre-existing rather than this branch's). Nothing is masked in that
+#: shape, so the whole cost is pure.
+#:
+#: WHY IT SPELLS THE SAME LANGUAGE, which is the obligation a second spelling of a
+#: language takes on. A split inside a CONTIGUOUS digit run always has an equivalent
+#: one-unit parse: the characters between the two chunks are the unit's own `\]`,
+#: whitespace and separator, and all three are epsilon exactly when the next
+#: character is still a digit — so extending the run by one digit and re-parsing
+#: leaves the rest of the line untouched, and by induction every split collapses to
+#: the maximal run. What DOES drop strings is a restriction on the unit END (the
+#: fragment's comment cites `12 34 MIIEowIBAAKCA`, which needs a unit to end
+#: immediately before `34`), and that is a different change. Both directions are
+#: enumerated rather than argued:
+#: `test_the_digit_maximal_prefix_spells_the_released_fragment_language` sweeps the
+#: two fragment languages against each other in both directions, and
+#: `test_the_open_rule_matches_its_released_spelling_on_every_fixture` compares the
+#: two RULES' matches (start, end, group 1, group 2) over the corpus, the dense
+#: payloads and a generated sweep — a divergence either way is a released mask or a
+#: published body line, so neither direction may be sampled.
+#:
+#: SCOPE, and it is deliberately narrow: THIS rule only. `LINE_PREFIX` itself and the
+#: three `PEM_*_RE` patterns keep the released spelling, because the pipe's deciders
+#: (`_pem_prefix_end_flags`, and the three classifiers built on it) mirror THAT
+#: fragment and are pinned against those patterns, while those three patterns are
+#: the DEFINITION of their languages rather than a hot path — the deciders decide
+#: them. The other two block rules (`pem-private-key`, `gcp-service-account-key`) do
+#: not embed the fragment at all, and the fragment alone decides nothing here: it is
+#: the ambiguity's combination with this rule's unbounded body run that made the
+#: engine walk 2**(digits-1) partitions per digit run.
+_PEM_DIGIT_MAX_PREFIX = LINE_PREFIX.replace(r"\d+", r"\d+(?!\d)")
+_PEM_DIGIT_MAX_LINE_CONTENT = (
+    _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE.replace(LINE_PREFIX, _PEM_DIGIT_MAX_PREFIX)
+)
 _PEM_RUN = (
     r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
@@ -2334,7 +2384,14 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # the SHORT-MID shape QA measured (`3| Qw9z` then `4| MIIE…`) — which also
             # keeps numbered prose safe: a prose line has no full body line after it, so
             # it can neither start nor continue the run.
-            r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")[ \t]*)+"
+            # THE DIGIT-MAXIMAL FRAGMENTS, not `LINE_PREFIX` / `_PEM_LINE_CONTENT`:
+            # this rule is the table's one unbounded walk over unshaped text, and the
+            # released fragment makes it exponential in the digits of a dense row (Q3
+            # on #1427). Both are substituted — the body unit AND the short arm's
+            # lookahead — because they carry the same ambiguity. Why that is the same
+            # language, why a restriction on the unit END is not, and what pins the
+            # equivalence: `_PEM_DIGIT_MAX_PREFIX` above.
+            r"(?:" + _PEM_DIGIT_MAX_PREFIX + r"(?:" + _PEM_DIGIT_MAX_LINE_CONTENT + r")[ \t]*)+"
             r"(?=" + LINE_SEP + r"|[\x27\x22]|$)"
             r")*)"
         ),
