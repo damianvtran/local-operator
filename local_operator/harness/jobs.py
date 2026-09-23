@@ -596,7 +596,7 @@ class AsyncJobManager:
             return None  # scoping: mismatch is not-found
         return job
 
-    def lookup_snapshot(self) -> dict[str, AsyncJob]:
+    def lookup_snapshot(self) -> Mapping[str, AsyncJob]:
         """Copy the non-sweeping lookup table, including attempt aliases.
 
         ``list()`` is intentionally not used here: it applies retention and may
@@ -607,9 +607,11 @@ class AsyncJobManager:
         rows = dict(self._jobs)
         for alias, target in self._aliases.items():
             job = self._jobs.get(target)
-            if job is not None:
-                # ``get(alias)`` resolves aliases before direct row ids; retain
-                # that precedence even for a malformed id collision.
+            if job is None:
+                # ``get(alias)`` resolves aliases before direct row ids, so a
+                # swept target must not expose a colliding stale direct row.
+                rows.pop(alias, None)
+            else:
                 rows[alias] = job
         return rows
 

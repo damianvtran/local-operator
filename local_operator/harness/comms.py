@@ -47,7 +47,16 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, Sequence, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 
 # The two custom-message markers this module writes and classifies. Defined in
 # the shared vocabulary module (see its docstring): a runner barred from
@@ -643,8 +652,13 @@ class RosterPass:
                 if callable(snapshot):
                     # Materialize before merging: a duck-typed mapping that fails
                     # partway through iteration must fall back without leaving a
-                    # partial index that could shadow a later manager.
-                    rows = tuple(snapshot().items())
+                    # partial index that could shadow a later manager. The native
+                    # manager promises a mapping snapshot; reject other shapes before
+                    # merging so its fallback remains the historical point lookup.
+                    snapshot_rows = snapshot()
+                    if not isinstance(snapshot_rows, Mapping):
+                        raise TypeError("job lookup snapshot must be a mapping")
+                    rows = tuple(snapshot_rows.items())
                     for job_id, job in rows:
                         self._indexed_jobs.setdefault(job_id, (position, job))
                     continue

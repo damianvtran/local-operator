@@ -320,6 +320,21 @@ def test_lookup_snapshot_matches_get_without_sweeping_retained_rows() -> None:
     assert "expired" in manager._jobs
 
 
+def test_lookup_snapshot_does_not_expose_direct_row_shadowed_by_swept_alias() -> None:
+    """Alias resolution precedes direct ids even after the target was swept."""
+    manager = AsyncJobManager()
+    manager._aliases["alias"] = "already-swept-target"
+    manager._jobs["alias"] = _task_row("alias")
+
+    snapshot = manager.lookup_snapshot()
+
+    assert manager.get("alias") is None
+    assert snapshot.get("alias") is None
+    assert "alias" not in snapshot
+    # Snapshot construction, unlike list(), does not itself sweep a row.
+    assert "alias" in manager._jobs
+
+
 def test_accounting_summary_is_bounded_for_hundred_child_fanout() -> None:
     manager = AsyncJobManager()
     manager.restore(
