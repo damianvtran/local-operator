@@ -2825,6 +2825,16 @@ class Session:
         # the ones that predate this record), while status, judge state and
         # history live in their own sidecar (see `_restore_goal_record`).
         self._restore_goal_record()
+        # ...and a goal that came back with NO token gets one, so the judge can
+        # run on it (``GoalState.ensure_token``). This is the R9 migration
+        # itself: a build that predates the record leaves the goal's text in
+        # ``attachment.json`` and no ``goal.json`` at all, and the fold reports
+        # that goal as `active` — so without this the very case R9 was written
+        # for answered `active` on every surface and never ran (agent review
+        # round 1, MAJOR-3). Deliberately after ``_restore_goal_record`` and not
+        # inside it: a record ON disk keeps its own token, so the only goal this
+        # can touch is one that never had an identity to preserve.
+        self._goal_state.ensure_token()
         # Owned here, not by the browser tool, for the same reason the wake
         # scheduler is: _build_tool_context runs at the start of EVERY turn, so
         # a handle the tool stored on the ToolContext lived exactly one turn.
@@ -4613,6 +4623,15 @@ class Session:
         prefix or an in-flight request.
         """
         stored = self._goal_state.set(text)
+        # A goal written WITHOUT arming still needs a token, or the judge refuses
+        # to run on it (see ``GoalState.ensure_token``). This is the plain
+        # "replace the text" act — the mobile relay and ``lop --goal`` — and its
+        # goal is standing work by the same reading that makes a restored record
+        # `active`, so the two halves must not disagree about whether it is
+        # pursued. No record write here: the token is this session's, nothing in
+        # flight spans a boot, and this path deliberately keeps `set_goal` a tail
+        # write plus a journal rather than a second `arm`.
+        self._goal_state.ensure_token()
         # Same tail, same fate on resume as the team/agent briefs, so the goal
         # is journalled by the same mechanism rather than a second one.
         self._persist_attachment()

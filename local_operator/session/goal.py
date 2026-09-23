@@ -580,6 +580,16 @@ class GoalState:
         # done". Leaving the tick state behind would tell a surface a judge was
         # still coming on a goal that has been settled.
         self.judge.state = "done"
+        if not reason:
+            # A PERSON'S settle carries no model sentence, and the previous
+            # tick's REASON is a sentence about work nothing is tracking any
+            # more. Kept, it printed a live-looking quote about an objective the
+            # user had just closed by hand — `judge: achieved · 2/12 · — still
+            # drafting`, on a card whose own history entry correctly recorded no
+            # reason at all (QA round 1, Q4). A VERDICT's settle passes its own
+            # sentence instead, and that one is the record's reason, published
+            # by the judge beside it.
+            self.judge.reason = ""
         return entry
 
     def record_superseded(self, reason: str = "") -> GoalHistoryEntry | None:
@@ -635,6 +645,31 @@ class GoalState:
         self.token = ""
         self.created_at = ""
         self.judge = GoalJudgeState()
+        return True
+
+    def ensure_token(self) -> bool:
+        """Give a goal that has NO token one, so the judge can run. ``True`` if minted.
+
+        The other half of RULINGS R9. The fold reads a goal with no status as
+        ``active`` — a record restored from a build that predates this one, or a
+        text written through the plain ``set_goal`` the mobile relay and
+        ``lop --goal`` use — because it is standing work the user expects
+        pursued. But ``GoalJudge._enabled`` also requires a TOKEN (it is the
+        judge's staleness guard), and ``arm`` was the only minter, so those two
+        paths produced a goal every surface called ``active`` and nothing ever
+        ran on: the silent half of "the goal sitting inert", with no error to
+        see (agent review round 1, MAJOR-3).
+
+        Minting here is exactly as safe as minting in :meth:`arm`. The token
+        exists so a verdict captured before a goal was REPLACED is dropped; a
+        goal that never had one has no such verdict, so there is nothing this
+        can invalidate. A ``done`` goal is deliberately left alone — it is
+        retained so the surfaces can show what was achieved, and minting would
+        arm the judge against work that is already finished.
+        """
+        if not self.text or self.token or self.status == "done":
+            return False
+        self.token = _new_id()
         return True
 
     def reset_judge(self, *, state: str) -> None:

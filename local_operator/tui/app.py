@@ -1048,6 +1048,41 @@ _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES = frozenset({"", "idle"})
 _LOOP_GOAL_LABEL_CHARS = 120
 
 
+#: How long the judge's continuation waits for the turn that just ENDED to
+#: release the session before the admission is given up on, and how often it
+#: asks again while it waits.
+#:
+#: WHY THE WAIT EXISTS AT ALL, because "the continuation is admitted from the
+#: turn-end handler" is the whole defect it repairs (QA round 1, Q1). The app's
+#: ``TurnEnded`` is posted from the session's HELD end event, which the turn's
+#: own pipeline flushes from its ``finally`` with ``_turn_lock`` still held
+#: (``Session._run_turn_pipeline`` documents that ordering, and
+#: ``on_turn_settled`` is the hook that fires after it). So the one edge this
+#: driver hangs on is the one moment the session cannot take a prompt: measured
+#: on the real app, ``Session.prompt`` raised ``TurnInFlight: session is already
+#: streaming`` with the lock held and ``is_streaming`` already False, the driver
+#: parked the record at ``waiting``, and the goal sat inert with a CONTINUE
+#: verdict in hand and no continuation turn ever run — deterministically, in the
+#: app and in ``tests/e2e/test_goal_submission.py``.
+#:
+#: The runtime host never meets this, and that is the shape being mirrored: its
+#: continuation goes through the handle's prompt QUEUE and is drained by the
+#: session itself (``serving.py``'s ``_drain_prompt_queue``), so it cannot
+#: arrive mid-turn at all. The TUI host owns its session in process and admits
+#: directly, so this host needs the deferral the queue provides there.
+#:
+#: BOUNDED, because "the lock is free in a few loop turns" is a fact about the
+#: ORDINARY teardown, not about every holder: an on-demand compaction holds the
+#: same lock for the length of a rewrite. Giving up parks the goal at
+#: ``waiting``, which is honest — nothing is being spent on it — and the next
+#: turn end re-arms the judge. The retry gap is not politeness: the teardown
+#: between the end event and the release can include a thread-backed transcript
+#: flush, which resolves in wall-clock time and not in a fixed number of loop
+#: turns.
+_GOAL_CONTINUATION_ADMISSION_S = 5.0
+_GOAL_CONTINUATION_ADMISSION_RETRY_S = 0.02
+
+
 def _loop_goal_label(goal: str) -> str:
     """A safe, bounded rendering of the goal for the launch notice.
 
@@ -10405,6 +10440,28 @@ class OperatorApp(App[None]):
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
+        # TRIGGER 3, on the other owning host: a goal whose continuation was in
+        # flight when this terminal closed is re-engaged ONCE, here, where the
+        # restored record is readable and the session is current.
+        #
+        # Why this host needed its own wiring rather than inheriting the
+        # runtime's: `GoalJudge.rearm_on_resume` was called from exactly one
+        # place (`ServingSessionHandle.rearm_goal_judge`, wired once per boot in
+        # `server.py`), and the TUI builds its own driver whose ONLY caller was
+        # the turn-end hook. So a local session killed mid-continuation reopened
+        # with the goal reading `active` and the judge reading `continuing` and
+        # nothing to re-engage it until the user happened to type — the
+        # "silently sitting inert" case, in exactly the app-reopened shape the
+        # operator named (agent review round 1, MAJOR-1; reproduced: `judge_calls
+        # after boot = 0`, no prompt admitted).
+        #
+        # Once per BOOT and not per adoption: a sidebar switch re-adopts, and the
+        # record's state has moved on by then in every settled case — this is the
+        # restart prologue the runtime runs, not a rule about focus. The driver's
+        # own guard (RULINGS R3) refuses anything but `continuing`/`judging`, and
+        # its in-flight claim refuses a second run, so a re-arm that lands on a
+        # goal nothing was spending on is a no-op by construction.
+        self._rearm_goal_judge_on_boot(session)
         # Bring the runtime up NOW rather than on the first keystroke. A cold
         # viewer can only paint what it reads off disk — the cwd and the
         # configured model name — so the band opened without the MCP roster,
@@ -34291,6 +34348,48 @@ class OperatorApp(App[None]):
             group=self._interaction.worker_group("loop"),
         )
 
+    async def _admit_goal_continuation(self, session: Any, text: str, echo: Any) -> None:
+        """Admit ONE judge continuation, deferred until the session can take it.
+
+        See :data:`_GOAL_CONTINUATION_ADMISSION_S` for why the wait is here at
+        all. Two things this method owns beyond the retry loop:
+
+        * The admission goes through ``_prompt_loop_turn``, i.e. the same route
+          the ``/loop`` worker uses, so this host has ONE admission path.
+        * The row carries the STRUCTURAL marker. ``harness_injected`` is what
+          tells every front end that a durable user-role row was authored by the
+          harness rather than typed, and this host was the one host that never
+          stamped it: the TUI's own paint and its replay are covered by the text
+          recogniser (``is_harness_chrome``), but the DESKTOP is marker-only by
+          contract (``docs/DESKTOP_API.md``), so a continuation written by a
+          local TUI replayed there as the user's own words — the operator's
+          invisibility requirement failing on a real cross-host path (agent
+          review round 1, MAJOR-2). Probed for the keyword the way
+          ``serving.py`` probes it: a reduced or third-party session that
+          predates it must not raise, and the keyword's job is to stamp a marker
+          those hosts never read.
+        """
+        from local_operator.session.errors import TurnInFlight
+
+        fields: dict[str, Any] = dict(echo.prompt_kwargs())
+        complete = getattr(session, "prompt_and_wait", session.prompt)
+        if "harness_injected" in inspect.signature(complete).parameters:
+            fields["harness_injected"] = True
+
+        deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
+        while True:
+            try:
+                await self._prompt_loop_turn(session, text, **fields)
+                return
+            except TurnInFlight:
+                # The typed refusal, and the ONLY one worth waiting out: a
+                # session that is closing a turn accepts this the moment that
+                # turn's lock is released. Reaching the deadline raises, and the
+                # driver turns it into a `waiting` — never a retry of the judge.
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(_GOAL_CONTINUATION_ADMISSION_RETRY_S)
+
     @staticmethod
     async def _prompt_loop_turn(session: SessionProtocol, prompt: str, **kwargs: Any) -> None:
         # Local Session.prompt already awaits the pipeline. Remote interactive
@@ -34501,17 +34600,19 @@ class OperatorApp(App[None]):
                 source, text, message_id=self._echo_message_id(session.prompt)
             )
             try:
-                # `_prompt_loop_turn` is the loop's own admission route: it
-                # prefers `prompt_and_wait`, which AWAITS the terminal outcome —
-                # which is what lets the driver judge the turn it just admitted
-                # instead of correlating an event.
-                await self._prompt_loop_turn(session, text, **echo.prompt_kwargs())
+                # `_admit_goal_continuation` is this host's admission route: it
+                # DEFERS the continuation until the turn that just ended has
+                # released the session, then admits it through
+                # `_prompt_loop_turn` — which prefers `prompt_and_wait`, so the
+                # driver AWAITS the terminal outcome and judges the turn it just
+                # admitted instead of correlating an event.
+                await self._admit_goal_continuation(session, text, echo)
             except BaseException:
-                # A refused admission (TurnInFlight, a retiring session) never
-                # announces, so take the echo entry back out — otherwise it
-                # would swallow the NEXT row carrying the same words. The
-                # exception is re-raised: the driver turns it into a `waiting`,
-                # and retrying here is exactly the spin it must not do.
+                # A refused admission (a retiring session) never announces, so
+                # take the echo entry back out — otherwise it would swallow the
+                # NEXT row carrying the same words. The exception is re-raised:
+                # the driver turns it into a `waiting`, and retrying here is
+                # exactly the spin it must not do.
                 self._discard_user_echo_for(source, echo)
                 if self._is_current(source):
                     self._retire_turn_band(session)
@@ -34543,7 +34644,7 @@ class OperatorApp(App[None]):
             # The same call `/goal --done` makes, so a verdict and a typed
             # mark-done produce one record and the surfaces cannot tell them
             # apart except by whose words the reason carries.
-            session.mark_goal_done(reason)
+            record.mark_goal_done(reason)
             self.call_later(self._source_frontend_changed, source)
 
         return GoalJudge(
@@ -34552,14 +34653,56 @@ class OperatorApp(App[None]):
             changed=changed,
             settled=settled,
             goal=lambda: getattr(session, "goal", ""),
-            status=lambda: getattr(session, "goal_status", ""),
-            token=lambda: getattr(session, "goal_token", ""),
-            serial=lambda: getattr(session, "goal_turn_serial", 0),
+            status=lambda: record.goal_status,
+            token=lambda: record.goal_token,
+            serial=lambda: record.goal_turn_serial,
             judge_state=lambda: session.goal_judge_state,
             # The loop check is a CALLBACK over the interaction's own flag, so a
             # loop that ends re-enables this judge with no bookkeeping.
             loop_running=lambda: source.loop.running,
         )
+
+    def _rearm_goal_judge_on_boot(self, session: SessionProtocol) -> None:
+        """Trigger 3 on this host: re-engage a judge that was in flight at close.
+
+        Called once per boot, after adoption, for the reasons stated at the call
+        site. Deferred to a worker rather than awaited: boot must not wait on a
+        provider call, and nothing here is the session's boot outcome.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        source = self._interaction
+        if session is None or not owns_the_session(session) or self._goal_judge_in_flight:
+            return
+        self._goal_judge_in_flight = True
+        try:
+            self.run_worker(
+                self._rearm_goal_judge_worker(session, source),
+                thread=False,
+                group=source.worker_group("goal_judge"),
+            )
+        except Exception:  # noqa: BLE001 — an additive worker must not fail boot
+            self._goal_judge_in_flight = False
+            logger.debug("goal judge re-arm could not be started", exc_info=True)
+
+    async def _rearm_goal_judge_worker(
+        self, session: Any, source: SessionInteraction
+    ) -> None:
+        """Run ONE trigger-3 re-arm and release the in-flight flag.
+
+        The flag is cleared unconditionally, for the same reason the turn-end
+        worker's is: a re-arm that raised must not leave this terminal convinced
+        a judge is running, or the goal would go unjudged for the app's life.
+        """
+        try:
+            driver = self._goal_judge_driver(session, source)
+            if driver is None:
+                return
+            await driver.rearm_on_resume()
+        except Exception:  # noqa: BLE001 — the judge is additive, never boot's fate
+            logger.debug("goal judge re-arm failed", exc_info=True)
+        finally:
+            self._goal_judge_in_flight = False
 
     def _maybe_judge_goal_turn(self, message: TurnEnded) -> None:
         """React to a LOCAL turn's end by judging the standing goal (§3.3).

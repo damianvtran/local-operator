@@ -2066,6 +2066,10 @@ async def _construct_child_session(
             _env_details(cwd),
             datetime.now().strftime("%Y-%m-%d"),
             goal=parent_session.goal,
+            # ...and its LIFECYCLE STATE, so a goal the parent has already
+            # settled is not handed to the child as standing work. Read off the
+            # live holder for the same reason the text is.
+            goal_status=getattr(parent_session, "goal_status", ""),
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
             credentials=names,

@@ -2870,6 +2870,12 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
+        # The goal block is withheld once the goal is DONE: `mark_done` keeps the
+        # text so the surfaces can strike through what was achieved, and a block
+        # gated on the text alone kept handing the model a finished objective as
+        # the standing one to pursue. Read beside the text so the cache key below
+        # moves with it.
+        goal_status = goal_state.status if goal_state is not None else ""
         team_brief = goal_state.team_brief if goal_state is not None else ""
         agent_brief = goal_state.agent_brief if goal_state is not None else ""
         names = (
@@ -2882,6 +2888,7 @@ def _make_system_blocks_provider(
             knowledge_block,
             date_str,
             goal,
+            goal_status,
             team_brief,
             agent_brief,
             tuple(names),
@@ -2897,6 +2904,7 @@ def _make_system_blocks_provider(
             environment,
             date_str,
             goal=goal,
+            goal_status=goal_status,
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
             credentials=names,
