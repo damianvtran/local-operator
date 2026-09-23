@@ -29,6 +29,7 @@ from local_operator.mobile.types import (
 from local_operator.session.frontend_state import FrontendSubscription
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
 
 
@@ -4429,6 +4430,27 @@ class _OffLoopCapableHeldBindHandle(_HeldBindHandle):
         return self._frontend.subscribe_threadsafe(on_update)
 
 
+class _DrainingOffLoopCapableHeldBindHandle(_OffLoopCapableHeldBindHandle):
+    """The parked-owner double WITH the production drain latch available on it.
+
+    Bound as a class attribute rather than called unbound, which is the pattern
+    ``test_serving_drain``'s ``DrainHost`` uses: a double that re-implemented the latch
+    would pin nothing about the state a viewer actually meets, and the attributes the
+    real method writes are declared here so the cells can read them back.
+    """
+
+    begin_drain = ServingSessionHandle.begin_drain
+    end_drain = ServingSessionHandle.end_drain
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: Written by ``begin_drain`` / cleared by ``end_drain``, read by the cells.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
+
+
 class _CountingBindHandle(FakeHandle):
     """A HEALTHY handle: binds at once, and records if the fallback was used.
 
@@ -4582,9 +4604,7 @@ async def test_a_draining_owner_still_lands_the_canonical_sync_inside_the_envelo
     DRAINING owner: a test that released the drain before dialling would prove nothing
     about the state the operator was in.
     """
-    from local_operator.session.runtime.serving import ServingSessionHandle
-
-    handle = _OffLoopCapableHeldBindHandle()
+    handle = _DrainingOffLoopCapableHeldBindHandle()
     runtime = RuntimeServer(handle, kind="tui")
     runtime.start()
     writer = None
@@ -4592,7 +4612,7 @@ async def test_a_draining_owner_still_lands_the_canonical_sync_inside_the_envelo
         # The PRODUCTION latch over this reduced handle: ``begin_drain`` asks only for
         # ``_disposing`` and an optional ``session.retire_wakes_to_inbox``, so the same
         # method the real handle runs is the one under test here.
-        assert ServingSessionHandle.begin_drain(handle, "stale-build", "0.62.9 -> 0.62.12")
+        assert handle.begin_drain("stale-build", "0.62.9 -> 0.62.12")
         assert (
             handle._draining is True
         ), "the drain has to be latched for this cell to mean anything"

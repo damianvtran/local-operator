@@ -29,14 +29,36 @@ from pathlib import Path
 import pytest
 
 from local_operator.session.runtime import launch, registry
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD,
     PROTOCOL_VERSION,
     SessionRecord,
 )
 from local_operator.session_lease import acquire_session_lease
+from tests.unit.session.runtime.test_server import FakeHandle
 
 SESSION_ID = "coldjoindrain"
+
+
+class _DrainingFakeHandle(FakeHandle):
+    """``test_server``'s ``FakeHandle`` plus the PRODUCTION drain latch.
+
+    Bound as a class attribute rather than called unbound, which is the shape
+    ``test_serving_drain``'s ``DrainHost`` uses: the cell is about the state a viewer
+    meets, so the latch that creates it has to be the real one, and the attributes it
+    writes are declared here so the cells can read them back.
+    """
+
+    begin_drain = ServingSessionHandle.begin_drain
+    end_drain = ServingSessionHandle.end_drain
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
 
 
 class _CountingControlPort:
@@ -158,8 +180,7 @@ async def test_a_draining_session_hands_a_cold_facade_its_canonical_sync(
     from local_operator.session.attached import AttachedSession
     from local_operator.session.frontend_state import FrontendStateStore
     from local_operator.session.runtime.server import RuntimeServer
-    from local_operator.session.runtime.serving import ServingSessionHandle
-    from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
+    from tests.unit.session.runtime.test_server import _wait_record
 
     config = tmp_path / ".local-operator"
     session_dir = config / "sessions" / SESSION_ID
@@ -172,7 +193,7 @@ async def test_a_draining_session_hands_a_cold_facade_its_canonical_sync(
     # as well, so nothing here can reach a store outside this tmp_path.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
 
-    handle = FakeHandle()
+    handle = _DrainingFakeHandle()
     # ONE HANDLE, ONE SESSION: the reduced handle names itself ``s1``, and a facade
     # that joins under another id is refused by the owner as "another conversation"
     # before any state is sent — so the double is aligned with the session under test
@@ -190,7 +211,7 @@ async def test_a_draining_session_hands_a_cold_facade_its_canonical_sync(
         # announcer publishes on the record (``announce_retiring`` writes both in one
         # call; this is the record half, so the facade's engage meets a live, DRAINING
         # owner rather than a hand-written record that no runtime stands behind).
-        assert ServingSessionHandle.begin_drain(handle, "stale-build", "0.62.9 -> 0.62.12")
+        assert handle.begin_drain("stale-build", "0.62.9 -> 0.62.12")
         runtime.note_leaving(LEAVING_FOR_BUILD)
         record = await _wait_record()
         assert record.leaving == LEAVING_FOR_BUILD, record.leaving
@@ -205,6 +226,7 @@ async def test_a_draining_session_hands_a_cold_facade_its_canonical_sync(
         await asyncio.wait_for(facade._ensure_bound(), timeout=45)
 
         client = facade._client
+        assert client is not None, "the cold facade bound with no client at all"
         owner = handle._frontend.state
         assert client._frontend_epoch == owner.epoch, (
             "the cold facade never learned the owner's canonical epoch, so no "
