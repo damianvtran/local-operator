@@ -138,10 +138,17 @@ class FakeHandle:
 
 
 class Clock:
-    """A monotonic clock the test moves, so a 300 s window costs no wall time."""
+    """A monotonic clock the test moves, so a 300 s window costs no wall time.
+
+    ``ticks`` counts the REAPER's sleeps, and it is what makes the pump
+    deterministic: the pump waits for a tick rather than for a duration, so the
+    fake clock advances exactly one tick at a time and can never be overshot by
+    an unknown amount while the pump was yielding.
+    """
 
     def __init__(self, start: float = 50_000.0) -> None:
         self.now = start
+        self.ticks = 0
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
@@ -171,6 +178,7 @@ class FakeAsyncio:
 
     async def sleep(self, seconds: float) -> None:
         self._clock.advance(seconds)
+        self._clock.ticks += 1
         await _REAL_ASYNCIO.sleep(0)
 
 
@@ -180,29 +188,53 @@ async def _pump_until(
     *,
     start: float,
     until: Callable[[], bool] | None = None,
-    limit_turns: int = 20_000,
+    budget_s: float = 60.0,
 ) -> None:
     """Drive loop turns until the fake clock has advanced ``seconds``.
 
-    Bounded by LOOP TURNS rather than by a wall-clock deadline (AGENTS.md,
-    "Wait on the event, never on the clock"): the fake clock only moves when the
-    reaper's own sleep does, so a turn count is the honest bound — and the limit
-    exists so a reaper that stopped sleeping fails the test instead of hanging.
+    WHAT IS ASSERTED IS THE FAKE CLOCK, and that is the only thing a turn bound
+    may be derived from — but a turn is NOT free, and pretending otherwise is
+    what made this helper flake on CI (``test (3.12, 4)``, 2026-09-23): a tick of
+    the drain reaches real machinery (the refresh path hops a thread), and while
+    the reaper waits on that, a pump yielding only ``sleep(0)`` can spend its
+    whole turn budget in microseconds. Measured: 20 000 turns bought 5 s of fake
+    time on a runner where the identical cell bought 60 s locally.
+
+    So the pump yields REAL time (half a millisecond per turn — small enough
+    that the fake clock is still entirely under the reaper's control, large
+    enough to give a thread-hopping tick its slot) and is bounded by BOTH a
+    wall-clock budget and a turn cap. The budget is a hang guard, not a timing
+    assertion (AGENTS.md, "keep a wall-clock assertion alongside it, with a
+    ceiling set for catastrophe"), and the failure it raises says which bound was
+    hit so a genuinely stuck reaper is not read as a slow runner.
 
     ``until`` is why the bound has to be a predicate and not just a duration: a
     reaper that has LEFT no longer sleeps, so a pump waiting for the clock to
-    reach a value past its exit would spin to the limit. Every caller passes the
+    reach a value past its exit would spin to the cap. Every caller passes the
     condition it expects to become true, and then asserts it did.
     """
-    for _ in range(limit_turns):
+    deadline = _REAL_TIME.monotonic() + budget_s
+    waits = 0
+    while _REAL_TIME.monotonic() < deadline:
         if until is not None and until():
             return
         if clock.now - start >= seconds:
             return
-        await _REAL_ASYNCIO.sleep(0)
+        # ONE REAPER TICK AT A TIME. Waiting for the tick rather than yielding a
+        # fixed number of turns is what keeps the fake clock from being overshot:
+        # the reaper's own sleeps are what move it, and a pump that yields real
+        # time while the reaper spins on zero-delay sleeps can let it advance
+        # hundreds of fake seconds inside one pump turn (measured: a cell that
+        # asserts "still resident at 295 s" read 301 s instead). The inner wait is
+        # real time so a tick that has to hop a thread still completes.
+        ticks = clock.ticks
+        while clock.ticks == ticks and _REAL_TIME.monotonic() < deadline:
+            waits += 1
+            await _REAL_ASYNCIO.sleep(0.001)
     raise AssertionError(
         f"the reaper stopped sleeping: {seconds}s of fake time needed, "
-        f"{clock.now - start:.1f}s elapsed in {limit_turns} loop turns"
+        f"{clock.now - start:.1f}s elapsed after {waits} waits and "
+        f"{budget_s:.0f}s of real time"
     )
 
 
@@ -372,30 +404,43 @@ def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 async def test_the_keep_alive_window_is_honoured_and_the_build_check_still_fires(
     monkeypatch: pytest.MonkeyPatch, keep_alive: None
 ) -> None:
-    """300 s of fake time, then the ordinary idle exit — on a 3 s base grace.
+    """The window is honoured, and it still ENDS — on a base grace beneath it.
 
-    The negative half is the load-bearing one: the runtime must still be
-    resident long past the 3 s it would have left on before this change. The
-    positive half is what stops a residency policy from becoming a leak: an exit
-    that never arrives fails this test too.
+    REAL SECONDS, SMALL WINDOW, and that is this repo's existing convention for a
+    grace a cell has to watch (``test_process_reaper`` uses 0.08-0.2 s ones). A
+    fake clock would have to fake the drain's whole tick, and it does not: the
+    tick reaches real machinery, so a pumped fake clock either overshot this
+    assertion or stalled the reaper (measured both ways on CI, 2026-09-23). The
+    window's VALUE is pinned where it is decided — ``_drain_window_s`` on a
+    once-viewed runtime below, and the registry defaults test — while this cell
+    pins the behaviour: the runtime stays past a base grace that has already
+    expired, and then leaves.
+
+    The negative half is the load-bearing one: it must be resident past the
+    ``GRACE`` it would have left on before this change. The positive half is what
+    stops a residency policy from becoming a leak: an exit that never arrives
+    fails this test too, on a real deadline rather than on a stopped clock.
     """
-    clock = _fake_clock(monkeypatch)
-    runtime = FakeRuntime(detached_at=time.time() - 1.0)
-    monkeypatch.setattr(child_mod, "_keep_alive_candidates", lambda: [(999.0, runtime._record.pid)])
+    GRACE = 0.4
+    WINDOW = 1.6
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", str(GRACE))
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: WINDOW)
+    runtime = FakeRuntime(detached_at=time.time())
+    monkeypatch.setattr(
+        child_mod, "_keep_alive_candidates", lambda: [(time.time(), runtime._record.pid)]
+    )
     handle = FakeHandle()
     stop = asyncio.Event()
-    start = clock.now
+    started = time.monotonic()
     task = asyncio.ensure_future(_reaper(handle, runtime, stop))
 
-    await _pump_until(clock, 100.0, start=start, until=stop.is_set)
-    assert not stop.is_set(), "the runtime left inside its keep-alive window"
+    await asyncio.sleep(GRACE * 2)  # twice the base grace: it would be gone by now
+    assert not stop.is_set(), "the runtime left on the base grace, not the window"
     assert not handle.disposed
 
-    await _pump_until(clock, 295.0, start=start, until=stop.is_set)
-    assert not stop.is_set(), "the window ended at 295 s, not 300"
-
-    await _pump_until(clock, 310.0, start=start, until=stop.is_set)
-    assert stop.is_set(), "the keep-alive never ended: the window is a leak"
+    await asyncio.wait_for(stop.wait(), 5.0)
+    assert 0.5 * WINDOW <= time.monotonic() - started < 5.0, "not the keep-alive window"
     assert handle.disposed and runtime.closed
     assert await task is True
 
@@ -463,21 +508,35 @@ async def test_the_build_refresh_fires_inside_the_keep_alive_window(
     from local_operator.update import BuildStamp
 
     new_build = BuildStamp(version="9.9.9", source_ref="deadbeef1234567")
-    clock = _fake_clock(monkeypatch)
-    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 5.0)
-    monkeypatch.setenv("LOP_BUILD_STAGGER_S", "0.5")
-    monkeypatch.setattr(child_mod, "_build_changed", lambda _boot: new_build)
+    # REAL SECONDS AGAIN, for the reason the window cell above records: the
+    # refresh path is exactly the part of the tick that touches real machinery.
+    # The build moves AFTER the drain has started, so this proves the check keeps
+    # running INSIDE the window rather than only at its start.
+    WINDOW = 30.0
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.2")
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.05)
+    monkeypatch.setenv("LOP_BUILD_STAGGER_S", "0.05")
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: WINDOW)
+    settled: list[Any] = [None]
+    monkeypatch.setattr(child_mod, "_build_changed", lambda _boot: settled[0])
 
-    runtime = FakeRuntime(detached_at=time.time() - 1.0, boot=BuildStamp(version="1.0.0"))
-    monkeypatch.setattr(child_mod, "_keep_alive_candidates", lambda: [(999.0, runtime._record.pid)])
+    runtime = FakeRuntime(detached_at=time.time(), boot=BuildStamp(version="1.0.0"))
+    monkeypatch.setattr(
+        child_mod, "_keep_alive_candidates", lambda: [(time.time(), runtime._record.pid)]
+    )
     handle = FakeHandle()
     stop = asyncio.Event()
-    start = clock.now
+    started = time.monotonic()
     task = asyncio.ensure_future(_reaper(handle, runtime, stop))
 
-    await _pump_until(clock, 60.0, start=start, until=stop.is_set)
-    assert stop.is_set(), "a newer build on disk did not end the keep-alive window"
-    assert clock.now - start < 300.0, "it waited out the window instead of refreshing"
+    await asyncio.sleep(0.4)
+    assert not stop.is_set(), "the runtime left before the build moved"
+    settled[0] = new_build
+
+    await asyncio.wait_for(stop.wait(), 10.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < WINDOW, "it waited out the window instead of refreshing"
     assert runtime.retiring and runtime.retiring[0][0] == "stale-build", runtime.retiring
     assert handle.disposed and runtime.closed
     assert await task is True
