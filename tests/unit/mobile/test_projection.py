@@ -2525,10 +2525,18 @@ def test_a_roster_row_with_no_age_publishes_no_age() -> None:
         )
 
     class Registry:
-        """The three members the roster fold reads, answering like the real one."""
+        """The members the roster fold reads, answering like the real one.
+
+        ``roster_pass`` returns ``self`` because the fold now reads one pass;
+        this fake IS the pass, so the same three members answer (see
+        ``SubagentComms.roster_pass``).
+        """
 
         def __init__(self, age_s: float | None) -> None:
             self._age = age_s
+
+        def roster_pass(self) -> "Registry":
+            return self
 
         def roster(self) -> list[Any]:
             return [lifecycle(self._age)]
@@ -2546,3 +2554,107 @@ def test_a_roster_row_with_no_age_publishes_no_age() -> None:
     dated = make_fold()
     dated.set_subagent_details(Registry(12.0))
     assert dated.projection.subagents[0].elapsed_s == pytest.approx(12.0)
+
+
+def test_set_subagent_details_reads_ONE_pass_and_publishes_the_same_fields() -> None:
+    """The fold must not walk the registry once per collection.
+
+    ``set_subagent_details`` runs on EVERY root event (``serving._refresh_state``),
+    and each walk is a synchronous read of a registry capped at 256 records, so
+    three walks per event — one of which was quadratic underneath, see
+    ``SubagentComms.RosterPass`` — was event-loop work paid on the turn's critical
+    path. The spy pins the shape: exactly one ``roster_pass()`` and no calls to
+    the single-walk methods at all.
+    """
+
+    class Jobs:
+        def __init__(self) -> None:
+            self.rows = {
+                "running": SimpleNamespace(
+                    status="running",
+                    start_time=1_000.0,
+                    agent_role="coder",
+                    model_label="test/child",
+                    latest_details={"progress": "reading"},
+                    result_text=None,
+                    error_text=None,
+                ),
+                "settled": SimpleNamespace(
+                    status="completed",
+                    start_time=900.0,
+                    agent_role="reviewer",
+                    model_label="test/child",
+                    latest_details={},
+                    result_text="review posted",
+                    error_text=None,
+                ),
+            }
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    class Spy(SubagentComms):
+        """Counts the walks, so "one pass" is asserted rather than assumed."""
+
+        def __init__(self, session: Any) -> None:
+            super().__init__(session)
+            self.calls: dict[str, int] = {"roster_pass": 0, "roster": 0, "nodes": 0, "job": 0}
+
+        def roster_pass(self, now: Any = None) -> Any:
+            self.calls["roster_pass"] += 1
+            return super().roster_pass(now)
+
+        def roster(self) -> Any:
+            self.calls["roster"] += 1
+            return super().roster()
+
+        def nodes(self) -> Any:
+            self.calls["nodes"] += 1
+            return super().nodes()
+
+        def job(self, job_id: str) -> Any:
+            self.calls["job"] += 1
+            return super().job(job_id)
+
+    session = SimpleNamespace(jobs=Jobs())
+    comms = Spy(cast(Session, cast(Any, session)))
+    comms.record_launch("running", "runner", prompt="go and read")
+    comms.record_launch("settled", "settler", prompt="review the diff")
+    # A live child, so one row lands as running and the other as completed. The
+    # cast is for the ``ChildSession`` protocol's shape, not for the value: the
+    # fold only reads ``session_id`` off it.
+    comms._records["running"].child = cast(Any, SimpleNamespace(session_id="child-session"))
+    comms._records["settled"].outcome = "completed"
+
+    fold = make_fold()
+    # The two ``record_launch`` calls above resolve a job row through the public
+    # ``job()``; the count below is about the FOLD, so it starts from here.
+    comms.calls = dict.fromkeys(comms.calls, 0)
+
+    fold.set_subagent_details(comms)
+
+    assert comms.calls == {"roster_pass": 1, "roster": 0, "nodes": 0, "job": 0}, (
+        "the fold must read one pass: a second walk here is per-event event-loop "
+        f"work, and this one runs on every root event. Got {comms.calls}"
+    )
+
+    rows = {row.job_id: row for row in fold.projection.subagents}
+    assert set(rows) == {"running", "settled"}
+    assert rows["running"].label == "runner"
+    assert rows["running"].status == "running"
+    assert rows["running"].activity == "reading"
+    assert rows["running"].prompt == "go and read"
+    assert rows["running"].agent == "coder"
+    assert rows["running"].model_label == "test/child"
+    # The child's age comes off the pass's ``ChildInfo``, not the row's default.
+    assert rows["running"].elapsed_s is not None
+    assert rows["settled"].label == "settler"
+    assert rows["settled"].status == "completed"
+    assert rows["settled"].result_text == "review posted"
+    assert rows["settled"].activity == ""
+    # A second refresh must publish the same rows rather than falling back to
+    # ``SubagentRow``'s running default for a settled child.
+    fold.set_subagent_details(comms)
+    again = {row.job_id: row for row in fold.projection.subagents}
+    assert again["settled"].status == "completed"
+    assert again["settled"].result_text == "review posted"

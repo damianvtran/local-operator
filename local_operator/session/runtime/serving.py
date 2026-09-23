@@ -6466,12 +6466,17 @@ class ServingSessionHandle(SessionHandle):
         published on the record because a subagent graph is in-process state no
         other session can observe.
 
-        The roster is ONE flat read: ``SubagentComms.nodes()`` already contains
-        every nested descendant, so counting is a filter over that list and must
-        never have a recursive walk added on top — that would double count every
-        node below depth 0. The statuses counted as running mirror the ones
-        ``info.collect`` uses, so the record and this session's own tree cannot
-        disagree.
+        The roster is ONE linear read: ``SubagentComms.status_counts()`` counts
+        every nested descendant in a single pass over the shared registry, so
+        counting is a filter over that histogram and must never have a
+        recursive walk added on top — that would double count every node below
+        depth 0. (The count used to be a filter over the ``nodes()`` LIST, which
+        read as "one flat read" and was not: ``nodes()`` -> ``node()`` ->
+        ``_describe()`` -> ``_live_twin()`` walked every record once per record,
+        so this publisher was quadratic in the roster and ran on the event loop
+        once per root event. See ``RosterPass``.) The statuses counted as
+        running mirror the ones ``info.collect`` uses, so the record and this
+        session's own tree cannot disagree.
 
         ``(None, None)`` on an unreadable roster rather than ``(0, 0)``: an
         unanswerable probe is not a measurement of zero, and the reader's
@@ -6482,17 +6487,12 @@ class ServingSessionHandle(SessionHandle):
             comms = getattr(session, "subagent_comms", None)
             if comms is None:
                 return (None, None)
-            nodes = comms.nodes()
+            counts = comms.status_counts()
         except Exception:  # noqa: BLE001 — an unhealthy session still publishes
             logger.debug("could not read the subagent roster", exc_info=True)
             return (None, None)
-        running = queued = 0
-        for node in nodes:
-            status = str(getattr(node, "status", "") or "")
-            if status in RUNNING_SUBAGENT_STATUSES:
-                running += 1
-            elif status == "queued":
-                queued += 1
+        running = sum(counts.get(status, 0) for status in RUNNING_SUBAGENT_STATUSES)
+        queued = counts.get("queued", 0)
         return (running, queued)
 
     def _publish_subagents(self) -> None:
@@ -6501,8 +6501,13 @@ class ServingSessionHandle(SessionHandle):
         Driven from ``_publish_busy`` — i.e. from ``_notify`` — because a
         subagent launching or settling IS a session event, so the transition
         publish is sub-second under any real workload while the 15 s heartbeat
-        floor bounds a missed publish. ``set_subagents`` de-duplicates, so the
-        steady-state cost is one dict walk plus two comparisons per event.
+        floor bounds a missed publish. ``set_subagents`` de-duplicates, so a
+        publish that changes nothing costs one comparison per side.
+
+        The walk behind the counts is linear, and saying so is the point: it
+        was quadratic, and the earlier claim here ("one dict walk plus two
+        comparisons per event") was what stopped anyone looking. See
+        :meth:`subagent_counts` and ``SubagentComms.RosterPass``.
         """
         server = self._registrant
         setter = getattr(server, "set_subagents", None)
@@ -6582,9 +6587,10 @@ class ServingSessionHandle(SessionHandle):
         # registry in ``SubagentComms`` is the only place that knows it. Both
         # hosts must therefore agree about the same row, or a runtime-hosted
         # session 404s every child transcript while a TUI-hosted one serves it.
-        # The cost is the one the TUI already pays per folded event (one
-        # registry walk plus a bounded copy); no child transcript ever leaves
-        # with it.
+        # The cost is the one the TUI already pays per folded event: one linear
+        # registry pass, plus a job-row lookup and the outcome/error text caps
+        # per node (both listed as unaddressed in the PR). No child transcript
+        # ever leaves with it.
         comms = getattr(self._session, "_subagent_comms", None)
         if comms is not None:
             self._fold.set_subagent_details(comms)

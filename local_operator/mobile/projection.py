@@ -2075,9 +2075,16 @@ class ProjectionFold:
         called for every root event, so it is deliberately restricted to the
         in-memory registry. Child history and attachment hydration belongs to
         ``TuiSessionHandle``'s worker path.
+
+        What it reads is ONE :meth:`SubagentComms.roster_pass`: the roster rows,
+        the nodes and the job row behind each node all come off a single linear
+        walk. Walking the registry three times here — and ``nodes()`` was itself
+        quadratic, see ``RosterPass`` — was the per-event cost this removes; a
+        fourth walk added below would put it straight back.
         """
-        roster = {item.job_id: item for item in comms.roster()}
-        nodes = comms.nodes()
+        read = comms.roster_pass()
+        roster = {item.job_id: item for item in read.roster()}
+        nodes = read.nodes()
         by_id = {node.job_id: node for node in nodes}
         children: dict[str | None, list[Any]] = {}
         for node in nodes:
@@ -2111,7 +2118,7 @@ class ProjectionFold:
             return lineage
 
         for node in nodes:
-            job = comms.job(node.job_id)
+            job = read.job(node.job_id)
             lifecycle = roster.get(node.job_id)
             row = self._subagents.get(node.job_id)
             if row is None:
