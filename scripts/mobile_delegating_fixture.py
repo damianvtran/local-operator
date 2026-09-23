@@ -35,6 +35,7 @@ hand-written JSON fixture.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import uuid
 
@@ -154,12 +155,36 @@ def _seed_unread(session_id: str) -> None:
     AttentionStore().publish(f"session/{session_id}", str(uuid.uuid4()), "a1", "complete")
 
 
+#: The variable name a caller may use instead of the second argument. This is a NAME,
+#: never a value, and it is written out in both this file and the capture module on
+#: purpose: they are siblings, and importing one from the other would drag
+#: Chrome/CDP code into a fixture that only serves a daemon.
+FIXTURE_PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
+
+
+def required_password(argv_rest: list[str]) -> str:
+    """The per-run password, or a refusal that names how to supply one.
+
+    THERE IS NO DEFAULT AND NO GENERATED FALLBACK, and that is the point: a fixed
+    fallback is a reusable credential the moment two runs share it, which is exactly
+    how the previous value became one that had to be rotated. The caller — the
+    capture script, which mints one per run with ``secrets.token_urlsafe`` — supplies
+    it, so the two ends cannot disagree and nothing here prints it.
+    """
+    value = argv_rest[0] if argv_rest else os.environ.get(FIXTURE_PASSWORD_ENV, "")
+    if not value:
+        raise SystemExit(
+            "this fixture needs a per-run password: pass it as the second argument, or "
+            f"set {FIXTURE_PASSWORD_ENV}. Generate one with "
+            "python -c 'import secrets;print(secrets.token_urlsafe(16))' and export it. "
+            "It is never defaulted and never printed by this script."
+        )
+    return value
+
+
 async def main() -> None:
-    # The password comes from the capture script (`scripts.mobile_delegating_shot.py`
-    # passes the one it types on the login form), so the two cannot disagree about it
-    # and no credential-shaped literal lives in this file at all.
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4188
-    password = sys.argv[2] if len(sys.argv) > 2 else "fixture-password"
+    password = required_password(sys.argv[2:])
     daemon = MobileDaemon(port=port, password=password, dial_registrants=False)
     for session_id, pid, name, counts, flags in ROWS:
         record = SessionRecord(
