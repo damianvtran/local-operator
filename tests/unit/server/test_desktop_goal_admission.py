@@ -1073,14 +1073,18 @@ async def test_the_goal_flags_start_no_turn_through_the_route(desktop) -> None:
     turn would spend a provider call on a goal the user has just finished.
     """
     client, remote, _bridge = desktop
-    for args in ("--done", "--dismiss", "delete"):
+    for index, args in enumerate(("--done", "--dismiss", "delete")):
         remote.receipt = {
             "kind": "notice",
             "text": "goal done: Preserve one identity",
             "style": "info",
             "data": {"stored": "Preserve one identity", "status": "done"},
         }
-        response = await _goal(client, args)
+        # A fresh id per form: the receipt store refuses one id used with two
+        # different bodies (that refusal is a different rule's test), and these
+        # three forms are three different bodies.
+        request_id = f"22222222-2222-4222-8222-{index:012d}"
+        response = await _goal(client, args, request_id=request_id)
 
         assert response.status_code == 200, response.text
         assert response.json()["result"]["result"]["admission"] is None, args
