@@ -230,6 +230,28 @@ async def _never():
     raise AssertionError("takeover was not expected")
 
 
+async def _dial_daemon(record):  # noqa: ANN001, ANN202
+    """Open + auth a DAEMON connection: the client that RENDERS a projection.
+
+    WHY THIS FILE DIALS ONE. A full-TUI attach no longer receives a projection at
+    all — its welcome is the identity-only ``welcome`` frame
+    (``RuntimeServer._slim_welcome_frame``) — so a welcome-size case driven
+    through ``AttachedSession.connect`` would be asserting about a payload the
+    operator's terminal never gets. The daemon is the client that does render one,
+    and it is the one the ceiling's substitution exists for.
+
+    The reader's limit is the ceiling's own: past it, ``readline`` raises exactly
+    as the daemon's control reader does, so an unfitted frame cannot pass here by
+    being read anyway.
+    """
+    reader, writer = await asyncio.open_connection(
+        "127.0.0.1", record.control_port, limit=_MAX_LINE_BYTES + 1
+    )
+    writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
+    await writer.drain()
+    return reader, writer
+
+
 def test_ten_jobs_at_the_cap_overflow_the_line_limit_without_the_fix() -> None:
     """The regression this guards is real, not hypothetical.
 
@@ -1312,7 +1334,9 @@ async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
     ``AttachedSession.connect`` — the sidebar's own attach path — with every
     frame the server is about to write recorded, so "no unreadable frame" is
     asserted on what actually left the handoff point rather than on a size
-    computed here.
+    computed here. The roster's own assertions are read off a DAEMON dial: a
+    full-TUI attach is no longer handed a projection to be fatal, so the client
+    that renders one is the one this case can still be about.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -1347,9 +1371,11 @@ async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
 
     registrant._send_to = recording_send  # type: ignore[assignment]
     viewer = None
+    daemon_writer = None
     try:
+        record = await _record(tmp_path)
         viewer = await AttachedSession.connect(
-            await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         # The attach IS the assertion: before the fix this raised "owner sent a
         # frame too large to read" on every attempt.
@@ -1362,10 +1388,23 @@ async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
         ]
         assert not oversize, f"the owner offered the wire an unreadable frame: {oversize}"
 
+        # AND THE ATTACH CANNOT MEET THIS FRAME AT ALL ANY MORE: its welcome is
+        # identity-only, so there is no roster on it to be unfittable. That is the
+        # other half of the fix, and it is why the case below is driven through
+        # the DAEMON — the client that does render a projection, and the one the
+        # ceiling's own case is about.
+        attach_welcome = next(frame for frame in written if frame.get("op") == "welcome")
+        assert attach_welcome["data"]["subagents"] == []
+
         # The roster survived as a roster — the shed tier, not the identity-row
         # tier, is what should have fitted this frame, and every row keeps the
         # parent edge the shed fields are derived from.
-        welcome = next(frame for frame in written if frame.get("op") == "projection")
+        daemon_reader, daemon_writer = await _dial_daemon(record)
+        welcome = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=5))
+        assert welcome["op"] == "projection", welcome
+        assert (
+            _line_bytes(welcome) <= _MAX_LINE_BYTES
+        ), "the daemon was handed a welcome its own reader cannot read"
         rows = welcome["data"]["subagents"]
         assert len(rows) == 256
         assert all(row.get("peer_ids") == [] for row in rows)
@@ -1374,6 +1413,8 @@ async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
     finally:
         if viewer is not None:
             await viewer.dispose()
+        if daemon_writer is not None:
+            daemon_writer.close()
         registrant.close()
 
 
@@ -1392,9 +1433,11 @@ async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
     connection. The session stays OPENABLE instead of dying on a line nobody can
     read.
 
-    Driven through ``AttachedSession.connect`` rather than a synthetic peer,
-    because a substitute that cannot satisfy the client's own identity check
-    would not be worth having.
+    Driven through ``AttachedSession.connect`` rather than a synthetic peer, because
+    a substitute that cannot satisfy the client's own identity check would not be
+    worth having — and, since a full-TUI attach now receives no projection at all,
+    the substitution itself is observed on the DAEMON, which is the client that
+    renders one (``_dial_daemon``).
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -1421,6 +1464,7 @@ async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
 
     registrant._readable_frame = recording_readable  # type: ignore[assignment]
     viewer = None
+    daemon_writer = None
     try:
         # The precondition, asserted rather than assumed: this roster is over the
         # line limit even after EVERY cap tier, which is what makes the welcome
@@ -1434,15 +1478,31 @@ async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
         ), "the fixture must be unfittable after every tier, including the shed"
         assert all("label" in row for row in capped["subagents"])
 
+        record = await _record(tmp_path)
         with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
             viewer = await AttachedSession.connect(
-                await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+                record, "s1", config_dir=tmp_path, takeover_factory=_never
             )
+        # THE ATTACH NO LONGER MEETS THIS FRAME AT ALL, so the ceiling has nothing
+        # to do for it: its welcome is the identity-only payload already, and a
+        # session that cannot be handed an unfittable projection cannot be killed
+        # by one. That is a second half of the fix, and it is why the assertion
+        # below moves to the client that DOES render a projection.
+        assert not viewer.is_cold
+        assert substitutions == [], (
+            "the attach was handed a projection for the ceiling to substitute — its "
+            "welcome is supposed to carry no payload at all"
+        )
+
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            daemon_reader, daemon_writer = await _dial_daemon(record)
+            welcome = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=5))
         # The client read a frame it could parse and identify, so the substitute
         # reached the wire; the identity-only payload is what it was.
-        assert not viewer.is_cold
         assert substitutions, "the ceiling never ran on the welcome"
-        welcome = substitutions[0]
+        assert (
+            welcome == substitutions[0]
+        ), "the frame the ceiling decided on is not the frame the peer read"
         assert welcome["op"] == "projection"
         assert welcome["data"]["session_id"] == "s1"
         assert welcome["data"]["conversation_name"] == "osworld"
@@ -1450,6 +1510,9 @@ async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
         assert welcome["data"]["subagents"] == []
         assert welcome["data"]["transcript"] == []
         assert welcome["data"]["pending"] is None
+        assert (
+            _line_bytes(welcome) <= _MAX_LINE_BYTES
+        ), "the substitute itself is unreadable, which is the defect it exists to fix"
         # The WELCOME branch is the one that ran: a repaint would have been
         # dropped instead (see the family test), and its log line says so.
         assert "refusing to write an unreadable projection" in caplog.text
@@ -1457,6 +1520,8 @@ async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
     finally:
         if viewer is not None:
             await viewer.dispose()
+        if daemon_writer is not None:
+            daemon_writer.close()
         registrant.close()
 
 
