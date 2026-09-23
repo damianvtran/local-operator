@@ -19396,11 +19396,20 @@ async def execute_ask(
         # a user decision — and it must not be reported as one, or the model
         # would "fall back to its recommendation" on a session where the user
         # was never shown anything.
+        #
+        # IT MUST ALSO CLAIM NOTHING ABOUT WHO IS AT A SCREEN. It used to read
+        # "No interactive surface is attached to this session, so the user cannot
+        # be asked", and that sentence was repeated into ``hub`` messages by
+        # parents that had a perfectly good surface attached — an absent HOOK is
+        # a fact about this process, not about the operator. The condition being
+        # reported is the missing wiring, so the text names that and what follows
+        # from it.
         return _error(
             tool_call_id,
             "ask",
-            "No interactive surface is attached to this session, so the user cannot "
-            "be asked. Decide without them.",
+            "this host has no way to present a question to a person — no ask hook is "
+            "wired into this session (a subagent, an `exec` run and a scheduler run "
+            "have none), so the user cannot be asked. Decide without them.",
         )
     answers = await ask_user(params.questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):

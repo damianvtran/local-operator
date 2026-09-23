@@ -2425,6 +2425,159 @@ async def test_a_subagent_inherits_the_operators_instructions(
     assert "<user_instructions>" in blocks[0]
 
 
+def _session_state_rows(session: Session) -> list[Any]:
+    """Every ``[session-state]`` custom row this session's transcript holds.
+
+    Read from the real journal rather than from a bookkeeping flag, because the
+    property under test IS "no row was written" — only the journal can say that.
+    """
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if str(entry.payload.get("custom_type", "")) == "session_state"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fifty_focus_changes_journal_no_session_state_row(tmp_config_dir: Path) -> None:
+    """Focus churn is FREE at the journal, not only in the block bytes.
+
+    The probe is re-read every turn and it reads ATTACHMENT, so a window being
+    raised and lowered fifty times changes nothing it can see: block 3 stays
+    byte-identical, ``_system_state_delta`` returns {}, and no row reaches the
+    transcript. A row per transition is exactly the token accumulation the
+    design forbids, and the block-bytes test in ``test_prompts_api`` cannot see
+    it — this drives the real publication path (``_prepare_system_blocks``) that
+    writes the rows.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        reads = {"n": 0}
+
+        def flap() -> bool:
+            # Something really did change on every read — the window moved. The
+            # answer Tier A gives did not, because focus is not an input to it.
+            reads["n"] += 1
+            return True
+
+        session._goal_state.interactive_probe = flap
+
+        first = await session._prepare_system_blocks()
+        for _ in range(50):
+            assert (await session._prepare_system_blocks())[3] == first[3]
+
+        assert reads["n"] > 50, "the probe was never re-read across those turns"
+        # The returned blocks are the frozen prefix, so the byte equality above
+        # is nearly free to satisfy — the load-bearing assertion is this one: a
+        # change the model cannot see must not write a row it has to read back.
+        assert _session_state_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir: Path) -> None:
+    """A REAL state change costs ONE row, and is silent afterwards.
+
+    The other half of the bound. The block is allowed to move when the answer
+    moves — a session whose pane detaches is being told something true — and the
+    cost is bounded by the number of TRANSITIONS, not by the number of turns.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        attached = {"value": True}
+        session._goal_state.interactive_probe = lambda: attached["value"]
+
+        first = await session._prepare_system_blocks()
+        attached["value"] = False
+        moved = await session._prepare_system_blocks()
+        # The RETURNED blocks are the frozen prefix, so both calls hand back the
+        # same bytes: a live change is journalled as a `[session-state]` delta,
+        # not repainted into the prefix. The row is the observation.
+        assert moved == first
+        for _ in range(20):
+            await session._prepare_system_blocks()
+
+        rows = _session_state_rows(session)
+        assert len(rows) == 1
+        payload = str(rows[0].payload)
+        assert "<interactivity>" in payload
+        assert "No interface is attached to this session" in payload
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
+    tmp_config_dir: Path,
+) -> None:
+    """A child renders the PARENT's answer, read live off the parent's holder.
+
+    A child Session is built in-process and holds no control socket and no
+    registrant, so "is an interface attached" is not a question it can answer —
+    its only channel to a person is ``hub`` -> parent. Its provider passed no
+    ``interactive=`` argument at all, so EVERY child rendered the ``True``
+    default whatever the truth was: the same defect from the other side, and the
+    reason a parent's false "nobody is watching a screen" reached
+    ``post-analyst`` through ``hub`` unchecked.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    async def child_tail(attached: bool) -> str:
+        parent = await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        )
+        assert isinstance(parent, Session)
+        parent._goal_state.interactive_probe = lambda: attached
+        try:
+            child = await _build_child_session(
+                label="probe",
+                prompt="do a thing",
+                parent_session=parent,
+                model_spec=None,
+                job_id=f"probe-job-{attached}",
+            )
+            try:
+                blocks = child._system_blocks_provider()
+                if inspect.isawaitable(blocks):
+                    blocks = await blocks
+                return str(blocks[-1])
+            finally:
+                await child.dispose()
+        finally:
+            await parent.dispose()
+
+    attached_body = await child_tail(True)
+    assert "<interactivity>" in attached_body
+    assert "An interface is attached to this session" in attached_body
+    assert "No interface is attached to this session" not in attached_body
+
+    unattached_body = await child_tail(False)
+    assert "<interactivity>" in unattached_body
+    assert "No interface is attached to this session" in unattached_body
+    assert "An interface is attached to this session" not in unattached_body
+
+
 def test_a_bom_does_not_survive_into_the_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

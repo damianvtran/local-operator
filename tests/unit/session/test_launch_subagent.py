@@ -1194,7 +1194,13 @@ async def test_child_without_parent_mcp_still_builds(tmp_path, monkeypatch):
     child = await build_child(parent)
 
     assert child.mcp_manager is None
-    assert knowledge_tail(child) == "<skills/>"
+    tail = knowledge_tail(child)
+    # The skills listing is still the head of the tail; what trails it now is the
+    # interactivity block, which is the child being told its PARENT's interface
+    # state (a child used to render the ``True`` default unconditionally).
+    assert tail.startswith("<skills/>")
+    assert "<interactivity>" in tail
+    assert "<mcps>" not in tail
     await child.dispose()
     await parent.dispose()
 
@@ -2127,9 +2133,9 @@ async def test_a_parent_with_no_configured_servers_gives_an_empty_tail(tmp_path,
 
     child = await build_child(parent)
 
-    assert knowledge_tail(child) == (
-        "<mcps>Find MCP tools: `mcp://?search=terms`; list: `mcp://`.</mcps>"
-    )
+    tail = knowledge_tail(child)
+    assert tail.startswith("<mcps>Find MCP tools: `mcp://?search=terms`; list: `mcp://`.</mcps>")
+    assert "<interactivity>" in tail
     assert resolve(child, "mcp://nope") == "Unknown MCP server: nope. Available: (none)"
     await child.dispose()
     await parent.dispose()

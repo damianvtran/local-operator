@@ -631,6 +631,16 @@ def build_system_blocks(
     not a per-turn instruction competing with the live conversation. Keeping
     it out of the tail also stops a long instructions file from being re-sent
     ahead of every volatile change.
+
+    ``interactive`` is TIER A — "an interface is attached that can PRESENT a
+    question" — and never "somebody is looking right now". The two are different
+    questions with different consumers, and this one is deliberately the weaker:
+    focus flaps with window z-order, and this value selects which
+    ``<interactivity>`` body rides the tail, so a focus-keyed answer would move a
+    block inside the persisted prefix every time a window was raised. The
+    runtime's attachment predicate is the source; see
+    ``RuntimeServer.attached_surfaces`` and
+    ``docs/design/attached-interface-signal.md``.
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
@@ -765,32 +775,61 @@ def build_system_blocks(
         # the more recent, more specific instruction, and later placement is
         # how the model reads precedence when the two briefs disagree.
         tail = f"{tail}\n\n<agent>\n{agent_brief.strip()}\n</agent>"
-    if not interactive:
-        # WHO CAN ANSWER, stated once. A detached session has nobody at a
-        # screen, so a question costs a parked gate (holding the runtime
-        # resident) and gets no answer — the model needs to know that BEFORE
-        # it decides to ask, not after the gate times out.
+    if interactive:
+        # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
+        # one. A question asked now is answered when the operator LOOKS, not when
+        # they are looking — so an attached session has to be told its question
+        # WILL be presented. Rendering nothing there left silence to be read as
+        # "probably nobody is there", which is the default reading this block
+        # exists to displace.
         #
-        # A single recomputed statement, deliberately, not an event: a row
-        # per attach/detach would grow the transcript without bound for a
-        # user who reattaches often, which is exactly the token accumulation
-        # this is meant to avoid. This block is rebuilt at turn start, so N
-        # attach/detach cycles cost the same as zero.
+        # BOTH BODIES ARE CONSTANTS: no timestamp, no session id, no count, no
+        # surface kind, and no word about who is watching. That last omission is
+        # the fix, not a tidy-up: the block used to claim "nobody is watching a
+        # screen" on evidence that could not support it (a machine-wide record
+        # unable to NAME the conversation was read as evidence against the
+        # session), and it is the sentence models parroted into `hub` messages
+        # while the operator was reading the session. What the block may state is
+        # what was measured — whether a surface is attached — and its consequence.
+        #
+        # Focus is not an input either (see ``RuntimeServer.attached_surfaces``),
+        # which is what makes the bytes stable: fifty window focus changes produce
+        # the same block, so the persisted prefix does not move and no transcript
+        # row is written. This block is rebuilt at turn start, so N attach/detach
+        # cycles cost exactly what zero cost — a row per transition is the token
+        # accumulation this deliberately avoids.
         tail = (
             f"{tail}\n\n<interactivity>\n"
-            "No interactive surface is attached to this session right now: "
-            "nobody is watching a screen, so a question to the user cannot be "
-            "answered until someone reopens it.\n\n"
-            "- Prefer to PROCEED with what you have, or finish the turn with a "
-            "clear statement of what you would have asked, over calling `ask`.\n"
-            "- That statement is a decision you already took and the fact that "
-            "would change it, not a question left hanging: with nobody at a "
-            "screen a prose question is even less answerable than usual.\n"
-            "- Do not take an irreversible or destructive action to avoid "
-            "asking; when the choice genuinely needs a person, stop and say so "
-            "— that is cheaper than a wrong guess.\n"
-            "- The user will read this conversation when they return, so write "
-            "for someone catching up, not for someone watching live.\n"
+            "An interface is attached to this session, so a question you ask WILL be\n"
+            "presented to the operator: `ask` puts it on that surface and waits for the\n"
+            "answer, parked for hours if necessary.\n\n"
+            "- Ask when the answer is genuinely the operator's to give, and not otherwise.\n"
+            "- The question is presented even if nobody is looking at this exact moment. It\n"
+            "  waits; it is not lost. A slow answer is not a refusal, and it is not a reason\n"
+            "  to decide on the operator's behalf.\n"
+            "- Write for a reader who may answer minutes later: say what you need and what\n"
+            "  you will do with it.\n"
+            "</interactivity>"
+        )
+    else:
+        # The negative body deliberately drops "nobody is watching a screen": it
+        # is the exact false claim the incident turned on, and the fact actually
+        # measured is the first sentence — no surface is attached — with its
+        # consequence for the turn.
+        tail = (
+            f"{tail}\n\n<interactivity>\n"
+            "No interface is attached to this session right now, so a question you ask cannot\n"
+            "be presented to anyone until a surface attaches: it waits, unread, and the turn\n"
+            "may block for hours.\n\n"
+            "- Prefer to PROCEED with what you have, or finish the turn with a clear\n"
+            "  statement of what you would have asked, over calling `ask`.\n"
+            "- That statement is a decision you already took and the fact that would change\n"
+            "  it, not a question left hanging.\n"
+            "- Do not take an irreversible or destructive action to avoid asking; when the\n"
+            "  choice genuinely needs a person, stop and say so — that is cheaper than a\n"
+            "  wrong guess.\n"
+            "- The operator will read this conversation when they return, so write for\n"
+            "  someone catching up, not for someone watching live.\n"
             "</interactivity>"
         )
     names = [name for name in (credentials or ()) if name]

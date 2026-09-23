@@ -1179,6 +1179,20 @@ class ToolContext(BaseModel):
     # was never shown the question. ``None`` means the tool is not advertised
     # at all (createIf), for the same reason ``wake_scheduler`` is.
     ask_user: AskUserFn | None = None
+    #: Live read of "an interface is attached to the SESSION this tool is running
+    #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
+    #: goal-state probe, so it is re-read per call rather than snapshotted per
+    #: turn. ``None`` means no session stands behind this context (a bare tool
+    #: test), which reads as attached: the pre-existing default, and the
+    #: direction every uncertain answer must fall (a wrong "attached" costs a
+    #: parked gate, a wrong "unattached" costs a question the operator was ready
+    #: to answer).
+    #:
+    #: NOT a synonym for :attr:`has_ui`, which says a host wired the tool surface
+    #: at all, and NOT evidence that anybody is looking right now: an attached
+    #: pane holds a question a person answers when they return. See
+    #: ``docs/design/attached-interface-signal.md``.
+    attached_probe: Callable[[], bool] | None = None
     # Optional host hook that makes a mid-session credential change VISIBLE to
     # the model (``Session.journal_credential_change``). The ``ask`` tool
     # stores secret answers through ``context.variables`` directly, so the
