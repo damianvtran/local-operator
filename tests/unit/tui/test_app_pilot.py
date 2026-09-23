@@ -2936,6 +2936,100 @@ async def test_ctrl_l_clears_and_resets() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["ctrl+d", "super+d"])
+async def test_quit_keys_join_attached_recovery_during_app_shutdown(
+    key: str, monkeypatch, tmp_path
+) -> None:
+    """The real empty-composer quit disposes an attached session before loop teardown."""
+    import local_operator.session.attached as attached_module
+    from local_operator.session.attached import AttachedSession
+
+    monkeypatch.setattr(attached_module, "find_runtime_record", lambda *args: (None, None))
+    monkeypatch.setattr(attached_module, "_RECOVERY_DIAL_CAP_S", 60.0)
+    monkeypatch.setattr(attached_module, "COLD_FALLBACK_S", 60.0)
+    retry_started = asyncio.Event()
+
+    async def no_takeover():
+        retry_started.set()
+        raise attached_module.SessionLeaseHeldError(tmp_path / "s1", 123)
+
+    session = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=no_takeover,
+        surface="desktop",
+    )
+    session._frontend_store = object()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+
+    async def no_retirement(session_arg) -> None:
+        del session_arg
+
+    monkeypatch.setattr(app, "_retire_unused_runtime", no_retirement)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._session = session
+        # Exercise the real disconnect callback, recovery loop and retry sleep;
+        # the attached facade remains the app's session throughout this test.
+        session._on_disconnected("owner exited")
+        recovery = session._recovery_task
+        assert recovery is not None
+        await asyncio.wait_for(retry_started.wait(), timeout=2)
+        # The failed takeover continues into the real retry delay; wait until
+        # the recovery task is actually parked there before Ctrl+D.
+        for _ in range(100):
+            if recovery.done() or recovery.get_coro().cr_await is not None:
+                break
+            await asyncio.sleep(0)
+        assert not recovery.done()
+        assert recovery.get_coro().cr_await is not None
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        await pilot.press(key)
+        await pilot.pause()
+        assert not app.is_running
+
+    assert recovery.done()
+    assert recovery.cancelled()
+    assert session._disposed
+
+
+@pytest.mark.asyncio
+async def test_empty_composer_accepts_textual_super_d_event() -> None:
+    """A delivered kitty-protocol Cmd+D chord follows the graceful exit route."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        await pilot.press("super+d")
+        await pilot.pause()
+
+        assert not app.is_running
+
+
+@pytest.mark.asyncio
+async def test_ctrl_d_in_nonempty_composer_still_deletes_forward() -> None:
+    """Ctrl+D remains TextArea's forward-delete when draft text is present."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.load_text("draft")
+        editor.cursor_location = (0, 0)
+        await pilot.pause()
+
+        await pilot.press("ctrl+d")
+
+        assert app.is_running
+        assert editor.text == "raft"
+
+
+@pytest.mark.asyncio
 async def test_session_disposed_on_exit() -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
@@ -9043,7 +9137,7 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
         ("!", "shell command"),
         ("option+left/right", "by word"),
         ("shift+tab", "reasoning effort"),
-        ("ctrl+d", "empty composer"),
+        ("ctrl/cmd+d", "empty composer"),
     ):
         row = next(
             (row for row in painted if row.strip().startswith(f"{key} ")),
@@ -11870,7 +11964,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+pageup",
             "ctrl+r",
             "esc",
-            "ctrl+d",
+            "ctrl/cmd+d",
         )
         # Matched against the KEY GUTTER, not against the whole help text. A
         # substring test over everything passes on a mention anywhere: the
@@ -11901,7 +11995,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+pageup",
             "ctrl+r",
             "esc",
-            "ctrl+d",
+            "ctrl/cmd+d",
         )
         keyed: list[str] = []
         capturing = False
