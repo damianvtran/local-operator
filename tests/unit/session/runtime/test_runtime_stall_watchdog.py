@@ -3860,6 +3860,7 @@ from local_operator.session.runtime import stall_watchdog
 bound = float(sys.argv[1])
 sentinel = pathlib.Path(sys.argv[2])
 in_flight = sys.argv[3] == "in-flight"
+serving_started = threading.Event()
 
 
 def stretch(seconds):
@@ -3903,17 +3904,27 @@ print(f"armed:{os.getpid()}", flush=True)
 def serving_tick():
     # A HEALTHY SERVING PLANE: a separate thread, reporting on its own cadence, so the
     # timer is re-armed toward the WORKLOAD plane's deadline rather than never being
-    # re-armed at all.
+    # re-armed at all. The first stamp releases the baseline snapshot below.
     while True:
         time.sleep(bound / 10)
         stall_watchdog.beat(stall_watchdog.SERVING)
+        serving_started.set()
 
 
-threading.Thread(target=serving_tick, name="serving-tick", daemon=True).start()
 # The stamp a starved tick leaves behind, and what teaches the bound WHICH thread's
 # frame to watch. Without it the plane has no loop thread and cannot be observed at
 # all, which is the behaviour the never-engaged cells already pin.
 stall_watchdog.beat(stall_watchdog.WORKLOAD)
+threading.Thread(target=serving_tick, name="serving-tick", daemon=True).start()
+assert serving_started.wait(), "the serving plane did not publish its first stamp"
+# Snapshot the REAL arm deadline after the serving beat has refreshed its plane: the
+# older workload stamp must remain the pin until executing frames earn an extension.
+# This gives the parent a structural before/after value even when a legitimate held
+# C-timer observation is present in the dump.
+deadline_path = stall_watchdog.deadline_path(os.getpid())
+sentinel.with_name("deadline-before.txt").write_text(
+    deadline_path.read_text(encoding="utf-8"), encoding="utf-8"
+)
 print(f"stretch:{stretch(bound * 3)}", flush=True)
 sentinel.write_text("the stretch returned", encoding="utf-8")
 sys.stdout.flush()
@@ -3930,8 +3941,10 @@ def test_an_executing_loop_with_a_step_in_flight_is_not_cut(tmp_path: Path) -> N
     longer than the bound, so its tick cannot run and no stamp arrives, while the
     work is legitimate — a step of this process's own is executing, which is the
     progress leg's second clause and the reason both legs abstain here. The child
-    returning zero and writing its sentinel establish that it completed; the sampled
-    workload frame records where it was executing rather than relying on a timing guess.
+    snapshots the real workload-pinned deadline after the serving plane's first beat;
+    the later sidecar must advance when moving workload frames earn an extension. A
+    held timer fire may still be recorded, so this checks the deadline decision rather
+    than confusing a fire observation with process exit.
     """
     sentinel = tmp_path / "returned.txt"
     result = _run_script(
@@ -3948,6 +3961,20 @@ def test_an_executing_loop_with_a_step_in_flight_is_not_cut(tmp_path: Path) -> N
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     dump = _dump_for(tmp_path, pid)
     text = dump.read_text(encoding="utf-8")
+    before_epoch_text, before_leg = (
+        (tmp_path / "deadline-before.txt").read_text(encoding="utf-8").split()
+    )
+    before_epoch = float(before_epoch_text)
+    after_epoch, after_leg = _deadline_record(tmp_path / "logs", pid)
+    assert before_leg == stall_watchdog.WORKLOAD, (
+        f"the baseline was not pinned by the initial workload stamp: "
+        f"{before_epoch_text} {before_leg}; {text[:2000]!r}"
+    )
+    assert after_epoch > before_epoch + 0.001, (
+        "the executing workload did not advance the real armed deadline: "
+        f"before={before_epoch_text} {before_leg}, after={after_epoch:.3f} {after_leg}; "
+        f"{text[:2000]!r}"
+    )
     assert stall_watchdog.WORKLOAD in stall_watchdog.executing_planes(
         pid, tmp_path / "logs"
     ), f"the dump does not record the workload loop executing: {text!r}"
