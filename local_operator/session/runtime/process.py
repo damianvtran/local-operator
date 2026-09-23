@@ -3564,6 +3564,19 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # ``_progress_probe``.
     global _live_handle
     _live_handle = handle
+    # AND THE BOUND MOVES WITH IT: from here the runtime is one something can judge, so
+    # the stall bound stops being the BOOT bound measured from the entry point and
+    # becomes the steady one measured from NOW, with BOTH planes stamped at this
+    # instant. The two halves are one mechanism — the boot bound above buys this line
+    # the time to arrive, and this line is what makes the steady bound mean what it was
+    # sized for — and the placement is the same boundary the lines below already draw:
+    # everything before the handle is published is boot (the probe answers "judge
+    # nothing" there), everything after it is a running runtime. It is NOT reached by the
+    # paths that return above — a lost lease, a failed construction — which is right:
+    # those never engaged, so a fire in their window still carries the boot bound, and
+    # the boot bound is the bound that covers a boot. Every in-process host reaches it
+    # too, where it is a documented no-op because ``arm`` never ran.
+    stall_watchdog.engage()
     _bind_boot_instrumentation(handle, session_id=resume or "", cwd=cwd)
 
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
