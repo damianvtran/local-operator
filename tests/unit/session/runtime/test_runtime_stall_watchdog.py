@@ -1813,7 +1813,7 @@ def test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD(
     assert f"When re-arming succeeds, a fired value of {boot:g}s" in boot_note, boot_note
     assert "means the runtime never engaged" in boot_note, boot_note
     assert "If engagement could not re-arm the timer" in boot_note, boot_note
-    assert "see the re-arm-failed message above" in boot_note, boot_note
+    assert "see the re-arm-failed message in this dump" in boot_note, boot_note
     assert "the timer may still fire at the boot bound" in boot_note, boot_note
     assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
         "a never-engaged held fire left a deadline sibling, so presence no longer "
@@ -1872,7 +1872,7 @@ def test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut(
     assert f"When re-arming succeeds, a fired value of {boot:g}s" in boot_note, boot_note
     assert "means the runtime never engaged" in boot_note, boot_note
     assert "If engagement could not re-arm the timer" in boot_note, boot_note
-    assert "see the re-arm-failed message above" in boot_note, boot_note
+    assert "see the re-arm-failed message in this dump" in boot_note, boot_note
     assert "the timer may still fire at the boot bound" in boot_note, boot_note
     assert not stall_watchdog.deadline_path(pid, tmp_path / "logs").exists(), (
         "a never-engaged fire left a deadline sibling, so presence no longer answers "
@@ -1936,7 +1936,7 @@ def test_engagement_rearm_failure_qualifies_a_boot_bound_fire(
     assert f"When re-arming succeeds, a fired value of {boot:g}s" in boot_note, boot_note
     assert "means the runtime never engaged" in boot_note, boot_note
     assert "If engagement could not re-arm the timer" in boot_note, boot_note
-    assert "see the re-arm-failed message above" in boot_note, boot_note
+    assert "see the re-arm-failed message in this dump" in boot_note, boot_note
     assert "the timer may still fire at the boot bound" in boot_note, boot_note
 
 

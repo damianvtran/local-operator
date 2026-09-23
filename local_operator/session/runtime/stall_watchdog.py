@@ -1635,9 +1635,14 @@ def arm(
         # ENGAGED and then went silent (the case the steady bound was sized for), while
         # a value at the boot bound is a runtime that never engaged at all — no session
         # judged, no beat ever landing — which is the class 10 of the 17 measured
-        # current-build fires belonged to. Written only when the two bounds differ:
-        # with one bound there is no split to explain, and a header sentence about a
-        # phase that cannot exist is how a header starts lying.
+        # current-build fires belonged to. THAT READING IS CONDITIONAL ON THE RE-ARM, which
+        # is why the note below qualifies it rather than stating it flatly (design review
+        # round 1, D1): :func:`engage` moves the bound in memory BEFORE it replaces the
+        # timer, so a runtime that DID engage but whose replacement failed keeps the
+        # original C timer and can still fire at the boot bound — a member of the 10/17
+        # class the attribution above would misread as never-engaged. Written only when
+        # the two bounds differ: with one bound there is no split to explain, and a header
+        # sentence about a phase that cannot exist is how a header starts lying.
         boot_note = ""
         if bound != steady:
             boot_note = (
@@ -1647,7 +1652,7 @@ def arm(
                 f"engagement moves the bound to {steady:g}s and stamps BOTH planes. "
                 f"When re-arming succeeds, a fired value of {bound:g}s — this number — means "
                 f"the runtime never engaged. If engagement could not re-arm the timer, see the "
-                f"re-arm-failed message above; the timer may still fire at the boot bound.\n"
+                f"re-arm-failed message in this dump; the timer may still fire at the boot bound.\n"
             )
         target = dump_path(pid, directory)
         inherited = deadline_path(pid, directory)
