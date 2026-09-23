@@ -591,6 +591,7 @@ def build_system_blocks(
     env_details: str,
     date_str: str,
     goal: str = "",
+    goal_status: str = "",
     user_instructions: str = "",
     repo_guidance: str = "",
     credentials: Sequence[str] | None = None,
@@ -631,6 +632,17 @@ def build_system_blocks(
     not a per-turn instruction competing with the live conversation. Keeping
     it out of the tail also stops a long instructions file from being re-sent
     ahead of every volatile change.
+
+    ``goal_status`` is the goal's lifecycle state (``"" | "active" | "done"``),
+    and it exists so that the ``<goal>`` block cannot outlive the goal's
+    objective. ``mark_done`` deliberately KEEPS ``text`` — that window is what
+    lets the chip strike through WHAT was done and the history name it — so a
+    block gated on the text alone kept telling the model, every turn, that a
+    finished objective was still the standing one to pursue: the model went on
+    working toward work the judge had just declared complete. ``"done"`` is
+    therefore the ONE state that withholds the block. Retaining the text is for
+    the SURFACES; the prompt is instructions, and "pursue this" must not be the
+    same sentence as "this was achieved" (UI review round 1).
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
@@ -746,9 +758,11 @@ def build_system_blocks(
         env_block = f"{env_block}\n\nModel: {model_label.strip()}"
 
     tail = skills_block or "<skills/>"
-    if goal:
+    if goal and goal_status != "done":
         # Phrased as a standing objective so the model carries it as context
-        # for every turn instead of re-acknowledging a fresh instruction.
+        # for every turn instead of re-acknowledging a fresh instruction. A
+        # DONE goal is left out entirely (see the docstring): its text is kept
+        # for the surfaces, not for the model to keep working toward.
         tail = (
             f"{tail}\n\n<goal>\nThe user's standing objective for this "
             f"session:\n{goal}\n</goal>"
