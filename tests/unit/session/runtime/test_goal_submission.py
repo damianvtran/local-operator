@@ -242,6 +242,43 @@ async def test_done_marks_the_goal_and_admits_no_turn(entry):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
+async def test_a_new_goal_over_a_settled_one_is_armed_on_the_owner_side(entry):
+    """Agent review round 2, MAJOR-5, on the DESKTOP route.
+
+    The state that had no cell on any surface: an objective set while the
+    PREVIOUS one is still settled. `/goal <text>` already reached the record's
+    own `arm_goal` here, so what this pins is the INVARIANT the `lop --goal`
+    path was fixed to honour — a new life taken together (status, judge, token),
+    the settled goal kept as history, and a turn admitted for the new objective
+    rather than for a goal nobody is pursuing.
+    """
+    session = GoalSession()
+    session.arm_goal("ship it")
+    session.mark_goal_done("the judge said so")
+    settled_token = session.goal_state.token
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    try:
+        if entry == "authoritative":
+            result = await handle.run_slash_authoritative("goal", "land the migration", None)
+            assert result["kind"] in ("notice", "block")
+        else:
+            await getattr(handle, entry)("goal", "land the migration")
+        await asyncio.sleep(0)
+    finally:
+        await handle.dispose()
+
+    assert session.goal == "land the migration"
+    assert session.goal_status == "active", "the new objective is not a settled one"
+    assert session.goal_state.token and session.goal_state.token != settled_token
+    assert session.goal_state.judge.state == "waiting"
+    assert [(row["text"], row["status"]) for row in session.history_view()] == [
+        ("ship it", "done")
+    ]
+    assert session.prompt_calls, "the new objective is submitted as work, not reported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
 async def test_history_answers_rows_in_data_and_a_count_in_the_notice(entry):
     """The one new form whose answer is a LIST, in the ``team_list`` shape.
 
