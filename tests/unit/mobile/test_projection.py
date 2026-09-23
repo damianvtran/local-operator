@@ -327,6 +327,124 @@ def test_subagent_details_seed_nested_descendants_for_recursive_navigation() -> 
     assert refreshed["grandchild"].activity == "summarizing"
 
 
+def test_subagent_compaction_reuses_only_identical_sources_and_prunes_removed_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Memoize the O(L) normalization without changing any projection values."""
+    import local_operator.mobile.projection as projection_module
+
+    job = SimpleNamespace(
+        status="running",
+        agent_role="coder",
+        model_label="test/model",
+        latest_details={},
+        result_text=None,
+        error_text=None,
+    )
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: job))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    prompt = "  first line  \n\n second line\t"
+    comms.record_launch("child", "child", prompt=prompt)
+    fold = make_fold()
+
+    calls = {"flat": 0, "multiline": 0}
+    compact = projection_module._compact
+    compact_multiline = projection_module._compact_multiline
+
+    def count_flat(text: str, limit: int) -> str:
+        calls["flat"] += 1
+        return compact(text, limit)
+
+    def count_multiline(text: str, limit: int) -> str:
+        calls["multiline"] += 1
+        return compact_multiline(text, limit)
+
+    monkeypatch.setattr(projection_module, "_compact", count_flat)
+    monkeypatch.setattr(projection_module, "_compact_multiline", count_multiline)
+
+    fold.set_subagent_details(comms)
+    first = fold.projection.subagents[0]
+    prompt_value = first.prompt
+    assert first.result_text == first.error_text == ""
+    assert calls == {"flat": 1, "multiline": 2}
+
+    fold.set_subagent_details(comms)
+    assert calls == {"flat": 1, "multiline": 2}
+    assert fold.projection.subagents[0].prompt == prompt_value
+
+    # A distinct but equal string is a cache miss: equality/hash work must not be
+    # substituted for the intended identity check on potentially huge sources.
+    changed_prompt = ("!" + prompt)[1:]
+    assert changed_prompt == prompt and changed_prompt is not prompt
+    comms._records["child"].prompt = changed_prompt
+    # The prompt and result deliberately hold the same source object: their
+    # different normalizers must still produce different, uncached semantics.
+    result = prompt
+    job.status = "completed"
+    job.result_text = result
+    job.error_text = "provider failed\n  at call site"
+    comms.record_outcome("child", "completed", result_text=result, error_text=job.error_text)
+    fold.set_subagent_details(comms)
+    settled = fold.projection.subagents[0]
+    assert prompt_value == "first line second line"
+    assert settled.prompt == prompt_value
+    assert settled.result_text == "first line\n\nsecond line"
+    assert settled.error_text == "provider failed\nat call site"
+    assert calls == {"flat": 2, "multiline": 4}
+
+    fold.set_subagent_details(comms)
+    assert calls == {"flat": 2, "multiline": 4}
+
+    # Whitespace/empty normalizer inputs retain their exact source distinctions;
+    # a later source object, even if the compacted output is the same, is new work.
+    whitespace = " \n  "
+    comms._records["child"].prompt = whitespace
+    job.result_text = whitespace
+    job.error_text = ""
+    comms.record_outcome("child", "completed", result_text=whitespace, error_text="")
+    fold.set_subagent_details(comms)
+    whitespace_row = fold.projection.subagents[0]
+    assert whitespace_row.prompt == ""
+    assert whitespace_row.result_text == ""
+    assert whitespace_row.error_text == ""
+    assert calls == {"flat": 3, "multiline": 6}
+
+    # A node can outlive its lifecycle reader in compatibility facades. Clear
+    # only terminal payload slots (the row's existing values remain untouched).
+    real_roster_pass = comms.roster_pass
+    current_pass = real_roster_pass()
+
+    class MissingLifecyclePass:
+        def roster(self) -> list[Any]:
+            return []
+
+        def nodes(self) -> list[Any]:
+            return current_pass.nodes()
+
+        def job(self, job_id: str) -> Any:
+            return current_pass.job(job_id)
+
+    monkeypatch.setattr(comms, "roster_pass", lambda: MissingLifecyclePass())
+    fold.set_subagent_details(comms)
+    assert ("child", "prompt") in fold._subagent_compact_cache
+    assert ("child", "result_text") not in fold._subagent_compact_cache
+    assert ("child", "error_text") not in fold._subagent_compact_cache
+
+    # When lifecycle data becomes available again, terminal outputs equal the
+    # uncached normalizers and repopulate their slots.
+    monkeypatch.setattr(comms, "roster_pass", real_roster_pass)
+    fold.set_subagent_details(comms)
+    assert fold.projection.subagents[0].result_text == ""
+    assert fold.projection.subagents[0].error_text == ""
+    assert calls == {"flat": 3, "multiline": 8}
+
+    # Removing the registry record releases all field refs on the next pass.
+    comms._records.pop("child")
+    fold.set_subagent_details(comms)
+    assert fold._subagent_compact_cache == {}
+    assert len(fold.projection.subagents) == 1  # the row's legacy removal is unchanged
+
+
 def test_nested_subagent_completion_refreshes_selected_detail() -> None:
     """A nested row has no root lifecycle event to settle its phone detail."""
 

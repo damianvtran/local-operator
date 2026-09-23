@@ -13,7 +13,10 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -3678,32 +3681,28 @@ async def test_store_maintenance_does_not_block_session_construction(
 ) -> None:
     """``create_session`` returns without waiting for the store sweeps.
 
-    The four passes are whole-store disk walks that have nothing to do with the
+    The six passes are whole-store disk walks that have nothing to do with the
     session being built; awaiting them put their cost (measured 545 ms of a
     708 ms ``create_session`` on a 3574-session store) on the critical path of
     boot AND of every ``/resume``. They must be dispatched, not awaited.
 
-    Pinned by observing the task handle rather than parking a worker thread:
-    under xdist the default thread pool can starve, and a test that blocks a
-    ``to_thread`` callback can flake as "never started" instead of catching the
-    regression. A live task at return proves the same contract without holding
-    a worker.
+    Pinned by observing the dedicated daemon thread rather than blocking the
+    event loop or using ``asyncio.to_thread``: the worker must be dispatched but
+    cannot keep the loop's default executor busy at interpreter shutdown.
     """
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
-    started = asyncio.Event()
-    release = asyncio.Event()
+    started = threading.Event()
+    release = threading.Event()
 
-    async def blocking_pass(*_a: Any, **_k: Any) -> Any:
+    def blocking_sweep(*_a: Any, **_k: Any) -> Any:
         started.set()
-        await release.wait()
+        release.wait()
         return cleanup_mod.CleanupResult()
 
-    # Patch the coroutine the dispatcher schedules, not the inner sweep: a
-    # regression that awaits it in create_session hangs on ``wait_for`` rather
-    # than merely slowing the test.
-    monkeypatch.setattr(session_factory, "_run_store_maintenance", blocking_pass)
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", blocking_sweep)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
@@ -3719,13 +3718,13 @@ async def test_store_maintenance_does_not_block_session_construction(
         timeout=5.0,
     )
     try:
-        # Dispatched, not awaited: the task exists and has not finished.
-        from local_operator import session_factory as sf
-
-        task = sf._STORE_MAINTENANCE_TASK
-        assert task is not None, "store maintenance was never dispatched"
-        assert not task.done(), "store maintenance was awaited before session return"
-        await started.wait()
+        # Dispatched, not awaited: one dedicated daemon thread owns the pass.
+        worker = session_factory._STORE_MAINTENANCE_THREAD
+        assert worker is not None, "store maintenance was never dispatched"
+        assert worker.daemon, "a blocked maintenance worker must not hold process exit"
+        assert worker.is_alive(), "store maintenance completed before session return"
+        assert await asyncio.to_thread(started.wait, 5), "maintenance callback never started"
+        assert threading.current_thread() not in (worker,)
     finally:
         release.set()
         await await_store_maintenance_for_tests()
@@ -3748,14 +3747,17 @@ async def test_store_maintenance_waits_until_create_session_can_return(
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
-    delay_entered = asyncio.Event()
-    release_delay = asyncio.Event()
-    callback_started = asyncio.Event()
+    delay_entered = threading.Event()
+    release_delay = threading.Event()
+    callback_started = threading.Event()
     model_work_completed: list[bool] = []
 
-    async def controlled_idle_window() -> None:
+    def controlled_idle_window(stop_event: threading.Event) -> bool:
         delay_entered.set()
-        await release_delay.wait()
+        while not stop_event.is_set():
+            if release_delay.wait(0.01):
+                return True
+        return False
 
     def note_filesystem_callback(*_a: Any, **_k: Any) -> Any:
         callback_started.set()
@@ -3787,16 +3789,11 @@ async def test_store_maintenance_waits_until_create_session_can_return(
         defer_mcp_wiring=True,
     )
     try:
-        assert (
-            not delay_entered.is_set()
-        ), "maintenance task executed before create_session returned"
+        assert delay_entered.wait(5), "maintenance did not reach its idle window"
+        assert not callback_started.is_set(), "maintenance started before its idle window"
         assert (
             model_work_completed
         ), "create_session did not complete its post-dispatch to_thread work"
-        await asyncio.wait_for(delay_entered.wait(), timeout=5.0)
-        assert (
-            not callback_started.is_set()
-        ), "maintenance filesystem work started before the idle window elapsed"
     finally:
         release_delay.set()
         await await_store_maintenance_for_tests()
@@ -3812,7 +3809,7 @@ async def test_store_maintenance_runs_once_per_process(
     """A second session in the same process does not re-sweep the store.
 
     ``/new`` and ``/resume`` re-enter ``create_session``, so before this change
-    every resume re-paid all four whole-store walks — on a store the same
+    every resume re-paid all six whole-store walks — on a store the same
     process had swept seconds earlier. Maintenance answers a question about the
     STORE, and the store does not become dirty because the user pressed
     ``/resume``.
@@ -3846,6 +3843,9 @@ async def test_store_maintenance_runs_once_per_process(
         await session.dispose()
 
     assert calls == [1], f"the store was swept {len(calls)} times in one process"
+    assert session_factory._STORE_MAINTENANCE_THREAD is not None
+    assert session_factory._STORE_MAINTENANCE_DONE is not None
+    assert session_factory._STORE_MAINTENANCE_DONE.is_set()
 
 
 @pytest.mark.asyncio
@@ -3886,6 +3886,488 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
     assert session is not None, "a failing sweep took the session down with it"
     assert ran == ["titles"], "a failing pass stopped the passes after it"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+def _patch_store_maintenance_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[str],
+    *,
+    fail_once: str | None = None,
+) -> None:
+    """Replace store-wide callbacks with ordered, resumable test probes."""
+    from local_operator.analytics import backfill as analytics_backfill
+    from local_operator.session import cleanup as cleanup_mod
+    from local_operator.tools import group_reaper
+
+    pending_failure = [fail_once]
+
+    def record(label: str):
+        def callback(*_args: Any, **_kwargs: Any) -> None:
+            calls.append(label)
+            if pending_failure[0] == label:
+                pending_failure[0] = None
+                raise OSError("injected interrupted pass")
+
+        return callback
+
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", record("cleanup"))
+    monkeypatch.setattr(group_reaper, "sweep_orphan_groups", record("groups"))
+    monkeypatch.setattr(resume_mod, "backfill_session_origins", record("origins"))
+    monkeypatch.setattr(resume_mod, "backfill_session_titles", record("titles"))
+    monkeypatch.setattr(
+        analytics_backfill, "backfill_analytics_session_names", record("analytics-names")
+    )
+    monkeypatch.setattr(
+        analytics_backfill, "backfill_analytics_session_daily", record("analytics-daily")
+    )
+
+
+def test_store_maintenance_lock_and_stamp_suppress_process_bursts(tmp_path: Path) -> None:
+    """Serialize overlap and suppress a second process after the lock is free."""
+    # Keep the child script literal and small so every process imports its own
+    # module state while sharing only the config-root lock and stamp.
+    script = r"""
+import sys, time
+from pathlib import Path
+from types import SimpleNamespace
+from local_operator import session_factory as sf, resume
+from local_operator.analytics import backfill
+from local_operator.session import cleanup
+from local_operator.tools import group_reaper
+root, calls_path, ready_path, release_path = map(Path, sys.argv[1:5])
+mode = sys.argv[5]
+sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
+
+def callback(*_args, **_kwargs):
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write("callback\n")
+        handle.flush()
+    if mode == "block":
+        ready_path.touch()
+        deadline = time.monotonic() + 15
+        while not release_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+cleanup.cleanup_from_config = callback
+group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+resume.backfill_session_origins = lambda *_a, **_k: None
+resume.backfill_session_titles = lambda *_a, **_k: None
+backfill.backfill_analytics_session_names = lambda *_a, **_k: None
+backfill.backfill_analytics_session_daily = lambda *_a, **_k: None
+sf._run_store_maintenance(SimpleNamespace(), root, None)
+"""
+    env = os.environ.copy()
+    env.pop("XPC_FLAGS", None)
+    calls_path = tmp_path / "calls.txt"
+    ready_path = tmp_path / "owner-ready"
+    release_path = tmp_path / "owner-release"
+    args = [str(tmp_path), str(calls_path), str(ready_path), str(release_path)]
+    owner = subprocess.Popen(
+        [sys.executable, "-c", script, *args, "block"],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready_path.exists() and owner.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_path.exists(), "maintenance owner did not reach its callback"
+        contender = subprocess.run(
+            [sys.executable, "-c", script, *args, "normal"],
+            cwd=Path(__file__).parents[2],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert contender.returncode == 0, contender.stderr
+    finally:
+        owner.terminate()
+        stdout, stderr = owner.communicate(timeout=5)
+    assert owner.returncode != 0, f"interrupted owner unexpectedly completed: {stdout} {stderr}"
+    assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback"]
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+    # A later runtime must take the released OS lock and retry after the owner
+    # dies mid-pass; the earlier partial run cannot claim completion.
+    retry = subprocess.run(
+        [sys.executable, "-c", script, *args, "normal"],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert retry.returncode == 0, retry.stderr
+    assert (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+    assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback", "callback"]
+
+    # This third process starts only after the retry released its lock; the
+    # completion stamp, not mere lock contention, must suppress the full scan.
+    later = subprocess.run(
+        [sys.executable, "-c", script, *args, "normal"],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert later.returncode == 0, later.stderr
+    assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback", "callback"]
+
+
+def test_store_maintenance_thread_retries_after_lock_owner_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock loser keeps its one daemon alive until owner crash releases it."""
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+
+    real_acquire = session_factory._acquire_store_maintenance_lock
+    busy = [3]
+    attempts = 0
+
+    def released_after_owner_exit(config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        if busy[0]:
+            busy[0] -= 1
+            return None
+        return real_acquire(config_dir)
+
+    monkeypatch.setattr(
+        session_factory, "_acquire_store_maintenance_lock", released_after_owner_exit
+    )
+    stop = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "single maintenance worker did not retry to completion"
+    assert done.is_set()
+    assert attempts == 4, "worker abandoned lock retries after its initial contention"
+    assert calls == [
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+        "analytics-names",
+        "analytics-daily",
+    ]
+
+
+def test_store_maintenance_thread_exits_retry_on_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+    attempted = threading.Event()
+    calls = 0
+
+    def remains_busy(_config_dir: Path) -> int | None:
+        nonlocal calls
+        calls += 1
+        attempted.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", remains_busy)
+    stop = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
+        daemon=True,
+    )
+    worker.start()
+    assert attempted.wait(5)
+    stop.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "reset did not stop bounded contender backoff"
+    assert done.is_set()
+    assert calls < 10, "contender spun instead of backing off"
+
+
+def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+
+    # Keep a real flock held while a separate thread publishes completion.
+    # The contender must keep one retry thread until the owner releases the lock,
+    # then observe the fresh stamp while holding that lock and skip the passes.
+    owner_fd = session_factory._acquire_store_maintenance_lock(tmp_path)
+    assert owner_fd is not None
+    published = threading.Event()
+    release_owner = threading.Event()
+
+    def publish_after_wait() -> None:
+        assert release_owner.wait(5)
+        session_factory._write_store_maintenance_stamp(
+            tmp_path, list(session_factory._STORE_MAINTENANCE_PASS_NAMES)
+        )
+        published.set()
+        session_factory._release_store_maintenance_lock(owner_fd)
+
+    publisher = threading.Thread(target=publish_after_wait, daemon=True)
+    publisher.start()
+    attempts = 0
+    real_acquire = session_factory._acquire_store_maintenance_lock
+
+    def count_attempts(config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        return real_acquire(config_dir)
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", count_attempts)
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, threading.Event(), done),
+        daemon=True,
+    )
+    worker.start()
+    deadline = time.monotonic() + 5
+    while attempts == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert attempts > 0, "contender never attempted the root lock"
+    assert not done.is_set(), "contender abandoned a busy owner instead of retrying"
+    release_owner.set()
+    worker.join(timeout=5)
+    publisher.join(timeout=5)
+
+    assert not worker.is_alive() and not publisher.is_alive()
+    assert done.is_set() and published.is_set()
+    assert attempts >= 2, "contender did not retry after the original busy lock"
+    assert calls == [], "fresh owner stamp should suppress every maintenance pass"
+
+
+def test_store_maintenance_retry_stops_on_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+    attempts = 0
+    entered = threading.Event()
+
+    def lock_stays_busy(_config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        entered.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", lock_stays_busy)
+    stop_event = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop_event, done),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(5)
+    stop_event.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "reset did not stop the bounded retry wait"
+    assert done.is_set()
+    assert attempts < 10, "retry loop spun instead of backing off"
+
+
+def test_store_maintenance_malformed_stamp_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    stamp.write_text("{ incomplete", encoding="utf-8")
+
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+
+    assert len(calls) == 6
+    assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
+        session_factory._STORE_MAINTENANCE_STAMP_VERSION
+    )
+
+
+def test_store_maintenance_lock_errors_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+
+    def unavailable(_config_dir: Path) -> int | None:
+        raise OSError("lock storage unavailable")
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", unavailable)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+
+    assert calls == [], "maintenance ran without its config-root lock"
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+
+def test_store_maintenance_stamp_read_error_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    stamp_path = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    stamp_path.write_text("not json", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def unreadable_stamp(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == stamp_path:
+            raise OSError("stamp cannot be read")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_stamp)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+
+    assert calls == [], "a stamp I/O error ran the passes without proving completion state"
+
+
+def test_store_maintenance_failed_pass_retries_without_completion_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls, fail_once="titles")
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    assert not stamp.exists(), "a failed pass published a completion stamp"
+    first_run = list(calls)
+
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    assert calls[: len(first_run)] == first_run
+    assert calls[len(first_run) :] == [
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+        "analytics-names",
+        "analytics-daily",
+    ]
+    assert stamp.exists(), "successful retry did not publish completion"
+
+
+@pytest.mark.parametrize(
+    "invalid_stamp", ["expired", "version", "oversized_timestamp", "integer_digit_limit"]
+)
+def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_stamp: str,
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    stamp_path = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    payload = json.loads(stamp_path.read_text(encoding="utf-8"))
+    if invalid_stamp == "expired":
+        payload["completed_at"] -= session_factory._STORE_MAINTENANCE_STAMP_TTL_SECONDS + 1
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif invalid_stamp == "version":
+        payload["version"] += 1
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif invalid_stamp == "oversized_timestamp":
+        # Python's JSON decoder accepts arbitrary-size integers; a valid JSON
+        # stamp outside float range is invalid metadata, not a worker crash.
+        payload["completed_at"] = 10**400
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        # Python 3.11+ can reject integer literals above its digit limit during
+        # JSON decoding; that is malformed stamp data and must trigger a rerun.
+        stamp_path.write_text('{"completed_at":' + "9" * 5000 + "}", encoding="utf-8")
+
+    first_count = len(calls)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    assert len(calls) == first_count * 2, f"{invalid_stamp} stamp incorrectly suppressed work"
+
+
+def test_blocked_maintenance_worker_does_not_hold_runner_shutdown(tmp_path: Path) -> None:
+    """A blocked maintenance callback cannot pin Runner.close's executor join."""
+    script = r"""
+import asyncio, sys, threading, time
+from pathlib import Path
+from types import SimpleNamespace
+from local_operator import session_factory as sf, resume
+from local_operator.analytics import backfill
+from local_operator.session import cleanup
+from local_operator.tools import group_reaper
+root = Path(sys.argv[1])
+started = threading.Event()
+sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
+
+def blocked(*_args, **_kwargs):
+    started.set()
+    threading.Event().wait()
+cleanup.cleanup_from_config = blocked
+group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+resume.backfill_session_origins = lambda *_a, **_k: None
+resume.backfill_session_titles = lambda *_a, **_k: None
+backfill.backfill_analytics_session_names = lambda *_a, **_k: None
+backfill.backfill_analytics_session_daily = lambda *_a, **_k: None
+async def main():
+    sf._start_store_maintenance(SimpleNamespace(), root, None)
+    deadline = time.monotonic() + 3
+    while not started.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    if not started.is_set():
+        raise RuntimeError("maintenance callback did not start")
+with asyncio.Runner() as runner:
+    runner.run(main())
+"""
+    env = os.environ.copy()
+    env.pop("XPC_FLAGS", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio
