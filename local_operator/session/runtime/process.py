@@ -2470,6 +2470,14 @@ def _unanswered_tail_step(session: object) -> bool:
     return bool(unanswered_tail_call_ids(messages))
 
 
+#: The class ``record.child`` holds, resolved on FIRST USE rather than at import
+#: time: this module is the child runtime's own boot path, and a lane read happens
+#: long after any ``Session`` exists, so by then the import is a ``sys.modules``
+#: lookup. Cached because ``_lane_step_in_flight`` runs once per live lane per
+#: sample, where a repeated import statement is a real cost.
+_LANE_CLASS: "type | None" = None
+
+
 def _lane_step_in_flight(lane: object) -> bool:
     """Is one IN-PROCESS child lane executing a step of its own?
 
@@ -2496,12 +2504,46 @@ def _lane_step_in_flight(lane: object) -> bool:
     still and is refused: it is true for the whole of a lane's turn, so one lane
     parked in a gate, or in a provider call that never returns, would spare its
     parent's spin for as long as it lived — the maximally-inclusive trap
-    :func:`_step_in_flight` refuses for ``is_busy``.
+    :func:`_step_in_flight` refuses for ``is_busy``. ITS OWN RESIDUAL IS STATED in
+    ``stall_watchdog``: a step that never CLOSES (a wedged in-process tool, a hung
+    compaction) holds this answer "in flight" for the life of the lane, which is
+    the same property reached through the narrow question.
+
+    FAIL CLOSED ON A SHAPE IT CANNOT READ, and it is stated rather than implied
+    because the alternative is silent. The lane is recognised as a REAL
+    ``Session`` — the type ``attach`` is ever handed in production, from
+    ``harness.subagent._construct_child_session`` — and anything else on
+    ``record.child`` (a test double, a future lane class) is HELD rather than judged
+    idle, with the hold announced at WARNING. Plain truthiness was the defect (agent
+    review round 1, MINOR 3), in BOTH of its directions: a ``MagicMock``'s attribute
+    is truthy for the life of the process, so it answered "in flight" forever with
+    nothing recording that the read never worked, and a shape whose attribute read a
+    real ``False`` while having no tail to scan was spent as "not in flight" — the
+    same answer a settled lane gives. The consequence for the probe is stated so a
+    reader does not have to infer it: while such a record is attached,
+    ``_step_in_flight`` answers "in flight" at EVERY sample, so the progress leg
+    DEFERS — it never closes a window (the three outcomes are named in
+    ``stall_watchdog``) — and the liveness leg is the only one left that can end the
+    run, on a frozen frame. That is this module's standing preference (spare rather
+    than cut), and the warning is what keeps the deferral from being silent.
 
     UNREADABLE HOLDS, the opposite direction from the parent's own tail, and
     :func:`_unanswered_tail_step` states why the two differ.
     """
     try:
+        global _LANE_CLASS
+        lane_class = _LANE_CLASS
+        if lane_class is None:
+            from local_operator.session.session import Session
+
+            lane_class = _LANE_CLASS = Session
+        if not isinstance(lane, lane_class):
+            logger.warning(
+                "stall watchdog: a child lane of unrecognised shape (%s) cannot be read; "
+                "holding the process rather than judging it idle",
+                type(lane).__name__,
+            )
+            return True
         if getattr(lane, "_compacting", False):
             return True
         return _unanswered_tail_step(lane)
@@ -2541,13 +2583,20 @@ def _child_lanes_in_flight(session: object) -> bool:
 
     COST, measured rather than assumed, because the module this feeds once refused
     this read as "not cheap" before there was a number for it: the cost table at
-    N = 1/8/64/256 live lanes is in ``stall_watchdog``'s docstring (0.7-1.2 µs of
-    CPU per lane, ~1.1 ms per minute at the roster cap), and the structural half of
-    the claim is pinned in
+    N = 0/1/8/64/256 live lanes is in ``stall_watchdog``'s docstring (0.75-1.3 µs of
+    CPU per lane, ~1.2 ms per minute at the width measured on this fleet), and the
+    structural half of the claim is pinned in
     ``tests/unit/session/runtime/test_child_lane_progress.py``. Two facts keep the
     walk bounded: each live lane is asked once per sample, and a lane holding a
     step is answered by the FIRST message the tail scan reaches, so the in-flight
     case is the CHEAP one.
+
+    N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``. ``_evict_overflow`` evicts only
+    records with no live child and no running job, so the cap bounds the map's
+    evictable tail rather than lane concurrency (300 attached lanes measured 300
+    records). The other half of the cost is the LANE's own tail length, because the
+    scan is linear in the rows it walks: see ``stall_watchdog``'s cost section,
+    which states that dependence with its figures rather than quoting one number.
     """
     try:
         records = getattr(getattr(session, "_subagent_comms", None), "_records", None)
@@ -2587,7 +2636,11 @@ def _step_in_flight(handle: object) -> bool:
     also invisible to the liveness leg's frame observation, which watches only
     the two threads that beat (the planes' own loops), so such a lane is cut with
     its parent. Closing that means reading a lane's frames, which is a different
-    change from this one.
+    change from this one. THE MIRROR CASE, named in ``stall_watchdog``, is the
+    price of this widening: a lane's step that never CLOSES makes this leg defer
+    for as long as the lane lives, so a reader who finds a runtime alive past its
+    bound with a lane holding a step is looking at the one leg that cannot see it
+    and should stop the process by hand.
     """
     session = getattr(handle, "_session", None)
     if session is None:

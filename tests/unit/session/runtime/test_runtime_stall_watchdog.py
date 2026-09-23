@@ -2783,6 +2783,7 @@ import os
 import pathlib
 import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 sys.path.insert(0, sys.argv[4])
@@ -2881,6 +2882,12 @@ async def main() -> None:
         _open_step(lane)
     elif MODE == "unreadable":
         lane._context = _UnreadableContext()
+    elif MODE == "unreadable_shape":
+        # A record whose ``child`` is not a lane this read can vouch for: the flag
+        # reads a real False and there is no tail to scan. The direction has to be
+        # "hold" — never "judge it idle" — for a shape a future lane class or a
+        # double can present (agent review round 1, MINOR 3).
+        comms._records["job-lane"].child = SimpleNamespace(_compacting=False)
     elif MODE == "parked_call":
         asyncio.create_task(_park_a_provider_call(stream))
         await asyncio.sleep(0.5)
@@ -2923,13 +2930,40 @@ def _run_lane_child(root: Path, mode: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _probe_answer(stdout: str) -> tuple[object, bool] | None:
+    """The probe tuple the child printed, PARSED rather than substring-matched.
+
+    ``_assert_spared`` asked whether the text ``", True)"`` appeared anywhere in the
+    child's stdout (agent review round 1, NIT 2). That is a match on a tuple
+    ``repr``: it would start passing for the wrong reason the day ``_work_motion``'s
+    own shape carries a ``True``, and it says nothing about WHICH element answered.
+    The second element of ``(motion, in_flight)`` is what every arm here is about,
+    so the second element is what is asserted — parsed out of the line the child
+    prints for exactly this purpose.
+    """
+    for line in stdout.splitlines():
+        if line.startswith("probe:"):
+            answer = ast.literal_eval(line[len("probe:") :])
+            assert isinstance(answer, tuple) and len(answer) == 2, (
+                f"the child printed a probe answer that is not the (motion, in_flight) "
+                f"pair, so this arm cannot read it: {line!r}"
+            )
+            return answer
+    return None
+
+
 def _assert_spared(result: subprocess.CompletedProcess[str], root: Path, mode: str) -> None:
-    """The shared half of the three arms: the leg answered, and nothing fired."""
+    """The shared half of the arms: the leg answered, and nothing fired."""
     assert result.returncode == 0, (
         f"the progress leg cut a manager whose lane was in '{mode}': "
         f"{result.stdout!r} {result.stderr!r}"
     )
-    assert ", True)" in result.stdout, (
+    answer = _probe_answer(result.stdout)
+    assert answer is not None, (
+        f"the '{mode}' child never printed the probe's own answer, so this arm would pass "
+        f"for a different reason than the one it is named for: {result.stdout!r}"
+    )
+    assert answer[1] is True, (
         f"the probe did not answer 'in flight' for '{mode}', so this arm would pass for "
         f"a different reason than the one it is named for: {result.stdout!r}"
     )
@@ -3007,6 +3041,22 @@ def test_an_unreadable_lane_leaves_the_runtime_alive(tmp_path: Path) -> None:
     """
     result = _run_lane_child(tmp_path / "unreadable", "unreadable")
     _assert_spared(result, tmp_path / "unreadable", "unreadable")
+
+
+def test_a_lane_of_an_unrecognised_shape_holds_the_runtime(tmp_path: Path) -> None:
+    """FAIL CLOSED on a child this read cannot vouch for (agent review round 1, MINOR 3).
+
+    ``_compacting`` is read only from a real ``bool`` now, so a ``record.child`` that
+    is not a lane this read recognises — a double, a future lane class without the
+    flag — is HELD and the hold is announced. Plain truthiness was the defect: a
+    ``MagicMock``'s attribute is truthy for the life of the process, which answered
+    "in flight" forever with nothing recording that the read never worked, and the
+    mirror case (an attribute reading a real ``False`` on a shape with no tail to
+    scan) was spent as "not in flight". ``_assert_spared`` carries the rest: alive
+    past four bounds, no fired marker and no progress line in the dump.
+    """
+    result = _run_lane_child(tmp_path / "unreadable-shape", "unreadable_shape")
+    _assert_spared(result, tmp_path / "unreadable-shape", "unreadable_shape")
 
 
 #: A clock the progress leg can be driven through: the predicate is about the

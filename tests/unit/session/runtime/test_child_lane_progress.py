@@ -17,17 +17,21 @@ product's own constructor, attached through the product's own ``record_launch`` 
 ``unanswered_tail_call_ids``.
 
 THE COST TABLE in ``stall_watchdog``'s docstring is a CPU measurement (that file
-explains why wall time is unusable on this host); what is asserted HERE is the
-structural half of it, which is what a test can hold: every live lane is asked
-once per sample, a lane holding a step short-circuits the scan, and a settled
+explains why wall time is unusable on this host), and it has TWO axes: lanes, and
+the run of tail rows the scan walks — the tail is the real driver, so the read is
+linear in rows × lanes rather than in lanes alone. What is asserted HERE is the
+structural half of the claim, which is what a test can hold: every live lane is
+asked once per sample, a lane holding a step short-circuits the scan, and a settled
 lane is never asked at all.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -269,13 +273,48 @@ def test_a_lane_with_no_context_is_not_an_unreadable_lane(tmp_path) -> None:
     assert process._step_in_flight(_handle(manager)) is False
 
 
-def test_the_tail_scan_raises_and_the_two_callers_pick_directions() -> None:
+def test_a_lane_of_an_unrecognised_shape_holds_and_says_so(tmp_path, caplog) -> None:
+    """A child this read cannot vouch for is HELD, and the hold is announced.
+
+    The REAL lane in this cell is the control: a ``Session`` whose compaction flag is
+    a real ``False`` and whose tail is settled answers "not in flight". A roster
+    position holding a child that is not a real ``Session`` must NOT be spent as that
+    answer. Plain truthiness was the defect (agent review round 1, MINOR 3), in its
+    two directions: a ``MagicMock``'s attribute is truthy for the life of the
+    process, so it answered "in flight" forever with nothing recording that the read
+    never worked, and a shape whose attribute read a real ``False`` while having no
+    tail to scan was spent as "not in flight" — the answer a settled lane gives.
+    Both are held now, and the hold is a WARNING rather than silence.
+    """
+    manager, comms = _manager_with_lanes(tmp_path, 1)
+    handle = _handle(manager)
+    assert process._step_in_flight(handle) is False
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        for shape in (SimpleNamespace(_compacting=False), MagicMock()):
+            comms._records["job-0"].child = shape  # type: ignore[assignment]
+            assert process._step_in_flight(handle) is True
+    announced = [record for record in caplog.records if "unrecognised shape" in record.getMessage()]
+    assert len(announced) == 2, (
+        f"the hold on a lane shape this read cannot recognise was silent, so the leg "
+        f"would look like it was working: {caplog.text!r}"
+    )
+
+
+def test_the_tail_scan_raises_and_the_two_callers_pick_directions(tmp_path) -> None:
     """One rule, two directions, chosen at the seam rather than copied per caller.
 
     A hand-copied second version of ``unanswered_tail_call_ids``' rule is a defect
     this module has already paid for once, so the scan is shared and the DIRECTION
     is the caller's: this session's own tail may fire a bound on a failed read,
     while a child lane must not.
+
+    THE CARRIER IS A REAL ``Session`` HERE, deliberately: a lane read now answers
+    "held" for a shape that is not a ``Session`` at all, so a ``SimpleNamespace``
+    carrier would make this cell pass through the shape check instead of through the
+    RAISE it is about — passing for the wrong reason, which is the failure mode the
+    cell exists to prevent.
     """
 
     class _BrokenContext:
@@ -283,7 +322,8 @@ def test_the_tail_scan_raises_and_the_two_callers_pick_directions() -> None:
         def messages(self) -> list[Any]:
             raise RuntimeError("context unavailable")
 
-    broken = SimpleNamespace(_context=_BrokenContext())
+    broken = _lane(_manager_with_lanes(tmp_path, 1)[1], "job-0")
+    broken._context = _BrokenContext()  # type: ignore[assignment]
     with pytest.raises(RuntimeError):
         process._unanswered_tail_step(broken)
     assert process._tool_batch_in_flight(broken) is False
