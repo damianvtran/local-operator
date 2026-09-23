@@ -67,6 +67,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_REMOVE_EMPTY,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
+    from local_operator.session.runtime.process import (
+        DEFAULT_KEEP_ALIVE_MAX,
+        DEFAULT_KEEP_ALIVE_SECONDS,
+    )
     from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.spawn.policy import (
         DEFAULT_FORK_CMUX_PLACEMENT,
@@ -130,6 +134,10 @@ def _consumer_defaults() -> dict[str, object]:
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
+        # The residency knobs, whose consumer constants sit beside the reaper
+        # that reads them (``process._keep_alive_*``).
+        "runtime.keep_alive_seconds": DEFAULT_KEEP_ALIVE_SECONDS,
+        "runtime.keep_alive_max": DEFAULT_KEEP_ALIVE_MAX,
         # The registry restates this empty string rather than importing the
         # reader (an import edge from the CLI's settings layer into the TUI for
         # one empty string), so THIS is what stops the two drifting — the same

@@ -3915,6 +3915,14 @@ class RuntimeServer:
             return
         self._detached = detached
         self._desktop_delivery = delivery
+        # WHEN the last viewer left, which is a different fact from THAT it did:
+        # the residency policy bounds how long (and how many) detached runtimes
+        # stay warm by evicting the least recently detached, and this is the one
+        # stamp that carries an order (``process._detached_at``,
+        # ``SessionRecord.detached_at``). Cleared on the 0->1 transition so a
+        # runtime being watched is not a keep-alive candidate — the reaper's own
+        # record read is the inverse of this field.
+        self._record.detached_at = time.time() if detached else None
         self._republish()
         if detached and self._pending:
             # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
