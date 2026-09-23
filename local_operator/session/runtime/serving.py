@@ -537,11 +537,6 @@ class ServingSessionHandle(SessionHandle):
         #: driver's module is imported lazily so this module stays importable
         #: without the session goal machinery.
         self._goal_judge: Any = None
-        #: The command id of the judge's own admitted continuation, while one is
-        #: in flight. Kept so a future reader can tell the judge's turn from a
-        #: user's without guessing, and so an aborted-continuation probe has an
-        #: identity to name rather than a text to match.
-        self._goal_judge_command_id: str | None = None
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -2840,17 +2835,18 @@ class ServingSessionHandle(SessionHandle):
                 # awaiting it there would deadlock. ``harness_injected`` is the
                 # structural stamp that tells every front end this row is
                 # harness chrome — the row is still persisted, and still
-                # announced, but no surface paints it as the user's words.
-                self._goal_judge_command_id = str(uuid.uuid4())
-                try:
-                    await self.prompt(
-                        text,
-                        command_id=self._goal_judge_command_id,
-                        wait_complete=True,
-                        harness_injected=True,
-                    )
-                finally:
-                    self._goal_judge_command_id = None
+                # announced, but no surface paints it as the user's words. THAT
+                # stamp, not a remembered id, is what distinguishes the judge's
+                # turn from a user's; the command id is minted per call and
+                # dropped with it (agent review round 2, MINOR-3: the id used to
+                # be held on the handle and read by nothing).
+                command_id = str(uuid.uuid4())
+                await self.prompt(
+                    text,
+                    command_id=command_id,
+                    wait_complete=True,
+                    harness_injected=True,
+                )
 
             def changed(fields: dict[str, Any]) -> None:
                 # One writer for the judge's fields, so the journal and the frame
