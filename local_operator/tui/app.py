@@ -306,6 +306,12 @@ from local_operator.tui.widgets.editor import (
     resolve_markers,
     substitute_credentials,
 )
+from local_operator.tui.widgets.goal_panel import (
+    GoalDelete,
+    GoalDismissed,
+    GoalMarkDone,
+    GoalPanel,
+)
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
@@ -381,12 +387,6 @@ from local_operator.tui.widgets.transcript import (
     WakeBlock,
     WorkingBlock,
     conversation_started,
-)
-from local_operator.tui.widgets.goal_panel import (
-    GoalDelete,
-    GoalDismissed,
-    GoalMarkDone,
-    GoalPanel,
 )
 from local_operator.tui.widgets.usage_panel import (
     UsageDismissed,
@@ -34032,7 +34032,10 @@ class OperatorApp(App[None]):
         chip's lesson: the goal repaints from the stream, never from local UI
         state).
         """
-        from local_operator.session.goal_judge import MAX_GOAL_CONTINUATIONS, owns_the_session
+        from local_operator.session.goal_judge import (
+            MAX_GOAL_CONTINUATIONS,
+            owns_the_session,
+        )
 
         panel = self._goal_panel()
         session = self._session
