@@ -12,6 +12,7 @@ import asyncio
 import json
 import string
 import uuid
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -1022,3 +1023,233 @@ def test_seen_endpoint_clears_unseen_in_summaries(tmp_path, monkeypatch) -> None
     response = client.post("/api/sessions/durable-1/seen", json={"completion_token": token})
     assert response.status_code == 200
     assert unseen_for("durable-1") is False
+
+
+# ---------------------------------------------------------------------------
+# List ordering and sectioning: ONE home for the key
+# ---------------------------------------------------------------------------
+
+
+def _live_entry(pid: int, session_id: str, *, streaming: bool = False) -> Any:
+    """A live entry whose projection streams iff asked; the record is plain."""
+    import time as _time
+
+    from local_operator.mobile.daemon import SessionEntry
+    from local_operator.mobile.types import SessionRecord
+
+    record = SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name=session_id,
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    record.started_at = _time.time()
+    # A record with a fresh beat, so ``_rank_row``'s wedged arm does not fire.
+    record.heartbeat_at = _time.time()
+    entry = SessionEntry(record)
+    entry.projection = SessionProjection(
+        session_id=session_id, pid=pid, kind="tui", streaming=streaming
+    )
+    return entry
+
+
+def test_a_live_session_does_not_jump_when_its_birth_resolves() -> None:
+    """THE REPORTED JITTER, pinned at the key.
+
+    The phone used to sort on a key it re-derived here, from whatever the merge
+    held — including a live row's ``created_at`` falling back to 0.0 until the
+    1 s durable refresh resolved it. Two live sessions in the same tier are the
+    case that showed it: the just-started one (birth not yet resolved) sorted
+    BELOW the older one, then JUMPED above it the moment its real, newer birth
+    landed. The fix ranks through the shared catalog home (``_rank_row``) and
+    falls back to the runtime's own ``started_at`` rather than a zero, so the
+    row holds its place across the transition.
+
+    This drives the real merge, not a copy of the key: a changed ``_rank_row``
+    must move the order asserted here.
+    """
+    table = SessionTable()
+    # Both idle (tier 5), so ONLY the birth term can separate them — which is
+    # the term the 0.0 fallback used to corrupt.
+    table.entries[11] = _live_entry(11, "older-live")
+    table.entries[12] = _live_entry(12, "newest-live")
+    # The newest session is the one that started most recently, so its record's
+    # started_at is the larger; make that explicit rather than racing the clock.
+    table.entries[11].record.started_at = 1_000.0
+    table.entries[12].record.started_at = 2_000.0
+    table._durable_rows_cache = {}
+    # The older session's birth is resolved; the newest one's is NOT yet.
+    table._creation_dates = {"older-live": 1_000.0}
+
+    first = [r["session_id"] for r in table._merge_summaries({})]
+    assert first == ["newest-live", "older-live"], (
+        "a live session whose durable birth has not resolved must still rank "
+        "by its runtime's own started_at, not by a zero that flips ends"
+    )
+
+    # The durable refresh now resolves the newest session's birth, which is (as
+    # its started_at already said) the larger. The order must not change.
+    table._creation_dates = {"older-live": 1_000.0, "newest-live": 2_000.0}
+    second = [r["session_id"] for r in table._merge_summaries({})]
+    assert second == first, "resolving a birth must not move a row that already ranked by it"
+
+
+def _durable_record(session_id: str, birth: float):
+    """A minimal durable-row stand-in: the merge only reads name/created_at/mtime."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(name=session_id, created_at=birth, mtime=birth, id=session_id)
+
+
+def test_section_membership_is_the_shared_active_rule() -> None:
+    """A durable-only UNREAD conversation is ACTIVE on every surface.
+
+    ``CatalogEntry.active`` is ``pending or unseen or live_state``. The phone
+    derived ``section`` from \"a live entry exists\" instead, so a conversation
+    that finished while no phone was watching carried an unseen receipt, ranked
+    tier 1 in the shared catalogue, and still landed under Previous here — the
+    two surfaces disagreeing about which list a row is in. Pinned against the
+    shared entry too, so the assertion is about agreement rather than a literal.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import entry_for
+
+    table = SessionTable()
+    table._attention_states = {"session/unread-cold": {"unseen": True, "kind": ""}}
+    durable = {
+        "unread-cold": _durable_record("unread-cold", 200.0),
+        "read-cold": _durable_record("read-cold", 100.0),
+    }
+    rows = {r["session_id"]: r for r in table._merge_summaries(durable)}
+    assert rows["unread-cold"]["section"] == "active"
+    assert rows["read-cold"]["section"] == "previous"
+
+    # The shared entry agrees about the same two rows with the same attention.
+    unread = entry_for(
+        SessionRow(id="unread-cold", mtime=200.0, name="unread-cold", created_at=200.0),
+        {"unseen": True, "kind": ""},
+    )
+    read = entry_for(
+        SessionRow(id="read-cold", mtime=100.0, name="read-cold", created_at=100.0),
+        {"unseen": False, "kind": ""},
+    )
+    assert unread.active is True and read.active is False
+
+
+def test_a_durable_unread_row_sorts_where_the_catalogue_puts_it() -> None:
+    """Order PARITY with ``entry_for(...).rank``, not merely a plausible order.
+
+    The phone's key IS the catalogue's key now, so the two must produce the same
+    sequence for the same store. This asserts the merged order equals the shared
+    ranking of the same rows — a regression that reintroduced a second key would
+    fail here even if that key happened to look reasonable.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import entry_for
+
+    table = SessionTable()
+    table._attention_states = {"session/mid": {"unseen": True, "kind": ""}}
+    durable = {
+        "old": _durable_record("old", 100.0),
+        "mid": _durable_record("mid", 200.0),
+        "new": _durable_record("new", 300.0),
+    }
+    phone = [r["session_id"] for r in table._merge_summaries(durable)]
+    shared = sorted(
+        durable,
+        key=lambda sid: entry_for(
+            SessionRow(
+                id=sid,
+                mtime=durable[sid].mtime,
+                name=sid,
+                created_at=durable[sid].created_at,
+            ),
+            table._attention_states.get(f"session/{sid}", {}),
+        ).rank,
+    )
+    assert phone == shared == ["mid", "new", "old"]
+
+
+# ---------------------------------------------------------------------------
+# Pins: one durable store, shared with the terminal and the desktop
+# ---------------------------------------------------------------------------
+
+
+def test_pin_route_writes_the_shared_store_and_the_frame_carries_it(tmp_path, monkeypatch) -> None:
+    """A phone pin IS the sidebar pin, and the list frame reports it.
+
+    The whole point of routing the phone's pin through
+    ``local_operator.tui.sidebar_pins`` is that a pin made on one surface is the
+    same pin the others read. This drives the real route and then reads the pin
+    file with the TERMINAL's own reader, so a second store would fail here even
+    if the phone's own list agreed with itself.
+    """
+    from local_operator.tui.sidebar_pins import read_pins
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    _write_turns(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    def pinned_for(session_id: str) -> bool | None:
+        rows = client.get("/api/sessions").json()["sessions"]
+        return next(r.get("pinned") for r in rows if r["session_id"] == session_id)
+
+    assert pinned_for("durable-1") is False
+    assert read_pins(cfg) == []
+
+    response = client.post("/api/sessions/durable-1/pin", json={"pinned": True})
+    assert response.status_code == 200
+    assert response.json()["pinned"] is True
+    # THE TERMINAL'S READER sees the same pin.
+    assert read_pins(cfg) == ["durable-1"]
+    assert pinned_for("durable-1") is True
+
+    # Idempotent in the pin direction: the stored newest-pin-first order does not
+    # change on a re-pin, which is what keeps a flaky link from rewriting it.
+    client.post("/api/sessions/durable-1/pin", json={"pinned": True})
+    assert read_pins(cfg) == ["durable-1"]
+
+    unpin = client.post("/api/sessions/durable-1/pin", json={"pinned": False})
+    assert unpin.json()["pinned"] is False
+    assert read_pins(cfg) == []
+    assert pinned_for("durable-1") is False
+
+
+def test_pin_route_refuses_an_unknown_session_and_a_non_boolean(tmp_path, monkeypatch) -> None:
+    """The two refusals that keep the store honest.
+
+    An unknown id must 404 like ``/seen`` beside it, so the route cannot plant
+    ids that resolve to nothing; and a non-boolean must 422 rather than be
+    truthy-coerced, because a pin whose provenance nobody can reconstruct is
+    exactly what the desktop route's strict model refuses.
+    """
+    from local_operator.tui.sidebar_pins import read_pins
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    # A real conversation, so the id is resolvable and the 422s below are about
+    # the BODY rather than a 404 for an unknown session taking the wrong arm.
+    _write_turns(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    assert client.post("/api/sessions/nope/pin", json={"pinned": True}).status_code == 404
+    for bad in ({"pinned": "yes"}, {"pinned": 1}, {}):
+        assert client.post("/api/sessions/durable-1/pin", json=bad).status_code == 422
+    assert read_pins(cfg) == []

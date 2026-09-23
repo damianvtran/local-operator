@@ -19,6 +19,13 @@ no heading. Sectioning is display-only — `rank_entries` still decides the
 ranking, and pins never reorder it — which is what keeps the terminal and the
 mobile relay agreeing on the same active/previous partition.
 
+The phone draws the same partition and the same ★ Pinned section, and it does
+so off the SAME key: the mobile daemon ranks through `session.catalog.entry_for`
+(see `_rank_row` in `mobile/daemon.py`) rather than re-deriving an order from
+live state, so the two surfaces cannot disagree about a row's tier, its section,
+or its place. A pin made on the phone — the list's long-press or the session
+view's ☆/★ header control — is written to this same store below.
+
 ### Pins
 
 `F10` pins or unpins the session under the pointer; with no pointer on the list

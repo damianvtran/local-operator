@@ -68,9 +68,10 @@ from local_operator.mobile.types import (
     SubagentRow,
 )
 from local_operator.procstate import detached_popen_kwargs
-from local_operator.session.creation import session_category, session_created_at
+from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import reported_subagent_count
+from local_operator.tui.sidebar_pins import read_pins, set_pin
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +298,96 @@ class SessionEntry:
         return self._req_seq
 
 
+def _rank_row(
+    session_id: str,
+    *,
+    entry: SessionEntry | None,
+    row: Any,
+    created_at: float,
+    mtime: float,
+    attention: dict[str, Any],
+    pending_kind: str,
+) -> tuple[tuple[int, int, float, str], bool]:
+    """``(rank, active)`` for one merged summary, taken from the SHARED home.
+
+    WHY THIS EXISTS AT ALL — the jitter it removes. The phone used to sort on a
+    key it derived here, out of whatever the merge happened to hold, while the
+    terminal and the desktop app both sort on ``catalog.entry_for(...).rank``.
+    Two homes for one order is exactly the drift this codebase forbids
+    elsewhere, and it produced a list the operator could watch move:
+
+    * **Membership was the live-entry test, not the shared ``active`` rule.**
+      ``section`` came from "a live SessionEntry exists", but the shared rule is
+      ``pending or unseen or live_state``. So a durable-only conversation that
+      finished while nobody was watching carried an unseen receipt, ranked tier
+      1 in the catalogue, and still landed under Previous here — the two
+      surfaces disagreeing about which list a row is in.
+    * **A brand-new session tied at birth zero.** ``created_at`` fell back to
+      ``self._creation_dates.get(session_id, 0.0)`` for a live session whose
+      durable row had not been built yet, so a just-started conversation sorted
+      below every real birth and JUMPED to the top the moment the 1 s durable
+      refresh resolved its date. Two rows sharing that 0.0 also swapped places
+      on the id tie-break, which is a different order on every poll whose set of
+      unresolved ids changed.
+    * **``busy`` was the projection's ``streaming``, not the record's state.**
+      Those are different facts — ``streaming`` is what the phone's fold has
+      seen, ``busy`` is the runtime's own published flag — and the terminal and
+      desktop rank on the latter. A session whose fold has not yet observed a
+      turn start (a mid-turn attach, a frame that arrived before the projection
+      did) therefore ranked one tier differently here than in the sidebar. It is
+      the same class of defect as the two above: a ranking input read from
+      whatever local state happened to be in hand instead of from the shared
+      source.
+
+    So this builds the SAME :class:`~local_operator.resume.SessionRow` the
+    catalogue's own decorator builds, hands it the same attention state, and
+    asks :func:`~local_operator.session.catalog.entry_for` for the key. The
+    ``live_state`` mapping below is ``decorate_rows``'s, deliberately — that
+    function is the other reader of a record's liveness, and a second spelling
+    of ``busy``/``attached``/``idle`` is the drift this change removes.
+
+    ``pending`` prefers the RECORD (what the catalogue reads) and falls back to
+    the live projection's gate for the window where the record has not caught
+    up, so a phone-visible gate is never unranked.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import entry_for
+
+    live_state = ""
+    pending: str | None = None
+    if entry is not None:
+        record = entry.record
+        # The catalogue's own mapping, so the two surfaces cannot disagree about
+        # what a record means. ``wedged`` first: a stopped owner outranks the
+        # busy flag, which may be a stale True from before the beat went quiet.
+        heartbeat = float(getattr(record, "heartbeat_at", 0.0) or 0.0)
+        if heartbeat > 0.0 and time.time() - heartbeat > registry.HEARTBEAT_TIMEOUT_S:
+            live_state = "wedged"
+        elif getattr(record, "busy", False):
+            live_state = "busy"
+        elif not getattr(record, "detached", False):
+            live_state = "attached"
+        else:
+            live_state = "idle"
+        pending = getattr(record, "pending", None) or None
+    if pending is None and pending_kind:
+        # The record has not carried the gate yet (the live projection saw it
+        # first). Same vocabulary the catalogue ranks on, so the row is ranked
+        # rather than left in the idle band for a poll.
+        pending = "approval" if pending_kind == "approval" else "answer"
+
+    shared = SessionRow(
+        session_id,
+        mtime,
+        str(getattr(row, "name", "") or ""),
+        created_at=created_at,
+        live_state=live_state,
+        pending=pending,
+    )
+    built = entry_for(shared, attention)
+    return built.rank, built.active
+
+
 def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | None]:
     """This entry's ``(running, queued)`` children, or ``(None, None)``.
 
@@ -415,6 +506,12 @@ class SessionTable:
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self._attention_states: dict[str, dict[str, Any]] = {}
         self._creation_dates: dict[str, float] = {}
+        #: The sidebar's durable pinned session ids, newest pin first, refreshed
+        #: off-loop with the listing and read by ``_merge_summaries``. Kept as
+        #: table state rather than read per row so a pin change made in the
+        #: terminal reaches the phone through exactly one read, and so the
+        #: merge itself stays pure in-memory.
+        self.pins: tuple[str, ...] = ()
 
     def invalidate_summaries_cache(self) -> None:
         """Drop both summaries caches so the next read rescans.
@@ -471,7 +568,7 @@ class SessionTable:
         # heartbeat or by adding filesystem work to the in-memory merge path.
         live_ids = {entry.record.session_id for entry in self.entries.values() if not entry.ended}
 
-        def load() -> tuple[dict[str, Any], dict[str, float]]:
+        def load() -> tuple[dict[str, Any], dict[str, float], tuple[str, ...]]:
             directory = config_dir()
             # ``recent_session_rows`` itself pays no creation-metadata reads —
             # it is on the CLI startup path. Each surface that needs birth
@@ -491,10 +588,17 @@ class SessionTable:
             for session_id in live_ids - rows.keys():
                 if session_id not in ("", ".", "..") and Path(session_id).name == session_id:
                     dates[session_id] = session_created_at(directory / "sessions" / session_id)
-            return rows, dates
+            # THE PINS, read on this same off-loop hop. The pin file lives in the
+            # config root beside the store, so reading it costs one small JSON
+            # read here rather than a filesystem call inside the merge (which
+            # must stay pure in-memory — it runs per repaint). Read
+            # unconditionally rather than only when pins exist: a pin UN-set in
+            # the terminal has to reach the phone too, and this is the only
+            # refresh path the listing has.
+            return rows, dates, tuple(read_pins(directory))
 
         async def _load() -> dict[str, Any]:
-            rows, self._creation_dates = await asyncio.to_thread(load)
+            rows, self._creation_dates, self.pins = await asyncio.to_thread(load)
             return rows
 
         task = asyncio.ensure_future(_load())
@@ -644,6 +748,30 @@ class SessionTable:
         self._summaries_at = time.monotonic()
         return out
 
+    def set_pins(self, session_id: str, pinned: bool) -> bool:
+        """Set one session's durable pin and refresh the table's copy.
+
+        Delegates to :mod:`local_operator.tui.sidebar_pins` — the ONE pin store —
+        so a pin made on the phone is the same pin the terminal's ``F10`` and the
+        desktop app's row action read and write. This is the whole reason the
+        phone's pin rides this file rather than a relay-local list: a pin is a
+        durable user statement about a conversation, not a per-surface view
+        preference, and a second store would make the surfaces disagree about
+        which conversations are pinned.
+
+        Returns the state the store now holds (``set_pin``'s own answer), and
+        invalidates the summaries cache so the next list frame carries it — the
+        pin is membership in a display section, so the row must move even
+        though nothing else about it changed.
+        """
+        from local_operator.paths import config_dir
+
+        state = set_pin(config_dir(), session_id, pinned)
+        self.pins = tuple(read_pins(config_dir()))
+        self.invalidate_summaries_cache()
+        self.notify_list_changed()
+        return state
+
     def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
         """Merge cached durable rows with fresh live state into summary rows.
 
@@ -658,17 +786,55 @@ class SessionTable:
             if prior is None or entry.record.heartbeat_at > prior.record.heartbeat_at:
                 active[entry.record.session_id] = entry
         out: list[dict[str, Any]] = []
+        ranks: dict[str, tuple[tuple[int, int, float, str], bool]] = {}
         for session_id in set(durable) | set(active):
             entry = active.get(session_id)
             counts = _advertisable_counts(entry)
             p = entry.projection if entry else None
             row = durable.get(session_id)
+            attention = self._attention_states.get(f"session/{session_id}", {})
+            # BIRTH, AND THE FALLBACK IS THE RUNTIME'S OWN START, never 0.0.
+            # ``_creation_dates`` is resolved off-loop by ``_refresh_durable_rows``
+            # for a live session the bounded history listing did not carry — but
+            # there is a window (a session just started from the phone, before the
+            # 1 s durable refresh runs) where neither a durable row NOR a resolved
+            # date exists. Falling back to 0.0 there put a brand-new conversation
+            # at the BOTTOM of its tier and then JUMPED it to the top the moment
+            # the real date landed: the highest-sorting ``-created_at`` term
+            # flips ends when a zero becomes a large number. ``started_at`` is the
+            # runtime's own clock, which for a conversation that was just created
+            # (and so was just started) is its birth to within the process
+            # handshake — close enough that the row holds its place across the
+            # transition instead of leaping, and honest about the fact that the
+            # exact birth is not known yet. The id tie-break below makes the order
+            # total for any remaining equal values.
+            created_at = (
+                row.created_at
+                if row
+                else self._creation_dates.get(session_id)
+                or (float(getattr(entry.record, "started_at", 0.0) or 0.0) if entry else 0.0)
+            )
+            mtime = row.mtime if row else entry.record.started_at if entry else 0
+            rank, is_active = _rank_row(
+                session_id,
+                entry=entry,
+                row=row,
+                created_at=created_at,
+                mtime=mtime,
+                attention=attention,
+                pending_kind=(p.pending.kind if p and p.pending else ""),
+            )
+            ranks[session_id] = (rank, is_active)
             out.append(
                 {
                     "session_id": session_id,
-                    "section": (
-                        "active" if entry or session_id in self.provisional_active else "previous"
-                    ),
+                    # SECTION IS THE SHARED ``active`` RULE, not "a live entry
+                    # exists". See ``_rank_row``: a durable-only conversation
+                    # with an unseen completion is Active on every other surface,
+                    # and calling it Previous here is what put one conversation
+                    # in two different lists depending on where you looked.
+                    "section": "active" if is_active else "previous",
+                    "pinned": session_id in self.pins,
                     "conversation_name": (p.conversation_name if p else "")
                     or (entry.record.conversation_name if entry else "")
                     or (row.name if row else ""),
@@ -730,34 +896,25 @@ class SessionTable:
                         for todo in phase.items
                         if todo.status in ("pending", "blocked")
                     ),
-                    "mtime": row.mtime if row else entry.record.started_at if entry else 0,
-                    "created_at": (
-                        row.created_at if row else self._creation_dates.get(session_id, 0.0)
-                    ),
-                    "completion_kind": self._attention_states.get(f"session/{session_id}", {}).get(
-                        "kind"
-                    )
-                    or "",
+                    "mtime": mtime,
+                    # The SAME value the rank used, so the wire and the order
+                    # cannot disagree about a row's birth (see the resolution
+                    # note above).
+                    "created_at": created_at,
+                    "completion_kind": attention.get("kind") or "",
                     # Shared completion receipts, not transcript activity or
                     # heartbeat freshness, decide whether an outcome is unread.
                     "unseen": self._is_unseen(session_id, row, entry),
                 }
             )
-        out.sort(
-            key=lambda summary: (
-                summary["section"] != "active",
-                session_category(
-                    pending=summary["needs_attention"],
-                    busy=summary["streaming"],
-                    unseen=summary["unseen"],
-                    kind=summary["completion_kind"],
-                    live=summary["section"] == "active",
-                ),
-                # Token/heartbeat refreshes must not move a finger's target.
-                -summary["created_at"],
-                summary["session_id"],
-            )
-        )
+        # THE SHARED RANK, straight from ``_rank_row`` — not a key re-derived
+        # here. Pins are NOT part of this sort: like the sidebar's ★ Pinned
+        # section, a pin is a DISPLAY lift applied by the client (see
+        # ``session-list.tsx``), so pinning a row never moves it within Active or
+        # Previous and the two surfaces keep agreeing about the ranking itself.
+        # The id tie-break inside ``entry_for``'s key makes the order total, so
+        # two rows of equal birth cannot swap places between polls.
+        out.sort(key=lambda summary: ranks[summary["session_id"]][0])
         return out
 
     def notify_list_changed(self) -> None:
@@ -2980,6 +3137,51 @@ def build_app(daemon: MobileDaemon):
         daemon.table.notify_list_changed()
         return JSONResponse({"ok": True, "attention": state})
 
+    async def api_session_pin(request: Request) -> Response:
+        """Set a conversation's durable pin to the state the caller asked for.
+
+        THE SHARED STORE, through ``SessionTable.set_pins`` ->
+        :mod:`local_operator.tui.sidebar_pins`. A pin made here is the SAME pin
+        the terminal's ``F10`` and the desktop app's row action read and write,
+        which is the requirement this route exists for: a pin is a durable
+        statement about a conversation, and the moment the phone keeps its own
+        list the three surfaces disagree about which conversations are pinned.
+
+        DESIRED STATE, NOT A TOGGLE, matching ``POST
+        /v1/desktop/sessions/{id}/pin`` rather than the TUI's keypress. A
+        dropped response must not flip the pin BACK when the caller retries, so
+        the body names the state wanted and a retry lands on the same one;
+        re-pinning an already-pinned session is a no-op, which is also what
+        keeps a re-pin from reordering the newest-pin-first store.
+
+        Refused for an id this machine has no conversation for, exactly like
+        ``/seen`` beside it — a live generation OR a durable user session — so
+        the route cannot be used to plant arbitrary ids in the store, and a pin
+        to a conversation that never existed cannot appear and then linger as an
+        entry that resolves to nothing.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None and _durable_user_session_dir(session_id) is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"error": "pinned (a boolean) is required"}, status_code=422)
+        pinned = body.get("pinned") if isinstance(body, dict) else None
+        # STRICT, for the reason the desktop route spells out: a truthy
+        # int/string is not a state the client meant, and accepting it would
+        # store a pin whose provenance nobody can reconstruct.
+        if not isinstance(pinned, bool):
+            return JSONResponse({"error": "pinned (a boolean) is required"}, status_code=422)
+        state = await asyncio.to_thread(daemon.table.set_pins, session_id, pinned)
+        # ``set_pins`` already invalidated the cache and woke the list stream; the
+        # caller gets the state the store now holds so a retry is idempotent.
+        return JSONResponse({"ok": True, "pinned": state})
+
     async def api_subagent_detail(request: Request) -> Response:
         """Full state for the one descendant named by the active phone route."""
         denied = gate(request)
@@ -3626,6 +3828,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/search", api_search_sessions),
         Route("/api/sessions/{session_id:str}/events", api_session_events),
         Route("/api/sessions/{session_id:str}/seen", api_session_seen, methods=["POST"]),
+        Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/agents/{job_id:str}", api_subagent_detail),
         Route(
             "/api/sessions/{session_id:str}/agents/{job_id:str}/history",

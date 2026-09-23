@@ -23,6 +23,7 @@
  * box they are bounded by, so they tighten exactly when the space does.
  */
 import { useEffect, useRef, useState } from "react";
+import { setSessionPin } from "../api";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
@@ -31,13 +32,16 @@ import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
+import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR } from "../lib/column";
 import { navigate } from "../router";
 import { useCompletionView } from "../use-completion-view";
 import { AgentScreen } from "./agent-view";
 import {
+	applySessionPin,
 	retainProjectionStream,
 	useProjection,
+	useSessions,
 } from "../store";
 import type { SessionProjection } from "../types";
 
@@ -71,6 +75,29 @@ function Header({
 	   an earlier version set it inside the sheet, which unmounted before it could
 	   paint (design round 6, D2). */
 	const [gateReceipt, setGateReceipt] = useState("");
+	/* THE PIN STATE COMES FROM THE LIST STORE, which is the same row the daemon
+	   serves on the list frame — so this control and the list's ★ agree by
+	   construction rather than by two reads of the pin file. `undefined` (an
+	   older daemon, or a session the list has not carried yet) reads as unpinned,
+	   which is the honest default: the button then offers to pin, and the next
+	   list repaint corrects it if that was wrong. */
+	const { sessions } = useSessions();
+	const pinned = Boolean(
+		sessions.find((row) => row.session_id === sessionId)?.pinned,
+	);
+	const [pinError, setPinError] = useState("");
+	const togglePin = async () => {
+		setPinError("");
+		const next = !pinned;
+		/* Optimistic, then confirmed — the list row moves at once and the daemon's
+		   next repaint is the authority. */
+		applySessionPin(sessionId, next);
+		try {
+			await setSessionPin(sessionId, next);
+		} catch (e) {
+			setPinError(String((e as Error).message ?? e));
+		}
+	};
 	return (
 		<>
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
@@ -85,6 +112,24 @@ function Header({
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
+			{/* THE DISCOVERABLE PIN. The list also pins on a long-press, but a gesture
+			    with no affordance is undiscoverable on its own — this header control is
+			    where a reader finds the feature, and it is the SAME shared store, so
+			    pinning here moves the list's ★ Pinned section too. `★`/`☆` rather than a
+			    word: the header is width-starved and the star is the mark the section
+			    heading already uses, so the two cannot be read as different things. */}
+			<button
+				type="button"
+				onClick={() => void togglePin()}
+				aria-label={pinned ? "unpin this session" : "pin this session"}
+				aria-pressed={pinned}
+				className={cn(
+					"flex min-h-8 min-w-8 items-center justify-center rounded-sm active:bg-elevated",
+					pinned ? "text-accent" : "text-ink-muted",
+				)}
+			>
+				{pinned ? "★" : "☆"}
+			</button>
 			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
 			    `/approvals auto` is authority-increasing, so it asks the runtime for a
 			    per-action challenge and signs it with this phone's non-extractable key.
@@ -116,6 +161,15 @@ function Header({
 				className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
 			>
 				{gateReceipt}
+			</p>
+		) : null}
+		{pinError ? (
+			/* A failed pin POST is SAID, not swallowed: a button whose press changed
+			   nothing must not read as success. The optimistic list write is corrected
+			   by the daemon's next repaint, so this is the only place the failure is
+			   visible at all. */
+			<p role="alert" className="border-b border-hairline px-2 py-1 text-meta text-danger">
+				Could not save the pin: {pinError}
 			</p>
 		) : null}
 		</>

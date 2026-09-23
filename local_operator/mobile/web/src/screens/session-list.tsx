@@ -7,6 +7,18 @@
  * the indicator — no spinner); a session waiting on the user carries the
  * danger dot and a word ("approval" / "question"), because that is the one
  * card that needs a decision (branding §7).
+ *
+ * SECTIONS AND ORDER COME FROM THE DAEMON, and this screen re-derives neither.
+ * The server sorts every row on the shared catalog key
+ * (`session.catalog.CatalogEntry.rank` — the same key the terminal sidebar and
+ * the desktop app sort on) and marks each row `active`/`previous` with the
+ * shared `active` rule, so the list is STABLE across activity refreshes (the
+ * jitter this change removes) and identical to the other two surfaces. This
+ * screen only GROUPS what it is given: ★ Pinned, Active Sessions, Previous
+ * Sessions — the sidebar's own section order, minus the subagent layer the
+ * phone does not carry. A pin is a display lift like the sidebar's, so it never
+ * changes the daemon's ranking and pinning a row never moves it inside its own
+ * section.
  */
 import {
 	useEffect,
@@ -15,11 +27,15 @@ import {
 	useState,
 	type Ref,
 } from "react";
-import { getDirectories } from "../api";
+import { getDirectories, setSessionPin } from "../api";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { navigate } from "../router";
-import { retainSessionListStream, useSessions } from "../store";
+import {
+	applySessionPin,
+	retainSessionListStream,
+	useSessions,
+} from "../store";
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
 import { MARK_DATA_URI } from "../lib/mark";
@@ -121,14 +137,56 @@ function NewMark({ visible }: { visible: boolean }) {
 function SessionCard({
 	s,
 	home,
+	onLongPress,
 	ref,
 }: {
 	s: SessionSummary;
 	home: string;
+	/* A long-press opens the pin action sheet for this row. Passed in rather
+	   than handled here so the card stays a pure presentation of one summary and
+	   the gesture's timer lives with the screen that owns the sheet — and so the
+	   card can be rendered in a test with no gesture machinery at all. */
+	onLongPress?: () => void;
 	/* FLIP anchor: the list measures every card before/after a reorder so it
 	   can settle it into its new slot instead of teleporting it. */
 	ref?: Ref<HTMLButtonElement>;
 }) {
+	/* A POINTER, NOT A HOVER: a phone has no hover, so a long-press is the one
+	   gesture that reliably means "more actions for this row" without a visible
+	   control on every card (which would cost width the title needs). A press
+	   that moves — a scroll — CANCELS the timer, or a flick through the list
+	   would open the sheet on whatever row the finger happened to pass over. */
+	const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const pressedAt = useRef<{ x: number; y: number } | null>(null);
+	/* Set by the long-press firing; read and reset by the click that follows it. */
+	const suppressClick = useRef(false);
+	const cancelPress = () => {
+		if (pressTimer.current !== null) {
+			clearTimeout(pressTimer.current);
+			pressTimer.current = null;
+		}
+		pressedAt.current = null;
+	};
+	const onPointerDown = (event: React.PointerEvent) => {
+		if (!onLongPress) return;
+		pressedAt.current = { x: event.clientX, y: event.clientY };
+		pressTimer.current = setTimeout(() => {
+			pressTimer.current = null;
+			/* A long-press must not ALSO fire the card's onClick and navigate:
+			   `cancelPress` clears the timer on pointerup, and the flag below is
+			   what tells the click handler to stand down. */
+			suppressClick.current = true;
+			onLongPress();
+		}, 450);
+	};
+	const onPointerMove = (event: React.PointerEvent) => {
+		const start = pressedAt.current;
+		if (start === null) return;
+		/* 10px of travel is a scroll, not a press held still. */
+		if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) {
+			cancelPress();
+		}
+	};
 	const pendingLabel =
 		s.pending_kind === "approval"
 			? "approval"
@@ -175,7 +233,19 @@ function SessionCard({
 		<button
 			ref={ref}
 			type="button"
-			onClick={() => navigate(`/s/${encodeURIComponent(s.session_id)}`)}
+			onPointerDown={onPointerDown}
+			onPointerMove={onPointerMove}
+			onPointerUp={cancelPress}
+			onPointerLeave={cancelPress}
+			onPointerCancel={cancelPress}
+			onContextMenu={(event) => event.preventDefault()}
+			onClick={() => {
+				if (suppressClick.current) {
+					suppressClick.current = false;
+					return;
+				}
+				navigate(`/s/${encodeURIComponent(s.session_id)}`);
+			}}
 			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
@@ -276,6 +346,22 @@ function SessionCard({
 						{pendingLabel}
 					</span>
 				) : null}
+				{/* A PINNED ROW CARRIES ITS ★, and it rides the RIGHT cluster rather than
+				    the state slot. The TUI made exactly this call (`session_sidebar.py`
+				    `_special_mark`): a ★ in the state column made the sessions a user
+				    cares about most the only ones that could not report being blocked,
+				    broken or finished, because the pin is the DURABLE fact and the state
+				    glyph is the volatile one — so the pin moves, not the state. The ★ is
+				    also the shape the ★ Pinned heading uses, so the mark and its section
+				    cannot disagree about what it means. */}
+				{s.pinned ? (
+					<span
+						className="shrink-0 text-meta text-accent"
+						aria-label="pinned"
+					>
+						★
+					</span>
+				) : null}
 				{/* State word rides BEFORE the count chips in the right cluster
 				    (spec §1): `new` truncates the title only, row height never
 				    changes. */}
@@ -366,6 +452,12 @@ export function SessionListScreen() {
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
 	const [query, setQuery] = useState("");
+	/* The row whose pin action sheet is open, or NONE. Held as the id rather than
+	   the summary so a list repaint while the sheet is open cannot leave the
+	   sheet describing a stale object — the row it names is re-read from
+	   `sessions` on every render, so the toggle always acts on current state. */
+	const [pinTarget, setPinTarget] = useState<string | null>(null);
+	const [pinError, setPinError] = useState("");
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
@@ -376,10 +468,54 @@ export function SessionListScreen() {
 			.toLowerCase()
 			.includes(query.toLowerCase()),
 	);
-	const active = visible.filter((session) => session.section === "active");
-	const previous = visible.filter((session) => session.section === "previous");
+	/* THE SIDEBAR'S SECTION ORDER, top to bottom: pinned, then the shared
+	   active/previous partition, filtered through whatever query is typed. A
+	   pinned row appears ONLY in ★ Pinned (not also in Active/Previous), matching
+	   the sidebar, where a pin lifts the row out of the section it ranked into.
+	   The RANKING is untouched — each group keeps the daemon's order, so pinning
+	   never reorders a section and the FLIP settle below has nothing to animate
+	   when a row merely joins the pinned list at the top. */
+	const pinned = visible.filter((session) => session.pinned);
+	const rest = visible.filter((session) => !session.pinned);
+	const active = rest.filter((session) => session.section === "active");
+	const previous = rest.filter((session) => session.section === "previous");
+	const pinRow = pinTarget
+		? sessions.find((session) => session.session_id === pinTarget) ?? null
+		: null;
+
+	/* Optimistic, then confirmed: the row moves the instant the user acts, and
+	   the daemon's next list repaint (which `set_pins` already woke) is the
+	   authority. A failed POST restores the truth via that same repaint. */
+	const togglePin = async (sessionId: string, pinned: boolean) => {
+		setPinError("");
+		applySessionPin(sessionId, pinned);
+		setPinTarget(null);
+		try {
+			await setSessionPin(sessionId, pinned);
+		} catch (e) {
+			/* Surface it rather than swallow: an unreachable daemon must not read as
+			   "the pin took". The next repaint corrects the row either way. */
+			setPinError(String((e as Error).message ?? e));
+		}
+	};
 
 	useEffect(() => retainSessionListStream(), []);
+
+	/* One card factory for all three sections, so a section cannot forget the FLIP
+	   ref or the long-press handler — the bug a fourth copy of this markup would
+	   eventually grow. */
+	const renderCard = (s: SessionSummary) => (
+		<SessionCard
+			key={s.session_id}
+			s={s}
+			home={home}
+			onLongPress={() => setPinTarget(s.session_id)}
+			ref={(el) => {
+				if (el) cardRefs.current.set(s.session_id, el);
+				else cardRefs.current.delete(s.session_id);
+			}}
+		/>
+	);
 
 	/* FLIP settle for reorders (spec §3): a card never teleports under a
 	   thumb mid-scroll. After each commit, measure every card's position in
@@ -473,34 +609,25 @@ export function SessionListScreen() {
 					</div>
 				) : (
 					<div className="flex flex-col gap-3">
+						{pinned.length > 0 ? (
+							<section>
+								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">★ Pinned</h2>
+								{pinned.map(renderCard)}
+							</section>
+						) : null}
 						<section>
 							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
-							{active.map((s) => (
-								<SessionCard
-									key={s.session_id}
-									s={s}
-									home={home}
-									ref={(el) => {
-										if (el) cardRefs.current.set(s.session_id, el);
-										else cardRefs.current.delete(s.session_id);
-									}}
-								/>
-							))}
+							{active.map(renderCard)}
 						</section>
 						<section>
 							<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
-							{previous.map((s) => (
-								<SessionCard
-									key={s.session_id}
-									s={s}
-									home={home}
-									ref={(el) => {
-										if (el) cardRefs.current.set(s.session_id, el);
-										else cardRefs.current.delete(s.session_id);
-									}}
-								/>
-							))}
+							{previous.map(renderCard)}
 						</section>
+						{pinError ? (
+							<p role="alert" className="px-2 text-meta text-danger">
+								Could not save the pin: {pinError}
+							</p>
+						) : null}
 					</div>
 				)}
 			</main>
@@ -522,6 +649,34 @@ export function SessionListScreen() {
 				</button>
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
+			{/* THE PIN ACTION SHEET. Long-press opened it, so it is where the gesture's
+			    meaning is spelled out rather than left to be discovered — the row shows
+			    a ★ once pinned, and this sheet is how a reader learns the gesture that
+			    put it there. ONE primary action and nothing else: a menu of one is a
+			    better fit for a phone than an inline control on every row, which would
+			    cost the title the width it truncates against. */}
+			<Sheet
+				open={pinRow !== null}
+				onClose={() => setPinTarget(null)}
+				title={pinRow?.conversation_name || "untitled"}
+			>
+				<div className="flex flex-col p-2">
+					<button
+						type="button"
+						onClick={() =>
+							pinRow && void togglePin(pinRow.session_id, !pinRow.pinned)
+						}
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
+					>
+						<span className="w-4 shrink-0 text-accent" aria-hidden>
+							★
+						</span>
+						{/* The verb names the state it will SET, so a second look at the same
+						    row reads the outcome rather than a description of the store. */}
+						{pinRow?.pinned ? "Unpin from the top" : "Pin to the top"}
+					</button>
+				</div>
+			</Sheet>
 		</div>
 	);
 }
