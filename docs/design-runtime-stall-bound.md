@@ -72,7 +72,9 @@ signal handler all fail here: a hung thread never releases the GIL, a Python
 signal handler only runs between bytecodes, and a loop parked in a C call never
 schedules the coroutine that would report the sample. `faulthandler`'s timer
 runs in a dedicated **C** thread, needs no GIL and no interpreter state, writes
-every thread's stack to a file descriptor and then `_exit`s.
+every thread's stack to a file descriptor. Production uses `exit=False`, so the
+runtime continues after the diagnostic until its own work returns or an operator
+explicitly stops it.
 
 **What the bound measures: no progress on a plane, not slow work.** Each plane
 carries its own last-seen stamp — the workload tick (`process._beat_stall_watchdog`)
@@ -93,8 +95,10 @@ usually not the whole process, and the serving plane's healthy heartbeat kept th
 timer fresh for hours. Measured on the committed head (`15ec2c63`) with a
 one-second bound: a rig with the workload plane 100% busy in the matcher and the
 serving plane beating every 0.2 s ran **8 s — 8x the bound — and was killed by an
-external timeout, with ZERO fired markers and a header-only dump**. After the fix
-the same rig leaves at the bound (`rc=1`) with every thread's stack.
+external timeout, with ZERO fired markers and a header-only dump**. The
+dump-only implementation records a fired dump at the bound while the native C
+call remains parked; the fixture's bounded sleep returns later, and the test then
+observes a normal child exit. Timer expiry itself does not exit it.
 
 **What it is stricter than, stated plainly.** A synchronous step is
 indistinguishable from a wedge from outside the process, so the bound is also a
@@ -112,14 +116,11 @@ freezes actually suffered (1.5-7.2 h, four of five with zero writes). A single
 synchronous step that holds the GIL for five unbroken minutes is not slow work.
 `LOP_RUNTIME_STALL_SECONDS` overrides it; `0` disables it.
 
-**What the exit costs, beyond the turn.** A hard exit runs no Python, so the
-in-process kill of this turn's tool process groups cannot fire (`execute_bash`'s
-`_kill` chain) — which is exactly the "hard death of the owning `lop` process"
-class `tools/group_reaper.py` exists for. Each group is registered with a
-liveness marker at spawn and `sweep_orphan_groups` reaps the ones whose owner is
-provably dead at the **next `lop` startup**, so a child orphaned here is bounded
-by the next session start rather than by this process's death — the same
-guarantee today's only recovery (SIGKILL) already relies on.
+**Why native termination is disabled.** The C callback cannot participate in
+work admission, so it cannot safely decide that an apparently idle runtime may be
+terminated. Diagnostic expiry therefore leaves the process alive; a runtime that
+stays wedged needs operator inspection and an explicit stop. Cooperative update
+retirement remains a separate work-aware path.
 
 **Production expiry is dump-only.** The previous implementation used
 `exit=not held` to let the native timer terminate a runtime after a Python sample
@@ -130,9 +131,8 @@ path, the sample was not a safe retirement barrier. The shared timer wrapper now
 always uses `exit=False`, including fires whose latest sample said idle.
 
 The watchdog still writes every thread's stack and a fired marker. The sampler
-may append `stall_watchdog.HELD_MARKER` after observing a surviving fire, but that
-marker now describes a process that survived a diagnostic-only timer, not a fatal
-vs held decision. If the runtime remains stuck, the operator must inspect the dump
+may append `stall_watchdog.HELD_MARKER` after observing a surviving fire; it is
+additional evidence of survival, not a branch that can make native termination safe. If the runtime remains stuck, the operator must inspect the dump
 and explicitly stop it (`lop stop --force` when graceful stop cannot reach the
 blocked loop). Idle frozen runtimes no longer receive automatic stale-idle
 termination or successor/reclaim handling; that is the fail-closed cost until all
@@ -165,9 +165,9 @@ file written into a log directory.
 (`stall_watchdog.announce`), and `lop sessions --json` carries a `stall_dump` key
 per row — the path when that pid's bound fired, `null` otherwise
 (`stall_watchdog.fired_pids`, read once per listing). That is the surface an
-operator or an agent lists a fleet on after something died, and the runtime that
-wrote the file is gone by definition, so the reader has to reach it from a
-listing rather than from the process.
+operator or an agent uses when investigating a watchdog fire. Because production
+expiry only writes a dump, the PID may still be alive; the listing exposes the
+dump path alongside that PID.
 
 **The interlock.** `faulthandler`'s timer is process-global and shared with
 `tests/e2e/watchdog.py` and `tests/shard_stall_watchdog.py`. The arming therefore
@@ -236,8 +236,8 @@ three text-preserving mutants (the publication inside `if False:`, an early
 module) left that pin green with the leg inert. The acceptance evidence is now a real
 `python -m …process` child spawned through `launch._spawn_runtime`, spinning because a
 `PYTHONPATH`-supplied `sitecustomize.py` starts a CPU-burning thread at interpreter
-start (no model, no turn), with `LOP_RUNTIME_STALL_SECONDS=45`: it exits `rc=1` with
-the progress line in its dump and `fired_leg → "progress"`. The same rig with `probe=`
+start (no model, no turn), with `LOP_RUNTIME_STALL_SECONDS=45`: it records the progress line in its dump,
+then the test reaps the still-live runtime. The same rig with `probe=`
 dropped inside the child does not fire. A predicate that ships silently disabled
 with green tests would make the fleet *look* protected, which is the failure this
 whole design exists to avoid.

@@ -546,18 +546,17 @@ ARM_MARKER = "[stall watchdog] "
 #: readers draw ("a bound fired" is all :func:`fired_pids` says, and
 #: :func:`fired_leg` names only which leg).
 OBSERVATION_NOT_VERDICT = (
-    "IF A DUMP FOLLOWS THIS HEADER IT IS AN OBSERVATION, NOT A VERDICT: the watchdog's timer "
-    "expired without a re-arm from this process's own loops, and that is ALL it measured. It is "
-    "NOT a statement that the runtime stopped -- the timer can expire on a process that is "
-    "mid-turn and working -- so THIS PROCESS MAY STILL BE ALIVE ON THIS SAME PID, and may carry "
-    "on serving, AFTER this dump is written. What would turn the observation into a death is the "
-    "exit faulthandler takes once it has dumped, and WHETHER THIS TIMER CARRIES THAT EXIT IS "
-    "ANSWERED AT EVERY RE-ARM RATHER THAN FIXED HERE: a runtime HOLDING WORK (a turn under the "
-    "lock, a live subagent lane, a background job, a gate parked on the user) is dumped and LEFT "
-    "RUNNING, while an IDLE one is dumped and exited. This header is written at ARM time, BEFORE "
-    "any of those re-arms, so it cannot name the answer that will hold at the fire -- and so the "
-    "file cannot say whether the runtime is gone either. A fire is not by itself a body count: "
-    "THE PID, NOT THIS FILE, IS WHAT SAYS WHETHER THE RUNTIME IS STILL THERE."
+    "THIS IS A TIMER OBSERVATION, NOT A VERDICT.\n\n"
+    "THIS PROCESS MAY STILL BE ALIVE ON THIS SAME PID. Check the PID; it may still serve.\n\n"
+    "PRODUCTION EXPIRY IS DUMP-ONLY: the native timer is armed with exit=False.\n\n"
+    "The timer expired without a re-arm from this process's own loops, and that is ALL it "
+    "measured. It is NOT a statement that the runtime stopped -- the timer can expire on a "
+    "process that is mid-turn and working, and it may carry on serving AFTER this dump is "
+    "written.\n\n"
+    "This header is written at ARM time, BEFORE any of those re-arms, so it cannot name the "
+    "answer that will hold at the fire -- and so the file cannot say whether the runtime is "
+    "gone either. A fire is not by itself a body count: THE PID, NOT THIS FILE, IS WHAT SAYS "
+    "WHETHER THE RUNTIME IS STILL THERE."
 )
 
 #: How to read the two numbers a fire leaves behind: the value on ``faulthandler``'s own
