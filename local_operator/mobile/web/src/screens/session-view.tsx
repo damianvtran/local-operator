@@ -40,6 +40,7 @@ import { AgentScreen } from "./agent-view";
 import {
 	applySessionPin,
 	retainProjectionStream,
+	retainSessionListStream,
 	useProjection,
 	useSessions,
 } from "../store";
@@ -189,6 +190,14 @@ export function SessionScreen({
 	const rootRef = useRef<HTMLDivElement>(null);
 
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
+	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
+	   authoritatively rather than optimistically forever (review round 1, MINOR 1).
+	   This header reads its pin state from the LIST store (`useSessions`); without
+	   retaining that stream a session opened directly by URL would never receive a
+	   repaint, so a pin set here — or cleared on another surface — would not
+	   correct itself until navigation. The stream is refcounted, so mounting it
+	   here alongside the list screen is free. */
+	useEffect(() => retainSessionListStream(), []);
 
 	useCompletionView(sessionId, projection, rootRef,
 		!connected || Boolean(jobId) || modelsOpen || effortOpen);

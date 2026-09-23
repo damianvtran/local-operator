@@ -167,14 +167,25 @@ function SessionCard({
 		}
 		pressedAt.current = null;
 	};
+	/* CLEANUP ON UNMOUNT (review round 1, MINOR 2). The list re-renders rows
+	   constantly, and a press in flight when a row unmounts — or when the whole
+	   screen is left by a navigation — would otherwise fire its ``setTimeout``
+	   against a torn-down tree: ``onLongPress`` would open a sheet for a row that
+	   is no longer on screen. */
+	useEffect(() => cancelPress, []);
 	const onPointerDown = (event: React.PointerEvent) => {
 		if (!onLongPress) return;
+		/* A NEW PRESS CLEARS THE SUPPRESSION, so it can never outlive the gesture
+		   that set it (review round 1, NIT 1). Without this a long-press whose
+		   finger lifted off the card (a ``pointerleave`` with no following click)
+		   left the flag set, and the user's NEXT genuine tap was swallowed. */
+		suppressClick.current = false;
 		pressedAt.current = { x: event.clientX, y: event.clientY };
 		pressTimer.current = setTimeout(() => {
 			pressTimer.current = null;
 			/* A long-press must not ALSO fire the card's onClick and navigate:
-			   `cancelPress` clears the timer on pointerup, and the flag below is
-			   what tells the click handler to stand down. */
+			   `cancelPress` clears the timer on pointerup, and this flag is what
+			   tells the click handler to stand down. */
 			suppressClick.current = true;
 			onLongPress();
 		}, 450);

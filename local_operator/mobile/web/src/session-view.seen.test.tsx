@@ -4,6 +4,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
+import { retainSessionListStream } from "./store";
 import type { SessionProjection } from "./types";
 
 vi.mock("./api", () => ({
@@ -41,6 +42,7 @@ vi.mock("./store", async (importOriginal) => {
 		...actual,
 		useProjection: vi.fn(() => slot),
 		retainProjectionStream: vi.fn(() => () => {}),
+		retainSessionListStream: vi.fn(() => () => {}),
 		useDraft: vi.fn(() => ["", () => {}]),
 		clearSessionUnseen: vi.fn(actual.clearSessionUnseen),
 	};
@@ -105,6 +107,18 @@ async function sample() {
 }
 
 describe("SessionScreen seen handshake", () => {
+	it("retains the LIST stream, so the header pin reflects the shared store", () => {
+		// Review round 1, MINOR 1. The header's ☆/★ reads its state from the list
+		// store, and the session route is reachable directly by URL — so without
+		// this stream the header could never receive the authoritative repaint
+		// that corrects an optimistic pin (or one cleared on another surface).
+		// Asserted through the SAME spy the component calls, so a removed effect
+		// fails here.
+		focusedResult();
+		render(<SessionScreen sessionId="s1" />);
+		expect(retainSessionListStream).toHaveBeenCalled();
+	});
+
 	it("acknowledges the rendered token once without optimistic clearing", async () => {
 		focusedResult();
 		render(<SessionScreen sessionId="s1" />);

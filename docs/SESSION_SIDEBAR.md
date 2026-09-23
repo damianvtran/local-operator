@@ -22,9 +22,11 @@ mobile relay agreeing on the same active/previous partition.
 The phone draws the same partition and the same ★ Pinned section, and it does
 so off the SAME key: the mobile daemon ranks through `session.catalog.entry_for`
 (see `_rank_row` in `mobile/daemon.py`) rather than re-deriving an order from
-live state, so the two surfaces cannot disagree about a row's tier, its section,
-or its place. A pin made on the phone — the list's long-press or the session
-view's ☆/★ header control — is written to this same store below.
+live state, so the two surfaces agree about a row's tier, its section, and its
+place. (The one asymmetry is the wake band: the phone's rows carry no wake data,
+so `wake_rank` is a constant there — see `CatalogEntry.rank`.) A pin made on the
+phone — the list's long-press or the session view's ☆/★ header control — is
+written to this same store below.
 
 ### Pins
 

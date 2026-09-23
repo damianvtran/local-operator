@@ -106,6 +106,10 @@ the session view header's ★ control).
     asserted against `entry_for` too so it is about *agreement*.
   - `test_a_durable_unread_row_sorts_where_the_catalogue_puts_it` — the merged
     order equals the shared ranking of the same rows.
+  - `test_a_phone_woken_session_is_active_before_its_record_arrives` — the
+    provisional wake window does not flash under Previous.
+  - `test_set_pins_does_not_touch_the_event_loop` — the pin write leaves the SSE
+    wake to the route, on the loop.
   - `test_pin_route_writes_the_shared_store_and_the_frame_carries_it` — the route
     round-trips, and the pin is read back with the TERMINAL's `read_pins`.
   - `test_pin_route_refuses_an_unknown_session_and_a_non_boolean` — 404 for an
@@ -114,3 +118,21 @@ the session view header's ★ control).
   section, the pinned mark, the long-press opening the sheet, a scroll cancelling
   it (with an unmoved-press control so the cancel test cannot pass vacuously),
   and that a long-press does not navigate.
+- `local_operator/mobile/web/src/session-view.seen.test.tsx` — the session view
+  retains the list stream, so the header pin can receive the authoritative
+  repaint.
+
+## Review round 1
+
+Agent review posted five findings; all addressed in this PR:
+
+- **MAJOR 1** — the phone-woken window (`provisional_active`) was dropped, so a
+  woken row flashed under Previous. Ranked as a live `idle` row instead; tested.
+- **MAJOR 2** — `set_pins` woke the SSE stream from a worker thread. The notify
+  moved to the route, on the loop; tested by monkeypatching the notifier.
+- **MINOR 1** — the session view read the list store without retaining its
+  stream. It retains it now; tested.
+- **MINOR 2** — the long-press timer had no unmount cleanup. Added.
+- **MINOR 3** — parity prose over-reached on the wake band. Narrowed here and in
+  `docs/mobile.md` / `docs/SESSION_SIDEBAR.md`.
+- **NIT 1** — `suppressClick` could latch. A new press clears it.
