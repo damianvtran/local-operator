@@ -710,7 +710,7 @@ async def test_both_parity_arms_read_through_the_idle_barrier(
     The spy sees ONLY this module's calls: ``_SharedApp.run`` and ``_run``
     reference ``wait_for_idle`` as a module global (which is why patching the
     module attribute reaches them), whereas textual's own pilots bind their copy
-    at import time (``textual/_wait.py`` → ``textual/pilot.py:15``,
+    at import time (``textual/_wait.py`` → ``textual/pilot.py:16``,
     ``textual/app.py:91``), so ``pilot.pause`` and ``App._press_keys`` never
     route through it. ``_settle``, ``_reset`` and ``_arrange`` do not call it at
     all, so each ``idle=True`` arm contributes exactly one spy call -- the count
