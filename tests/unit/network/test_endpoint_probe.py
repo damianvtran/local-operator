@@ -311,6 +311,79 @@ def test_every_detail_the_probe_writes_is_a_code_the_human_gloss_can_read() -> N
     assert relay.is_probe_detail("host-a") is False
 
 
+def test_every_code_the_doctor_can_print_has_a_reading_too() -> None:
+    """QA round 24, Q-R24-2: the doctor's own vocabulary joins the same guard.
+
+    ``lop network doctor``'s ``detail`` is a field with a HUMAN RENDERER
+    (``resume.doctor_detail_words``), so it needs the protection the probe's
+    vocabulary got in round 10: a code this build can write with no stated reading
+    would reach a person as itself. The codes are enumerated FROM THE SOURCE — the
+    doctor's own set (``relay.DOCTOR_DETAIL_CODES``) plus the prefixed arrivals its
+    producers write and the refusal family the peer's own build decides — and each is
+    asserted to read as something a person would say.
+
+    ``present`` and ``ok`` are named as the two entries that ARE what a person would
+    say, so the exception is written down rather than left out: a vocabulary guard
+    with an undocumented hole is how this class of finding comes back.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import handshake
+
+    already_words = {"present", "ok"}
+    # The probe's codes ride in this field: a doctor reachability row IS one probe
+    # attempt, so the doctor's set must cover them (and the renderer must read them).
+    assert set(relay.PROBE_DETAIL_CODES) <= set(relay.DOCTOR_DETAIL_CODES)
+    for code in sorted(relay.DOCTOR_DETAIL_CODES):
+        words = resume.doctor_detail_words(code)
+        assert words.strip(), code
+        if code in already_words:
+            assert words == code, code
+            continue
+        assert words != code, code
+        assert ":" not in words and "_" not in words, (code, words)
+    # The prefixed arrivals, each built by the producer that writes it rather than
+    # typed here: the class name is what the reader is spared and ``--json`` keeps.
+    for exc in (TimeoutError(), ConnectionRefusedError(), ConnectionResetError("closed")):
+        refused = resume.doctor_detail_words(relay.handshake_refused_reason(exc))
+        assert refused == resume._BARE_CODE_WORDS, (exc, refused)  # noqa: SLF001
+        assert exc.__class__.__name__ not in refused, refused
+    nothing = resume.doctor_detail_words(f"{relay.CONNECT_FAILED_PREFIX}TimeoutError")
+    assert nothing == resume._DOCTOR_NOTHING_ANSWERED, nothing  # noqa: SLF001
+    assert "TimeoutError" not in nothing, nothing
+    # The refusal family (enumerated from the peer's constants, not typed) and the
+    # dial's phase guard: the peer ANSWERED and refused, which is what they read.
+    reasons = {value for name, value in vars(handshake).items() if name.startswith("REASON_")}
+    assert len(reasons) >= 10, reasons  # a truncated enumeration is not evidence
+    for code in sorted(reasons | {"pair_phase_requires_the_ceremony"}):
+        assert resume.doctor_detail_words(code) == resume._BARE_CODE_WORDS, code  # noqa: SLF001
+    # THE STATE Q-R24-2 IS ABOUT. An address that ANSWERED while the doctor's own
+    # budget expired: this build's spelling, from the listing's own producer with the
+    # doctor's clock, and the one a relay started before this build writes into the
+    # same field. Both read the same way — no address, no token — which is what makes
+    # the human line true about a device that was talking.
+    answered = resume.doctor_detail_words(
+        relay.handshake_not_attempted_reason("127.0.0.1:64994", budget="doctor")
+    )
+    assert answered == resume._DOCTOR_HANDSHAKE_ANSWERED_WORDS, answered  # noqa: SLF001
+    assert "127.0.0.1" not in answered and "not_attempted" not in answered, answered
+    older = resume.doctor_detail_words(
+        "not_attempted: 127.0.0.1:64994 answered and the doctor budget ran out before "
+        "the handshake"
+    )
+    assert older == answered, older
+    # ...while the probe's own bare ``not_attempted`` code keeps ITS doctor reading:
+    # the two are told apart by the colon, and the code's reading is about a dial that
+    # never happened — not the same state.
+    assert resume.doctor_detail_words("not_attempted") == (
+        "the doctor ran out of time before this address was tried"
+    )
+    # A SUCCESSFUL dial that is not the winner's keeps its fact and drops the endpoint
+    # its own row already shows.
+    elsewhere = resume.doctor_detail_words(relay.doctor_link_elsewhere_detail("127.0.0.1:64994"))
+    assert elsewhere == resume._DOCTOR_LINK_ELSEWHERE_WORDS, elsewhere  # noqa: SLF001
+    assert "127.0.0.1" not in elsewhere, elsewhere
+
+
 # ---------------------------------------------------------------------------
 # The member table, learned from a peer
 # ---------------------------------------------------------------------------

@@ -1856,13 +1856,11 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # D3) so this listing, `/sessions`'s own `--all-peers` line and the
         # sidebar tooltip say the same thing about the same state. The raw reason
         # is not lost: it is this verb's ``--json`` field, which is the machine
-        # surface. THE ONE HUMAN SURFACE THAT DOES PRINT ONE IS `lop network doctor`,
-        # deliberately and alone (round 10, MINOR-1): its rows are PER ADDRESS and
-        # the wire code is the diagnosis the command exists to make — which address
-        # was dialled and how it failed — while the member-level sentences
-        # `peer_reason_words` returns would be false on such a row. That function's
-        # own docstring is where the boundary is argued; do not widen it back to a
-        # claim about every surface.
+        # surface. `lop network doctor` renders its own rows through
+        # `resume.doctor_detail_words` for the same reason and in the same two
+        # registers (round 24, Q-R24-2): that table is a SECOND one because a
+        # doctor row is about one ADDRESS and these sentences are about a MEMBER,
+        # which is argued in that function's docstring.
         from local_operator.resume import peer_reason_words
 
         lines.append(
@@ -2383,12 +2381,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     payload = live if live is not None else _doctor_locally(args)
     checks = list(payload.get("checks") or [])
+    # THE ROW'S OWN WORDS, NOT ITS FIELD (round 24, Q-R24-2). This used to render
+    # ``detail`` verbatim, which put a stage word, a Python class name AND — on the
+    # state the listing's own round-10 fix exists for — the endpoint address on a
+    # human line. These lines are the human register; the raw strings are unchanged
+    # and still ride in ``checks[].detail`` of the payload ``--json`` prints.
+    from local_operator.resume import doctor_detail_words
+
     lines = []
     for check in checks:
         state = "ok " if check.get("ok") else "FAIL"
         lines.append(
             f"{state} {check.get('check', '')} {check.get('device_id', '')} "
-            f"{check.get('endpoint', '')} {check.get('detail', '')}"
+            f"{check.get('endpoint', '')} {doctor_detail_words(str(check.get('detail', '')))}"
             + (f" {check['latency_ms']}ms" if check.get("latency_ms") is not None else "")
         )
     if not lines:
@@ -2399,7 +2404,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "re-pair with a new invite"
         )
     failures = [
-        f"{check.get('check', '')}: {check.get('detail', '') or 'failed'}"
+        f"{check.get('check', '')}: {doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
         for check in checks
         if not check.get("ok")
     ]

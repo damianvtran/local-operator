@@ -376,10 +376,17 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             for row in rows
         ]
     if action == "doctor":
+        # THE SAME WORDS THE CLI SHOWS ITS OWN READER, through the same renderer
+        # (round 24, Q-R24-2): every string in that field is written for a person
+        # here, and the raw codes stay in ``checks[].detail``, which is what this
+        # tool's ``details`` carries into the machine register. A doctor row is about
+        # one address, which is why this is not ``peer_reason_words``.
+        from local_operator.resume import doctor_detail_words
+
         lines = [
             f"{'ok  ' if check.get('ok') else 'FAIL'} {check.get('check')} "
             f"{check.get('device_id', '')} {check.get('endpoint', '')} "
-            f"{check.get('detail', '')}".rstrip()
+            f"{doctor_detail_words(str(check.get('detail', '')))}".rstrip()
             for check in payload.get("checks") or []
         ]
         if not lines:

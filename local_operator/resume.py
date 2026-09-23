@@ -2346,7 +2346,10 @@ _HANDSHAKE_ANSWERED_WORDS = "it answered, and the listing ran out of time before
 #: refusals (``handshake.REASON_*`` — ``epoch_stale``, ``untrusted``,
 #: ``protocol_mismatch`` …) and the phase guard
 #: (``pair_phase_requires_the_ceremony``), where the peer ANSWERED and the link was
-#: not made. Saying "nothing answered" for those would be the same inversion
+#: not made; and the handshake's own refusal stage (``handshake_refused:<exception>``,
+#: the socket CONNECTED and the far side closed it or never spoke — the stage word
+#: says the peer answered, which is why its tail may not be read as silence; round
+#: 24, Q-R24-1). Saying "nothing answered" for those would be the same inversion
 #: MAJOR-1 is about, one state over; printing the code would put a bare wire word
 #: on a human line. A peer's own refusal message is the one arrival in this field
 #: this device did not write, and its single-word form reads the same way — as that
@@ -2488,17 +2491,19 @@ def peer_reason_words(reason: str) -> str:
     same reason.
 
     WHAT A READER IS TOLD FOR EVERY CODE THIS FIELD CARRIES (round 10, MAJOR-2).
-    Four producers write it, and each arrival has a stated reading: the record's own
+    Five producers write it, and each arrival has a stated reading: the record's own
     facts (``no_endpoint``, ``not_a_member``, ``member_removed``) and the probe's
     codes (``no_answer``, ``not_attempted``, ``bad_endpoint``) are TABLE ENTRIES, so
-    no bare token reaches a human line; ``connect_failed:<exception>`` and the bare
+    no bare token reaches a human line; ``connect_failed:<exception>``, the bare
     handshake refusals (``epoch_stale``, ``untrusted``, … — ``handshake.REASON_*``
-    and the dial's own phase guard) fall to the two STRUCTURAL FALLBACKS below,
-    which are sentences rather than tokens; the relay's ``handshake_not_attempted``
-    sentence is keyed on its stage and keeps its meaning without its address; and a
-    sentence written for a reader — the relay's ``not_attempted`` reason, a peer's
-    own refusal message — is returned as written. The tests walk that vocabulary
-    from the source, so a code added without a reading fails them.
+    and the dial's own phase guard) and ``handshake_refused:<exception>`` (an address
+    that ANSWERED and a link that was not made) fall to the two STRUCTURAL FALLBACKS
+    below, which are sentences rather than tokens; the relay's
+    ``handshake_not_attempted`` sentence is keyed on its stage and keeps its meaning
+    without its address; and a sentence written for a reader — the relay's
+    ``not_attempted`` reason, a peer's own refusal message — is returned as written.
+    The tests walk that vocabulary from the source, so a code added without a reading
+    fails them.
 
     Prefix-matched on the stage before the ``:`` rather than on the exception
     class, because the tail is whatever the dial raised: a vocabulary of Python
@@ -2511,19 +2516,15 @@ def peer_reason_words(reason: str) -> str:
     are a summary OF. It used to be printed per candidate by ``lop network peers``
     as well, and UX round 5's U28 removed that: a human listing is not where a
     Python class name belongs, and the human line and the payload are the two
-    registers. ``lop network doctor`` is the ONE human surface that prints a peer's
-    reachability REASON as a wire code, deliberately: that column is the instrument's
-    own reading — the dial result of one address (the endpoint is its own column, so
-    nothing is smuggled), or the record fact when nothing was dialled — and the code
-    IS the diagnosis the command exists to make, since "refused" and "a black hole"
-    want different remedies. The member-level sentences in this function would be
-    FALSE on such a row: ``no_answer`` reads "no address of it answered", a claim
-    about every address, on a row about one. The guide routes doctor's diagnosis
-    through ``--json`` for that reason: "``lop network doctor --json`` reports the
-    same per link, one row per address plus the handshake". (``lop network log`` also
-    prints codes, and is not a third case: it prints the audit RECORD — event and
-    detail as the record — so its human form and its ``--json`` carry the same
-    bytes.)
+    registers. ``lop network doctor`` renders a peer's reachability through
+    :func:`doctor_detail_words` for the same reason (round 10's MINOR-1 took the
+    narrower option here, and round 24's Q-R24-2 measured what it cost), which is
+    why the member-level sentences ABOVE are not that renderer's table: on a row
+    about ONE address, ``no_answer`` reading "no address of it answered" is a claim
+    about every address a peer publishes. Its raw ``detail`` fields are still the
+    ``--json`` register, byte for byte. (``lop network log`` prints codes, and is not
+    a third case: it prints the audit RECORD — event and detail as the record — so
+    its human form and its ``--json`` carry the same bytes.)
     """
     token = (reason or "").strip()
     if not token:
@@ -2539,6 +2540,18 @@ def peer_reason_words(reason: str) -> str:
         # the reader's question is about the DEVICE, so the address is not lost by
         # leaving it in the ``--json`` field it came from.
         return _HANDSHAKE_ANSWERED_WORDS
+    if stage == "handshake_refused":
+        # A STAGE ONLY EVER WRITTEN ON A SOCKET THAT CONNECTED (round 24, Q-R24-1).
+        # ``relay.handshake_refused_reason`` writes it in the dial's ``except`` arm,
+        # after the connection was handed in, so it always means the address ANSWERED
+        # and the link was not made — and its tail is a Python class name, which is
+        # the ``--json`` register. The bare refusal codes got exactly this reading in
+        # round 10 for exactly this reason; this stage — the ONE arrival in the field
+        # whose own name says the peer answered — was left falling through to the
+        # "nothing answered" default, so a peer that answered and hung up, or
+        # answered and never spoke the protocol, was reported as one that never
+        # answered at all.
+        return _BARE_CODE_WORDS
     if not sep:
         # NOT a ``stage:tail`` pair, so it is one of two things: a sentence written
         # for a reader already, or a BARE WIRE CODE. ``epoch_stale`` and
@@ -2567,6 +2580,135 @@ def peer_reason_words(reason: str) -> str:
     # module has never seen: an unreadable reason is still "it did not answer" to
     # the person reading the row.
     return "it did not answer"
+
+
+#: The producer's own opening words for the doctor's ``connected`` stage — one
+#: address ANSWERED and the LINK went to another address the member publishes
+#: (``relay.doctor_link_elsewhere_detail``). It is a sentence rather than a stage
+#: prefix, so it is recognised by the prefix the producer writes; a test builds the
+#: string from that producer and asserts the reading below, so the two cannot drift.
+_DOCTOR_LINK_ELSEWHERE_PREFIX = "connected;"
+
+#: What a doctor row says when the address was dialled and nothing answered at it.
+#: One string for the transport's failure (``connect_failed:<exception>``) and for a
+#: dial that returned without a reason at all (``unreachable``): the reader's answer
+#: is the same, and the exception class is the ``--json`` register.
+_DOCTOR_NOTHING_ANSWERED = "nothing answered at that address"
+
+#: What a doctor row says when its address ANSWERED and THIS DEVICE's own doctor
+#: budget expired before the handshake could start. The same state the listing
+#: reports as ``handshake_not_attempted``; only the clock differs, so only the clock
+#: is named differently.
+_DOCTOR_HANDSHAKE_ANSWERED_WORDS = (
+    "it answered, and the doctor ran out of time before the handshake"
+)
+
+#: What a doctor row says when its address ANSWERED and the link was established at
+#: ANOTHER address the member publishes — a successful dial that is not the winner.
+_DOCTOR_LINK_ELSEWHERE_WORDS = (
+    "it answered; the link was established at another address this member publishes"
+)
+
+#: What ``lop network doctor`` tells a person for one check row's ``detail``.
+#:
+#: A DOCTOR ROW IS ABOUT ONE ADDRESS, AND THAT IS WHY THIS IS NOT
+#: :data:`PEER_REASON_WORDS` (QA round 24, Q-R24-2). Every sentence in the table
+#: above is about a MEMBER: ``no_answer`` reads "no address of it answered" — a
+#: claim about every address a peer publishes, painted onto a row that reports the
+#: result of ONE dial beside that address in its own column — and ``not_attempted``
+#: names the LISTING's clock, which is not the clock that expired here. So one token
+#: is said twice in this module, each time about what the surface reading it is
+#: actually reporting; neither table is a rename of the other, and collapsing them
+#: is how a true sentence becomes false one surface over (round 10, MAJOR-1). The
+#: record facts are the exception: ``no_endpoint`` says the same thing about a member
+#: on both surfaces, so it is spelled once and referenced here.
+#:
+#: ``present`` AND ``ok`` ARE THE DOCTOR'S OWN ENGLISH, not wire words: they are what
+#: a person would say, so they are their own reading — and the guard test in
+#: ``tests/unit/network/test_endpoint_probe.py`` names them as the two entries it
+#: does not require to differ, rather than leaving them unenumerated.
+DOCTOR_DETAIL_WORDS: dict[str, str] = {
+    "identity_missing": "this device has no mesh identity",
+    "present": "present",
+    "ok": "ok",
+    # One member-level fact, one wording: this one is not per-address, so the doctor's
+    # table does not get a second spelling of it.
+    "no_endpoint": PEER_REASON_WORDS["no_endpoint"],
+    "unreachable": _DOCTOR_NOTHING_ANSWERED,
+    "refused_by_peers": "peers are refusing this device's handshakes",
+    "not_attempted": "the doctor ran out of time before this address was tried",
+    "no_answer": _DOCTOR_NOTHING_ANSWERED,
+    "bad_endpoint": "the address it publishes cannot be dialled",
+}
+
+
+def doctor_detail_words(detail: str) -> str:
+    """One ``lop network doctor`` check row's ``detail``, in the words a person reads.
+
+    IT IS STILL A GLOSS AND NOT A PRINT. The doctor rendered this field verbatim
+    until round 24 (round 10's MINOR-1 took the narrower option, and QA round 24
+    measured what that cost on the one state the listing's own fix exists for:
+    ``not_attempted: 127.0.0.1:64994 answered and the doctor budget ran out before
+    the handshake`` — a stage word AND an endpoint address on a human line, in the
+    one state whose remedy differs). Words here, tokens in ``--json``: the raw
+    ``detail`` is unchanged and every row still carries it byte for byte.
+
+    WHAT THE WORDS KEEP, AND WHAT THEY DROP. They keep the STAGE of the dial the row
+    reports — nothing answered at that address, the address ANSWERED and the link was
+    refused (the refusal family, including the bare refusal codes the peer's own
+    build decides), the address answered only after our clock expired, an address
+    that was never tried, one whose published form cannot be dialled at all — which
+    is what the command exists to tell apart. They drop the two things a person does
+    not act on from a row: the transport's failure mode (the exception class name in
+    ``connect_failed:*`` and ``handshake_refused:*``), and any endpoint address
+    inside a sentence, which the row already carries in its own column. That is
+    :func:`peer_reason_words`' own argument — a vocabulary of Python class names
+    would be a second registry to keep, and the distinction a reader needs is which
+    stage the dial reached, not which exception said so.
+
+    Two spellings of the same state are read here on purpose, because the relay is a
+    separate, LONG-RUNNING process: this build writes
+    ``handshake_not_attempted: <endpoint> answered and the doctor budget ran out …``
+    (the listing's own producer, with the doctor's clock), and a relay started before
+    this build wrote ``not_attempted: <endpoint> answered and the doctor budget ran
+    out …`` into the same field. Both are the "answered" state and both read the
+    same way; the probe's own ``not_attempted`` code is always BARE — it is a member
+    of ``relay.PROBE_DETAIL_CODES``, which is what makes the distinction between the
+    two safe to read off the colon.
+
+    AN EMPTY DETAIL READS AS NOTHING, unlike :func:`peer_reason_words`, whose callers
+    paint it into a clause: this one is appended to a row that already ends where its
+    facts do.
+    """
+    token = (detail or "").strip()
+    if not token:
+        return ""
+    if token in DOCTOR_DETAIL_WORDS:
+        return DOCTOR_DETAIL_WORDS[token]
+    if token.startswith(_DOCTOR_LINK_ELSEWHERE_PREFIX):
+        # The winning endpoint is in this sentence and must not survive into a row a
+        # person reads: the row shows ITS OWN address in its own column, and the
+        # winner is the row above it.
+        return _DOCTOR_LINK_ELSEWHERE_WORDS
+    stage, sep, tail = token.partition(":")
+    if not sep:
+        # A BARE CODE WITH NO ENTRY: the handshake's refusal family
+        # (``handshake.REASON_*``, which the peer's own build decides) and the dial's
+        # phase guard. Neither means silence — the peer answered and refused — so
+        # neither may fall to the "nothing answered" reading.
+        return _BARE_CODE_WORDS if _is_bare_code(token) else token
+    if stage == "connect_failed":
+        return _DOCTOR_NOTHING_ANSWERED
+    if stage == "handshake_refused":
+        # Written only on a socket that CONNECTED (``relay.handshake_refused_reason``).
+        return _BARE_CODE_WORDS
+    if stage == "handshake_not_attempted" or (stage == "not_attempted" and tail.strip()):
+        # The second spelling is a relay started before this build; see the docstring.
+        return _DOCTOR_HANDSHAKE_ANSWERED_WORDS
+    # A sentence this device did not write — the membership sentence, the local
+    # fallback's "not probed: …" — is already prose for a reader, and every sentence
+    # the doctor writes itself is an arm above this line.
+    return token
 
 
 #: The session plane's ``state`` tokens, in the words a person reads. See
