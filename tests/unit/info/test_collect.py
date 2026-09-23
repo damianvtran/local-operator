@@ -1238,9 +1238,10 @@ def test_an_absurd_count_is_refused_rather_than_breaking_the_layout() -> None:
 
     Not reachable from this codebase's publisher — the count is a ``len()`` over
     a roster bounded by ``DEFAULT_MAX_RUNNING_JOBS`` — so this only guards a
-    corrupt or foreign record, which is exactly the population ``_reported_count``
-    already exists to reason about. Six digits still pass: the ceiling is about
-    rendering, not about a belief regarding how many subagents can exist.
+    corrupt or foreign record, which is exactly the population
+    ``session.runtime.types.reported_subagent_count`` already exists to reason about. Six
+    digits still pass: the ceiling is about rendering, not about a belief regarding how many
+    subagents can exist.
     """
     for value, reported in ((999_999, True), (1_000_000, False), (10**30, False)):
         records = [
