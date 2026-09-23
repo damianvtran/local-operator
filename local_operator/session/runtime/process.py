@@ -2455,19 +2455,29 @@ def _step_in_flight(handle: object) -> bool:
     incident this leg exists for had four running lanes that had produced
     nothing for seven minutes. Reusing ``is_busy`` here would have spared the
     very state the leg is for, so what it asks is narrower and about THIS
-    process: is a tool batch running, or a compaction rewriting history. Both
-    burn CPU with no transcript movement while they last, which is exactly what
-    the other two legs would otherwise read as a spin.
+    process: is a tool batch running, a compaction rewriting history, or a
+    delegated child stream awaiting its provider. The stream's counter is child-
+    only, so this does not mistake the manager's own provider request for child
+    work. If reading the counter fails, preserve the process rather than letting
+    an unreadable active-work signal trigger the watchdog.
 
-    A subagent lane's OWN in-process tool is not covered here, and the module
-    docstring says so rather than leaving a reader to infer coverage. A lane that
-    is stepping is covered from the other end: its step boundaries move
+    Arbitrary child in-process tool calls are still not represented here. A lane
+    that is stepping is covered from the other end: its step boundaries move
     ``_work_motion``'s roster generation, so the NO MOTION leg fails first.
+    This provider-request signal does not claim to solve a child tool that parks
+    without an outstanding model call.
     """
     session = getattr(handle, "_session", None)
     if session is None:
         return True
     if getattr(session, "_compacting", False):
+        return True
+    try:
+        stream = getattr(session, "_stream_fn", None)
+        if bool(getattr(stream, "child_model_requests_in_flight", False)):
+            return True
+    except Exception:  # noqa: BLE001 — an unreadable child-work signal must not fire a bound
+        logger.debug("stall watchdog: could not read child provider request state", exc_info=True)
         return True
     return _tool_batch_in_flight(session)
 

@@ -370,6 +370,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the tmp FILE of a failed record write",
     ),
+    # Store-maintenance completion metadata (2026-09-23). Startup passes the
+    # AgentRegistry config root to this worker; session directories are its
+    # separate `sessions/<id>` children. The target uses a fixed stamp basename
+    # at that root, and mkstemp creates the temporary FILE beside it in the same
+    # config root, so neither replace nor failure cleanup can displace a session.
+    (
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
+        "os.replace",
+        "atomically publishes only the fixed config-root .store-maintenance.json FILE; "
+        "its tmp FILE is created in that same root, outside sessions/<id>",
+    ),
+    (
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
+        "<path>.unlink",
+        "removes only the same-root temporary FILE after stamp publication fails; "
+        "config_dir is the store root, not a session directory",
+    ),
     # -- agent / team storage (agents/<id>/, teams/<name>/), never sessions/ --
     ("local_operator/agents.py::AgentRegistry.delete_agent", "shutil.rmtree", "agents/<id>"),
     (
@@ -1725,6 +1742,12 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # pid and nothing else (see the allow-list rows above): no session id, no
         # caller input, so neither can name a path under sessions/.
         "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        # The worker is called with AgentRegistry.config_dir (the config root),
+        # while sessions live in its separate sessions/<id> child. Its destination
+        # is config_dir / the fixed .store-maintenance.json basename and its temp
+        # FILE is created with mkstemp(dir=config_dir), so these file replacements
+        # cannot rename a session directory.
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
     }
