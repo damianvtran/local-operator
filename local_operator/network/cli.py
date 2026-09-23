@@ -38,7 +38,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 #: The default invite lifetime. A string flag parsed by :func:`_duration`, because
 #: ``--expires 10m`` is what a person types and ``600`` is what they would have to
@@ -1528,13 +1528,65 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
 _STOP_ENDED_OUTCOMES = frozenset({"stopped", "killed", "already-gone", "not_running"})
 
 
-#: The session plane's listing header (UX round 5, U29).
+#: The session plane's listing header (UX round 5, U29), and the grid its rows print
+#: into (review round 9, NIT).
 #:
 #: The rows are four CLI columns that had no header, so three of them were for the
 #: reader to infer from shape alone — the same defect the local `lop sessions`
 #: table never had (its columns are named, ``cli.STATE_COLUMN_WIDTH``'s line).
-#: Named in the order the rows print them.
-SESSIONS_HEADER = "SESSION  DEVICE  STATE  CONVERSATION"
+#:
+#: ALIGNED, AND NOTHING IS CUT. The header added for them was a two-space list of
+#: labels beside two-space rows, so each label sat wherever its own length left it:
+#: at 64 columns — where the header is what a user reads as the columns — nothing
+#: lined up with the values under it. Fixed widths were the other way to fix that,
+#: and they are wrong for THREE of these four columns, because the text in them is
+#: identity this process did not author: a peer's session id, a peer's device name, a
+#: conversation title minted elsewhere. The local table can cut what it prints because
+#: its cells are a listing of known shapes; here a cut id makes two rows
+#: indistinguishable and a cut name answers the wrong question — the suite's own
+#: fixture is a 19-character id, `_UNSEEN_ROW`'s. So each column is as wide as the
+#: widest cell it actually prints, and the header is one more row of that grid.
+#:
+#: Named in the order the rows print them; ``CONVERSATION`` is left unmeasured because
+#: it is last and nothing follows it to be displaced.
+SESSIONS_COLUMNS = ("SESSION", "DEVICE", "STATE", "CONVERSATION")
+
+
+def _session_plane_lines(rows: Sequence[tuple[str, str, str, str]]) -> list[str]:
+    """The federated listing's header and rows, laid out on one grid.
+
+    CELLS, NOT CHARACTERS, because two of these columns carry text this process did
+    not author (a peer's device name can be CJK) and a column is a display width:
+    ``cli._pad_cell`` is the local table's own padder and rich's ``cell_len`` its own
+    measure, so the two listings cannot disagree about what a cell is (design round 1,
+    D2 — the finding that made ``cli._pad_cell`` exist).
+
+    A column is never narrower than the local table's width for the same column
+    (``cli.PEER_COLUMN_WIDTH``, ``cli.STATE_COLUMN_WIDTH``), so a short listing renders
+    in the shape the sibling verb uses and one session reads the same in both. Those
+    two names are imported here rather than at module scope for the reason every other
+    import of that module in this file is: its docstring's import-cost contract.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.cli import PEER_COLUMN_WIDTH, STATE_COLUMN_WIDTH, _pad_cell
+
+    floors = (0, PEER_COLUMN_WIDTH, STATE_COLUMN_WIDTH)
+    measured = SESSIONS_COLUMNS[:-1]
+    widths = [
+        max(len(label), floors[index], *(cell_len(cells[index]) for cells in rows))
+        for index, label in enumerate(measured)
+    ]
+
+    def laid_out(cells: Sequence[str]) -> str:
+        padded = [_pad_cell(text, width) for text, width in zip(cells, widths)]
+        # Right-trimmed: a row with no conversation ends in the blanks of the columns
+        # before it otherwise, and trailing whitespace is a diff nobody can see.
+        return "  ".join([*padded, cells[-1]]).rstrip()
+
+    # The header is the labels through the SAME lay-out: it is one more row of the
+    # grid, so a column cannot move in the header and stay in the rows.
+    return [laid_out(SESSIONS_COLUMNS), *(laid_out(cells) for cells in rows)]
 
 
 #: What a stop outcome leaves the user with, when it leaves them with anything
@@ -1750,7 +1802,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             if str((row.get("peer") or {}).get("device_id") or "").lower() == wanted
             or str((row.get("peer") or {}).get("name") or "").lower() == wanted
         ]
-    lines = []
+    lines: list[str] = []
+    cells: list[tuple[str, str, str, str]] = []
     from local_operator.resume import session_state_words
 
     for row in remote:
@@ -1770,15 +1823,20 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # other surface uses (the sidebar paints that session under ``⇄`` with a
         # row mark, and the words the app has for the condition are in
         # ``resume.session_state_words``).
-        lines.append(
-            f"{row.get('session_id')}  {holder}"
-            f"  {session_state_words(str(row.get('state') or '')) or '?'}"
-            f"  {row.get('conversation_name') or ''}".rstrip()
+        cells.append(
+            (
+                str(row.get("session_id") or ""),
+                holder,
+                session_state_words(str(row.get("state") or "")) or "?",
+                str(row.get("conversation_name") or ""),
+            )
         )
     if remote:
         # Only when there are rows: with none, the sentence below IS the listing
-        # and a header above it would name columns nothing is printed under.
-        lines.insert(0, SESSIONS_HEADER)
+        # and a header above it would name columns nothing is printed under. Header
+        # and rows are laid out TOGETHER, because a column's width is the width of
+        # the cells actually printed in it (`_session_plane_lines`).
+        lines.extend(_session_plane_lines(cells))
     # A DEVICE THAT COULD NOT BE ASKED IS NAMED, IN EVERY CASE (Q-R4-1, UX round
     # 2 U14). The sibling family already does this (``lop sessions --all-peers``
     # prints ``<device>: unreachable (<reason>)``), and this one used to answer
@@ -1796,8 +1854,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # surface a user reads, which is a Python class name in place of a fact.
         # The gloss is the shared one (`resume.peer_reason_words`, design round 1
         # D3) so this listing, `/sessions`'s own `--all-peers` line and the
-        # sidebar tooltip say the same thing about the same state. The raw token
-        # is still what ``lop network peers`` prints per candidate.
+        # sidebar tooltip say the same thing about the same state. The raw reason
+        # is not lost: it is this verb's ``--json`` field, which is the machine
+        # surface (`peer_reason_words`' own line — no human line prints it, R21).
         from local_operator.resume import peer_reason_words
 
         lines.append(

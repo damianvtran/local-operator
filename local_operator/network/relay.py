@@ -553,6 +553,14 @@ def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
     A candidate that ANSWERED is dropped rather than reported: a probe with a
     winner has no reason, and a caller that asks anyway must not be handed
     ``unreachable: ... ok`` — a sentence that contradicts itself.
+
+    THE COMPOUND FORM IS FOR MACHINES, AND IS GLOSSED BY SHAPE. It is the
+    ``reason`` field of the ``--json`` payloads that carry these rows, which is
+    where an endpoint address beside its own failure code belongs. The human
+    surfaces render the same field through ``resume.peer_reason_words``, which
+    recognises a list of wire tokens by what it is made of rather than by the
+    ``unreachable`` prefix — so an entry added here later, or a second compound
+    shape, is glossed rather than leaked (QA round 21, Q-R21-1).
     """
     codes = [row.detail for row in attempts if row.detail != "ok"]
     if not codes:

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from argparse import Namespace
 from pathlib import Path
 
 import pytest
 
 from local_operator.network import cli as net_cli
-from local_operator.network import store, types, wire
+from local_operator.network import relay, store, types, wire
 from tests.unit.network import conftest as net_fixtures
 
 NETWORK = "n_0123456789abcdef01234567"
@@ -443,6 +444,119 @@ def test_a_peer_row_is_a_name_and_words_never_the_wire_token() -> None:
     assert net_cli._peer_line({**row, "reachable": True, "reason": ""}) == (  # noqa: SLF001
         "pixel-8  reachable"
     )
+
+
+def test_a_peer_row_with_several_addresses_glosses_the_whole_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 21, Q-R21-1: the compound reason reached the user verbatim.
+
+    A member row carries EVERY address its declaring device advertises
+    (``relay.advertise_endpoints``: the operator's declared hosts, then the live
+    ones), so several candidates is a DESIGNED state rather than an accident. When
+    they fail DIFFERENTLY the probe reports each one with its own answer —
+    ``unreachable: <endpoint> <detail>; …`` — which is the right shape for
+    ``--json`` and the wrong one for a person. The line QA measured was::
+
+        device-b cannot be reached from this device right now (127.0.0.1:0
+        connect_failed:OSError; 127.0.0.1:39223 connect_failed:ConnectionRefusedError)
+
+    The reason is built here by the REAL producer rather than typed, and rendered
+    through the REAL line function, because the defect lived at that seam: the
+    gloss decided ``stage: <sentence>`` by "the tail contains a space", which this
+    machine list also satisfies (``resume.peer_reason_words``).
+    """
+    reason = relay.probe_reason(
+        [
+            relay.CandidateAttempt("127.0.0.1:0", False, "connect_failed:OSError"),
+            relay.CandidateAttempt(
+                "127.0.0.1:39223", False, "connect_failed:ConnectionRefusedError"
+            ),
+        ]
+    )
+    # The wire shape is deliberate, and asserting it here is what keeps the two
+    # halves of this test from drifting apart: this is the string --json keeps.
+    assert reason == (
+        "unreachable: 127.0.0.1:0 connect_failed:OSError; "
+        "127.0.0.1:39223 connect_failed:ConnectionRefusedError"
+    )
+    row = {
+        "device_id": "d_" + "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+        "name": "device-b",
+        "reachable": False,
+        "reason": reason,
+    }
+    line = net_cli._peer_line(row)  # noqa: SLF001
+    # The peer and the plain reason, and nothing else.
+    assert line == (
+        "device-b cannot be reached from this device right now (no address of it answered)"
+    )
+    # No address, no port, no stage word and no exception class name.
+    assert "127.0.0.1" not in line, line
+    assert re.search(r":\d+", line) is None, line
+    assert "connect_failed" not in line, line
+    assert "OSError" not in line, line
+    assert "ConnectionRefusedError" not in line, line
+    # SHAPE, NOT PREFIX: a compound written with another stage word is the same
+    # leak and takes the same gloss, so a future list shape cannot leak either.
+    other_shape = "half_broken: 10.0.0.1:7 bad_endpoint; 10.0.0.2:7 no_answer"
+    assert net_cli._peer_line({**row, "reason": other_shape}) == (  # noqa: SLF001
+        "device-b cannot be reached from this device right now (no address of it answered)"
+    )
+    # And the token is not lost: it is this verb's --json field, byte for byte.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: {"value": [row]})
+    assert net_cli._cmd_peers(Namespace(json=True)) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["peers"][0]["reason"] == reason
+    assert payload["peers"][0]["device_id"] == row["device_id"]
+
+
+def test_the_federated_listing_header_lines_up_with_its_rows() -> None:
+    """Review round 9, NIT: the header was a two-space list of labels.
+
+    With unpadded rows, each label sat wherever its own length left it, so nothing
+    lined up with the values under it — and at 64 columns the header is what a user
+    reads as the columns (the local ``lop sessions`` table has always padded,
+    ``cli.STATE_COLUMN_WIDTH``'s line).
+
+    NOTHING IS CUT, which is why the columns are measured from the rows rather than
+    fixed: three of these cells are identity this process did not author — a peer's
+    session id, a peer's device name, a conversation title — and a cut id makes two
+    rows indistinguishable. The long id below is the length the suite's own fixture
+    uses (``_UNSEEN_ROW`` is 19 characters, and a fixed twelve-cell column cut it),
+    the wide name is a peer's, and both are asserted whole with the columns after
+    them asserted not to move.
+    """
+    from rich.cells import cell_len
+
+    from local_operator import cli as local_cli
+
+    rows = [
+        ("qr7-1-stored-unseen", "東京のマシン", "not running", "Auditing the mesh"),
+        ("9f3ac1e0b7d2", "pixel-8", "live", ""),
+    ]
+    header, *laid_out = net_cli._session_plane_lines(rows)  # noqa: SLF001
+
+    def column_at(line: str, needle: str) -> int:
+        """The CELL offset ``needle`` starts at, which is what a column is."""
+        return cell_len(line[: line.index(needle)])
+
+    for line, row in zip(laid_out, rows):
+        for label, cell in zip(net_cli.SESSIONS_COLUMNS, row):
+            if not cell:
+                # The conversation is the last column and is not padded, so a row
+                # without one has no offset to compare against.
+                continue
+            assert column_at(header, label) == column_at(line, cell), (label, header, line)
+        # Identity is printed WHOLE: the id and the name are not cut to a column.
+        assert row[0] in line, line
+        assert row[1] in line, line
+    # And the local table's own widths are the floor for the two columns the two
+    # listings share, so a short listing renders in the shape the sibling verb uses.
+    device_width = column_at(header, "STATE") - column_at(header, "DEVICE") - 2
+    state_width = column_at(header, "CONVERSATION") - column_at(header, "STATE") - 2
+    assert device_width >= local_cli.PEER_COLUMN_WIDTH
+    assert state_width >= local_cli.STATE_COLUMN_WIDTH
 
 
 def test_the_session_planes_state_token_is_said_in_words() -> None:

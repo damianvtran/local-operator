@@ -2218,6 +2218,54 @@ PEER_REASON_WORDS: dict[str, str] = {
     "member_removed": "it was removed from this network",
 }
 
+#: What a row says when NONE of a member's declared addresses answered.
+#:
+#: One spelling for two arrivals: the ``unreachable`` stage word (a member whose
+#: addresses all failed the same way) and the compound list below (a member whose
+#: addresses failed differently). They are the same answer to the reader, and the
+#: two branches that produce it must not drift into two sentences for it.
+_NO_ADDRESS_ANSWERED = "no address of it answered"
+
+
+def _carries_wire_tokens(tail: str) -> bool:
+    """Does a ``stage:`` tail carry the relay's OWN tokens rather than a sentence?
+
+    THE TEST THAT DECIDES A ``stage: <sentence>`` BY SHAPE (QA round 21,
+    Q-R21-1). It used to be ``" " in tail``, and the COMPOUND failure reason broke
+    that test: a member advertising several addresses reports every one of them as
+    ``unreachable: <endpoint> <detail>; <endpoint> <detail>`` — a MACHINE list that
+    contains spaces — so the sentence test matched and the whole line, addresses and
+    Python class names included, was printed to the user verbatim.
+
+    Deciding it by the one prefix that shape happens to start with would fix
+    today's string and leave the next compound shape free to leak the same way, so
+    the question asked here is what the tail is MADE OF. Every failure code the
+    relay writes is either ``stage:detail`` with no space around the colon
+    (``connect_failed:OSError``) or a bare snake_case token (``bad_endpoint``,
+    ``no_answer``), and a sentence written for a person — the only one this field
+    carries is the relay's :data:`NOT_ATTEMPTED_REASON` — is words with neither
+    property. One wire token anywhere in the tail therefore means the field is the
+    relay's vocabulary rather than prose, whatever surrounds it.
+
+    FAILING TOWARDS THE GLOSS IS DELIBERATE. A tail mistaken for wire tokens loses
+    a sentence and reads as "it did not answer", which is blander than the truth but
+    never names a transport's failure mode at a reader; the reverse mistake —
+    trusting a tail that turns out to be a list — is the defect this exists to
+    prevent, and it puts endpoint addresses and exception class names on a user's
+    screen.
+    """
+    for field in tail.split():
+        # ``stage:detail`` — a colon with something after it INSIDE one field (a
+        # field that is only ``stage:`` carries no detail and so proves nothing).
+        colon = field.find(":")
+        if 0 <= colon < len(field) - 1:
+            return True
+        # A bare token: the relay's own spellings are snake_case identifiers, which
+        # a sentence written for a person does not contain.
+        if "_" in field:
+            return True
+    return False
+
 
 def peer_reason_words(reason: str) -> str:
     """The relay's ``reason`` token said in words, and never empty.
@@ -2233,6 +2281,16 @@ def peer_reason_words(reason: str) -> str:
     (``not_attempted: the listing budget ran out…``) keeps its sentence and loses
     only the stage word.
 
+    THE COMPOUND LIST IS THE THIRD SHAPE (QA round 21, Q-R21-1): a member that
+    advertises several addresses reports those that failed DIFFERENTLY as
+    ``unreachable: <endpoint> <detail>; <endpoint> <detail>``, so it rides a
+    ``stage: `` prefix while being a machine list rather than prose. It is glossed
+    whole here, because an endpoint address and a Python class name are exactly the
+    two things a human line must not carry — and it is recognised by its SHAPE
+    (:func:`_carries_wire_tokens`) rather than by its prefix, so a compound reason
+    written a different way later cannot leak the same fields through the same
+    sentence test.
+
     ONE FUNCTION, THREE SURFACES. It moved here from the network panel (UX round
     3, U23) because by the last round three surfaces printed the same token three
     ways: the panel said the words, while the sidebar's tooltip and the
@@ -2246,9 +2304,11 @@ def peer_reason_words(reason: str) -> str:
     Prefix-matched on the stage before the ``:`` rather than on the exception
     class, because the tail is whatever the dial raised: a vocabulary of Python
     class names would be a second registry to keep, and the distinction a reader
-    needs is "nothing answered", not which exception said so. The token is not
-    lost — it is the ``reason`` field of the ``--json`` payload every one of these
-    verbs still ships, which is the machine surface these summaries are a summary
+    needs is "nothing answered", not which exception said so — which is also why
+    the compound list is glossed whole rather than summarised entry by entry. The
+    token is not lost — it is the ``reason`` field of the ``--json`` payload every
+    one of these verbs still ships, which is the machine surface these summaries
+    are a summary
     OF. It used to be printed per candidate by ``lop network peers`` as well, and
     UX round 5's U28 removed that: a human listing is not where a Python class
     name belongs, and the human line and the payload are the two registers.
@@ -2265,12 +2325,22 @@ def peer_reason_words(reason: str) -> str:
         # reader already.
         return token
     if " " in tail.strip():
-        # ``stage: <sentence>`` — the sentence IS the gloss.
+        # A tail containing a space is EITHER the compound failure list or a
+        # ``stage: <sentence>``, and the two are told apart by what the tail is made
+        # of (:func:`_carries_wire_tokens`) rather than by the stage word: the whole
+        # point is that a list of wire tokens must never be handed back as prose, and
+        # that holds for whatever stage word prefixes one. Both branches answer with
+        # the same sentence a bare ``unreachable`` stage gets, because a list of
+        # failed candidates IS "none of its addresses answered".
+        if _carries_wire_tokens(tail):
+            return _NO_ADDRESS_ANSWERED
         return tail.strip()
     if stage == "connect_failed":
         return "it did not answer"
-    if token.startswith("unreachable:"):
-        return "no address of it answered"
+    if stage == "unreachable":
+        # Every address this member declared was tried and none of them answered,
+        # reported as the bare stage word because they all failed the same way.
+        return _NO_ADDRESS_ANSWERED
     # The default is also the answer for a stage whose tail names a failure this
     # module has never seen: an unreadable reason is still "it did not answer" to
     # the person reading the row.
