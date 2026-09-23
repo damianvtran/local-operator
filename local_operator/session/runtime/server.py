@@ -6353,7 +6353,21 @@ class RuntimeServer:
             # what the once-per-episode latch exists to preserve.
             self._frame_cap_warned = False
             return
-        ordinary = self._projection_payload()
+        # BUILD AND CAP THE FRAME OFF THE EVENT LOOP. ``_projection_payload``
+        # runs ``cap_projection_frame``, which serialises a payload that can sit
+        # near the 1 MB wire cap; on the loop that is measured to park the whole
+        # runtime — 13 of 50 runtime-stall dumps in one 24 h window hold the loop
+        # thread in ``json.dumps -> _frame_bytes -> cap_projection_frame``, and
+        # one of those fired the 300 s stall bound and killed the runtime. The
+        # build is a pure function of the projection the fold publishes, so it
+        # belongs in a worker: ``_push`` is a coalesced repaint, never a
+        # request/response, so nothing waits on it within a turn.
+        #
+        # ONLY THE BUILD MOVES. ``_send_to`` stays on the loop and says why
+        # itself (the writer and its lock are loop-owned objects), and the
+        # per-connection frames are derived from ``ordinary`` on the loop after
+        # the hop returns, so the wire bytes are unchanged.
+        ordinary = await asyncio.to_thread(self._projection_payload)
         await asyncio.gather(
             *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )
