@@ -150,14 +150,17 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     third and rendered the first two) is the drift this function exists to
     make impossible. A fourth prompt is added in one place.
 
-    This tuple is the EXACT-match half of the decision only. One chrome prompt
-    has a family of shapes rather than a single string — the connectivity
+    This tuple is the EXACT-match half of the decision only. Chrome prompts
+    with a family of shapes rather than a single string live in the producer's
+    own recogniser instead, and there is one per family: the connectivity
     instruction, which ``harness.loop._continuation_instruction`` composes per
-    cut (prose alone, an aborted tool call alone, or the two joined) — and those
+    cut (prose alone, an aborted tool call alone, or the two joined) — those
     cannot be enumerated here because the tool-call half interpolates the
-    aborted calls' names. :func:`is_harness_chrome` therefore adds the producer's
-    own recogniser for that family; there is still exactly ONE decision, and it
-    is this function plus that one recogniser, not a list per surface.
+    aborted calls' names — and the goal judge's continuation
+    (``session.goal_judge``), which interpolates the goal. :func:`is_harness_chrome`
+    therefore adds each producer's own recogniser; there is still exactly ONE
+    decision, and it is this function plus those recognisers, not a list per
+    surface.
     """
     from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
     from local_operator.session.goal_loop import LOOP_PROMPT
@@ -177,19 +180,26 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the three prompts that are
-    single fixed strings; the loop's
+    single fixed strings; a producer-side recogniser covers each family the
+    producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
-    covers the shapes of the fourth, which the producer composes per cut and
-    which therefore cannot live in a tuple. Equality alone used to be the whole
-    test, and the composed "prose then an aborted tool call" instruction — the
-    incident's own shape — was a member of neither, so a resumed session
-    painted it (and the tool-call-only shape) as the operator's own words.
+    for the "prose then an aborted tool call" instruction, and the goal judge's
+    :func:`~local_operator.session.goal_judge.is_goal_continuation_instruction`
+    for the continuation that interpolates the standing goal. Equality alone used
+    to be the whole test, and the composed connectivity instruction — the
+    incident's own shape — was a member of neither, so a resumed session painted
+    it (and the tool-call-only shape) as the operator's own words; the goal
+    continuation would have done the same on every surface, since its text
+    changes with the goal.
     """
     from local_operator.harness.loop import is_connectivity_continuation_instruction
+    from local_operator.session.goal_judge import is_goal_continuation_instruction
 
     stripped = text.strip()
-    return stripped in harness_chrome_prompts() or is_connectivity_continuation_instruction(
-        stripped
+    return (
+        stripped in harness_chrome_prompts()
+        or is_connectivity_continuation_instruction(stripped)
+        or is_goal_continuation_instruction(stripped)
     )
 
 

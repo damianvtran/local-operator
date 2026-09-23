@@ -495,6 +495,22 @@ class FakeSession:
         judge = self._goal_state.judge
         for name, value in changes.items():
             setattr(judge, name, value)
+
+    @property
+    def goal_token(self) -> str:
+        return self._goal_state.token
+
+    @property
+    def goal_judge_state(self) -> Any:
+        return self._goal_state.judge
+
+    @property
+    def goal_turn_serial(self) -> int:
+        # Declared because the judge's staleness guard READS it on every tick:
+        # an undeclared attribute would raise inside a worker and be logged as
+        # a debug line, so the pilot would see a judge that silently never
+        # settles rather than a fake that is missing a field.
+        return 0
         self.refresh_frontend_state()
 
     def refresh_frontend_state(self) -> None:
