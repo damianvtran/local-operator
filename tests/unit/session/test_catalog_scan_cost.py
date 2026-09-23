@@ -1362,94 +1362,210 @@ class TestAPinnedConversationSurvivesThePage:
         assert len(_ROW_CACHE) == 3, "the extras evicted the page rows from the cache"
 
 
-class TestBirthDatesAreReadOnlyForThePage:
-    """``load_catalog`` reads ``created_at.json`` for the rows it RETURNS, not for the store.
+class TestBirthDatesAreMemoizedNotBounded:
+    """``load_catalog`` stamps every candidate's birth, but a warm call re-reads none.
 
-    Reading birth for every scan candidate before the slice was 0.80 s of a
-    1.47 s desktop list at 9,400 directories (desktop load report D-F7). The
-    selection now uses each candidate's activity mtime as an upper bound on its
-    birth and resolves births best-first (``catalog._select_page``). These pin
-    both halves: the cost is O(page + contenders), and the answer is the one a
-    full sort over real birth dates gives — including when activity order and
-    birth order disagree, which is the case a naive "rank by mtime" would get
-    wrong.
+    Reading ``created_at.json`` per candidate was 0.80 s of a 1.47 s desktop list
+    at 9,400 directories (desktop load report D-F7). PR #1470's first cut read
+    births only for rows that could reach the page, bounding each by its activity
+    mtime, and review round 1 (F1/Q-1) showed that bound is unsound: a birth LATER
+    than activity (hand-edited or restored sidecar, ``st_birthtime`` fallback)
+    dropped the row from the page. So every candidate is stamped again, and the
+    saving is a stat-validated in-process memo (``catalog._BIRTH_MEMO``). These pin
+    the answer (identical to a full sort in BOTH directions, pins at their rank),
+    the invalidation, the bound on the memo, and the warm-call cost.
     """
 
     @staticmethod
-    def _opened_births(run: Callable[[], Any]) -> tuple[Any, int]:
-        from local_operator.session import creation
+    def _counting_reads(run: Callable[[], Any]) -> tuple[Any, int]:
+        """Count ``created_at.json`` opens during ``run`` (the read the memo saves)."""
+        import builtins
+        import io
 
-        real = creation.session_created_at
-        calls = [0]
+        opened = [0]
+        real_open = io.open
 
-        def counting(directory: Path) -> float:
-            calls[0] += 1
-            return real(directory)
+        def counting(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(file).endswith("created_at.json"):
+                opened[0] += 1
+            return real_open(file, *args, **kwargs)
 
-        import local_operator.session.catalog as catalog
-
-        original = catalog.session_created_at
-        catalog.session_created_at = counting
+        original = builtins.open, io.open
+        builtins.open = io.open = counting  # type: ignore[assignment]
         try:
-            return run(), calls[0]
+            return run(), opened[0]
         finally:
-            catalog.session_created_at = original
+            builtins.open, io.open = original  # type: ignore[assignment]
 
-    def test_a_large_store_reads_births_for_the_page_not_the_store(self, tmp_path: Path) -> None:
-        # Each conversation last active shortly after it was born: the common
-        # shape, where only rows active since the page's oldest birth contend.
-        for index in range(400):
-            _session(
-                tmp_path, f"user{index:08x}", stamp=5_000.0 + index + 0.5, created=5_000.0 + index
-            )
+    @staticmethod
+    def _fresh_process() -> None:
+        from local_operator.session import catalog
 
-        entries, reads = self._opened_births(lambda: load_catalog(tmp_path, limit=20))
+        catalog._BIRTH_MEMO.clear()
 
-        assert [entry.id for entry in entries] == [f"user{i:08x}" for i in range(399, 379, -1)]
-        # The selection resolves the page plus the one contender whose bound had
-        # to be read to prove the page complete (21); the page's own hydration in
-        # ``cached_session_rows`` reads the page again on a cold row cache (20).
-        # Before the change the selection alone read all 400.
-        assert reads <= 41, reads
+    def test_the_page_matches_a_full_sort_in_both_directions(self, tmp_path: Path) -> None:
+        """Activity after birth (every writer's shape) AND before it (F1's shape).
 
-    def test_the_page_matches_a_full_sort_when_activity_and_birth_disagree(
-        self, tmp_path: Path
-    ) -> None:
-        """An OLD conversation touched recently must not outrank a newer one, and
-        a young conversation left untouched must still make the page."""
+        The second population is what a bounded selection got wrong: a row born
+        newest but last active oldest must still lead the page.
+        """
         import random
 
+        self._fresh_process()
         rng = random.Random(1234)
         births: dict[str, float] = {}
         for index in range(120):
             session_id = f"user{index:08x}"
             born = 1_000.0 + rng.random() * 50_000.0
             births[session_id] = born
-            _session(
-                tmp_path,
-                session_id,
-                created=born,
-                stamp=born + rng.choice([0.0, 5.0, 60_000.0 * rng.random()]),
-            )
-
-        entries = load_catalog(tmp_path, limit=25, pinned_off_page=["user00000007"])
+            # One in four drawn with activity BEFORE birth, by up to 60k s.
+            skew = 60_000.0 * rng.random()
+            stamp = born - skew if index % 4 == 0 else born + skew
+            _session(tmp_path, session_id, created=born, stamp=max(stamp, 1.0))
         expected = sorted(births, key=lambda session_id: (-births[session_id], session_id))
 
-        page = [entry.id for entry in entries[:25]]
-        assert page == expected[:25]
-        assert [entry.row.created_at for entry in entries[:25]] == [
-            births[session_id] for session_id in page
+        for limit in (1, 5, 25, 119, 200):
+            entries = load_catalog(tmp_path, limit=limit)
+            assert [entry.id for entry in entries] == expected[:limit], limit
+            assert [entry.row.created_at for entry in entries] == [
+                births[session_id] for session_id in expected[:limit]
+            ]
+
+    def test_a_newborn_row_with_the_oldest_activity_leads_a_full_page(self, tmp_path: Path) -> None:
+        """QA round 1's Q-1 repro, verbatim in shape: the page is full before
+        the violator's activity would ever be reached."""
+        self._fresh_process()
+        for index in range(12):
+            _session(
+                tmp_path,
+                f"ordinary{index:04d}",
+                created=1_000.0 + index,
+                stamp=2_000.0 + index,
+            )
+        _session(tmp_path, "newborn_old_activity", created=999_999.0, stamp=1.0)
+
+        entries = load_catalog(tmp_path, limit=5)
+
+        assert [entry.id for entry in entries] == [
+            "newborn_old_activity",
+            "ordinary0011",
+            "ordinary0010",
+            "ordinary0009",
+            "ordinary0008",
         ]
-        if "user00000007" not in page:
-            assert entries[25:] and entries[25].id == "user00000007"
-            assert entries[25].row.created_at == births["user00000007"]
 
-    def test_no_returned_row_carries_the_placeholder_birth(self, tmp_path: Path) -> None:
+    def test_a_pinned_violator_comes_back_at_its_rank_not_appended(self, tmp_path: Path) -> None:
+        """Review round 1's pinned shape: the pin ranks FIRST, so it is on the
+        page, and is neither dropped nor appended after the page rows."""
+        self._fresh_process()
         for index in range(30):
-            _session(tmp_path, f"user{index:08x}", stamp=9_000.0 - index, created=1_000.0 + index)
+            _session(tmp_path, f"old{index:08x}", created=1_000.0 + index, stamp=1_000.0 + index)
+        _session(tmp_path, "born_new_active_old", created=11_000.0, stamp=10.0)
 
-        entries = load_catalog(tmp_path, limit=10, pinned_off_page=["user00000000"])
+        entries = load_catalog(tmp_path, limit=5, pinned_off_page=["born_new_active_old"])
 
-        assert len(entries) == 11
-        assert all(entry.row.created_at > 0 for entry in entries)
-        assert [entry.id for entry in entries[:10]] == [f"user{i:08x}" for i in range(29, 19, -1)]
+        assert [entry.id for entry in entries] == [
+            "born_new_active_old",
+            "old0000001d",
+            "old0000001c",
+            "old0000001b",
+            "old0000001a",
+        ]
+
+    def test_a_warm_call_reads_no_birth_and_a_cold_call_reads_each_once(
+        self, tmp_path: Path
+    ) -> None:
+        """The cost the memo buys, stated as counts rather than time: a cold call
+        reads each candidate's sidecar once (page hydration included), and an
+        unchanged store is answered from the memo on every later call."""
+        for index in range(300):
+            _session(tmp_path, f"user{index:08x}", created=5_000.0 + index, stamp=6_000.0 + index)
+        self._fresh_process()
+
+        _cold, cold_reads = self._counting_reads(lambda: load_catalog(tmp_path, limit=20))
+        warm, warm_reads = self._counting_reads(lambda: load_catalog(tmp_path, limit=20))
+
+        assert cold_reads == 300, cold_reads
+        assert warm_reads == 0, warm_reads
+        assert [entry.id for entry in warm] == [f"user{i:08x}" for i in range(299, 279, -1)]
+
+    def test_an_edited_sidecar_is_re_read(self, tmp_path: Path) -> None:
+        """Invalidation on the sidecar's (inode, mtime_ns, size): an edit through
+        a fresh file (new inode), an in-place rewrite of a different length, and
+        the store writer's own hard-link publish all move the key."""
+        self._fresh_process()
+        for index in range(3):
+            _session(tmp_path, f"user{index:08x}", created=1_000.0 + index, stamp=5_000.0)
+        assert load_catalog(tmp_path)[0].id == "user00000002"
+
+        target = tmp_path / "sessions" / "user00000000" / "created_at.json"
+        replacement = target.with_name("created_at.json.new")
+        replacement.write_text("9000.0", encoding="utf-8")
+        os.replace(replacement, target)  # new inode
+        assert load_catalog(tmp_path)[0].id == "user00000000"
+
+        with open(target, "w", encoding="utf-8") as handle:  # same inode, new size
+            handle.write("10.0")
+        assert load_catalog(tmp_path)[-1].id == "user00000000"
+        assert load_catalog(tmp_path)[-1].row.created_at == 10.0
+
+    def test_a_sidecar_gained_or_lost_changes_the_answer(self, tmp_path: Path) -> None:
+        """A directory with no readable sidecar is never memoized (its fallback
+        birth has no key to validate), so both transitions are seen at once."""
+        self._fresh_process()
+        _session(tmp_path, "user00000001", created=2_000.0, stamp=5_000.0)
+        _session(tmp_path, "user00000002", created=3_000.0, stamp=5_000.0)
+        sidecar = tmp_path / "sessions" / "user00000001" / "created_at.json"
+        load_catalog(tmp_path)
+
+        sidecar.unlink()
+        lost = {entry.id: entry.row.created_at for entry in load_catalog(tmp_path)}
+        assert lost["user00000001"] != 2_000.0
+
+        sidecar.write_text("4000.0", encoding="utf-8")
+        gained = [entry.id for entry in load_catalog(tmp_path)]
+        assert gained[0] == "user00000001"
+
+    def test_a_renamed_or_recreated_directory_is_not_served_from_the_memo(
+        self, tmp_path: Path
+    ) -> None:
+        self._fresh_process()
+        _session(tmp_path, "user00000001", created=2_000.0, stamp=5_000.0)
+        _session(tmp_path, "user00000002", created=3_000.0, stamp=5_000.0)
+        load_catalog(tmp_path)
+
+        # Renamed: a different id is a different memo key.
+        (tmp_path / "sessions" / "user00000001").rename(tmp_path / "sessions" / "user00000009")
+        renamed = {entry.id: entry.row.created_at for entry in load_catalog(tmp_path)}
+        assert renamed == {"user00000009": 2_000.0, "user00000002": 3_000.0}
+
+        # Recreated under the same id: the sidecar is a new inode.
+        import shutil
+
+        shutil.rmtree(tmp_path / "sessions" / "user00000002")
+        _session(tmp_path, "user00000002", created=1_500.0, stamp=5_000.0)
+        recreated = {entry.id: entry.row.created_at for entry in load_catalog(tmp_path)}
+        assert recreated["user00000002"] == 1_500.0
+
+    def test_the_memo_is_bounded_by_the_store_and_by_the_root_count(self, tmp_path: Path) -> None:
+        from local_operator.session import catalog
+
+        self._fresh_process()
+        for index in range(10):
+            _session(tmp_path, f"user{index:08x}", created=1_000.0 + index, stamp=5_000.0)
+        load_catalog(tmp_path, limit=3)
+        memo = catalog._BIRTH_MEMO[str(tmp_path / "sessions")]
+        assert len(memo) == 10  # every candidate, not only the page
+
+        import shutil
+
+        for index in range(6):
+            shutil.rmtree(tmp_path / "sessions" / f"user{index:08x}")
+        load_catalog(tmp_path, limit=3)
+        assert len(memo) == 4, "deleted sessions were not pruned"
+
+        for store in range(catalog._BIRTH_MEMO_ROOTS + 2):
+            other = tmp_path / f"store{store}"
+            _session(other, "user00000001", created=1.0, stamp=2.0)
+            load_catalog(other)
+        assert len(catalog._BIRTH_MEMO) == catalog._BIRTH_MEMO_ROOTS
