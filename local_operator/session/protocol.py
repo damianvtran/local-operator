@@ -43,8 +43,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     # Same shape, same reason: ``mark_goal_done`` returns the settled entry, and
     # naming the real type keeps the caller's ``entry`` from degrading to ``Any``
-    # (``tui/app.py`` passes it straight into ``goal_done_answer``).
-    from local_operator.session.goal import GoalHistoryEntry
+    # (``tui/app.py`` passes it straight into ``goal_done_answer``). ``GoalState``
+    # too: the judge's own record is what ``GoalRecordProtocol.goal_judge_state``
+    # hands the driver beside the wire shape.
+    from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState
 
 
 def unanswered_tail_call_ids(messages: Sequence[Any]) -> set[str]:
@@ -1688,6 +1690,18 @@ class GoalRecordProtocol(Protocol):
     @property
     def goal_turn_serial(self) -> int:
         """The monotone turn counter the judge samples at a turn end."""
+        ...
+
+    @property
+    def goal_judge_state(self) -> "GoalJudgeState":
+        """The judge's RECORD, not the wire dict — what the driver reads.
+
+        Distinct from :attr:`goal_judge` on purpose: the wire shape drops the
+        breaker's ``failures`` counter, and the driver needs it to honour the
+        breaker across a restart. Declared because BOTH owning hosts read it off
+        the session binding, and because a rename that silently returned
+        ``None`` here would stop the judge re-arming rather than failing.
+        """
         ...
 
     @property
