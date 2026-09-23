@@ -33898,7 +33898,8 @@ class OperatorApp(App[None]):
         )
 
         session = self._session
-        if session is None or not hasattr(session, "set_goal"):
+        record = self._goal_record()
+        if session is None or not hasattr(session, "set_goal") or record is None:
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
             # `notice` would collapse it for a typo.
@@ -33920,18 +33921,18 @@ class OperatorApp(App[None]):
             # took away and retype it (round 1: design D4, UX U3). A DELETE
             # records nothing, which is the whole difference from mark-done.
             receipt = cleared_goal_receipt(session.goal)
-            session.delete_goal()
+            record.delete_goal()
             notice(receipt)
             return
         if form == "done":
-            entry = session.mark_goal_done()
+            entry = record.mark_goal_done()
             notice(goal_done_answer(session.goal, entry))
             return
         if form == "dismiss":
-            notice(goal_dismissed_receipt(session.dismiss_goal()))
+            notice(goal_dismissed_receipt(record.dismiss_goal()))
             return
         if form == "history":
-            rows = goal_history_items(session.history_view())
+            rows = goal_history_items(record.history_view())
             self._append_block(self._goal_history_block(rows))
             notice(goal_history_notice(len(rows)))
             return
@@ -33950,7 +33951,7 @@ class OperatorApp(App[None]):
         # `arm_goal` rather than `set_goal`: the same text write plus the record's
         # supersede/arm ordering, which is what makes `/goal B` non-destructive
         # to `/goal A` and what arms the judge.
-        stored = session.arm_goal(request)
+        stored = record.arm_goal(request)
         # Only the standing objective is capped. The ordinary user message
         # retains the full request, and the normal submit path owns its ONE
         # transcript row, busy steering, compaction hold and attachment order.
@@ -33980,9 +33981,10 @@ class OperatorApp(App[None]):
         ``alert=True``, since it is the one acceptance that cannot be undone.
         """
         session = self._session
+        record = self._goal_record()
         goal = getattr(session, "goal", "") or ""
-        status = getattr(session, "goal_status", "") or ""
-        history = getattr(session, "goal_history", None) or []
+        status = getattr(record, "goal_status", "") or ""
+        history = getattr(record, "goal_history", None) or []
         choices: list[ArgumentChoice] = []
         if history:
             choices.append(ArgumentChoice("--history", "List the settled goals"))
@@ -33993,6 +33995,44 @@ class OperatorApp(App[None]):
         if goal:
             choices.append(ArgumentChoice("--clear", "Clear the standing goal", alert=True))
         return choices
+
+    def _goal_record_for(self, session: Any) -> Any:
+        """``session`` as the judged-goal record's OWNER, or ``None``.
+
+        The record — its status, its judge, its settled history and the four acts
+        that write it — belongs to the process that owns the session's loop, and
+        that is a fact about the SESSION rather than about this terminal. So the
+        question is asked of the object, with the one predicate that already
+        answers it everywhere else (``goal_judge.owns_the_session``), and the
+        answer is then narrowed to ``GoalRecordProtocol`` so pyright checks every
+        use against the real surface.
+
+        Why the narrowing matters twice over. Statically: the five record members
+        the TUI calls directly were undeclared on ``SessionProtocol``, which is
+        what the twelve attribute errors in the type gate were about, and the
+        reads it makes through ``getattr`` were invisible to pyright entirely
+        (``tests/unit/session/test_viewer_protocol.py`` derives them by AST). At
+        runtime: a follower holds a ``SessionProtocol`` too, and the four
+        mutators are NOT on it — deliberately, because a follower's route to
+        those acts is the ROUTED slash command (``/goal`` is not in
+        ``_FRONTEND_LOCAL_SLASHES``), which runs them on the owner and returns
+        the owner's own receipt. Declaring them shared would have promised a
+        capability a follower must not have.
+
+        ``None`` is therefore the honest answer on a viewer, and every caller
+        already has a fallback for it: a surface paints an empty record, and an
+        act reports that there is nothing to act on.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.protocol import GoalRecordProtocol
+
+        if session is None or not owns_the_session(session):
+            return None
+        return session if isinstance(session, GoalRecordProtocol) else None
+
+    def _goal_record(self) -> Any:
+        """This terminal's OWN session as the judged-goal record, or ``None``."""
+        return self._goal_record_for(self._session)
 
     def _goal_panel(self) -> Any:
         """The mounted overlay, or None before compose (or in a stripped harness)."""
@@ -34039,13 +34079,14 @@ class OperatorApp(App[None]):
 
         panel = self._goal_panel()
         session = self._session
+        record = self._goal_record()
         if panel is None or session is None:
             return
         panel.show(
             goal=getattr(session, "goal", "") or "",
-            status=getattr(session, "goal_status", "") or "",
-            judge=getattr(session, "goal_judge", None),
-            history=list(getattr(session, "goal_history", []) or []),
+            status=getattr(record, "goal_status", "") or "",
+            judge=getattr(record, "goal_judge", None),
+            history=list(getattr(record, "goal_history", []) or []),
             cap=MAX_GOAL_CONTINUATIONS,
             actions=owns_the_session(session),
         )
@@ -34065,11 +34106,11 @@ class OperatorApp(App[None]):
         from local_operator.session.goal import goal_done_answer
 
         message.stop()
-        session = self._session
-        if session is None or not hasattr(session, "mark_goal_done"):
+        record = self._goal_record()
+        if record is None:
             return
-        entry = session.mark_goal_done()
-        self._system_notice(goal_done_answer(getattr(session, "goal", ""), entry))
+        entry = record.mark_goal_done()
+        self._system_notice(goal_done_answer(getattr(self._session, "goal", ""), entry))
         self._refresh_goal_panel()
 
     def on_goal_delete(self, message: GoalDelete) -> None:
@@ -34077,11 +34118,11 @@ class OperatorApp(App[None]):
         from local_operator.session.goal import cleared_goal_receipt
 
         message.stop()
-        session = self._session
-        if session is None or not hasattr(session, "delete_goal"):
+        record = self._goal_record()
+        if record is None:
             return
-        receipt = cleared_goal_receipt(getattr(session, "goal", ""))
-        session.delete_goal()
+        receipt = cleared_goal_receipt(getattr(self._session, "goal", ""))
+        record.delete_goal()
         # The receipt names what went, and it is the user's whole chance to see
         # it: a delete has no undo and records no history entry.
         self._system_notice(receipt)
@@ -34431,6 +34472,20 @@ class OperatorApp(App[None]):
         """
         from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
 
+        # THE RECORD IS THE OWNER'S, and a session that does not implement it is
+        # not judged here at all. Four of the five members reached through this
+        # binding MUTATE the record (arm, mark done, delete, dismiss), it is read
+        # off the concrete session rather than off the shared viewer protocol
+        # (see ``_goal_record_for``), and an unguarded read of it off a
+        # duck-typed session is the crash class the protocol guards exist to
+        # close: the runtime's ``rearm_on_resume`` raised
+        # ``AttributeError: 'Slow' object has no attribute 'goal_judge_state'``
+        # inside a task nobody awaits when a scripted ``SessionProtocol`` double
+        # was on the other side (QA round 1, Q3).
+        record = self._goal_record_for(session)
+        if record is None:
+            return None
+
         async def judge(question: str) -> str:
             answer = await self._ask_judge(session, question)
             # `""` rather than `None`: an unavailable judge is an UNREADABLE
@@ -34469,7 +34524,7 @@ class OperatorApp(App[None]):
             # frame and the sidecar, so a phone watching the same session sees the
             # same judge state. A host-local dict would leave every other surface
             # reporting a goal nothing is acting on.
-            session.note_goal_judge(**fields)
+            record.note_goal_judge(**fields)
             self.call_later(self._source_frontend_changed, source)
             # The TUI's HALF OF THE STALL RECEIPT, in the same register and off
             # the same edge as the runtime's (design round 1, D2): a goal that
@@ -34564,10 +34619,16 @@ class OperatorApp(App[None]):
         """
         try:
             driver = self._goal_judge_driver(session, source)
+            record = self._goal_record_for(session)
+            # ``None`` on a session that does not implement the judged-goal
+            # record: there is nothing here to judge, and the driver refuses to
+            # read the record off a duck-typed binding (see ``_goal_record_for``).
+            if driver is None or record is None:
+                return
             await driver.on_turn_end(
                 error=bool(error),
                 aborted=aborted,
-                serial=int(getattr(session, "goal_turn_serial", 0) or 0),
+                serial=int(record.goal_turn_serial or 0),
             )
         except Exception:  # noqa: BLE001 — the judge is additive, never a turn's fate
             logger.debug("goal judge worker failed", exc_info=True)
@@ -39669,12 +39730,13 @@ class OperatorApp(App[None]):
 
         arg = arg.strip()
         session = self._session
-        if session is None or not hasattr(session, "set_goal"):
+        record = self._goal_record()
+        if session is None or record is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         if not arg:
             return SlashResult(
                 kind="notice",
-                text=goal_report(session.goal, getattr(session, "goal_status", "")),
+                text=goal_report(session.goal, record.goal_status),
                 style="info",
             )
         form = goal_flag_form(arg)
@@ -39683,10 +39745,10 @@ class OperatorApp(App[None]):
             # `/goal --clear` is rendered by ITS terminal, so a receipt that named
             # nothing would be the same silent loss one hop out (design D4/U3).
             receipt = cleared_goal_receipt(session.goal)
-            session.delete_goal()
+            record.delete_goal()
             return SlashResult(kind="notice", text=receipt, style="info")
         if form == "done":
-            entry = session.mark_goal_done()
+            entry = record.mark_goal_done()
             return SlashResult(
                 kind="notice",
                 text=goal_done_answer(session.goal, entry),
@@ -39695,11 +39757,11 @@ class OperatorApp(App[None]):
         if form == "dismiss":
             return SlashResult(
                 kind="notice",
-                text=goal_dismissed_receipt(session.dismiss_goal()),
+                text=goal_dismissed_receipt(record.dismiss_goal()),
                 style="info",
             )
         if form == "history":
-            rows = goal_history_items(session.history_view())
+            rows = goal_history_items(record.history_view())
             # Byte-for-byte the owner's answer (`serving.py::_goal_slash`): this is
             # the product a follower paints, so the two must not differ by a row
             # shape or a word (the host-disagreement rule at this function's
@@ -39716,7 +39778,7 @@ class OperatorApp(App[None]):
             # one that refused it is the host-disagreement class the shared
             # vocabularies in `session/goal.py` exist to remove (UX U6).
             return SlashResult(kind="notice", text=refusal, style="warning")
-        stored = session.arm_goal(arg)
+        stored = record.arm_goal(arg)
         if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
             return SlashResult(
                 kind="notice",

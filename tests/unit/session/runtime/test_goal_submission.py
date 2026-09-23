@@ -266,9 +266,12 @@ async def test_history_answers_rows_in_data_and_a_count_in_the_notice(entry):
         if entry == "authoritative":
             assert result["kind"] == "block"
             assert result["data"]["type"] == "goal_history"
-            assert result["data"]["items"] == [
-                ["first thing", "done · " + session.history_view()[0]["settled_at"] + " · the judge said so"]
-            ]
+            settled_at = session.history_view()[0]["settled_at"]
+            # Bound to a local rather than inlined: the receipt line is the same
+            # statement either way, and this is the one place in the file where
+            # the join pushes past the project's 100-column limit.
+            expected_rows = [["first thing", f"done · {settled_at} · the judge said so"]]
+            assert result["data"]["items"] == expected_rows
         assert session.prompt_calls == []
         assert session.steer_calls == []
     finally:

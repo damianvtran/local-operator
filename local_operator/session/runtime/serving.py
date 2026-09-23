@@ -2789,8 +2789,25 @@ class ServingSessionHandle(SessionHandle):
         is only the policy's collaborator bundle and a restart has nothing to
         lose (read ``session/goal_judge.py``'s module docstring for why that is
         the design rather than an implementation detail).
+
+        ``None`` when the session does not implement the judged-goal record —
+        the four mutators plus the status/judge/serial reads this bundle hands
+        over. The record is the OWNER's surface and is not on the shared viewer
+        protocol (see ``GoalRecordProtocol``), so a session that is only a
+        ``SessionProtocol`` cannot be judged at all. Refusing HERE, at the one
+        place the bundle is built, is what keeps an unguarded read off a
+        duck-typed binding from becoming an exception inside a task nobody
+        awaits: measured on this fleet as
+        ``AttributeError: 'Slow' object has no attribute 'goal_judge_state'``
+        raised out of ``rearm_on_resume``, failing two ``test_exec_mode`` cells
+        (QA round 1, Q3).
         """
         from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
+        from local_operator.session.protocol import GoalRecordProtocol
+
+        record = self._session if isinstance(self._session, GoalRecordProtocol) else None
+        if record is None:
+            return None
 
         if self._goal_judge is None:
 
@@ -2893,7 +2910,7 @@ class ServingSessionHandle(SessionHandle):
             return False
         return loop.get("status") in {"running", "judging"}
 
-    def _maybe_judge_goal(self, event: AgentEvent) -> None:
+    def _maybe_judge_goal(self, event: AgentEndEvent) -> None:
         """Judge the standing goal off a turn's end — triggers 1 and 2.
 
         SYNCHRONOUS, and every refusal inside it is a silent return: this runs on
@@ -2909,13 +2926,24 @@ class ServingSessionHandle(SessionHandle):
         is defensive rather than load-bearing on the shipped path — and it is one
         line rather than a comment precisely so that a host that ever wraps an
         attached session cannot silently start spending in it.
+
+        ``AgentEndEvent``, not the base ``AgentEvent`` this was annotated with:
+        the three fields read below (``error``/``aborted``/``generation``) exist
+        only on the end event, and the caller already narrows with an
+        ``isinstance`` check before calling here — so the base annotation was
+        three pyright errors on a read the runtime guard had always made safe,
+        not a latent bug. Naming the real type is what lets the type gate agree
+        with the guard instead of having to be told to look away.
         """
         from local_operator.session.goal_judge import owns_the_session
 
         try:
             if not owns_the_session(self._session):
                 return
-            self._goal_judge_driver().start_turn_end(
+            driver = self._goal_judge_driver()
+            if driver is None:
+                return
+            driver.start_turn_end(
                 error=bool(event.error),
                 aborted=bool(event.aborted),
                 serial=int(event.generation or 0),
@@ -2936,7 +2964,15 @@ class ServingSessionHandle(SessionHandle):
         Synchronous by design: the plan that holds it cannot await, so it
         schedules the probe as a background task on this loop.
         """
-        task = asyncio.ensure_future(self._goal_judge_driver().rearm_on_resume())
+        # A session outside the record's contract has no judge to re-arm, and
+        # scheduling a task that would fail on that read is how the
+        # `test_exec_mode` cells got an unretrieved exception instead of a
+        # verdict — checked BEFORE the task exists, so nothing outlives this
+        # call (QA round 1, Q3).
+        driver = self._goal_judge_driver()
+        if driver is None:
+            return
+        task = asyncio.ensure_future(driver.rearm_on_resume())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 

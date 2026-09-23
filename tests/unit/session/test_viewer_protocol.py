@@ -20,8 +20,11 @@ four times (#576, #609, #624, #625) with a fifth guarded in
 Site-local fixes do not close a class of bug. This does: it derives the member
 set from the SOURCE — the session-valued attribute accesses and literal-string
 duck-probes in the files listed in ``_SCANNED`` — and fails when one of them is
-not declared on ``SessionProtocol`` or ``ViewerSessionProtocol``. Adding a new
-undeclared duck-typed member therefore fails here rather than in a user's
+not declared on a protocol: ``SessionProtocol``, ``ViewerSessionProtocol``, or
+the owner-side ``GoalRecordProtocol`` (which exists because the judged-goal
+record is the SESSION OWNER's surface and the shared protocol must not promise a
+follower the right to settle somebody else's goal; see its docstring). Adding a
+new undeclared duck-typed member therefore fails here rather than in a user's
 terminal.
 
 The derivation is deliberately syntactic rather than type-inferred: pyright
@@ -87,7 +90,11 @@ from pathlib import Path
 
 import local_operator
 from local_operator.session.attached import AttachedSession
-from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
+from local_operator.session.protocol import (
+    GoalRecordProtocol,
+    SessionProtocol,
+    ViewerSessionProtocol,
+)
 from local_operator.session.session import Session
 
 _ROOT = Path(local_operator.__file__).resolve().parent
@@ -778,7 +785,11 @@ def _declared() -> set[str]:
     the protocol.
     """
     names: set[str] = set()
-    for proto in (SessionProtocol, ViewerSessionProtocol):
+    # The OWNER-side protocol is in this tuple for the same reason the other two
+    # are: it is a declaration, and a declaration no reader consults is not one.
+    # ``GoalRecordProtocol`` is where the judged-goal record's members live, so a
+    # host that reads them (through its own narrowed binding) is declaring them.
+    for proto in (SessionProtocol, ViewerSessionProtocol, GoalRecordProtocol):
         names.update(n for n in dir(proto) if not n.startswith("_"))
         # ``__mro__`` via getattr: pyright models it as a descriptor on the
         # metaclass and rejects the direct access on a Protocol class object.
@@ -1416,7 +1427,12 @@ def _static_conformance_is_checked_by_pyright() -> None:
     viewer: ViewerSessionProtocol = AttachedSession.__new__(AttachedSession)
     owner: SessionProtocol = Session.__new__(Session)
     attached: SessionProtocol = AttachedSession.__new__(AttachedSession)
-    _ = (viewer, owner, attached)
+    # The OWNER-ONLY judged-goal record: assigned to the concrete ``Session``
+    # and to NOTHING else, which is the whole claim — a follower must not be
+    # able to arm, settle or delete somebody else's goal, so an assignment to
+    # ``AttachedSession`` here would be a promise the design refuses.
+    record: GoalRecordProtocol = Session.__new__(Session)
+    _ = (viewer, owner, attached, record)
 
 
 def test_the_static_conformance_anchor_still_exists() -> None:
