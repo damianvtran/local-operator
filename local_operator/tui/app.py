@@ -846,11 +846,16 @@ _DRAIN_NOTICES: dict[str, str] = {
 #: (true — the commitment survives) beside `update failed` in its own column, and the
 #: incident row names the bound the runtime actually spent. The viewer's row is the
 #: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
-#: drain sentence after the abandon, and it self-corrects the moment they send (the
-#: message starts a turn). Repainting it truthfully needs a frame the renderer acts on
-#: at the moment the latch comes off — either `draining=True`, which would be false, or
-#: a NEW "the departure ended" op — i.e. a two-repo wire addition with its own design
-#: round, deferred in the PR thread rather than half-built here.
+#: drain sentence after the abandon, and **nothing takes that row down** — it is painted
+#: once, through `_notice_for`, which appends a block to the transcript, and the only
+#: retraction in this app is `_retire_unsent_runtime_notice`, for the unsent-runtime row
+#: (matched by its own private text). So the claim is not corrected on screen: the
+#: operator's next message starts a turn, and the row's second clause is contradicted by
+#: what they see rather than reworded (agent review round 2, R2-NIT-2). Repainting it
+#: truthfully needs a frame the renderer acts on at the moment the latch comes off —
+#: either `draining=True`, which would be false, or a NEW "the departure ended" op —
+#: i.e. a two-repo wire addition with its own design round, deferred in the PR thread
+#: rather than half-built here.
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
