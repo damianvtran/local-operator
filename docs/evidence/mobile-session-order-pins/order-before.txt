@@ -1,0 +1,8 @@
+# GET /api/sessions on origin/main (same synthetic fixture, port 4200)
+# session_id   section   unseen
+done-new     active    True
+done-old     active    True
+busy-a       active    False
+cold-unread  previous  True     <-- DIVERGENCE: ranked tier 1 in the shared
+                                  catalogue (unseen), but filed under Previous
+cold-read    previous  False
