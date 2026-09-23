@@ -331,13 +331,23 @@ def test_mobile_uses_same_categories_birth_and_ties():
                 # reads — ``streaming`` is what a fold has SEEN, and the two can
                 # differ for a frame. A real busy runtime publishes
                 # ``busy=True`` (``RuntimeServer``), so a fixture that set only
-                # the projection was under-specifying what the daemon receives
-                # (caught by this test when the phone began using the shared key).
+                # the projection was under-specifying what the daemon receives.
                 busy=e.row.live_state == "busy",
             )
         )
+        # DELIBERATELY DIVERGENT FOR ONE ROW, so this fixture can FAIL on a wrong
+        # ranking input (review round 3, MINOR 1). With ``streaming`` mirroring
+        # ``busy`` exactly, a daemon that ranked on the projection instead of the
+        # record passed 28/28 — the two inputs could never disagree, so the test
+        # proved nothing about which one is read. ``busy-b`` is the mid-turn-attach
+        # window a real daemon sees: the record already says busy, the fold has not
+        # yet observed a turn start. Ranking on ``streaming`` would file it under
+        # the unseen-error tier instead of busy, and the expected order below fails.
         entry.projection = SessionProjection(
-            session_id=e.id, pid=entry.record.pid, kind="tui", streaming=e.row.live_state == "busy"
+            session_id=e.id,
+            pid=entry.record.pid,
+            kind="tui",
+            streaming=e.row.live_state == "busy" and e.id != "busy-b",
         )
         if e.row.pending:
             from local_operator.mobile.types import PendingRequest

@@ -225,15 +225,16 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 	   wrapper's height class and its `aria-hidden`, which is the same signal a
 	   sighted reader and assistive tech get. */
 	function hintBox(): HTMLElement {
-		return screen.getByText("touch and hold a row to pin it")
-			.parentElement as HTMLElement;
+		/* The grid wrapper: <div grid> > <div overflow-hidden> > <p>. */
+		return screen.getByText("touch and hold a row to pin it").parentElement
+			?.parentElement as HTMLElement;
 	}
 
 	it("shows the hint while nothing is pinned", () => {
 		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		expect(screen.getByText("touch and hold a row to pin it")).toBeTruthy();
-		expect(hintBox().className).toContain("max-h-8");
+		expect(hintBox().className).toContain("grid-rows-[1fr]");
 		expect(hintBox().getAttribute("aria-hidden")).toBeNull();
 	});
 
@@ -243,7 +244,7 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 			summary({ session_id: "a1", conversation_name: "Alpha" }),
 		];
 		render(<SessionListScreen />);
-		expect(hintBox().className).toContain("max-h-0");
+		expect(hintBox().className).toContain("grid-rows-[0fr]");
 		expect(hintBox().getAttribute("aria-hidden")).toBe("true");
 		expect(screen.getByText("★ Pinned")).toBeTruthy();
 	});
@@ -256,7 +257,7 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
 			target: { value: "zzz-no-match" },
 		});
-		expect(hintBox().className).toContain("max-h-0");
+		expect(hintBox().className).toContain("grid-rows-[0fr]");
 		expect(screen.getByText("no matching conversations")).toBeTruthy();
 	});
 
@@ -272,6 +273,6 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
 			target: { value: "alpha" },
 		});
-		expect(hintBox().className).toContain("max-h-0");
+		expect(hintBox().className).toContain("grid-rows-[0fr]");
 	});
 });
