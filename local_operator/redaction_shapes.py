@@ -1679,17 +1679,34 @@ LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
 #: block. `tools/builtin.py` holds that cut back to the line boundary by at most
 #: ``PEM_BODY_FLOOR - 1`` bytes, and reads this constant rather than restating the
 #: number, for the same reason the regexes above are shared.
+#:
+#: ONE definition, TWO readers today and a THIRD expected — and the third is where a
+#: merge has to reconcile rather than pick. The pipe-filter-spin branch (#1427) replaces
+#: the three ``PEM_*_LINE_RE`` patterns at the pipe's call sites with LINEAR DECIDERS
+#: (``pem_body_line`` / ``pem_end_line`` / ``pem_header_line_end``) and spells BOTH ends
+#: of this floor by hand: ``{8,}`` and ``{1,7}`` in its copies of the two fragments
+#: below, and an ``8``/``7`` pair in its ``_pem_body_arm_span`` calls. A decider whose
+#: floor is a byte LOWER than the hold's under-holds the tail of a line, and
+#: under-holding is the leak direction — the fragment is then read as prose, which
+#: closes the block. So the deciders read ``PEM_BODY_FLOOR`` and
+#: ``PEM_BODY_FLOOR - 1`` from here, and the two quantifier spellings below are built
+#: from the same number so a pattern cannot drift from it either.
 PEM_BODY_FLOOR = 8
-_PEM_FULL_LINE = r"[A-Za-z0-9+/=]{" + str(PEM_BODY_FLOOR) + r",},?[ \t]*"
+#: The floor's two spellings, as the regexes below need them and built from the number
+#: above: a MINIMUM run (a line that stands on its own) and a run bounded one below it
+#: (the truncated-line allowance). Not restated as literals anywhere in this module.
+_PEM_FLOOR_MIN_RUN = "{" + str(PEM_BODY_FLOOR) + ",}"
+_PEM_FLOOR_SUB_RUN = "{1," + str(PEM_BODY_FLOOR - 1) + "}"
+_PEM_FULL_LINE = r"[A-Za-z0-9+/=]" + _PEM_FLOOR_MIN_RUN + r",?[ \t]*"
 _PEM_SHORT_MID_LINE = (
-    r"[A-Za-z0-9+/=]{1,"
-    + str(PEM_BODY_FLOOR - 1)
-    + r"},?[ \t]*(?="
+    r"[A-Za-z0-9+/=]"
+    + _PEM_FLOOR_SUB_RUN
+    + r",?[ \t]*(?="
     + LINE_SEP
     + LINE_PREFIX
-    + r"[A-Za-z0-9+/=]{"
-    + str(PEM_BODY_FLOOR)
-    + r",})"
+    + r"[A-Za-z0-9+/=]"
+    + _PEM_FLOOR_MIN_RUN
+    + r")"
 )
 #: A short line is a body line when a full one FOLLOWS it, and the run may end with one
 #: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
@@ -1698,12 +1715,43 @@ _PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
 _PEM_RUN = (
     r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
-    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1," + str(PEM_BODY_FLOOR - 1) + r"},?)?"
+    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]" + _PEM_FLOOR_SUB_RUN + r",?)?"
 )
 PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$", re.MULTILINE)
 PEM_HEADER_LINE_RE = re.compile(
     r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
-    r"-{1,4}[\x27\x22]?-{1,4}$",
+    r"-{1,4}[\x27\x22]?-{1,4}[ \t]*(?=\r|\n|$)",
+    # The trailing ``[ \t]*(?=\r|\n|$)`` is the CRLF / CR / trailing-whitespace spelling
+    # of the armour line, and it is not cosmetic either: ``$`` alone cannot match in
+    # front of a ``\r``, so ``...KEY-----\r\n`` — an ordinary key file written on
+    # Windows, or quoted by a wiki, or left with a trailing space by an editor — was not
+    # a header here at all. The shape table's ``pem-private-key`` needs a COMPLETE
+    # BEGIN … END, so for an unterminated view the pipe's mask is the only layer that can
+    # hide the body, and for that spelling it never engaged: measured through the real
+    # tool, ``head -n 6`` on a complete CRLF key published 5 of its 25 body lines, and an
+    # unterminated CRLF block published 137 body lines on the transcript, 200 in the raw
+    # spill and 129 over ``read spill://`` (identical at the base — pre-existing, and
+    # this fix closes it for the ordinary spelling rather than licensing it).
+    #
+    # The terminator is TOLERATED BY LOOKAHEAD rather than consumed, which is the
+    # spelling that covers all three of them: a bare CR line ending (a key file that
+    # came off an old Mac, or through a filter that normalised to CR) satisfies ``\r``
+    # with nothing after it, where ``\r?$`` could not — the optional CR is backtracked
+    # away and ``$`` then has no ``\n`` to sit in front of. Leaving the terminator
+    # outside the match is also what the mask wants: its caller hands the bytes after
+    # the match to ``_PEM_LINE_BREAK``, which emits the separator verbatim.
+    #
+    # Widening the TAIL is the whole of the change, and it cannot open a block on text
+    # that is not an armour line: the phrase (``BEGIN `` … ``PRIVATE KEY``) and both
+    # dash runs are untouched, a line still has to be that WHOLE line (trailing prose
+    # after the dashes does not match), and the prefix grammar is unchanged. That is
+    # why the over-mask cost of this decision is measured at ZERO rather than asserted:
+    # across the 423-case shape corpus and all 648 of the repository's source and docs
+    # files, NOT ONE line is newly classified as a header (the corpus's own armour lines
+    # matched under the old tail too, and no repository file carries one at all), so no
+    # text changes its pipe output. The decision was still made in the mask-more
+    # direction — a real key file with CRLF endings masks now, and it published its body
+    # before.
     # MULTILINE, and that is not cosmetic: the pipe layer SEARCHES a multi-line read for
     # this header, so without the flag it matched only when the read was exactly one
     # header line — which the release point's hold makes impossible — and the entire

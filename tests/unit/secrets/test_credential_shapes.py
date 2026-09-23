@@ -2247,6 +2247,223 @@ def test_an_unterminated_block_with_a_second_block_present_publishes_no_body() -
     assert REDACTION_MARKER in published
 
 
+# --- the round-2 remediation: the cap's OWN split, and the armour's spellings -----
+#
+# Three holes round 1 found in the section above, all measured on the revision before
+# these arms existed, and all three in the SAME publish direction:
+#
+# 1. the cap can land inside the ARMOUR LINE. The hold above finds a block by its
+#    opening marker, but the cap is applied after that hold and recomputes the cut
+#    from the buffer length, so the marker itself is what gets split: a bare marker
+#    fragment goes out, the rest of the marker stays in ``pending`` where its line no
+#    longer STARTS with it, and the classifier can never match it again. The state
+#    never opens, so the whole flush is body nothing masks — measured 138 raw body
+#    lines, and the alignment is fixed per stream (a repeated read leaks every time).
+# 2. an armour line ending in ``\r`` / ``\r\n`` / trailing whitespace never opened the
+#    block at all: ``$`` cannot match in front of a ``\r``, so an ORDINARY key file
+#    written on Windows (or quoted by a wiki, or left with a trailing space by an
+#    editor) published its body — measured 5 of 25 lines for ``head -n 6`` on a
+#    complete CRLF key, and 200 lines of an unterminated one on every surface.
+# 3. a second block's header arriving in the SAME read as the first block's END was
+#    released without re-opening the state, so the second block's body went out raw —
+#    measured 138 lines on the shape below.
+#
+# The armour literals in this section come from the shared ones above (``_PEM_HEADER``,
+# ``_PEM_END``, ``_PEM_DASHES``), which are assembled from parts for the same reason.
+
+#: The line-break spellings an armour line arrives with in the wild: LF, CRLF, a bare CR
+#: (a key that came off an old Mac, or through a filter that normalised to CR), and the
+#: two trailing-whitespace forms a copy-paste or an editor leaves behind.
+_ARMOUR_BREAKS = (
+    ("lf", "\n", "\n"),
+    ("crlf", "\r\n", "\r\n"),
+    ("cr", "\r", "\r"),
+    ("trailing-spaces-lf", "   \n", "\n"),
+    ("trailing-tab-crlf", "\t\r\n", "\r\n"),
+    ("trailing-space-cr", " \r", "\r"),
+)
+
+
+def test_a_cap_that_splits_the_armour_line_publishes_no_body() -> None:
+    """The cap's cut landing INSIDE the armour line is the one split the mask cannot survive.
+
+    The hold in ``_release_point`` defers a block by its opening marker, and the cap is
+    applied AFTER that hold and recomputes the cut from the buffer length — so an
+    alignment that puts the cap a few bytes into the armour line publishes a marker
+    FRAGMENT and leaves the rest of the marker in ``pending``, where the line no longer
+    starts with it. From then on the classifier cannot match it, the state never opens,
+    and every later release is body that nothing masks: 138 raw body lines measured at
+    this exact alignment, identical at the base tree.
+
+    WHAT DECIDES IT IS THE ALIGNMENT, NOT THE READ SIZE — which is why the sweep is over
+    both: the same payload fed whole, in 4 KiB reads, in 1 KiB reads and in 100 B reads
+    all published the body before the fix, and a session that runs the same truncated
+    read twice leaks twice, because the alignment is fixed per stream.
+    """
+    _pem_grammar_is_live()
+    # The sweep is DERIVED from the cap, not hard-coded: the cut lands ``limit`` bytes
+    # before the end, so a total that puts it 8-27 bytes into a 32-byte armour line is
+    # ``limit + 8`` to ``limit + 27``. Width-checked, because a wider armour literal
+    # would move the window and quietly turn this arm into one that sweeps nothing.
+    assert len(_PEM_HEADER) == 32, "the armour literal changed width; re-derive the sweep"
+    limit = builtin._PIPE_DEFERRAL_LIMIT
+    for size in (0, 100, 1024, 4096):  # 0 is one feed + the flush
+        for total in range(limit + 8, limit + 28):
+            raw = (_PEM_HEADER + _body_lines(300))[:total].encode()
+            published = _pipe_whole(raw.decode()) if size == 0 else _pipe_chunks(raw, size)
+            leaked = _published_body_lines(published)
+            assert not leaked, (
+                f"a {'whole-stream' if size == 0 else f'{size} B'} feed of {total} B "
+                f"published {len(leaked)} body lines of a block whose marker the cap split"
+            )
+
+
+def test_a_second_block_after_a_terminated_one_publishes_no_body() -> None:
+    """A terminated block AND a second header in ONE read: the state has to be RE-opened.
+
+    The second-header arm treats a header inside an open block as armour rather than
+    prose, but this loop reaches that arm with the state already CLOSED whenever the same
+    release carried the earlier block's END. Releasing the header without re-opening it
+    left the second block's body to go out raw on the next release — measured 138 raw
+    body lines at this shape (12,071 B, one read), the whole flush.
+    """
+    _pem_grammar_is_live()
+    payload = _PEM_HEADER + _body_lines(3) + _PEM_END + _PEM_HEADER + _body_lines(200)
+
+    redactor = builtin._PipeRedactor([])
+    redactor.feed(payload.encode())
+    assert redactor._in_key_block is True, "the second block's header did not re-open the state"
+
+    published = _pipe_whole(payload)
+    leaked = _published_body_lines(published)
+    assert not leaked, f"{len(leaked)} body lines of the second block were published"
+
+
+@pytest.mark.parametrize(
+    ("name", "armour_break", "body_break"),
+    _ARMOUR_BREAKS,
+    ids=[case[0] for case in _ARMOUR_BREAKS],
+)
+def test_an_armour_line_with_a_cr_or_a_trailing_space_is_still_armour(
+    name: str, armour_break: str, body_break: str
+) -> None:
+    """The armour line's own terminator spelling must not decide whether a key is masked.
+
+    ``$`` cannot match in front of a ``\\r``, so the classifier did not see
+    ``...KEY-----\\r\\n`` (or ``...\\r``, or the trailing-whitespace forms) as armour at
+    all, and an unterminated block then went out in the clear: 200 of 200 body lines on
+    the transcript, the raw spill file and ``read spill://``. Base and head were
+    identical there, so this is pre-existing — but it is the branch's own title claim
+    unmet for an ORDINARY spelling, and the pipe is the only layer that can hide an
+    unterminated view (``pem-private-key`` needs a complete BEGIN … END). Every surface
+    below is built from the pipe's bytes, so the pipe's output is the first thing to pin
+    and the store's copy and the settled pass follow it.
+    """
+    _pem_grammar_is_live()
+    armour = _PEM_HEADER.rstrip("\n") + armour_break
+    # (1) an UNTERMINATED block, 200 lines, which is the shape the retention route leaks.
+    unterminated = armour + _body_lines(200).replace("\n", body_break)
+    published = _pipe_whole(unterminated)
+    leaked = _published_body_lines(published)
+    assert not leaked, f"{name}: {len(leaked)} body lines of an unterminated block went out"
+
+    # (2) the same bytes through the retention route: the store's retained copy and the
+    # settled pass over it, neither of which can repair a headerless fragment.
+    sink = builtin._BashOutput(limit=65536)
+    redactor = builtin._PipeRedactor([])
+    raw = unterminated.encode()
+    for index in range(0, len(raw), 4096):
+        sink.append(redactor.feed(raw[index : index + 4096]))
+    sink.append(redactor.feed(b"", final=True))
+    for surface, text in (
+        ("the retained copy", sink.decode()),
+        ("the settled pass", _live_text(sink.decode())),
+    ):
+        leaked = _published_body_lines(text)
+        assert not leaked, f"{name}: {surface} published {len(leaked)} body lines"
+
+    # (3) ``head -n 6`` on a COMPLETE key of this spelling: five body lines, no END in the
+    # text at all, so nothing downstream can repair it. Measured 5 of 25 published before.
+    truncated = armour + _body_lines(5).replace("\n", body_break)
+    leaked = _published_body_lines(_pipe_whole(truncated))
+    assert not leaked, f"{name}: {len(leaked)} body lines of a truncated complete key went out"
+
+
+def test_a_complete_key_with_crlf_endings_is_masked_to_its_end() -> None:
+    """The whole block path for the CRLF spelling: body masked, END out, state closed.
+
+    Asserted at the MASK rather than on the pipe's whole output, because for a COMPLETE
+    block the shape table masks the span as well and a product-level assertion would be
+    satisfied by either layer (the same reason the LF arm above is written this way).
+    """
+    _pem_grammar_is_live()
+    block = _PEM_HEADER.rstrip("\n") + "\r\n" + _body_lines(3).replace("\n", "\r\n")
+    block += _PEM_END.rstrip("\n") + "\r\n"
+    redactor = builtin._PipeRedactor([])
+    masked = redactor._mask_open_key_block(block)
+
+    assert not _published_body_lines(masked), "a complete CRLF block published its body"
+    assert _PEM_END.rstrip("\n") in masked, "the END line was eaten"
+    assert redactor._in_key_block is False, "the END line did not close the state"
+
+
+def test_the_body_floor_is_one_definition_for_the_grammar_and_the_hold() -> None:
+    """The floor the grammar accepts and the floor the hold holds at are ONE number.
+
+    ``PEM_BODY_FLOOR`` is read twice: by the body grammar (through its two quantifier
+    spellings) and by the release hold, which keeps a cap-forced cut off a fragment
+    shorter than it — because the line loop reads such a fragment as PROSE, which CLOSES
+    an open block. The relationship is a BOUNDARY, so it is pinned from both sides here:
+    a merger who moves either side — including the linear deciders #1427 substitutes at
+    the pipe's call sites, which spell an ``8``/``7`` pair by hand — makes this arm
+    disagree with itself rather than let the hold under-hold, which is the leak
+    direction.
+    """
+    floor = redaction_shapes.PEM_BODY_FLOOR
+    # The grammar's side of the boundary.
+    assert builtin._PEM_BODY_LINE.match("M" * floor), "the grammar rejects a run at its own floor"
+    assert not builtin._PEM_BODY_LINE.match("M" * (floor - 1)), "a lone sub-floor line is prose"
+
+    # The hold's side, at the SAME boundary: build a text whose cap-forced cut leaves a
+    # fragment of exactly ``fragment`` bytes in an open block's last line, and read the
+    # cut back. Held iff the fragment is shorter than the floor.
+    original = builtin._PIPE_DEFERRAL_LIMIT
+    try:
+        builtin._PIPE_DEFERRAL_LIMIT = 256
+        for fragment in (floor - 1, floor):
+            text = _PEM_HEADER + _body_lines(20) + "M" * (256 + fragment)
+            line_start = len(text) - (256 + fragment)
+            cut = builtin._PipeRedactor([])._release_point(text, final=False)
+            held = cut == line_start
+            assert held is (fragment < floor), (
+                f"a {fragment}-byte fragment at the cut was "
+                f"{'held' if held else 'released'} against a floor of {floor}"
+            )
+    finally:
+        builtin._PIPE_DEFERRAL_LIMIT = original
+
+
+def test_a_certificate_banner_does_not_open_a_private_key_block() -> None:
+    """The widened armour tail must not open a block on a PUBLIC key's banner.
+
+    Tolerating ``\\r`` and trailing whitespace removed the whitespace as a discriminator,
+    so the phrase is now the only thing separating a private-key banner from any other
+    PEM banner — and this is the arm that pins it, including for the spellings the
+    widening was for: a certificate banner followed by base64-shaped lines stays readable
+    byte for byte, because ``PRIVATE KEY`` is missing.
+    """
+    _pem_grammar_is_live()
+    banner = _PEM_DASHES + "BEGIN CERTIFICATE" + _PEM_DASHES
+    for ending in ("\n", "\r\n", "  \r\n", " \r"):
+        body_break = "\n" if ending.endswith("\n") else "\r"
+        text = banner + ending + _body_lines(20).replace("\n", body_break)
+        published = _pipe_whole(text)
+        assert _published_body_lines(
+            published
+        ), f"a public banner ending {ending!r} opened a private-key block"
+        assert published == text, f"a public banner ending {ending!r} was rewritten by the pipe"
+
+
 def test_two_stores_in_one_process_are_independent() -> None:
     """The registration set and its cap are PER STORE, not per process.
 

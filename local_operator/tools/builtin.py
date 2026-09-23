@@ -2252,6 +2252,17 @@ _PEM_HEADER_LINE = PEM_HEADER_LINE_RE
 _PEM_BODY_LINE = PEM_BODY_LINE_RE
 _PEM_END_LINE = PEM_END_LINE_RE
 
+#: NECESSARY CONDITIONS of the header pattern above, checked BEFORE it wherever the
+#: pattern would otherwise run over text this filter did not shape. Both literals are
+#: required by the pattern, so the gate can only skip work — and the work it skips is
+#: expensive, because the shared prefix grammar is ambiguous by construction: a
+#: digit-dense line is seconds of backtracking before the engine can conclude that it
+#: is not a PEM line. This tuple carries the SAME NAME and the SAME CONTENTS as the gate
+#: #1427 puts in front of the mask's own search (``_PEM_HEADER_HINTS`` in that branch),
+#: so a merge of the two keeps ONE gate instead of two that can drift apart; on this
+#: branch the cap-split hold below is the reader.
+_PEM_HEADER_HINTS = ("BEGIN ", "PRIVATE KEY")
+
 #: The line terminator that ends a PEM header's own line. Consumed by the mask at
 #: the header hand-off so the line loop never classifies a bare separator as prose
 #: (see ``_PipeRedactor._mask_open_key_block``); the bytes are emitted verbatim.
@@ -2599,6 +2610,17 @@ class _PipeRedactor:
           ``pending`` is capped separately), so it now ends only at the END line,
           at a NON-BODY line, or at end of stream.
 
+        KNOWN AND RECORDED, pre-existing and in the OVER-MASK direction, so it is
+        recorded rather than patched in this change: once this loop CLOSES the state it
+        goes on classifying to the end of the RELEASE, so base64-shaped ORDINARY lines
+        that follow a terminated block in the same release are withheld —
+        `cat key.pem; base64 thing` in one read withheld 20 of 20, where the same text
+        in a later release is published (0 of 20). Re-checking the state per line is
+        what would fix it and it is not a line to slip in here: it would also publish
+        the body-shaped line that the stray-header arm pins as MASKED, so a close would
+        become a licence to publish, and that needs its own round with its own
+        over-mask evidence.
+
         KNOWN AND RECORDED, at the layer boundary rather than patched here: a body
         FRAGMENT that reaches the shape table with no header in front of it (a
         truncated ``key.pem`` read directly, say) matches no rule, because the
@@ -2626,6 +2648,18 @@ class _PipeRedactor:
                     # state costs nothing and cannot eat ordinary text: prose that is
                     # not armour still closes the block, which is the guard that rule
                     # exists for.
+                    #
+                    # AND THE STATE IS CARRIED, not merely kept: this loop reaches the
+                    # arm with the state already CLOSED whenever the release that ends
+                    # here also carried an END (the arm above closes it on one), so
+                    # releasing the header without re-opening let the SECOND block's
+                    # body go out raw on the next release — measured on `header + 3
+                    # body lines + END + header + 200 body lines` (12,071 B, one read):
+                    # 138 raw body lines, the whole flush. A fresh marker goes with the
+                    # state, so a second block's body is announced like any other
+                    # block's rather than dropped silently under the first block's.
+                    self._in_key_block = True
+                    self._key_block_marker_sent = False
                     out.append(line)
                     continue
                 if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
@@ -2682,7 +2716,6 @@ class _PipeRedactor:
         # one, so releasing at ``\r`` is free and keeps a long build's output
         # visible while it runs.
         cut = max(text.rfind("\n"), text.rfind("\r")) + 1
-        line_cut = cut
         # An UNTERMINATED private-key block defers the WHOLE block, not just to
         # the last newline: a PEM body is the credential and it spans lines, so
         # releasing up to the last newline would publish the key material and
@@ -2691,23 +2724,28 @@ class _PipeRedactor:
         # an OPEN block is masked, because the state carries across releases: the body
         # used to go out verbatim once the cap cut through the block, which is the
         # publish this mask closes).
+        block_open = False
         begin = text.rfind("-----BEGIN", 0, cut)
         if begin >= 0:
             end = text.find("-----END", begin)
             if end < 0 or end >= cut:
                 cut = begin
-        # Whether this text carries an OPEN block, needed by the fragment rule at
-        # the end of this function: the header hold above is the ONLY thing that can
-        # have narrowed the cut by now (the cap, the shape spans and the known-value
-        # rule all run below), so a cut narrower than the line boundary IS the hold.
-        block_open = cut < line_cut
+                # Set WHERE THE HOLD FIRES rather than inferred afterwards from the
+                # cut's position: the cap below rewrites the cut, so an inference taken
+                # after it answers a different question — and the fragment rule at the
+                # end of this function needs this one, which is "the text carries a
+                # block the classifier accepted", because the cap can leave the block's
+                # own marker outside the release (see `_cut_past_a_split_header`).
+                block_open = True
         # The cap is applied LAST and wins over every hold above: bounded memory
         # is the property that must not depend on what the child prints, so a
         # command that opens a PEM block and never closes it cannot pin the
-        # buffer forever.
+        # buffer forever. ONE hold survives it, and only because the cap can destroy
+        # the very thing the hold above protects: a cut inside a header LINE splits a
+        # marker no later release can put back together.
         cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
         if cap_forced:
-            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+            cut = self._cut_past_a_split_header(text, len(text) - _PIPE_DEFERRAL_LIMIT)
         # Never cut through a KNOWN value. The newline rule above already
         # prevents that for any value without a newline in it, which is every
         # credential in practice; this keeps the guarantee for the ones with
@@ -2741,6 +2779,13 @@ class _PipeRedactor:
         # PEM_BODY_FLOOR - 1 bytes of latency, applies only while a block is open (in
         # the state, or opened by this very text), and rewrites nothing: the fragment
         # goes out whole with its line on the next release.
+        #
+        # IT DOES NOT APPLY TO THE FINAL RELEASE, and that is a decision rather than an
+        # oversight: ``final`` releases to the end of the buffer, so a fragment there is
+        # the END OF THE STREAM and nothing follows it for the line loop to misread —
+        # and holding bytes back at that point would DROP them, because ``pending`` is
+        # never flushed again. The invariant this hold exists for is not "no fragment is
+        # ever released"; it is "no fragment a LATER release will classify".
         while True:
             previous_cut = cut
             if spans:
@@ -2756,6 +2801,55 @@ class _PipeRedactor:
             if cut == previous_cut:
                 break
         return cut
+
+    def _cut_past_a_split_header(self, text: str, cut: int) -> int:
+        """Extend a cap-forced cut to the end of a header LINE it would otherwise split.
+
+        WHY THIS EXISTS, and why it is the ONE hold the cap does not win over. The
+        release point finds a block by its opening literal and defers it to its END,
+        but the cap is applied after that hold and recomputes the cut from the buffer
+        length — so an alignment that puts the cap inside the header line splits the
+        MARKER: ``-----BEGIN RSA PRI`` goes out as a bare armour fragment and the rest
+        of the marker stays in ``pending``, where its line no longer STARTS with the
+        marker, so ``_PEM_HEADER_LINE`` can never match it again. The state never
+        opens, the carried-state masking below never engages, and every later release
+        is body that nothing masks. Measured on the shape of ``head -c 8210 key.pem``:
+        138 raw body lines published, and the alignment is fixed per stream — a session
+        that runs the same truncated read twice leaks both times.
+
+        The cut moves FORWARD to the end of that line rather than BACK to its start,
+        and both halves of that matter:
+
+        * the header line has to be inside ONE release for the mask to see it, so the
+          cut must not land in the middle of it — which a retreat also achieves;
+        * but a retreat HOLDS the block, and the held bytes are exactly what the cap
+          exists to bound: with a buffer that never grows past the cap, a retreat at a
+          header line that starts the buffer would answer every release with the same
+          offset and let ``pending`` grow without bound. Moving forward releases the
+          armour line, which is not the credential, and leaves ``pending`` SMALLER
+          than the cap allows — so no bound is weakened and nothing can stall.
+
+        Only a line that IS a header line opens this path — the same pattern the mask
+        classifies with, so the hold cannot disagree with the mask about what it split
+        — and only when that line's terminator has arrived, because the line has to be
+        complete to be released whole. The hint gate in front of the pattern is the
+        pattern's own necessary conditions: this runs per release, and the prefix
+        grammar is ambiguous enough that an ungated match on ordinary text is seconds.
+        """
+        line_start = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
+        if line_start >= cut:
+            return cut  # the cut is already a line boundary: nothing is split
+        break_match = _PEM_LINE_BREAK.search(text, cut)
+        if break_match is None:
+            # No terminator in the buffer yet: the line cannot be released whole, and
+            # the fragment rule below is the only hold that applies to it.
+            return cut
+        line = text[line_start : break_match.start()]
+        if not all(hint in line for hint in _PEM_HEADER_HINTS):
+            return cut
+        if _PEM_HEADER_LINE.match(line) is None:
+            return cut
+        return break_match.end()
 
     def _shape_safe_spans(self, text: str) -> list[tuple[int, int]]:
         """Every shape span a cap-forced release must not land inside.
