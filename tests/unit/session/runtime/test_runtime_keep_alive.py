@@ -440,9 +440,7 @@ async def test_a_viewer_that_comes_and_goes_inside_one_tick_still_starts_the_win
     runtime._record.detached = True
 
     await _pump_until(clock, 30.0, start=start, until=stop.is_set)
-    assert not stop.is_set(), (
-        "the runtime left on the grace it drew before the viewer arrived"
-    )
+    assert not stop.is_set(), "the runtime left on the grace it drew before the viewer arrived"
 
     await _pump_until(clock, 320.0, start=start, until=stop.is_set)
     assert stop.is_set(), "the re-drawn keep-alive window never ended"
