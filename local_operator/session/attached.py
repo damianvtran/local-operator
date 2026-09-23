@@ -937,6 +937,33 @@ def _accepts_updating(callback: Any) -> bool:
     ``VAR_KEYWORD`` counts as accepting it: a host that takes ``**kwargs`` is not
     surprised by one more. An unreadable signature reads as NO, which degrades to the
     pre-change behaviour rather than to silence.
+
+    ONE PROBE PER KEYWORD, spelled through :func:`_accepts_keyword`, because the two
+    keywords arrived in different rounds and a host may legitimately take one and not
+    the other (the app's own callback grew ``updating`` first): asking once for both
+    would either drop a key a host wanted or hand it one it would raise on.
+    """
+    return _accepts_keyword(callback, "updating")
+
+
+def _accepts_update_failed(callback: Any) -> bool:
+    """Whether ``callback`` can be handed the ``update_failed`` keyword.
+
+    The record PAIR's second half: ``process._abandon_move`` keeps ``leaving`` at the
+    ordinary build phrase through an abandon, so the phrase ALONE reads as "a new
+    message will not start a turn" on a runtime that has released the latch and takes
+    work again. Same probe, same reasoning, its own name so the two cannot be resolved
+    together by accident.
+    """
+    return _accepts_keyword(callback, "update_failed")
+
+
+def _accepts_keyword(callback: Any, name: str) -> bool:
+    """Whether ``callback``'s signature accepts the keyword ``name``.
+
+    The shared body of the two probes above. ``VAR_KEYWORD`` counts as accepting it
+    (a host taking ``**kwargs`` is not surprised by one more), and an unreadable
+    signature reads as NO — the pre-change behaviour rather than silence.
     """
     if callback is None:
         return False
@@ -944,7 +971,7 @@ def _accepts_updating(callback: Any) -> bool:
         parameters = inspect.signature(callback).parameters
     except (TypeError, ValueError):  # pragma: no cover - builtins, partials, C callables
         return False
-    if "updating" in parameters:
+    if name in parameters:
         return True
     return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 
@@ -1054,13 +1081,16 @@ class AttachedSession:
         #: (:func:`types.drain_phrase_for_frame`) and have done since design round
         #: 4, D9 (agent review round 5, MINOR-2).
         #: The drain/window callback: the frame's leaving PHRASE, plus the update
-        #: window's build pair as a keyword ("" when the frame carries no window).
+        #: window's build pair and the failed half of a handover as keywords (""
+        #: when the frame carries neither).
         self._drain_callback: Callable[..., Any] | None = None
         #: Whether ``_drain_callback`` accepts that keyword, resolved once when it is
         #: set: the call site is inside a blanket exception guard, so the answer has
         #: to be known BEFORE the call rather than discovered by catching a TypeError
-        #: (see :func:`_accepts_updating`).
+        #: (see :func:`_accepts_updating`). Asked per keyword, for the reason that
+        #: function gives — a host may have grown one and not the other.
         self._drain_callback_takes_updating: bool = False
+        self._drain_callback_takes_update_failed: bool = False
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -6403,11 +6433,12 @@ class AttachedSession:
         """
         self._drain_callback = callback
         self._drain_callback_takes_updating = _accepts_updating(callback)
+        self._drain_callback_takes_update_failed = _accepts_update_failed(callback)
 
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
 
-        The frame is additive three times over: a runtime older than the ``draining``
+        The frame is additive four times over: a runtime older than the ``draining``
         field is therefore read as the idle handover, which is the pre-change
         behaviour and paints nothing, a runtime older than ``leaving`` has its
         trigger read off the frame's ``reason``/``to`` by
@@ -6452,10 +6483,20 @@ class AttachedSession:
             # nothing but a ``logger.debug`` to show for it. A one-argument host now
             # gets the phrase and no window, which is exactly the pre-change behaviour.
             phrase = drain_phrase_for_frame(frame)
+            # THE RECORD'S OWN TWO HALVES RIDE ALONGSIDE THE PHRASE, each only to a
+            # host that has a parameter for it (agent review round 1, NIT 3 — the
+            # same guard ``updating`` needed, and the reason it is asked per keyword
+            # rather than once for the pair). ``updating`` selects the window's
+            # sentence; ``update_failed`` completes the record pair that says a
+            # handover was GIVEN UP, which the phrase alone cannot say because the
+            # record deliberately keeps the ordinary build phrase through an abandon
+            # (``process._abandon_move``).
+            keywords: dict[str, str] = {}
             if self._drain_callback_takes_updating:
-                callback(phrase, updating=str(frame.get("updating") or ""))
-            else:
-                callback(phrase)
+                keywords["updating"] = str(frame.get("updating") or "")
+            if self._drain_callback_takes_update_failed:
+                keywords["update_failed"] = str(frame.get("update_failed") or "")
+            callback(phrase, **keywords)
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 

@@ -74,6 +74,7 @@ from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
@@ -2364,22 +2365,35 @@ class _DrainProgress:
     measured against. Nothing here is advanced by the caller's own cadence, and
     that is what makes this a bound on the WORK rather than a second timeout: a
     runtime whose turn is stepping, whose lane is reporting, whose jobs are
-    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a
-    hold that is moving is never cut however long it runs.
+    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a hold
+    that is moving is never cut BY THIS CLOCK, however long it runs — the hold has a
+    second clock (``latched_at``, below) and that one is not moved by the work.
 
     ``abandoned`` is the drain's own record that its hold was ended by the bound —
     the runtime kept the build it loaded rather than being cut — and it is also the
     guard that keeps the give-up from running twice.
+
+    ``latched_at`` is the instant this clock was opened, i.e. the drain's first
+    tick, and it is deliberately NOT the movement clock: it advances only when the
+    drain object is new, so it measures the HOLD while ``moved_at`` measures the
+    work. It feeds :data:`types.BUILD_DRAIN_DWELL_S`, the bound that exists
+    precisely because the movement clock can be pushed forward forever by a lane
+    that keeps stepping (see that constant for the measurement). The first tick is
+    used rather than the latch's own instant because the reaper is what owns the
+    latch-to-tick gap (``REAP_CHECK_S``, quarter-second), and taking the clock the
+    runtime actually reads keeps every assertion in the suite on one number instead
+    of two that differ by up to a tick.
     """
 
     motion: "tuple[Any, ...]" = ()
     moved_at: float = 0.0
     abandoned: bool = False
+    latched_at: float = 0.0
 
     @classmethod
     def started(cls, handle: object, at: float) -> "_DrainProgress":
         """Open the clock on the drain's first tick, already sampled."""
-        return cls(motion=_work_motion(handle), moved_at=at)
+        return cls(motion=_work_motion(handle), moved_at=at, latched_at=at)
 
     def sample(self, handle: object, at: float) -> bool:
         """One observation. True when the work moved since the last one."""
@@ -2393,6 +2407,15 @@ class _DrainProgress:
     def stalled_s(self, at: float) -> float:
         """How long this drain's work has shown no movement, in seconds."""
         return at - self.moved_at
+
+    def dwell_s(self, at: float) -> float:
+        """How long this drain has been HELD, in seconds, movement or not.
+
+        The other half of the pair, and the one the movement clock cannot answer:
+        ``stalled_s`` is reset by anything the work reports, so a hold that keeps
+        reporting is unbounded by it (``types.BUILD_DRAIN_DWELL_S``).
+        """
+        return at - self.latched_at
 
 
 #: The handle of the runtime this process is currently running, for the stall
@@ -2781,18 +2804,31 @@ async def _drain_for(
     idle instant arrives. Nothing in flight is aborted: the wait is bounded by
     the work.
 
-    AND ONLY BY THE WORK THAT IS STILL MOVING — see :func:`_abandon_move`, the
-    one rung here that draws a bound at all. It reads no clock of the drain: the
-    clock it reads is reset by every observable sign that the work advanced
-    (:func:`_work_motion`), so it cannot fire on a turn that is merely long, and
-    what it bounds is not the hold but STALENESS. The state it exists for has no
-    other exit: ``is_busy()`` counts a gate parked on a user and a lane parked
-    behind a child process, both of which can hold for hours, and a drain that
-    holds forever takes its session with it (measured: 2 h and still refusing,
+    AND ONLY BY THE WORK, OR BY THE HOLD ITSELF — see :func:`_abandon_move`, the
+    one rung here that draws a bound at all, and it draws two. The FIRST is the
+    staleness bound (:data:`types.BUILD_DRAIN_PROGRESS_S`): it reads no clock of
+    the drain — the clock it reads is reset by every observable sign that the work
+    advanced (:func:`_work_motion`), so it cannot fire on a turn that is merely
+    long, and what it bounds is not the hold but STALENESS. The state it exists for
+    has no other exit: ``is_busy()`` counts a gate parked on a user and a lane
+    parked behind a child process, both of which can hold for hours, and a drain
+    that holds forever takes its session with it (measured: 2 h and still refusing,
     ``state=wedged``, three lanes stalled behind a 23-minute bash child). And a
     stale hold that cannot be waited out is now RECORDED rather than cut: the
     bound abandons the handover, publishes the failure, and leaves the session
     running on the build it loaded.
+
+    THE SECOND BOUND IS THE DWELL, and it exists because the first one cannot be
+    reached by the state that wedged this host: ``_work_motion`` is reset by the
+    very reports a stepping lane makes, so work that KEEPS reporting bounds nothing
+    at all and the drain holds for the runtime's whole life (measured: EIGHT HOURS
+    on the reporting session, and the staleness bound only fired once the lanes
+    stopped). The dwell
+    (:data:`types.BUILD_DRAIN_DWELL_S`) is measured from the drain's first tick and
+    ignores the work entirely, so it is the arm that ends a handover which is
+    progressing and merely long; it is checked SECOND, because an expired staleness
+    clock is the sharper observation of the two and 15 min is inside 30, so a silent
+    hold never reaches it.
 
     The viewer term of :func:`_should_exit` is deliberately absent, exactly as
     it is absent from ``may_refresh``. The ``retiring`` frame went out at drain
@@ -2811,9 +2847,9 @@ async def _drain_for(
     waits for hours of work, and a reason that names the build pair of the
     latch asserts a transition the install left long ago.
 
-    ``now`` is the caller's clock, injectable for the one test that has to cross
-    a fifteen-minute bound without waiting it out — the same convention
-    ``_BuildWatch.poll`` uses.
+    ``now`` is the caller's clock, injectable for the tests that have to cross a
+    fifteen-minute bound — or the half-hour dwell above it — without waiting it
+    out: the same convention ``_BuildWatch.poll`` uses.
     """
     at = time.monotonic() if now is None else now
     if drain.progress is None:
@@ -2829,6 +2865,18 @@ async def _drain_for(
     if not _idle_for_refresh(handle):
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
             await _abandon_move(drain, handle, runtime, at=at)
+            return False
+        # THE DWELL, and it is the SECOND question because it is the WEAKER
+        # observation: an expired staleness clock names what the runtime saw the
+        # work NOT do, while an expired dwell says only that the hold is old. A
+        # hold that has gone silent is therefore always diagnosed by the arm above
+        # (15 min is inside 30), and what reaches this line is the state nothing
+        # else bounds — a handover whose lanes keep reporting (see
+        # ``types.BUILD_DRAIN_DWELL_S`` for the eight-hour measurement). Ordered,
+        # not folded into one comparison, so the log and the published bound say
+        # which of the two the runtime actually ran out of.
+        if drain.progress.dwell_s(at) >= BUILD_DRAIN_DWELL_S:
+            await _abandon_move(drain, handle, runtime, at=at, dwell=True)
             return False
         return False
     begin_retire = getattr(handle, "begin_retire", None)
@@ -2848,8 +2896,22 @@ async def _abandon_move(
     runtime: object,
     *,
     at: float,
+    dwell: bool = False,
 ) -> None:
     """The drain could not reach idle: ABANDON the move and KEEP SERVING.
+
+    TWO BOUNDS REACH THIS, and which one did is a keyword rather than a re-read of
+    the clock, because the two say different things to a reader and the log line and
+    the PUBLISHED BOUND are the only places that can say them:
+
+    * the STALENESS bound (:data:`types.BUILD_DRAIN_PROGRESS_S`), the default — the
+      work has reported nothing for fifteen minutes, so what the runtime saw is
+      stated as silence;
+    * the DWELL bound (``dwell=True``, :data:`types.BUILD_DRAIN_DWELL_S`) — the drain
+      has been HELD for half an hour with the work still reporting. Nothing is
+      claimed about the work here, because nothing was observed about it: the
+      movement clock keeps being reset by the very reports that make this arm
+      necessary (a lane that keeps stepping holds a drain for as long as it likes).
 
     Replaces a force-cut that ended the runtime and its turn together after
     :data:`types.BUILD_DRAIN_PROGRESS_S` of no movement from the work in flight.
@@ -2892,6 +2954,18 @@ async def _abandon_move(
     is already latched as a commitment (the record still says it is leaving for the
     build on disk when its turn ends, which is still true).
 
+    THAT RETRY IS ALSO WHAT MAKES THE DWELL ARM SAFE TO FIRE EARLY, which is the
+    half a reader of the dwell bound needs: on the STALENESS arm the work has stopped
+    reporting, so releasing the latch cannot make the hold longer; on the DWELL arm
+    the work is still going, and a released latch ADMITS MORE WORK — so a dwell that
+    fires on a handover which would have converged in the next minute delays that
+    handover rather than losing it. Nothing is discarded by doing so: the departure
+    is retried at every tick, so it lands at the first idle instant the session
+    reaches, and the newer build is asked about again rather than forgotten. This is
+    the trade the bound exists to make — an operator who can use the session now,
+    and a build move that happens later, in place of a session nobody can write to
+    for as long as a lane keeps stepping.
+
     THE RECORD KEEPS ``LEAVING_FOR_BUILD`` THROUGH THE ABANDON, and that is deliberate
     rather than a leftover (agent review round 1, MINOR-2; design round 1, D4 read the
     same pair from the rendered frame): the COMMITMENT is what survives — the drain
@@ -2915,31 +2989,55 @@ async def _abandon_move(
     truth (``update_failed`` plus the build still running), which is the same split
     the update window's abandon already relies on.
     """
-    stalled = drain.progress.stalled_s(at) if drain.progress is not None else BUILD_DRAIN_PROGRESS_S
-    if drain.progress is not None:
+    progress = drain.progress
+    if progress is not None:
         # ONCE PER DRAIN, and the flag is the guard rather than a caller's check:
         # the reaper ticks every ``REAP_CHECK_S`` and a released latch does not
         # stop ``_drain_for`` being called with the SAME drain object, so without
         # this a runtime that cannot reach idle would publish its failure four
         # times a minute.
-        if drain.progress.abandoned:
+        if progress.abandoned:
             return
-        drain.progress.abandoned = True
-    logger.warning(
-        "session runtime: the build drain for %s held with no movement for %.0fs "
-        "(bound %.0fs); ABANDONING the handover and keeping %s",
-        drain.reason,
-        stalled,
-        BUILD_DRAIN_PROGRESS_S,
-        _loaded_build_label(runtime),
-    )
+        progress.abandoned = True
+    if dwell:
+        # The dwell arm's own two numbers. ``at`` is the caller's instant, so the
+        # spent figure is read from the same clock the bound was compared against.
+        spent = progress.dwell_s(at) if progress is not None else BUILD_DRAIN_DWELL_S
+        bound = BUILD_DRAIN_DWELL_S
+        # A WARNING OF ITS OWN, because the two arms have to be separable from a
+        # log alone: this one fired while the runtime was still observing progress,
+        # so a reader must not be told the work went quiet (it did not) and must be
+        # told the build pair the abandoned handover was for, or the line cannot be
+        # matched to the update it abandoned.
+        logger.warning(
+            "session runtime: the build drain for %s was latched for %.0fs with work "
+            "still in flight and still reporting (dwell bound %.0fs, handover to %s); "
+            "ABANDONING the handover, releasing the latch and keeping %s — the work "
+            "continues and this runtime keeps serving it",
+            drain.reason,
+            spent,
+            bound,
+            drain.to or "<unnamed>",
+            _loaded_build_label(runtime),
+        )
+    else:
+        spent = progress.stalled_s(at) if progress is not None else BUILD_DRAIN_PROGRESS_S
+        bound = BUILD_DRAIN_PROGRESS_S
+        logger.warning(
+            "session runtime: the build drain for %s held with no movement for %.0fs "
+            "(bound %.0fs); ABANDONING the handover and keeping %s",
+            drain.reason,
+            spent,
+            bound,
+            _loaded_build_label(runtime),
+        )
     end = getattr(handle, "end_drain", None)
     if callable(end):
         try:
             end()
         except Exception:  # noqa: BLE001 — a failed release must not stop the report
             logger.debug("could not release the drain latch", exc_info=True)
-    await _keep_loaded_build(handle, runtime, drain.to, BUILD_DRAIN_PROGRESS_S)
+    await _keep_loaded_build(handle, runtime, drain.to, bound)
 
 
 async def _hand_wakes_to_successor(handle: object) -> int:

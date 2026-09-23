@@ -4560,6 +4560,74 @@ async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_rela
 
 
 @pytest.mark.asyncio
+async def test_a_draining_owner_still_lands_the_canonical_sync_inside_the_envelope() -> None:
+    """THE OPERATOR'S SYMPTOM, with the drain latched: a viewer still gets its state.
+
+    The incident's configuration, not an invented one. The runtime that could not be
+    attached had latched a stale-build drain (``begin_drain``, taken here through the
+    PRODUCTION latch rather than a fake that re-implements it) and was still stepping
+    three subagent lanes, so its session loop was exactly as busy as the parked owner
+    below models — the attach then missed the 15 s envelope and the operator got
+    ``RuntimeUnresponsiveError`` while the session was, technically, alive and serving.
+
+    So this is the parked-owner rig re-driven under a drain. Two things are asserted,
+    and the second is the one a future change is most likely to break: the canonical
+    ``frontend_sync`` LANDS, inside a bound well under the attach envelope, and it
+    lands through the OFF-LOOP fallback — a draining runtime still serves a joining
+    viewer. Gating the fallback on "not draining" (a plausible-looking reading of "a
+    runtime that is leaving should not bind new viewers") is what this cell fails on,
+    and the cost of that gate is another attach nobody can complete.
+
+    The latch is asserted while the sync is in flight, because the property is about a
+    DRAINING owner: a test that released the drain before dialling would prove nothing
+    about the state the operator was in.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    handle = _OffLoopCapableHeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        # The PRODUCTION latch over this reduced handle: ``begin_drain`` asks only for
+        # ``_disposing`` and an optional ``session.retire_wakes_to_inbox``, so the same
+        # method the real handle runs is the one under test here.
+        assert ServingSessionHandle.begin_drain(handle, "stale-build", "0.62.9 -> 0.62.12")
+        assert (
+            handle._draining is True
+        ), "the drain has to be latched for this cell to mean anything"
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        started = time.monotonic()
+        sync = await _until(reader, "frontend_sync")
+        landed_after = time.monotonic() - started
+
+        assert sync["data"].get("sequence") is not None, "the sync carried no canonical state"
+        assert landed_after < 10.0, (
+            "a draining owner's viewer waited "
+            f"{landed_after:.1f}s for its state, and the attach envelope is 15 s: this is "
+            "the shape that made the runtime unattachable"
+        )
+        assert handle.off_loop_binds == 1, (
+            "the parked on-loop bind carried the sync, so the off-loop fallback a "
+            "draining runtime needs was not used"
+        )
+        assert runtime.frontend_off_loop_binds == 1
+        assert handle._draining is True, (
+            "the drain was released under the viewer, so this no longer says anything "
+            "about a DRAINING owner"
+        )
+    finally:
+        handle.bind_gate.set()
+        handle.release_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_a_healthy_owner_never_reaches_the_off_loop_fallback() -> None:
     """The other half of the grace, on a real socket.
 

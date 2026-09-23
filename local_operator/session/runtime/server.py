@@ -2226,6 +2226,18 @@ class RuntimeServer:
             # BEFORE the announce — that ordering is the window's own contract — so
             # the record is the one place both ends can read it from.
             "updating": self._record.updating,
+            # THE FAILED HALF OF A HANDOVER, additive like the three above, and the
+            # pair it completes is what a viewer needs to tell a handover that is
+            # STILL WAITING from one that was given up: the record keeps
+            # ``leaving`` at the ordinary build phrase through an abandon BY DESIGN
+            # (``process._abandon_move``), so the phrase alone tells a viewer a new
+            # message will not start a turn — false from the instant the latch is
+            # released. Read off the record for ``updating``'s own reason, and it is
+            # the only place that fact can come from: the abandon is not announced
+            # (there is no "staying" op on this wire, and ``process.py`` refuses to
+            # invent one), so a viewer learns it from the record, through the next
+            # frame that carries the record's state.
+            "update_failed": self._record.update_failed,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))

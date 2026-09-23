@@ -37,6 +37,31 @@ OLD = BuildStamp(version="0.59.7", source_ref="7fe8b1005")
 NEW = BuildStamp(version="0.59.8", source_ref="dec7933a6")
 
 
+class _MovingLane:
+    """A session double whose LANE keeps stepping: never silent, never idle.
+
+    One of ``_work_motion``'s five signals and the one the incident's runtime kept
+    moving — the roster generation is bumped by every completed assistant message, model
+    change and lifecycle event a child reports (``Session._schedule_subagent_persist``),
+    so a stepping child keeps the parent's movement clock reset while the parent's own
+    transcript stays frozen.
+
+    ``step_forever`` is driven as a real task rather than by poking the movement clock,
+    because the property under test is precisely that the staleness clock cannot be left
+    alone by work of this shape.
+    """
+
+    def __init__(self) -> None:
+        self._subagent_roster_generation = 0
+        self.steps = 0
+
+    async def step_forever(self) -> None:
+        while True:
+            self._subagent_roster_generation += 1
+            self.steps += 1
+            await asyncio.sleep(0.002)
+
+
 class _Handle:
     """Permanently busy, with no session to report movement from."""
 
@@ -129,6 +154,67 @@ async def _wait_for(predicate: Any, timeout: float = 5.0) -> bool:
             return True
         await asyncio.sleep(0.01)
     return False
+
+
+@pytest.mark.asyncio
+async def test_a_drain_with_MOVING_work_is_abandoned_at_the_dwell(monkeypatch) -> None:
+    """THE OPERATOR'S EIGHT HOURS: work that keeps reporting is now bounded too.
+
+    The cell above is the SILENT hold. This is the one the fleet actually produced,
+    and it is the reason a second bound exists at all: a lane that keeps STEPPING
+    resets the movement clock on every read (:func:`process._work_motion` reads the
+    subagent roster generation among its five signals), so ``stalled_s`` never
+    reaches ``BUILD_DRAIN_PROGRESS_S`` and, before this arm, nothing else in the
+    process ended the hold — measured on the reporting host as eight hours latched,
+    with the session refusing admissions for the whole of it.
+
+    Red on a tree without the dwell, green with it, and the discrimination is by the
+    PUBLISHED BOUND: the staleness arm cannot have fired here, because its own bound
+    is fifteen minutes and this cell's run is a fraction of a second — so a tree that
+    reached the abandon through silence would have to publish 900 s, while the dwell
+    arm publishes the dwell it ran out of (patched here to 50 ms).
+
+    The lane is driven for real — a task stepping the roster every few milliseconds,
+    the shape its own comment describes — rather than by moving the clock, because the
+    WHOLE POINT is that no injected clock can stand in for this: the clock the
+    staleness bound reads is pushed forward by the work itself.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setattr(child_mod, "BUILD_DRAIN_DWELL_S", 0.05, raising=False)
+    monkeypatch.setattr(child_mod.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: NEW)
+    monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: NEW)
+    monkeypatch.setattr(update_mod, "build_marker_age_s", lambda *_a, **_k: 999.0)
+
+    lane = _MovingLane()
+    handle, runtime, stop = _Handle(), _Runtime(), asyncio.Event()
+    handle._session = lane
+    stepping = asyncio.ensure_future(lane.step_forever())
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+    try:
+        assert await _wait_for(lambda: handle.drains == 1), "the drain latch never engaged"
+        assert await _wait_for(lambda: handle.releases == 1, timeout=2.0), (
+            "a lane that keeps stepping held the drain past the dwell: this is the "
+            "state that stayed latched for eight hours, and nothing else ends it"
+        )
+        assert lane.steps > 2, "the lane has to have stepped for this cell to mean anything"
+        assert handle.draining is False, "the latch was counted but never taken off"
+        assert handle.retired is False, "the moving hold is abandoned, not retired"
+        assert (
+            not stop.is_set() and not handle.disposed
+        ), "an abandoned handover keeps serving; it never ends the process or its turn"
+        assert runtime.failures, "the abandoned handover was never published"
+        assert runtime.failures[0][1] == pytest.approx(0.05), (
+            "the failure was published with the STALENESS bound, so this cell was "
+            "passed by the wrong arm rather than by the dwell"
+        )
+        assert handle.drains == 1, "the drain was latched a second time"
+    finally:
+        stepping.cancel()
+        stop.set()
+        task.cancel()
 
 
 @pytest.mark.asyncio
