@@ -1525,6 +1525,13 @@ class RuntimeServer:
         #: for tests and for the "did a headless runtime pay for a fold?"
         #: question; 0 after a lifetime with no daemon client is the claim.
         self.projection_sinks_built: int = 0
+        #: How many viewers this runtime attached by binding OFF the session's
+        #: loop because the on-loop bind missed ``_ONLOOP_BIND_GRACE_S``.
+        #: Observable for the same reason ``projection_sinks_built`` is: it is
+        #: the term that says whether the grace is mistuned for a given host. A
+        #: healthy owner answers in one digit of milliseconds, so a nonzero count
+        #: on an idle session is the signal that the grace (or the host) moved.
+        self.frontend_off_loop_binds: int = 0
         # What build this runtime is running, stamped once at construction:
         # the answer cannot change while the process lives, and the record is
         # the channel an attach client reads it from before it dials.
@@ -3104,11 +3111,18 @@ class RuntimeServer:
             # release the recorded subscription — safe rather than lucky.
             bind_task = asyncio.ensure_future(bind(self._frontend_relay(conn, conn.bind_token)))
             subscription: FrontendSubscription | None
+            bind_started = time.perf_counter()
             try:
                 subscription = await self._bind_with_grace(bind_task)
             except asyncio.CancelledError:
                 self._release_when_landed(bind_task)
                 raise
+            # The grace's own measurement, logged on both hand-off branches
+            # below. It is what answers the design's rollout question — "is the
+            # fallback firing on healthy owners?" — from a production log, since
+            # a healthy owner answers in one digit of milliseconds (p50 4.7-5.0 ms
+            # measured) and would never appear here at all.
+            waited_ms = (time.perf_counter() - bind_started) * 1000.0
             if subscription is None:
                 bind_off_loop = getattr(self._handle, "subscribe_frontend_nowait", None)
                 if not callable(bind_off_loop):
@@ -3117,8 +3131,27 @@ class RuntimeServer:
                     # the honest cost of the only handle that cannot be served
                     # this way (the TUI kind, whose subscribe goes through the
                     # app's own loop).
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) and this handle has no "
+                        "off-loop bind — waiting it out",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
                     subscription = await asyncio.shield(bind_task)
                 else:
+                    #: Counted as well as logged: the counter is the cheap signal
+                    #: a status host can read, the line is the one a human greps.
+                    self.frontend_off_loop_binds += 1
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) — binding off the session "
+                        "loop",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
                     # RETIRE THE ABANDONED ATTEMPT BEFORE IT REGISTERS. The bump
                     # makes every callback stamped before it (the parked on-loop
                     # bind's, when it lands) return early instead of relaying a
@@ -3130,6 +3163,13 @@ class RuntimeServer:
                     # a raise or a cancellation anywhere below cannot leave a
                     # subscription nobody will receive.
                     self._release_when_landed(bind_task)
+                    # A SECOND ``frontend_sync`` MAY ARRIVE ON THIS CONNECTION
+                    # LATER, and it is not this hand-off binding twice: a viewer
+                    # rehydrates itself at turn end through its own
+                    # ``frontend_sync`` RPC. What the token guard above rules out is
+                    # a DUPLICATE DELTA STREAM, which is what the client's
+                    # exact-``+1`` check reads as a gap (measured on the desk rig:
+                    # ``sync_seqs`` 5 then 46 on one attach, contiguous throughout).
                     outcome = bind_off_loop(self._frontend_relay(conn, conn.bind_token))
                     if inspect.isawaitable(outcome):
                         outcome = await outcome

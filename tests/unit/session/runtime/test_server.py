@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import statistics
 import threading
 import time
@@ -4428,6 +4429,26 @@ class _OffLoopCapableHeldBindHandle(_HeldBindHandle):
         return self._frontend.subscribe_threadsafe(on_update)
 
 
+class _CountingBindHandle(FakeHandle):
+    """A HEALTHY handle: binds at once, and records if the fallback was used.
+
+    ``FakeHandle.subscribe_frontend`` returns immediately, so this is the owner
+    shape ``_ONLOOP_BIND_GRACE_S`` is sized for (a real one answers in 4.7-5.0 ms
+    p50). The off-loop entry point exists and is countable, which is the point:
+    "the grace never fires on a healthy owner" is otherwise asserted only by the
+    absence of a symptom, and the symptom it would have (no display window on
+    every viewer) is invisible while the attach still looks fast and green.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.off_loop_calls = 0
+
+    def subscribe_frontend_nowait(self, on_update):  # noqa: ANN001
+        self.off_loop_calls += 1
+        return self._frontend.subscribe_threadsafe(on_update)
+
+
 async def _frontend_delta_sequences(reader: asyncio.StreamReader, count: int) -> list[int]:
     """Read exactly ``count`` canonical deltas and return their sequences.
 
@@ -4461,7 +4482,9 @@ async def _subscribers_become(handle: FakeHandle, want: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_relays() -> None:
+async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_relays(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The grace, the fallback and the bind token, on a real socket.
 
     WHAT THIS PINS. The on-loop bind is shielded and cannot be cancelled, so an
@@ -4485,11 +4508,19 @@ async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_rela
         reader, writer = await _dial_frontend(record)
         assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
 
-        sync = await _until(reader, "frontend_sync")
+        with caplog.at_level(logging.INFO, logger="local_operator.session.runtime.server"):
+            sync = await _until(reader, "frontend_sync")
         assert handle.off_loop_binds == 1, (
             "the sync arrived off-loop, but the recorded fallback count says the "
             "grace did not hand the bind over"
         )
+        # AND THE HAND-OFF IS OBSERVABLE FROM OUTSIDE THE HANDLE. The runtime's
+        # own counter and line are what answer the design's rollout question
+        # ("is the fallback firing on healthy owners?") in a production log —
+        # pinned HERE because this is the only attach in the file that takes the
+        # fallback, and a counter nothing asserts is a number nobody can trust.
+        assert runtime.frontend_off_loop_binds == 1
+        assert "missed the 100 ms on-loop grace" in caplog.text
         assert sync["data"].get("display_history") is None, (
             "the off-loop path has no display window: it reads the loop-owned "
             "transcript, which is the loop this path exists to avoid"
@@ -4526,6 +4557,60 @@ async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_rela
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_owner_never_reaches_the_off_loop_fallback() -> None:
+    """The other half of the grace, on a real socket.
+
+    THE GRACE IS A BET THAT IS WORTHLESS IF IT FIRES ON EVERYONE. The off-loop
+    path has no display window, so a grace that misfires on healthy owners takes
+    the window away from every viewer while the attach still looks fast and every
+    other test stays green. This drives the healthy shape end to end: a handle
+    that binds on the session loop at once, its off-loop entry point present and
+    countable, and the ``frontend_sync`` read off the wire.
+    """
+    handle = _CountingBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        sync = await _until(reader, "frontend_sync")
+        assert sync["data"]["sequence"] >= 0
+        assert handle.off_loop_calls == 0, (
+            "a handle that answers in microseconds was served off-loop: the "
+            "grace is mistuned for healthy owners"
+        )
+        assert runtime.frontend_off_loop_binds == 0
+        await _subscribers_become(handle, 1)
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+def test_the_on_loop_grace_keeps_its_headroom_over_a_healthy_owners_bind() -> None:
+    """The constant is pinned to the distribution that sized it, as a RATIO.
+
+    ``_ONLOOP_BIND_GRACE_S`` is justified by measured healthy binds (p50
+    4.7-5.0 ms, p95 <= 15 ms for a whole sync) and nothing else in the tree ties
+    the two together: a later change that lowered the grace to 20 ms would leave
+    every test green while pushing healthy owners onto the fallback, whose only
+    trace is the log line this change adds. A ratio rather than a duration, so
+    the assertion states the HEADROOM that was chosen and does not pin a
+    host-speed number into the suite.
+    """
+    from local_operator.session.runtime import server as server_module
+
+    healthy_bind_p95_s = 0.015
+    assert server_module._ONLOOP_BIND_GRACE_S >= 6 * healthy_bind_p95_s, (
+        f"the on-loop grace is {server_module._ONLOOP_BIND_GRACE_S * 1000:.0f} ms, "
+        "which is no longer an order of magnitude over a healthy owner's p95 bind "
+        "(15 ms) — healthy owners would take the off-loop fallback and lose their "
+        "display window"
+    )
 
 
 @pytest.mark.asyncio

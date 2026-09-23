@@ -4598,14 +4598,32 @@ class FrontendStateStore:
     """
 
     def __init__(self, state: FrontendSessionState) -> None:
+        # The ONE assignment outside ``_install``: nothing else can see this
+        # store yet, so there is no race to take the lock against.
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
-        #: Guards the two O(1) critical sections that make registration and
-        #: publication ONE step across threads: a publish assigns ``_state`` and
-        #: takes its subscriber list, a subscribe appends itself and takes the
-        #: state reference. Everything expensive — the caller-owned clone, the
-        #: fan-out — happens OUTSIDE it, so no publisher ever waits on a
-        #: snapshot build and no subscriber waits on a subscriber callback.
+        #: Guards the ONE O(1) critical section that makes registration and
+        #: publication a single step across threads: a publish assigns ``_state``
+        #: and takes its subscriber list (``_install``); a subscribe appends
+        #: itself and takes the state reference (``_join``).
+        #:
+        #: EVERYTHING PROPORTIONAL TO THE STATE HAPPENS OUTSIDE IT — the deep
+        #: copy and freeze (``_freeze_for_install``), the caller-owned clone, the
+        #: fan-out. That is not tidiness: ``subscribe_threadsafe`` takes this lock
+        #: synchronously on the SERVING loop, so any state-sized work in the
+        #: section is the serving plane waiting on the session plane's state
+        #: size — the coupling the off-loop path exists to remove. A freeze in
+        #: here measured p50 24.7 ms / max 51.5 ms for one cold 20-job x 400-row
+        #: payload, with a joining thread waiting up to 65.7 ms behind it,
+        #: against p50 0.3 ms / max 0.6 ms for the same install holding only the
+        #: assign. (Review round 1 measured the same defect independently at
+        #: 45.6 ms held and 89.4 ms worst joiner wait, on its own fixture.)
+        #:
+        #: It does NOT make the store multi-writer, and the state a publish
+        #: installs is still built from a single read of ``_state``: one writer
+        #: per store is the contract (the session loop for the producer, the
+        #: follower's own loop for a viewer). What the lock closes is the JOIN
+        #: race, which is the only one a second thread introduces.
         #:
         #: It exists because a SUBSCRIBER no longer has to be on the session's
         #: loop (``subscribe_threadsafe``): a viewer dialling a busy owner was
@@ -4830,17 +4848,39 @@ class FrontendStateStore:
     def has_subscribers(self) -> bool:
         return bool(self._subscribers)
 
-    def _install_locked(self, state: FrontendSessionState) -> None:
-        """Assign canonical state. The CALLER holds ``_publish_lock``.
+    def _freeze_for_install(self, state: FrontendSessionState) -> FrontendSessionState:
+        """The frozen object an install publishes. Call OUTSIDE ``_publish_lock``.
 
-        WHY THE LOCK COVERS THE ASSIGNMENT AND NOTHING ELSE. ``_state`` is
-        never mutated in place — every publish REPLACES the object — so a reader
-        that captured the previous reference keeps a consistent object for as
-        long as it needs it, and a concurrent clone can build at its leisure.
-        The lock therefore only has to make "install this object" and "become
-        visible to the next publisher" a single step as seen by a subscriber.
+        WHY THE FREEZE IS NOT IN THE SECTION. ``model_copy(deep=True)`` plus
+        ``_freeze_state_jobs`` is proportional to the state — measured at p50
+        24.7 ms / max 51.5 ms for one cold 20-job x 400-row payload and p50
+        0.17 ms for re-installing a state that is already frozen — and the
+        object is private to the call that built it until ``_install`` assigns
+        it, so building it outside the lock costs nothing and keeps the serving
+        plane off the session plane's state size.
+
+        Sites whose install is deliberately SHALLOW (``_fold_live_event``, the
+        sequence-only arms) do not come through here: their whole point is to
+        share the frozen sub-objects rather than re-clone them per delta.
         """
-        self._state = _freeze_state_jobs(state.model_copy(deep=True))
+        return _freeze_state_jobs(state.model_copy(deep=True))
+
+    def _install(self, state: FrontendSessionState) -> list[Callable[[FrontendUpdate], None]]:
+        """Make a FROZEN state canonical and take its audience: the only lock.
+
+        THE ONE THING ``_publish_lock`` GUARDS, and it is O(1) — an assignment
+        and a list copy, nothing proportional to the state. That is what the
+        ordering proof needs: "install this object" and "become visible to the
+        next publisher" have to be one step as seen by a joiner, so a callback is
+        in the returned list XOR after the sequence it captured, never both.
+
+        Returns the audience rather than notifying, so every notifying path takes
+        it from the same section that installed the state and fans out OUTSIDE
+        it. No subscriber callback ever runs holding this lock.
+        """
+        with self._publish_lock:
+            self._state = state
+            return list(self._subscribers)
 
     def _rebuild_derived(self, state: FrontendSessionState) -> None:
         """Drop every cache a re-seated state invalidates.
@@ -4867,8 +4907,7 @@ class FrontendStateStore:
         self._follower_windows.reset(state.epoch)
 
     def replace(self, state: FrontendSessionState) -> None:
-        with self._publish_lock:
-            self._install_locked(state)
+        self._install(self._freeze_for_install(state))
         self._rebuild_derived(state)
 
     def replace_and_notify(self, state: FrontendSessionState) -> None:
@@ -4881,10 +4920,15 @@ class FrontendStateStore:
         state as its own sync AND receive that same state as an update — which
         its exact-``+1`` check reads as a gap. Admitted under the lock it is in
         one list or the other, never both.
+
+        The state handed in is frozen BEFORE that section
+        (``_freeze_for_install``): a wire-snapshot install is the coldest one
+        there is — a restored 20-job payload measures tens of milliseconds to
+        freeze — and the section is taken on the serving loop by every joiner in
+        that window.
         """
-        with self._publish_lock:
-            self._install_locked(state)
-            subscribers = list(self._subscribers)
+        frozen = self._freeze_for_install(state)
+        subscribers = self._install(frozen)
         self._rebuild_derived(state)
         update = FrontendUpdate(
             epoch=state.epoch,
@@ -4925,11 +4969,13 @@ class FrontendStateStore:
             # round trip buys the certainty that no window survives a lineage the
             # follower has just declared untrustworthy.
             self._follower_windows.reset(self._state.epoch)
-            with self._publish_lock:
-                # Sequence-only install; the assign and the subscriber list are
-                # one step for the same reason as every other publish.
-                self._state = self._state.model_copy(update={"sequence": update.sequence})
-                subscribers = list(self._subscribers)
+            # Sequence-only install, and SHALLOW on purpose: the body was shed,
+            # so what this publish carries is unknown rather than unchanged, and
+            # the object it installs is the previous one with a new sequence
+            # number. Only the assign needs the section.
+            subscribers = self._install(
+                self._state.model_copy(update={"sequence": update.sequence})
+            )
             for subscriber in subscribers:
                 subscriber(update.model_copy(deep=True))
             return self.state
@@ -5046,9 +5092,7 @@ class FrontendStateStore:
         # the cost this change removes. The flag's remaining job is the OTHER
         # case — a delta that did not touch the roster, whose jobs are the ones
         # canonical state already holds.
-        with self._publish_lock:
-            self._state = _freeze_state_jobs(candidate, jobs_are_canonical=True)
-            subscribers = list(self._subscribers)
+        subscribers = self._install(_freeze_state_jobs(candidate, jobs_are_canonical=True))
         # Record what canonical state now HOLDS, so the next delta can prove
         # those windows by identity. Done after the install rather than beside
         # the loop above: a delta that fails validation never reaches here, and a
@@ -5089,12 +5133,15 @@ class FrontendStateStore:
             jobs[index] = job.model_copy(
                 update={"trajectory": list(rows), "trajectory_length": max(len(rows), 0)}
             )
-            with self._publish_lock:
-                # Silent (no delta, no sequence move): this changes what THIS
-                # follower holds locally, so only the pointer needs the lock.
-                self._state = _freeze_state_jobs(
+            # Silent (no delta, no sequence move): this changes what THIS follower
+            # holds locally, so both the freeze and the assign are local work —
+            # and the freeze is proportional to the roster, which is exactly why
+            # it is not inside the section every joiner contends for.
+            self._install(
+                _freeze_state_jobs(
                     self._state.model_copy(update={"jobs": jobs}), jobs_are_canonical=False
                 )
+            )
             return True
         return False
 
@@ -5122,9 +5169,10 @@ class FrontendStateStore:
             if job.id != job_id or job.session_id != session_id:
                 continue
             jobs[index] = _freeze_job(job.model_copy(update={"todos": todos}))
-            with self._publish_lock:
-                # Silent replacement, as in ``seed_job_trajectory``.
-                self._state = self._state.model_copy(update={"jobs": _FrozenSequence(jobs)})
+            # Silent replacement, as in ``seed_job_trajectory``, and shallow for
+            # the same reason: the roster is already frozen and only this
+            # follower's local copy of it moves.
+            self._install(self._state.model_copy(update={"jobs": _FrozenSequence(jobs)}))
             self._todo_sequences[job_id] = sequence
             return True
         return False
@@ -5227,15 +5275,19 @@ class FrontendStateStore:
         # Re-validating a full model here deep-copied all job trajectories for
         # every small delta; each changed field was validated above instead.
         jobs_changed = "jobs" in normalized
-        with self._publish_lock:
-            self._state = _freeze_state_jobs(
-                self._state.model_copy(update={**normalized, "sequence": self._state.sequence + 1}),
-                jobs_are_canonical=not jobs_changed,
-            )
-            subscribers = list(self._subscribers)
+        # THE CANDIDATE IS BUILT BEFORE THE SECTION, from one read of ``_state``:
+        # its freeze is proportional to the roster, which is the cost the lock
+        # used to carry, and the store's one-writer contract is what makes that
+        # read sound outside the lock.
+        current = self._state
+        frozen = _freeze_state_jobs(
+            current.model_copy(update={**normalized, "sequence": current.sequence + 1}),
+            jobs_are_canonical=not jobs_changed,
+        )
+        subscribers = self._install(frozen)
         update = FrontendUpdate(
-            epoch=self._state.epoch,
-            sequence=self._state.sequence,
+            epoch=frozen.epoch,
+            sequence=frozen.sequence,
             changes=wire_changes,
             job_trajectory_appends=trajectory_appends,
             job_trajectory_replacements=trajectory_replacements,
@@ -5605,8 +5657,7 @@ class FrontendStateStore:
         if initial:
             payload = current.model_dump()
             payload.update(changes)
-            with self._publish_lock:
-                self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
+            self._install(_freeze_state_jobs(FrontendSessionState.model_validate(payload)))
             self._trajectory_windows.adopt_from(self._state.jobs)
             self._released_rows.adopt_from(self._state.jobs)
         else:
@@ -6282,10 +6333,10 @@ class FrontendStateStore:
         # loop, and a deep copy re-clones a 500-event trajectory each token.
         # ``live`` is freshly built above, and every other field is replaced
         # (never mutated in place) by ``mutate``/``apply_update``.
-        with self._publish_lock:
-            # Silent replacement: no delta and no sequence move, so only the
-            # pointer needs to be installed atomically against a reader.
-            self._state = self._state.model_copy(update={"live_events": live})
+        #
+        # Silent replacement: no delta and no sequence move, so only the pointer
+        # needs installing against a reader.
+        self._install(self._state.model_copy(update={"live_events": live}))
 
     async def checkpoint(self, transcript: Any) -> None:
         state = self.state
