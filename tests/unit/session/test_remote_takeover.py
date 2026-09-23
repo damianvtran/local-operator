@@ -12,6 +12,37 @@ from local_operator.session.attached import AttachedSession
 
 
 @pytest.mark.asyncio
+async def test_dispose_cancels_and_joins_sleeping_recovery(tmp_path, monkeypatch) -> None:
+    """A viewer exit must finish its retry worker before returning."""
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
+    entered_retry = asyncio.Event()
+
+    async def no_takeover():
+        entered_retry.set()
+        raise remote_module.SessionLeaseHeldError(tmp_path / "s1", 123)
+
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=no_takeover,
+    )
+    remote._on_disconnected("owner exited")
+    recovery = remote._recovery_task
+    assert recovery is not None
+
+    # Wait until the retry arm is about to sleep, where the original defect left
+    # a worker alive after dispose returned.
+    await asyncio.wait_for(entered_retry.wait(), timeout=2)
+    await asyncio.sleep(0)
+
+    await remote.dispose()
+
+    assert recovery.done()
+    assert recovery.cancelled()
+    assert remote._recovering is False
+
+
+@pytest.mark.asyncio
 async def test_owner_death_takes_over_silently_and_retains_submitted_input(
     tmp_path, monkeypatch
 ) -> None:
@@ -49,10 +80,14 @@ async def test_owner_death_takes_over_silently_and_retains_submitted_input(
     remote.set_takeover_callback(adopt)
     remote._runtime_ready.set()
     remote._on_disconnected("owner exited")
+    recovery = remote._recovery_task
+    assert recovery is not None
     submitted = asyncio.create_task(remote.prompt("continue after death"))
     await asyncio.wait_for(submitted, timeout=2)
     assert adopted == [winner]
     assert winner.prompts == ["continue after death"]
+    assert recovery.done()
+    assert not recovery.cancelled()
 
 
 @pytest.mark.asyncio

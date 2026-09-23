@@ -145,7 +145,9 @@ from local_operator.scratchpad import (
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
+    ScratchpadContentError,
     ScratchpadPathError,
+    check_scratchpad_write,
     ensure_scratchpad_dir,
     parse_scratchpad_url,
     scratchpad_dir_of,
@@ -2898,6 +2900,122 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     return redacted if isinstance(redacted, str) else text
 
 
+#: The most text the settled `bash` path PUBLISHES per stream: the cap the
+#: masked result and the spill are elided to.
+#:
+#: **Why a cap at all.** The pass costs CPU proportional to its input — measured
+#: on this tree at ~0.2 microseconds per byte when the shape gate stays shut and
+#: ~3-4 when every line carries an anchor, i.e. 1-16 seconds of synchronous work
+#: for a 4 MB stream, all of it on the event loop before the thread hop landed.
+#: The bash settled path hands the pass the whole retained stream (`_BashOutput`
+#: keeps up to :data:`SPILL_ENTRY_LIMIT_BYTES` per pipe) while the model's
+#: display budget is 8 KiB :data:`TOOL_OUTPUT_LIMIT_CHARS`, so the cost of the
+#: pass and the size of what the model reads are two different numbers.
+#:
+#: **It is NOT a bound on the pass input, and the round-1 review measured why.**
+#: An earlier revision elided at this cap BEFORE masking, to hand the pass only
+#: what survives. Two things were wrong with that. (1) It saved nothing: the cap
+#: is the retention limit and ``_BashOutput.decode()`` is the only way past it
+#: — the retention notice, 39 characters for a 4 KiB omission and 42 for a
+#: 4 MiB one — so the pass was handed 4,194,343 characters either way. (2) It
+#: LEAKED: an elision runs before the mask, its cuts snap inward to line
+#: boundaries, and a cut inside a multi-line match publishes the kept side as an
+#: incomplete block the table cannot match — raw key material in the result and
+#: in the spill the model can ``read``. The pass is therefore handed everything
+#: retention kept (the mask must see every byte that can be published) and this
+#: constant caps the PUBLISHED text only. It is deliberately NOT the 8 KiB
+#: display budget either: the same text is what gets spilled, which the model can
+#: `read` later, so capping at the display budget would drop bytes that are still
+#: published — and a bound may only ever drop what the mask has already been
+#: applied to.
+_REDACT_STREAM_LIMIT_CHARS = SPILL_ENTRY_LIMIT_BYTES
+
+
+def _redact_settled_stream(text: str, context: ToolContext | None) -> str:
+    """Redact one settled `bash` stream, THEN cap what is published.
+
+    **The mask runs first, and the order is load-bearing.** :func:`truncate_output`
+    cuts the head and tail of its input and snaps both cuts INWARD to a line
+    boundary (:func:`_clip_head_tail`), so an elision applied BEFORE the mask can
+    land inside a multi-line match and publish its kept side as an incomplete
+    block the table cannot match: a PEM header plus its first body lines with no
+    ``END`` is published RAW — in the result, and in the spill the model can
+    ``read`` afterwards. Measured at the shipped cap on the reviewer's
+    construction (a block whose END line is the last line of the retained head,
+    so the snapped cut falls inside it): a raw key body line in the call-site
+    spill under the elide-first order, none under this one. Masking first means
+    a cut inside a match can only publish ``[redacted]``.
+
+    **Why this costs nothing.** The cap is the retention limit itself and
+    ``_BashOutput.decode()`` is the only way past it — the retention notice is
+    appended to the retained head and tail, so an over-cap stream decodes to
+    ``limit + len(notice)`` and the elision's whole saving is that notice.
+    Measured: the pass was handed 4,194,343 characters either way (a 4 KiB
+    omission, notice 39). So the cap is kept as a bound on what is
+    PUBLISHED (the result and the spill), never as a bound on the pass input —
+    the only text the pass may safely be denied is text that is not published,
+    and a tighter cap here would deny it text that is.
+    """
+    return truncate_output(_redact_tool_text(text, context), _REDACT_STREAM_LIMIT_CHARS)
+
+
+def _decode_and_redact_streams(
+    stdout_chunks: "_BashOutput",
+    stderr_chunks: "_BashOutput",
+    context: ToolContext | None,
+) -> tuple[str, str]:
+    """Decode both captured streams and redact them, in ONE off-loop call.
+
+    **The NAME is load-bearing: it is the settled bash tail's off-loop seam.**
+    ``tests/unit/tools/test_loop_liveness.py`` names this symbol in its
+    ``OffLoopSpy``, which resolves the name on the module and fails with an
+    ``AttributeError`` rather than quietly asserting nothing when it moves —
+    the shape this helper was renamed into cost one round of a red gate for
+    exactly that reason. A rename therefore has to carry that spy with it.
+    Its pair, ``_bash_oversized_streams``, is watched the same way.
+
+    **Why the pass is in here rather than beside the decode.** The comment at
+    the foreground call site already moved the multi-MB decode, join and elision
+    into a thread because a batch of concurrent `bash` calls finishing together
+    froze the TUI frame. The redaction moved with it only for the streams that
+    are small: it is the other multi-MB synchronous step, so leaving it on the
+    event loop kept the freeze for exactly the commands the thread was added
+    for. The work is byte-for-byte the same; only the thread it runs on changes.
+
+    ``asyncio.to_thread`` copies the current context, so the tool-source and
+    shape-hit reporters the pass publishes through are the same ones the calling
+    task would have seen — the incident a hit files is unchanged.
+
+    **A cancelled call does NOT cancel the pass, and that is accepted rather
+    than handled.** ``asyncio.to_thread`` has no cancellation: an abort, a
+    timeout or a steer that lands while this runs discards the result and leaves
+    the work running to completion on the pool thread (worst case measured at
+    ~16 s for 4 MiB of anchor-bearing text). Nothing here can interrupt it: the
+    pass is a pure function of (text, values) with no abort channel, and giving
+    it one would put a signal into the shape table every caller shares, for a
+    case whose only cost is one worker thread that the event loop is not waiting
+    on. The alternative — checking for cancellation between streams — would leak
+    a partial scrub, which is the one outcome this path exists to prevent.
+
+    **It also makes the shape-hit sink cross-thread, which is new here.** The
+    registered-value sink the pass reads and writes
+    (``VariableStore.redaction_values`` / ``_register_shape_hits``) was until now
+    only ever touched from the loop thread, where two concurrent `bash` calls
+    serialised; two calls settling together now run it in two worker threads, so
+    a read of the value set can interleave with a write to it. Bounded and
+    fail-closed, measured by the round-1 QA pass: 20,000 concurrent probes with
+    no failure, and every failing route lands on the withheld-result placeholder
+    (``_redact_tool_text`` resolves all three routes to the same full pass, so a
+    raise is caught and the output is withheld), never on an unmasked
+    credential. Recorded rather than locked: a mutex here would serialise the
+    pass this change exists to move off the loop.
+    """
+    return (
+        _redact_settled_stream(stdout_chunks.decode(), context),
+        _redact_settled_stream(stderr_chunks.decode(), context),
+    )
+
+
 def _bash_output_summary(stdout: str, stderr: str) -> str:
     """The shared 'stdout/stderr' body used by updates and the final result."""
     parts = [
@@ -3616,9 +3734,9 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out, err = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-            out = _redact_tool_text(out, context)
-            err = _redact_tool_text(err, context)
+            out, err = await asyncio.to_thread(
+                _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+            )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
             if memory_exceeded_bg:
@@ -3886,15 +4004,17 @@ async def execute_bash(
             + (f"\n{aborted_missing}" if aborted_missing else ""),
         )
 
-    # Decoding and, for oversized output, spilling/eliding run in a thread:
-    # a command that printed megabytes turns this tail into a multi-MB
-    # decode, a multi-MB join, a disk write of the spill and string slicing
-    # to elide it — all synchronous, all on the loop that renders the TUI,
-    # and the reason a batch of concurrent bash calls used to freeze the
-    # frame at the moment they finished together.
-    stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-    stdout_raw = _redact_tool_text(stdout_raw, context)
-    stderr_raw = _redact_tool_text(stderr_raw, context)
+    # Decoding, redaction and (for oversized output) spilling/eliding run in a
+    # thread: a command that printed megabytes turns this tail into a multi-MB
+    # decode, a multi-MB credential pass, a multi-MB join, a disk write of the
+    # spill and string slicing to elide it — all synchronous, all on the loop
+    # that renders the TUI, and the reason a batch of concurrent bash calls used
+    # to freeze the frame at the moment they finished together. The redaction is
+    # in the thread with the decode (`_decode_and_redact_streams`) rather than
+    # beside it, because it is one of those multi-MB steps.
+    stdout_raw, stderr_raw = await asyncio.to_thread(
+        _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+    )
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -4001,14 +4121,6 @@ def _bash_partial_summary(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput
     return _bash_output_summary(
         truncate_output(stdout_chunks.decode()),
         truncate_output(stderr_chunks.decode()),
-    )
-
-
-def _decode_chunks(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> tuple[str, str]:
-    """Join and decode both captured streams off the event loop."""
-    return (
-        stdout_chunks.decode(),
-        stderr_chunks.decode(),
     )
 
 
@@ -6164,8 +6276,15 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
         # A target the shell has yet to expand does not NAME a path, and printing
         # its resolved form would invent one (``> /tmp/f$i`` is not
         # ``/private/tmp/f$i``). The directory is the honest subject there, and it
-        # is a directory that really exists.
-        unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
+        # is a directory that really exists. The two expansions first are the
+        # spellings that DO name a path: the home spelling, which only counts in
+        # the LEADING position, and ``$TMPDIR``, which rewrites anywhere. What still
+        # carries a ``$`` or a backtick after them is what this scan cannot
+        # resolve — ``~/rig-x/f$i`` names no file either.
+        unexpanded = (
+            _UNEXPANDED_SHELL.search(_expand_home_spellings(_expand_tmpdir_spellings(candidate)))
+            is not None
+        )
         return _temp_scratch_line(
             resolved.parent if unexpanded else resolved,
             why,
@@ -6270,17 +6389,82 @@ def _expand_tmpdir_spellings(candidate: str) -> str:
     return candidate
 
 
+#: The shell's two spellings of the home directory, longest first — the same
+#: ordering constraint as the temp spellings above, so `${HOME}` can never be
+#: rewritten to a leftover `${}`.
+_HOME_SPELLINGS = ("${HOME}", "$HOME")
+
+
+def _expand_home_spellings(candidate: str) -> str:
+    """``candidate`` with a LEADING ``~/``, ``$HOME`` or ``${HOME}`` expanded.
+
+    The shell channel's counterpart of ``Path.expanduser()``, which the
+    ``write``/``edit`` channel already applies in ``_resolve_workspace_path``. A
+    home path is NEITHER of the two shapes this scan refuses: it is not the bare
+    relative target that has no cwd to resolve against, and it is not a scheme.
+    ``~/workspace/…`` is how a session spells a home path all day, so leaving it
+    in the silent bucket is how the SAME write gets advised when spelled
+    absolutely and not when spelled with a tilde — measured on the released
+    v0.62.3, where ``> /Users/<u>/workspace/scratch-a/tmp/x.md`` fired and
+    ``> ~/workspace/scratch-a/tmp/x.md`` was silent.
+
+    Normalising in ONE place, before the absolute test both predicates share, is
+    what keeps a single rule for what names an absolute target: the temp-root arm
+    and the scratch-name arm then read the same expanded string, and neither
+    learns a second shape.
+
+    Three shapes only, and LEADING only: ``~/…``, ``~`` alone, and the two
+    variable spellings followed by ``/`` or standing alone. ``~other/tmp/x`` names
+    ANOTHER user's home, which this scan cannot resolve, so it is left alone — the
+    same refusal a relative path gets, and for the same reason. A ``~`` outside
+    the leading position (``/tmp/~/x``) is a literal directory name, and so is
+    ``$HOMEfoo``, whose expansion is the shell's business rather than this scan's.
+
+    A host the OS will not name a home directory for raises ``RuntimeError`` out
+    of ``expanduser``; the candidate is handed on UNCHANGED then, which leaves it
+    failing the absolute test and so silent, rather than inventing a path.
+    ``os.environ["HOME"]`` is deliberately not read directly: ``Path`` is what the
+    other channel resolves through, so the two cannot disagree about whose home
+    ``~`` means.
+
+    Quoting is not visible here — ``_bash_tokens`` has already dequoted the token,
+    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. The dequoting
+    is inherited from the temp spelling next door; what is NEW here is the REACH,
+    because ``'~/x'`` could not fire at all before this helper existed. It errs
+    toward one advisory line about a path the command did not create, never toward
+    a wrong subject or a refusal, and the GUIDE says so — a session reading the
+    line needs to know which spelling produced it.
+    """
+    if candidate == "~" or candidate.startswith("~/"):
+        try:
+            return str(Path(candidate).expanduser())
+        except RuntimeError:  # pragma: no cover - a host with no home directory
+            return candidate
+    for spelling in _HOME_SPELLINGS:
+        if candidate == spelling or candidate.startswith(spelling + "/"):
+            try:
+                home = str(Path.home())
+            except RuntimeError:  # pragma: no cover - a host with no home directory
+                return candidate
+            return home + candidate[len(spelling) :]
+    return candidate
+
+
 def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
 
     The root spellings a shell writes are the point of the expansion below:
     ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
     literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
-    shells on this fleet spell it. Every other form is left alone: a relative
-    path, a ``~`` path and anything carrying a scheme are not temp-root targets
-    and must not be guessed at.
+    shells on this fleet spell it. ``~`` and ``$HOME`` spellings are normalised
+    here too (:func:`_expand_home_spellings`) so ``~/…`` reaches this predicate
+    exactly as its absolute spelling does — the home arm of the same hole.
+
+    What is left alone is a RELATIVE path and anything carrying a scheme: neither
+    names a temp-root target, and the scan has no cwd to resolve the relative one
+    against.
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
@@ -6300,10 +6484,14 @@ def _scratch_dir_target(
     """``candidate`` resolved, when it sits DIRECTLY in a scratch-named directory.
 
     The shell side of the second arm, and the sibling of :func:`_temp_root_target`
-    above — same expansion, same refusals, a different predicate. The refusals are
-    shared for the same reason they exist there: a relative path, a ``~`` path and
-    anything carrying a scheme are not guessed at, because the scan has no cwd to
-    resolve them against and a path the command never names is worse than the miss.
+    above — same expansions, same refusals, a different predicate. The refusals are
+    shared for the same reason they exist there: a relative path and anything
+    carrying a scheme are not guessed at, because the scan has no cwd to resolve
+    them against and a path the command never names is worse than the miss. A home
+    spelling is not in that class — ``~``/``$HOME`` name a directory the OS can
+    resolve without a cwd, and the ``write``/``edit`` channel has always resolved
+    them — so :func:`_expand_home_spellings` normalises them rather than letting
+    the two channels disagree about the same path.
 
     That refusal is also the honest limit of this arm on the shell channel: a bare
     ``> tmp/x.md`` is RELATIVE and goes unnoticed, while the same write through
@@ -6313,7 +6501,7 @@ def _scratch_dir_target(
     states this, because it is the copy an agent reads before choosing where to
     write (round 1, R4).
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
@@ -6592,15 +6780,24 @@ def _scratchpad_listing(
 
 
 def _scratchpad_target(
-    tool_call_id: str, tool_name: str, url: str, context: ToolContext | None
+    tool_call_id: str,
+    tool_name: str,
+    url: str,
+    context: ToolContext | None,
+    size: int | None = None,
 ) -> Path | ToolResult:
     """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
 
     Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
-    cannot forget part of: no scratchpad root, a malformed URL, and a URL that
-    names a directory. A scratchpad file needs a file name —
-    ``write(path="scratchpad://")`` is a refusal, not a silent write to the
-    directory's own path.
+    cannot forget part of: no scratchpad root, a malformed URL, a URL that
+    names a directory, and material a pad does not keep
+    (:func:`~local_operator.scratchpad.check_scratchpad_write`). A scratchpad
+    file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
+    silent write to the directory's own path.
+
+    ``size`` is the payload's length in bytes for the caller that has one
+    (``write``); it is optional because ``edit`` sees only its hunks and so is
+    judged on the name alone.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -6627,6 +6824,15 @@ def _scratchpad_target(
             f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. '{example}'; "
             f'read(path="{url}") lists what is already there.',
         )
+    # The content rules run LAST, after the address is settled: by here the URL
+    # is known to be well formed and to name a file inside the root, so a
+    # refusal can be about the material rather than about the address. A content
+    # refusal is the model's own argument at fault, exactly like a malformed
+    # URL, so it carries the same ``invalid arguments`` marker.
+    try:
+        check_scratchpad_write(target.path, root, url, size)
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
     # The root is created lazily by the write itself (``path.parent``), so a
     # scratchpad directory that does not exist yet is a normal first write.
     return target.path
@@ -8340,7 +8546,16 @@ async def execute_write(
         return refusal
     url = raw.strip()
     if _has_scratchpad_scheme(url):
-        scratchpad_target = _scratchpad_target(tool_call_id, "write", url, context)
+        # The payload is measured in BYTES, not characters: the ceiling is about
+        # what this write puts on a disk shared with every other session, and a
+        # multi-byte character costs more than one byte there.
+        scratchpad_target = _scratchpad_target(
+            tool_call_id,
+            "write",
+            url,
+            context,
+            size=len(params.content.encode("utf-8")),
+        )
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
         path = scratchpad_target
@@ -8519,12 +8734,19 @@ def _load_ignore_rules(directory: Path, rel_dir: str) -> list[_IgnoreRule]:
     return rules
 
 
-def _ignored(
-    rel: str,
-    is_dir: bool,
-    rules: list[tuple[str, list[_IgnoreRule]]],
-) -> bool:
-    """gitignore last-match-wins evaluation over the ancestor rule stack."""
+def _ignored(rel: str, rules: list[tuple[str, list[_IgnoreRule]]]) -> bool:
+    """gitignore last-match-wins evaluation over the ancestor rule stack.
+
+    THE DIRECTORY QUESTION IS NOT A PARAMETER, and it used to be: every caller passed
+    an ``is_dir`` that this function never read — the directory-only distinction
+    lives in the COMPILED rule (``_IgnoreRule.dir_only`` appends ``(/.*)?``), so a
+    ``dist/`` rule matches the file under it whether or not the caller knew it was a
+    directory. Three call sites computed that value, and one of them paid a ``stat``
+    per candidate per ancestor to do it (the ancestor loop in the glob walk) — a
+    syscall whose result was then discarded. Removed rather than documented because the
+    alternative keeps inviting a future reader to branch on a value that does not
+    change the answer.
+    """
     ignored = False
     for _base, base_rules in rules:
         for rule in base_rules:
@@ -8580,11 +8802,11 @@ def _walk_entries(root: Path, *, respect_ignore: bool = True) -> list[Path]:
             if is_dir:
                 if entry.name in _GREP_PRUNE_DIRS or entry.name.startswith("."):
                     continue
-                if respect_ignore and _ignored(rel, True, local_rules):
+                if respect_ignore and _ignored(rel, local_rules):
                     continue
                 _walk(Path(entry.path), rel, local_rules)
             elif is_file:
-                if respect_ignore and _ignored(rel, False, local_rules):
+                if respect_ignore and _ignored(rel, local_rules):
                     continue
                 files.append(Path(entry.path))
 
@@ -8654,33 +8876,104 @@ def _literal_prefix(pattern: str) -> str:
     return "".join(out).rstrip("/")
 
 
-def _path_is_ignored(root: Path, path: Path) -> bool:
-    """Evaluate root + nested ignore files for one glob candidate.
+class _IgnoreWalk:
+    """One glob walk's cache of the ignore rules, and of the paths they prune.
 
-    Unlike grep's walker, pathlib.glob materializes candidates without walking
-    through our rule stack. Rebuild the ancestor stack here so a
-    packages/a/.gitignore has the same authority over `**/*.py` as it does in
-    grep. The caller still bypasses this for an explicitly named literal
-    prefix ("dist/*.js" means the ignored dist on purpose).
+    WHY IT EXISTS, AS A MEASUREMENT RATHER THAN A HUNCH. The implementation it
+    replaces rebuilt the ENTIRE ancestor rule stack from disk for EVERY candidate, so a
+    glob's cost was candidates x depth x (two stats + a read + a parse + a compile)
+    before a single regex was run. Measured on a 15,620-file tree of depth 5 with a
+    ``.gitignore`` at every level (``**/*.py``): **89,840 rule loads and 2,052,120 rule
+    searches, 13.4 s of CPU** — against 3,906 directories, i.e. the same walk needs one
+    load per DIRECTORY. Cached, measured on the same tree: **3,906 loads, 671,265
+    searches, 3.9 s of CPU**, one load per directory and the same 15,620 results.
+
+    SEMANTICS ARE UNCHANGED, and the shape of the cache is what keeps them so:
+
+    * ``stack`` for a directory is its ``PARENT``'s stack plus its own file, in that
+      order, so ``_ignored``'s last-match-wins evaluation reads the same list in the
+      same order the old code rebuilt;
+    * an entry is evaluated against the rules of the directory that CONTAINS it,
+      which is what the old loop did at the same step (it loaded a directory's rules
+      and then judged that directory's child);
+    * ``pruned`` memoizes "this directory, or one of its ancestors, is ignored", which
+      is the early-return the old loop made as soon as any prefix matched — so an
+      ignored directory still prunes its whole subtree and a ``!`` rule still cannot
+      re-enter it;
+    * nothing outside the root is ever consulted (the old loop started AT the root).
+
+    One instance per WALK, not per process, and deliberately: the rules come off disk
+    and a long-lived cache would answer for a tree that has changed under it, which is
+    the one thing a search pruning tool must not do.
     """
-    try:
-        rel_parts = path.relative_to(root).parts
-    except ValueError:
-        return False
-    rules: list[tuple[str, list[_IgnoreRule]]] = []
-    current = root
-    rel_dir = ""
-    for index, part in enumerate(rel_parts):
-        found = _load_ignore_rules(current, rel_dir)
-        if found:
-            rules.append((rel_dir, found))
-        rel = "/".join(rel_parts[: index + 1])
-        candidate = current / part
-        if _ignored(rel, candidate.is_dir(), rules):
+
+    __slots__ = ("_root", "_stacks", "_pruned")
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        #: The root's own stack, loaded here rather than lazily: a child of the root
+        #: is judged by the root's rule file, and the old loop loaded it on its FIRST
+        #: iteration with the empty relative directory (``rel_dir=""``), which is the
+        #: label kept here so the stack a rule sits in is byte-identical to before.
+        rules = _load_ignore_rules(root, "")
+        self._stacks: dict[Path, list[tuple[str, list[_IgnoreRule]]]] = {
+            root: [("", rules)] if rules else []
+        }
+        #: The root itself is never pruned: nothing above it has authority inside it.
+        self._pruned: dict[Path, bool] = {root: False}
+
+    def _stack(self, directory: Path) -> list[tuple[str, list[_IgnoreRule]]]:
+        """The ancestor rule stack THROUGH ``directory`` (its own file included)."""
+        found = self._stacks.get(directory)
+        if found is not None:
+            return found
+        try:
+            rel_dir = directory.relative_to(self._root).as_posix()
+        except ValueError:
+            return []
+        stack = self._stack(directory.parent)
+        rules = _load_ignore_rules(directory, rel_dir)
+        if rules:
+            stack = stack + [(rel_dir, rules)]
+        self._stacks[directory] = stack
+        return stack
+
+    def _is_pruned(self, directory: Path) -> bool:
+        """Is this DIRECTORY itself ignored (by its own rules or an ancestor's)?"""
+        found = self._pruned.get(directory)
+        if found is not None:
+            return found
+        try:
+            rel = directory.relative_to(self._root).as_posix()
+        except ValueError:
+            pruned = False
+        else:
+            # ``rel`` is non-empty here: the root is seeded above, and anything else
+            # that resolves to "" would be the root under another spelling.
+            pruned = self._is_pruned(directory.parent) or _ignored(
+                rel, self._stack(directory.parent)
+            )
+        self._pruned[directory] = pruned
+        return pruned
+
+    def ignores(self, path: Path) -> bool:
+        """Whether ``path`` (a file OR a directory) is declared ignored.
+
+        The leaf is judged against its PARENT's stack (the ancestors' rules), and its
+        parent's own pruned verdict is consulted first — which is what makes an
+        ignored directory hide its whole subtree without walking it, and what stops a
+        ``!`` rule from re-entering one.
+        """
+        try:
+            rel = path.relative_to(self._root).as_posix()
+        except ValueError:
+            return False
+        if not rel:
+            return False
+        parent = path.parent
+        if parent != path and self._is_pruned(parent):
             return True
-        current = candidate
-        rel_dir = rel
-    return False
+        return _ignored(rel, self._stack(parent))
 
 
 def _glob_walk(root: Path, pattern: str) -> list[str]:
@@ -8691,11 +8984,12 @@ def _glob_walk(root: Path, pattern: str) -> list[str]:
     the pattern's literal prefix names them, because an author who writes
     'dist/index.html' into a repo that ignores dist/ means that file."""
     prefix = _literal_prefix(pattern)
+    cache = _IgnoreWalk(root)
     out = []
     for p in root.glob(pattern):
         rel = p.relative_to(root).as_posix()
         explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
-        if not explicitly_named and _path_is_ignored(root, p):
+        if not explicitly_named and cache.ignores(p):
             continue
         out.append(rel + ("/" if p.is_dir() else ""))
     return sorted(out)
@@ -18289,6 +18583,20 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
+        # WHY it stopped, when it was not a clean completion: a child the loop
+        # cut off carries a cause token (``ChildInfo.cut_off_cause``) and without
+        # this line the roster printed only ``failed — resumable``, so a parent
+        # scanning the list could not tell a cut-off child from an ordinary
+        # provider failure — the recorded cause reached no surface (design D4).
+        # Rendered through the same ``render_cut_off_reason`` every other
+        # surface uses, so the words cannot drift.
+        if row.cut_off_cause:
+            # FUNCTION-LOCAL import: this module is a denied-module boundary and
+            # must not import ``incidents`` at module scope (see the denied-module
+            # note above). ``update.py`` reaches the same helper the same way.
+            from local_operator.incidents import render_cut_off_reason
+
+            lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
         # The session id only where it can be acted on. It is the id
         # ``--resume`` takes (NOT the job id on the line above), and this
         # roster is the only surface that shows it now that children are kept

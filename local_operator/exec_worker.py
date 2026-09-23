@@ -179,7 +179,6 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
     ``session_factory.create_session``.
     """
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
     from local_operator.session_factory import create_session
 
@@ -203,12 +202,11 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
     # which writes to whatever root it is handed.
     base_dir = config_dir()
     config_manager = ConfigManager(base_dir)
-    credential_manager = CredentialManager.readonly(base_dir)
 
     from local_operator.agents import AgentRegistry  # lazy: heavy module
 
     agent_registry = AgentRegistry(base_dir)
-    return create_session(session_args, config_manager, credential_manager, agent_registry)
+    return create_session(session_args, config_manager, agent_registry)
 
 
 def run(

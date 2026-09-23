@@ -948,12 +948,14 @@ def _migrate_env(args: argparse.Namespace) -> int:
 
     Four properties, each deliberate:
 
-    - **It never CREATES the source file.** The read goes through the class-level
-      :meth:`CredentialManager.read_credentials`, which binds the manager without
-      running ``__init__`` — ``__init__`` calls ``_ensure_config_exists()``,
-      whose whole job is to create an empty ``credentials.env``, and a migration
-      that recreated the file it is retiring would silently undo itself on a
-      host that had already been cleaned up.
+    - **It never CREATES the source file.** The read goes through
+      :func:`local_operator.secrets.legacy_env.read_credentials`, which only
+      opens the file for reading — the deleted ``CredentialManager`` used to
+      CREATE an empty ``credentials.env`` as a side effect of construction, and a
+      migration that recreated the file it is retiring would silently undo itself
+      on a host that had already been cleaned up. That property is exactly why
+      the reader was extracted out of that module rather than deleted with it
+      (PR2b).
     - **It never prints a value, and never its own source.** Names, classes and
       counts only. This command runs right after an operator has decided their
       secrets should stop being readable off the disk; printing them into a
@@ -972,17 +974,21 @@ def _migrate_env(args: argparse.Namespace) -> int:
     ``--dry-run`` writes nothing and opens no store; it prints the same lines
     with ``[dry-run]`` and is safe to run as often as wanted before committing.
     """
-    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
     from local_operator.paths import config_dir
     from local_operator.secrets.keys import store_path
+    from local_operator.secrets.legacy_env import (
+        CREDENTIALS_FILE_NAME,
+        read_credentials,
+    )
     from local_operator.secrets.store import provider_secret_name
 
     root = config_dir()
     source = root / CREDENTIALS_FILE_NAME
 
-    # Read WITHOUT creating it, and WITHOUT CredentialManager.__init__ (whose
-    # `_ensure_config_exists` would touch the very file being retired).
-    values = CredentialManager.read_credentials(root)
+    # Read WITHOUT creating it: ``read_credentials`` opens the file read-only
+    # and returns ``{}`` for an absent one, so a host that has already migrated
+    # stays migrated.
+    values = read_credentials(root)
     if not values:
         # Two distinct situations with one honest sentence. An absent file is the
         # expected END state of this whole exercise, so it is not an error.

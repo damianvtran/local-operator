@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.paths import config_dir
 from local_operator.web_search.models import (
     PROVIDER_IDS,
@@ -83,24 +82,21 @@ def add_search_subparser(
     test.add_argument("--json", action="store_true", dest="as_json")
 
 
-def _stack() -> tuple[ConfigManager, CredentialManager]:
-    """A config manager and a bound credential manager for the search verbs.
+def _stack() -> tuple[ConfigManager, Path]:
+    """A config manager and the config ROOT the search readers resolve under.
 
-    ``CredentialManager.readonly`` rather than the plain constructor: ``__init__``
-    runs ``_ensure_config_exists``, which CREATES an empty ``credentials.env``,
-    so every one of these verbs that only READS the legacy tier — and every one
-    that now writes a provider-class STORE row via ``_store_api_key`` — was
-    resurrecting the plaintext file this consolidation retires (R5). The readers
-    below (``provider_statuses``, ``_credential``) go through
-    ``[redacted]``, which reads the provider-class STORE row and the
-    process environment — the plaintext ``credentials.env`` leg is GONE (PR2a)
-    — so nothing here needs the file created, or keeps it alive.
+    A bare path that is never used to construct anything for its own sake: the
+    readers below (``provider_statuses``, ``_credential``) take it as ``base`` and
+    resolve the provider-class STORE row then the process environment. It used to
+    be a ``CredentialManager``, whose construction CREATED an empty
+    ``credentials.env`` — the file this consolidation retires (R5); the module is
+    deleted now (PR2b) and there is nothing left that could bring the file back.
     """
     base = config_dir()
-    return ConfigManager(base), CredentialManager.readonly(base)
+    return ConfigManager(base), base
 
 
-def format_search_status(manager: ConfigManager, credentials: CredentialManager) -> str:
+def format_search_status(manager: ConfigManager, config_dir: Path | None) -> str:
     """Plain, width-tolerant status table shared by CLI and TUI."""
     from local_operator.web_search.providers import (
         chain_label,
@@ -111,7 +107,7 @@ def format_search_status(manager: ConfigManager, credentials: CredentialManager)
     from local_operator.web_search.service import load_search_settings
 
     settings = load_search_settings(manager)
-    statuses = provider_statuses(settings, credentials)
+    statuses = provider_statuses(settings, config_dir)
     header = (
         f"Web search: {'on' if settings.enabled else 'off'} | "
         f"balance: {settings.strategy}\n"
@@ -138,7 +134,7 @@ def format_search_status(manager: ConfigManager, credentials: CredentialManager)
     return "\n".join(rows)
 
 
-def _store_api_key(provider_id: SearchProviderId, credentials: CredentialManager) -> None:
+def _store_api_key(provider_id: SearchProviderId) -> None:
     """Save a search provider's API key as a provider-class store row.
 
     Writes ``LOP_PROVIDER_<KEY>`` with ``role="provider"`` — the consolidated
@@ -188,7 +184,7 @@ def _setup_provider(args: argparse.Namespace) -> int:
         set_searxng_endpoint,
     )
 
-    manager, credentials = _stack()
+    manager, config_dir = _stack()
     provider_id: SearchProviderId = args.provider
     if args.oauth and provider_id != "tavily":
         print("error: --oauth is supported only for Tavily")
@@ -203,12 +199,12 @@ def _setup_provider(args: argparse.Namespace) -> int:
             if result != 0:
                 return result
         elif provider_id == "tavily" and args.api_key:
-            _store_api_key(provider_id, credentials)
+            _store_api_key(provider_id)
         elif provider_id == "perplexity" and args.api_key:
-            _store_api_key(provider_id, credentials)
+            _store_api_key(provider_id)
         elif provider_id == "deepseek":
             if args.api_key:
-                _store_api_key(provider_id, credentials)
+                _store_api_key(provider_id)
             else:
                 # DeepSeek search has no search-specific secret: it bills the
                 # same key the model route uses. Saying so is the whole setup, and
@@ -224,7 +220,7 @@ def _setup_provider(args: argparse.Namespace) -> int:
                 )
         elif provider_id in ("exa", "parallel"):
             if args.api_key:
-                _store_api_key(provider_id, credentials)
+                _store_api_key(provider_id)
             else:
                 # Their free tier is the DEFAULT now, so setup must not demand a
                 # credential: prompting for a key a user does not need, and failing
@@ -236,7 +232,7 @@ def _setup_provider(args: argparse.Namespace) -> int:
                     f"--api-key to store a key and use the higher-limit keyed API."
                 )
         elif provider_id in ("brave", "serpapi"):
-            _store_api_key(provider_id, credentials)
+            _store_api_key(provider_id)
         elif provider_id == "searxng":
             endpoint = str(args.endpoint or input("SearXNG base URL: ")).strip().rstrip("/")
             if not endpoint.startswith(("http://", "https://")):
@@ -268,15 +264,15 @@ def _setup_provider(args: argparse.Namespace) -> int:
         # `auto paid` this replaces described a LISTED leg as if the user had not
         # listed it, two commands after `search enable deepseek` learned to say
         # `enabled (paid)` on the same install (round-2 U2-4).
-        _print_landing(settings, credentials, provider_id)
+        _print_landing(settings, config_dir, provider_id)
         return 0
-    _print_landing(settings, credentials, provider_id)
+    _print_landing(settings, config_dir, provider_id)
     return 0
 
 
 def _print_landing(
     settings: WebSearchSettings,
-    credentials: CredentialManager,
+    config_dir: Path | None,
     provider_id: SearchProviderId,
 ) -> None:
     """Say where a provider landed, so the user never has to guess.
@@ -292,7 +288,7 @@ def _print_landing(
     )
 
     status = next(
-        (row for row in provider_statuses(settings, credentials) if row.id == provider_id),
+        (row for row in provider_statuses(settings, config_dir) if row.id == provider_id),
         None,
     )
     if status is None:
@@ -304,8 +300,8 @@ def _print_landing(
 async def _test_search(args: argparse.Namespace) -> int:
     from local_operator.web_search.service import WebSearchService, load_search_settings
 
-    manager, credentials = _stack()
-    service = WebSearchService(load_search_settings(manager), credentials)
+    manager, config_dir = _stack()
+    service = WebSearchService(load_search_settings(manager), config_dir)
     try:
         response = await service.search(
             args.query,
@@ -339,9 +335,9 @@ def search_command(args: argparse.Namespace) -> int:
     )
 
     command = args.search_command or "list"
-    manager, credentials = _stack()
+    manager, config_dir = _stack()
     if command == "list":
-        print(format_search_status(manager, credentials))
+        print(format_search_status(manager, config_dir))
         return 0
     if command == "on":
         set_search_enabled(manager, True)
@@ -361,7 +357,7 @@ def search_command(args: argparse.Namespace) -> int:
                 f"you run `local-operator search enable {args.provider}`."
             )
         else:
-            _print_landing(settings, credentials, args.provider)
+            _print_landing(settings, config_dir, args.provider)
         return 0
     if command == "balance":
         set_search_strategy(manager, args.strategy)
@@ -377,7 +373,7 @@ def search_command(args: argparse.Namespace) -> int:
             "Web search order: "
             + ", ".join(args.providers)
             + " "
-            + provider_order_note(list(args.providers), settings, credentials)
+            + provider_order_note(list(args.providers), settings, config_dir)
         )
         return 0
     if command == "setup":

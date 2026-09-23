@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.mcp.config import MCPHttpServerConfig, MCPStdioServerConfig
 from local_operator.mcp.credentials import MCPCredentials, store_credentials
 from local_operator.mcp.manager import McpManager
@@ -64,7 +63,10 @@ def test_the_encrypted_store_is_the_only_leg_read(isolated):
     migrate-env`` moves it, which is the honest state of an install that has not
     migrated rather than a silent downgrade to a store nothing maintains.
     """
-    CredentialManager(isolated).set_credential("TOKEN", "legacy-synthetic")
+    # The writer that used to seed the in-memory mapping is deleted (PR2b), so
+    # the decoy is written as the FILE a host mid-migration would actually have:
+    # the point of the test is that a value living only in it must not resolve.
+    (isolated / "credentials.env").write_text("TOKEN=legacy-synthetic\n", encoding="utf-8")
     cfg = MCPStdioServerConfig(command="unused", env={"API_KEY": "${TOKEN}"})
     with pytest.raises(McpSecretRefError):
         resolve_config_secrets("test", cfg)
@@ -227,7 +229,7 @@ async def test_a_server_echoed_credential_never_reaches_a_sink(isolated, tail):
 async def test_metadata_probe_never_creates_the_legacy_file(isolated):
     """A cold metadata read must not write the store it is describing.
 
-    A probe that constructs a store (``CredentialManager.__init__`` writes
+    A probe that constructs a store (the retired ``CredentialManager.__init__`` wrote
     ``credentials.env``; opening the encrypted store initialises it) turns a read
     into a write of state the caller never asked for. Reproduced by the assembled
     desktop probe.

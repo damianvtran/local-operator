@@ -214,7 +214,6 @@ async def test_the_deferred_round_still_reports_its_outcome_to_a_subscriber(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import await_store_maintenance_for_tests
 
     args = argparse.Namespace(
@@ -228,7 +227,6 @@ async def test_the_deferred_round_still_reports_its_outcome_to_a_subscriber(
     session = await create_session(
         args,
         ConfigManager(isolated_config),
-        CredentialManager(isolated_config),
         AgentRegistry(isolated_config),
         has_ui=False,
         cwd=str(isolated_config),
@@ -300,7 +298,6 @@ async def test_a_degradation_arm_also_pushes_the_outcome_to_a_subscriber(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import (
         await_store_maintenance_for_tests,
         create_session,
@@ -317,7 +314,6 @@ async def test_a_degradation_arm_also_pushes_the_outcome_to_a_subscriber(
     session = await create_session(
         args,
         ConfigManager(isolated_config),
-        CredentialManager(isolated_config),
         AgentRegistry(isolated_config),
         has_ui=False,
         cwd=str(isolated_config),
@@ -387,7 +383,6 @@ async def test_the_in_process_path_wires_mcp_without_any_publisher(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     args = argparse.Namespace(
         hosting="test",
@@ -400,7 +395,6 @@ async def test_the_in_process_path_wires_mcp_without_any_publisher(
     session = await create_session(
         args,
         ConfigManager(isolated_config),
-        CredentialManager(isolated_config),
         AgentRegistry(isolated_config),
         has_ui=False,
         cwd=str(isolated_config),
@@ -461,7 +455,6 @@ async def test_a_gated_wiring_parks_until_the_latch_is_set(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     args = argparse.Namespace(
         hosting="test",
@@ -474,7 +467,6 @@ async def test_a_gated_wiring_parks_until_the_latch_is_set(
     session = await create_session(
         args,
         ConfigManager(isolated_config),
-        CredentialManager(isolated_config),
         AgentRegistry(isolated_config),
         has_ui=False,
         cwd=str(isolated_config),

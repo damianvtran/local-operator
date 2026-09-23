@@ -23,7 +23,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.server.routes import auth, desktop_tunnel
 
 TOKEN = "desktop-tunnel-test-token"
@@ -78,7 +77,6 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.include_router(auth.router)
     app.include_router(desktop_tunnel.router)
     app.state.config_manager = ConfigManager(tmp_path)
-    app.state.credential_manager = CredentialManager(tmp_path)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",

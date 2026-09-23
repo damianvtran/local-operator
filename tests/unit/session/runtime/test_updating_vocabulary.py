@@ -217,9 +217,26 @@ def test_the_failure_has_a_renderable_incident_cause_of_its_own() -> None:
     ), "a bound ending an update is not something the user asked for"
     sentence = incidents.render_cut_off_reason(cause)
     assert "update" in sentence, sentence
+    # THE SENTENCE NAMES NO BOUND, deliberately (design review round 1, D2): the
+    # update WINDOW and the build DRAIN both publish this token, with bounds three
+    # orders of magnitude apart, so a number rendered from either constant is wrong
+    # for the other arm by construction. What the reader needs is the bound the
+    # runtime ACTUALLY spent, so it rides the incident's detail — pinned below.
+    assert types.bound_text(buildwatch.UPDATE_LOCK_S) not in sentence, (
+        "the shared sentence must not claim one arm's bound for both: " f"{sentence!r}"
+    )
+    assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) not in sentence, sentence
+    # ...and the detail names it, per arm, which is the only place it can be known.
+    window_detail = incidents.update_failed_detail("0.62.2 -> 0.63.0", buildwatch.UPDATE_LOCK_S)
+    drain_detail = incidents.update_failed_detail("0.62.2 -> 0.63.0", types.BUILD_DRAIN_PROGRESS_S)
+    assert types.bound_text(buildwatch.UPDATE_LOCK_S) in window_detail, window_detail
+    assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) in drain_detail, drain_detail
+    assert window_detail != drain_detail, "the two arms must not report one bound"
+    rendered = incidents.render_cut_off_reason(cause, detail=drain_detail)
+    assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) in rendered, rendered
     assert (
-        types.bound_text(buildwatch.UPDATE_LOCK_S) in sentence
-    ), f"the rendered sentence must name the bound it spent: {sentence!r}"
+        types.bound_text(buildwatch.UPDATE_LOCK_S) not in rendered
+    ), f"the drain rung reported the window's bound: {rendered!r}"
 
 
 def test_the_fleet_row_carries_the_window_and_the_failure() -> None:
