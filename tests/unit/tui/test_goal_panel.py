@@ -466,6 +466,11 @@ async def test_a_short_terminal_says_the_list_was_clipped_rather_than_none() -> 
         body = _card_text(panel)
         assert "none yet" not in body, "the record has eleven; the card must not deny them"
         assert "more settled" in body
+        # ...and it is PAINTED here: with no room for a row, the notice rides the
+        # heading, which is the row that fits where two did not.
+        lines = body.split("\n")
+        notice = next(index for index, line in enumerate(lines) if "more settled" in line)
+        assert notice < panel.region.height, "the notice must be inside the painted box"
         # On the ground that cannot hold the notice either, the card is clipped
         # from the bottom rather than allowed to paint over the composer — the
         # chrome (title, goal, judge, heading) is the floor it keeps.
