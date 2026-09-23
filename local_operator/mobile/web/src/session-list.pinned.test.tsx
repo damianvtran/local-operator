@@ -220,19 +220,58 @@ describe("empty sections cost no heading (design round 1, D1)", () => {
 });
 
 describe("the list teaches its own pin gesture (design round 1, D2)", () => {
-	it("shows the long-press hint while nothing is pinned", () => {
+	/* The caption is ALWAYS MOUNTED and collapses via max-height (design round 2,
+	   D8 — an abrupt unmount snapped the list ~23px). So the tests read the
+	   wrapper's height class and its `aria-hidden`, which is the same signal a
+	   sighted reader and assistive tech get. */
+	function hintBox(): HTMLElement {
+		return screen.getByText("touch and hold a row to pin it")
+			.parentElement as HTMLElement;
+	}
+
+	it("shows the hint while nothing is pinned", () => {
 		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		expect(screen.getByText("long-press a row to pin it")).toBeTruthy();
+		expect(screen.getByText("touch and hold a row to pin it")).toBeTruthy();
+		expect(hintBox().className).toContain("max-h-8");
+		expect(hintBox().getAttribute("aria-hidden")).toBeNull();
 	});
 
-	it("drops the hint once a pin exists, whose ★ Pinned section is the discoverer", () => {
+	it("collapses the hint once a pin exists, whose ★ Pinned section is the discoverer", () => {
 		sessionList = [
 			summary({ session_id: "p1", conversation_name: "Pinned", pinned: true }),
 			summary({ session_id: "a1", conversation_name: "Alpha" }),
 		];
 		render(<SessionListScreen />);
-		expect(screen.queryByText("long-press a row to pin it")).toBeNull();
+		expect(hintBox().className).toContain("max-h-0");
+		expect(hintBox().getAttribute("aria-hidden")).toBe("true");
 		expect(screen.getByText("★ Pinned")).toBeTruthy();
+	});
+
+	it("collapses the hint when a query matches no row at all (D5)", () => {
+		/* The caption names a row to hold, so it must never sit above
+		   "no matching conversations". */
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
+			target: { value: "zzz-no-match" },
+		});
+		expect(hintBox().className).toContain("max-h-0");
+		expect(screen.getByText("no matching conversations")).toBeTruthy();
+	});
+
+	it("stays collapsed when a search merely HIDES the pinned rows (D6)", () => {
+		/* A pin exists in the store but the query hides it, so `pinned` (the
+		   VISIBLE pinned list) is empty — the gate must read the store, not the
+		   filtered list, or the hint would return here. */
+		sessionList = [
+			summary({ session_id: "p1", conversation_name: "Zebra pinned", pinned: true }),
+			summary({ session_id: "a1", conversation_name: "Alpha" }),
+		];
+		render(<SessionListScreen />);
+		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
+			target: { value: "alpha" },
+		});
+		expect(hintBox().className).toContain("max-h-0");
 	});
 });

@@ -610,16 +610,39 @@ export function SessionListScreen() {
 				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 				    round 1, D2). The session view's ☆ is one tap away and does the same
 				    thing, but a reader has to already be in a conversation to find it, so
-				    it cannot teach the list's own long-press. Shown only while the hint is
-				    still TRUE and useful: with nothing pinned, the gesture is invisible;
-				    once anything is pinned the ★ Pinned section is its own discoverer and
-				    the line would be noise. Non-interactive and dim — it is a caption, not
-				    a control. */}
-				{sessions.length > 0 && pinned.length === 0 ? (
+				    it cannot teach the list's own long-press.
+
+				    GATED ON WHAT IS ON SCREEN, not on the store — the whole point of the
+				    caption is that it names a row the reader can see. Keying on
+				    ``sessions`` (unfiltered) put "touch and hold a row to pin it" directly
+				    above "no matching conversations" for a query that matched nothing, and
+				    brought it back whenever a search hid the pinned rows (design round 2,
+				    D5/D6). ``visible.length > 0`` is the honest condition; the pinned test
+				    reads the STORE so a search that hides a pin does not re-show the hint.
+
+				    IT COLLAPSES RATHER THAN VANISHES, which is D8: removing the node
+				    outright snapped the whole list up ~23px at the exact moment the first
+				    pin landed. The wrapper is always mounted and animates its height to
+				    zero, so the list settles instead of jumping. `prefers-reduced-motion`
+				    caps it to instant for free (the global block), which is the right
+				    fallback — the point is not the motion, it is that nothing snaps. */}
+				<div
+					className={cn(
+						"overflow-hidden transition-[max-height] duration-200 ease-out",
+						visible.length > 0 && !sessions.some((session) => session.pinned)
+							? "max-h-8"
+							: "max-h-0",
+					)}
+					aria-hidden={
+						visible.length > 0 && !sessions.some((session) => session.pinned)
+							? undefined
+							: true
+					}
+				>
 					<p className="mx-2 mb-2 text-meta text-ink-dim">
-						long-press a row to pin it
+						touch and hold a row to pin it
 					</p>
-				) : null}
+				</div>
 				{sessions.length === 0 ? (
 					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 						<p className="text-body text-ink-muted">
