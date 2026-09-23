@@ -1932,9 +1932,10 @@ def test_the_progress_leg_needs_all_three_facts_at_once(
     idle_then_spin = fires([0.0] * 200 + [1.0] * 60)
     assert idle_then_spin is not None and idle_then_spin <= 208, idle_then_spin
     # THE FIRE REUSES THE LIVENESS LEG'S EXIT — the same C timer, armed to expire
-    # now, and `exit=True` — so the dump is written and the process leaves.
+    # now. The wrapper preserves the diagnostic deadline but never authorizes a
+    # native process exit, regardless of the caller's sampled idle state.
     assert spy.armed, "the progress fire never reached the C timer"
-    assert spy.armed[-1][1] is True, "a progress fire must exit, like the liveness leg"
+    assert spy.armed[-1][1] is False, "a progress fire must remain diagnostic-only"
     assert spy.armed[-1][0] <= stall_watchdog.MIN_REARM_S
     handle.close()
     text = dump.read_text(encoding="utf-8")
@@ -4302,6 +4303,88 @@ while True:
 """
 
 
+_DUMP_ONLY_IDLE_CHILD = """
+import os
+import pathlib
+import sys
+import time
+
+from local_operator.session.runtime import stall_watchdog
+
+sentinel = pathlib.Path(sys.argv[1])
+flag = pathlib.Path(sys.argv[2])
+sampled_idle = pathlib.Path(sys.argv[3])
+bound = float(sys.argv[4])
+admit = sys.argv[5] == "admit"
+calls = 0
+
+def busy():
+    global calls
+    calls += 1
+    is_busy = flag.exists()
+    # The first call seeds _Armed; this line proves the sampler itself observed
+    # False before the test advances either case to the timer fire.
+    if calls > 1 and not is_busy:
+        sampled_idle.write_text("sampled idle", encoding="utf-8")
+    return is_busy
+
+assert stall_watchdog.arm(seconds=bound, busy=busy), "the child did not arm"
+print(f"armed:{os.getpid()}", flush=True)
+dump = stall_watchdog.dump_path()
+deadline = time.monotonic() + bound * 5
+while time.monotonic() < deadline:
+    if sampled_idle.exists() and stall_watchdog.FIRED_MARKER in dump.read_text(encoding="utf-8"):
+        break
+    time.sleep(0.02)
+else:
+    raise AssertionError("the idle sample or the C-timer dump never arrived")
+if admit:
+    # Admission deliberately follows both the sampler's False and its native
+    # timer fire; that stale observation must not terminate the new work.
+    flag.write_text("work admitted", encoding="utf-8")
+    held_deadline = time.monotonic() + bound * 5
+    while time.monotonic() < held_deadline:
+        if stall_watchdog.HELD_MARKER in dump.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("the sampler did not observe post-fire work admission")
+    sentinel.write_text("admitted", encoding="utf-8")
+else:
+    sentinel.write_text("idle survived", encoding="utf-8")
+"""
+
+
+def test_a_dump_only_idle_fire_survives_later_work_admission(tmp_path: Path) -> None:
+    """A real idle fire is diagnostic; both idle and later work survive it."""
+    for mode, expected in (("idle", "idle survived"), ("admit", "admitted")):
+        run_dir = tmp_path / mode
+        run_dir.mkdir()
+        sentinel = run_dir / "sentinel.txt"
+        flag = run_dir / "busy.flag"
+        sampled_idle = run_dir / "sampled-idle.txt"
+        result = _run_script(
+            _DUMP_ONLY_IDLE_CHILD,
+            run_dir,
+            args=(
+                str(sentinel),
+                str(flag),
+                str(sampled_idle),
+                str(SHORT_BOUND_S),
+                mode,
+            ),
+        )
+        assert result.returncode == 0, (
+            f"the native timer ended the {mode} child: rc={result.returncode} "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+        assert sampled_idle.read_text(encoding="utf-8") == "sampled idle"
+        assert sentinel.read_text(encoding="utf-8") == expected
+        pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+        text = _dump_for(run_dir, pid).read_text(encoding="utf-8")
+        assert stall_watchdog.FIRED_MARKER in text, f"no C-timer dump for {mode}: {text!r}"
+
+
 def test_a_fire_with_work_in_flight_dumps_and_the_runtime_SURVIVES(tmp_path: Path) -> None:
     """THE CELL THE OPERATOR'S RULE RESTS ON, driven through a real process.
 
@@ -4471,7 +4554,7 @@ def test_a_caller_with_no_busy_probe_keeps_the_old_exit_leg(
     monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
 
     assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
-    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [(5.0, True)], fake.armed
+    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [(5.0, False)], fake.armed
 
 
 def test_a_busy_probe_that_raises_holds_the_exit_leg(
@@ -4745,8 +4828,8 @@ def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
         False
     ], f"the extension armed a FATAL timer on a runtime holding work: exit={captured}"
 
-    # ...and the other direction, so the cell cannot pass by never arming fatally at
-    # all: an idle arm still arms fatally, which is the wedge recovery.
+    # ...and the other direction: even when the caller labels the arm idle, the
+    # single native timer wrapper remains dump-only.
     armed.held = False
     stall_watchdog._extend_for_execution(armed, 501.0, (stall_watchdog.WORKLOAD,))
-    assert captured[-1] is True, "an IDLE arm must still be a fatal one"
+    assert captured[-1] is False, "an IDLE arm must not authorize a native exit"

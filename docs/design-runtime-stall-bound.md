@@ -1,7 +1,12 @@
 # Bounding a runtime's own stall
 
-Status: implemented (the instrument). The bound on the scan's cost is a separate
-change — see "PR-B" at the end, which this note exists to inform.
+Status: implemented (the instrument). Production watchdog expiry is diagnostic-only:
+no Python idle sample is atomic with all work-admission paths, so the C timer must not
+terminate the runtime. Until a shared native admission/retirement barrier exists, a
+fired dump requires operator inspection and explicit stop of a runtime that remains
+wedged; stale-idle automatic termination is intentionally unavailable. Cooperative
+update retirement keeps its independent work-aware gate. The bound on the scan's cost
+is a separate change — see "PR-B" at the end, which this note exists to inform.
 
 ## The failure, measured
 
@@ -25,7 +30,7 @@ over those exact transcripts costs 1.75-2.07 s for 1.16-1.45 MB. The scan was
 not converging, and **nothing in the process could say which line it was on**,
 because the one instrument that would have answered (`LOP_RUNTIME_DEBUG_STACKS`,
 the SIGUSR1 asyncio dump) was not set on the launcher. That is the defect this
-change fixes first: a wedged runtime now names itself, and then it leaves.
+change fixes first: a wedged runtime now names itself for operator investigation.
 
 ## No caller is named, and this note does not pretend otherwise
 

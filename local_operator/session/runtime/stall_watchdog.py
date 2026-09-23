@@ -32,8 +32,9 @@ needs the loop that is blocked.)
 
 ``faulthandler.dump_traceback_later`` is the one mechanism that survives it. It
 arms a timer in a dedicated **C** thread that writes every thread's stack with
-``write(2)`` straight to a file descriptor and then calls ``_exit(1)`` — no GIL,
-no Python frames and no interpreter state required.
+``write(2)`` straight to a file descriptor without the GIL. The wrapper below
+forces ``exit=False``: a Python idle sample cannot be atomic with every
+work-admission path, and the native timer cannot re-check it before exiting.
 
 WHAT "STALL" MEANS HERE: NO PROGRESS, NOT SLOW WORK
 ---------------------------------------------------
@@ -1644,20 +1645,23 @@ def _fired_count(path: Path) -> int:
 
 
 def _arm_timer(handle: IO[str], remaining: float, *, exit_leg: bool) -> None:
-    """Arm (or replace) the C timer, for ``remaining``, with the exit leg given.
+    """Arm (or replace) the C timer for diagnostics, never process termination.
 
-    ONE SPELLING FOR THE THREE SITES that reach ``dump_traceback_later`` (the arm,
-    a plane's beat, the progress leg's own fire) so that no site can leave the exit
-    leg at a default: ``exit_leg`` is a keyword-only argument with no default, and
-    the whole defect this change fixes was one literal ``exit=True`` written at a
-    re-arm site that the re-arm itself had the information to answer differently.
+    ``exit_leg`` remains an input because callers compute and record their local
+    decision, but a sampled idle state is not atomic with every work-admission path.
+    No production timer may use it to authorize a native process exit.
+
+    ONE SPELLING FOR EVERY PRODUCTION TIMER SITE (the arm, a plane's beat, the
+    progress leg's own fire). ``exit_leg`` remains explicit because callers record
+    their Python-side sample, but the C timer is always dump-only: that sample cannot
+    synchronize with all admission paths or be re-checked at native expiry.
 
     REPLACING IS THE ARMED STATE: a second call supersedes the pending timer rather
     than adding one (measured, and the module docstring's inventory says so), so
-    there is never a second timer to reason about — which is what lets the exit leg
-    be re-decided on every re-arm rather than only at the arm.
+    each re-arm replaces the prior diagnostic deadline without creating a second
+    timer.
     """
-    faulthandler.dump_traceback_later(max(MIN_REARM_S, remaining), file=handle, exit=exit_leg)
+    faulthandler.dump_traceback_later(max(MIN_REARM_S, remaining), file=handle, exit=False)
 
 
 def _rearm(armed: "_Armed", *, remaining: float | None = None) -> None:
@@ -1778,9 +1782,8 @@ def _record_held_fire(armed: "_Armed") -> bool:
       flight, so there is no work a cut could lose. Without this the bound would
       become unfirable for a runtime that recovered from a stall it survived.
     """
-    if not armed.held:
-        # Not ours: a fatally armed fire leaves no process behind to annotate it.
-        return False
+    # Every timer is dump-only, so a fire always survives long enough to be
+    # observed here, even when the last Python sample said the runtime was idle.
     size = _dump_size(armed.path)
     if size < 0 or size <= armed.arm_size:
         return False
@@ -1795,10 +1798,10 @@ def _record_held_fire(armed: "_Armed") -> bool:
     _append_dump_line(
         armed,
         f"{HELD_MARKER}the bound fired at "
-        f"{time.strftime('%Y-%m-%d %H:%M:%S')} and did NOT end this runtime: a turn, a "
-        "subagent or a job is in flight, and the runtime is now STALLED rather than "
-        "gone. Every thread's stack is above. Nothing here stops it; stop it with "
-        "`lop stop` if the work is not going to finish.\n",
+        f"{time.strftime('%Y-%m-%d %H:%M:%S')} and did NOT end this runtime. The "
+        "sampled idle state is not atomic with work admission, so the process may still "
+        "be active or wedged. Every thread's stack is above. Inspect this dump and stop "
+        "the runtime explicitly if it remains stuck.\n",
     )
     if _holds_work(armed.busy):
         armed.held = True
