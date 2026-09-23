@@ -1727,6 +1727,21 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
+        elif setting.kind is settings_io.Kind.CASCADE:
+            # The guessing ladder below knows int/float/bool/null and nothing
+            # structured, so a cascade's JSON fell through it as a plain
+            # string and was stored verbatim. ``coerce`` owns the CASCADE
+            # parse — one definition shared with the page — and its
+            # ``ValueError`` is written for the user, so the except arm below
+            # reports it rather than this call site inventing its own wording.
+            try:
+                value = settings_io.coerce(setting, value)
+            except ValueError as error:
+                print(
+                    paint(f"Error: {args.key}: {error}", ERROR, stream=sys.stderr),
+                    file=sys.stderr,
+                )
+                return 1
         else:
             # Try to convert to int
             try:

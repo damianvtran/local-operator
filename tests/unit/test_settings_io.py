@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -2207,3 +2208,101 @@ def test_a_windows_launcher_is_judged_by_what_windows_can_run(
     monkeypatch.setenv("PATHEXT", ".PY")
     assert settings_io._windows_command_is_runnable(r"C:\tools\tool.py")
     assert not settings_io._windows_command_is_runnable(r"C:\tools\app.exe")
+
+
+class TestConfigEditStoresACascadeAsAMapping:
+    """``lop config edit retry.fallbackChains '<json>'`` must store a MAPPING.
+
+    ``config_edit_command`` guesses a typed value's type with its own
+    int/float/bool/null ladder and never consults :func:`coerce`, which has no
+    ``CASCADE`` arm either. A JSON object therefore falls through both as a
+    plain ``str`` and is written verbatim into ``config.yml``:
+
+        fallbackChains: '{"default":["anthropic/claude-sonnet-5"]}'
+
+    ``validate`` cannot catch it because it has no ``CASCADE`` arm and returns
+    ``None`` for the kind, so the write is accepted and the command prints
+    "Successfully updated". Every reader of the cascade
+    (``providers.failover.resolve_chain``, ``read_chains``) requires a
+    ``Mapping`` and silently treats a string as no cascade at all, so the
+    failover the user just configured never runs. The receipt says it worked;
+    nothing else does.
+
+    Observed on 0.54.13 and still on 0.62.12.
+    """
+
+    CHAIN = '{"default":["anthropic/claude-haiku-4-5-20251001"]}'
+
+    def test_the_stored_value_is_a_mapping(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=self.CHAIN))
+        assert code == 0, capsys.readouterr()
+
+        stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+        assert isinstance(stored, Mapping), f"stored as {type(stored).__name__}: {stored!r}"
+        assert stored == {"default": ["anthropic/claude-haiku-4-5-20251001"]}
+
+    def test_the_stored_cascade_resolves_for_the_failover_layer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The point of the write: the cascade the user configured is LIVE.
+
+        Asserted through the failover layer's own resolver rather than by
+        re-reading the file, because "is a dict" is not the contract the user
+        cares about — "a quota failure now has somewhere to go" is.
+        """
+        import argparse
+
+        from local_operator.cli import config_edit_command
+        from local_operator.providers.failover import (
+            expand_fallback_candidates,
+            resolve_chain,
+        )
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        assert (
+            config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=self.CHAIN))
+            == 0
+        ), capsys.readouterr()
+
+        chains = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+        selector = "anthropic/claude-opus-5"
+        chain = resolve_chain(selector, chains)
+        assert chain is not None, "no chain resolved for the configured selector"
+        assert expand_fallback_candidates(selector, chain) == [
+            "anthropic/claude-haiku-4-5-20251001"
+        ]
+
+    def test_a_malformed_cascade_is_refused_rather_than_stored(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Refusing beats storing a shape every reader will ignore.
+
+        The failure this guards is the one above wearing a different hat: a
+        value the cascade cannot use must not be written and then reported as
+        a success, whether it arrived as bare text or as JSON of the wrong
+        shape.
+        """
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        for bad in ("not json at all", '["a","b"]', '{"default":"not-a-list"}'):
+            code = config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=bad))
+            assert code == 1, f"{bad!r} was accepted: {capsys.readouterr()}"

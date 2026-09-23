@@ -2520,19 +2520,32 @@ _CORRUPT_CASCADE = "{'default': ['anthropic/claude-opus-5', 'openrouter/deepseek
 
 
 def _corrupt_the_cascade(tmp_path: Path) -> None:
-    """Store the #440 wreckage the way the shipped bug stored it.
+    """Store the #440 wreckage, which is now only reachable from OUTSIDE the app.
 
-    Goes through `settings_io.coerce` + `write_setting` — the exact pair
-    `_commit_edit` calls — because a test that wrote the string straight into
-    `config.yml` would prove nothing about whether that state is reachable.
-    `coerce` returns the text unchanged for a kind it has no parser for, and
-    `validate` has no `Kind.CASCADE` arm, which together are why a repr could be
-    committed over a mapping in the first place.
+    This used to go through ``settings_io.coerce`` + ``write_setting`` — the
+    pair ``_commit_edit`` calls — because that was how the shipped bug reached
+    the state: ``coerce`` returned the text unchanged for a kind it had no
+    parser for, and ``validate`` had no ``Kind.CASCADE`` arm, so a repr could
+    be committed over a mapping.
+
+    Both holes are closed: ``coerce`` parses CASCADE as JSON and raises for
+    anything else, and ``validate`` refuses a non-mapping. So the app can no
+    longer PRODUCE this state, and constructing it through those functions
+    would now assert the opposite of what they do.
+
+    The state still has to be recoverable, which is why these tests remain.
+    Two populations reach it without the app's help: an install that was
+    already corrupted by the shipped bug, and a hand-edited ``config.yml``
+    (the file is documented as editable, and nothing validates it on read).
+    Writing the file directly is therefore no longer "proving nothing" — it is
+    now the ONLY way in, and it is exactly what those users' disks look like.
     """
-    setting = settings_io.resolve_key("retry.fallbackChains")
-    assert setting is not None
-    manager = ConfigManager(tmp_path)
-    settings_io.write_setting(manager, setting, settings_io.coerce(setting, _CORRUPT_CASCADE))
+    config = tmp_path / "config.yml"
+    loaded = yaml.safe_load(config.read_text()) if config.exists() else None
+    document = loaded if isinstance(loaded, dict) else {}
+    values = document.setdefault("values", {})
+    values.setdefault("retry", {})["fallbackChains"] = _CORRUPT_CASCADE
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
     assert _values(tmp_path)["retry"]["fallbackChains"] == _CORRUPT_CASCADE
 
 
