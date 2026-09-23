@@ -308,7 +308,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
 #: ``scratchpad://`` (51) raises hold to — so the ratchet stays as tight as it
 #: was, and the tighten band below (1,200) is nowhere near tripped.
-BUDGET_BILLED_TOKENS = 30_150
+#:
+#: RAISED BY EXACTLY WHAT THE ATTACHED-INTERFACE BLOCK COSTS (2026-09-23).
+#: ``prompts_api.build_system_blocks`` now emits a POSITIVE ``<interactivity>``
+#: body for an attached session — the text that says a question WILL be
+#: presented — where it previously emitted no block at all, so this guard's
+#: default render (``interactive=True``) grew by it. Measured with the command
+#: below, same tree otherwise: 83,408 chars = 30,003 billed at the merge base
+#: ``1392324b`` (147 under the old 30,150), 84,005 chars = 30,218 billed with
+#: the block. The block therefore costs 215 billed tokens on EVERY request of
+#: an attached session (design:
+#: ``docs/design/attached-interface-signal.md`` §3.4, where it was estimated at
+#: ~90 — that gap is why this raise was not in the plan).
+#:
+#: The raise is deliberate and is NOT a loosening: 30,365 restores exactly the
+#: 147-token headroom the tree had at the merge base, so the next addition finds
+#: the ratchet as tight as this one did. It is not paid for out of the block,
+#: because the block's sentences ARE the fix — the incident was a model told
+#: "nobody is watching a screen" while the operator was reading the session, and
+#: silence gave it nothing else to read. A future round that wants these tokens
+#: back should take them from the block's style hint ("Write for a reader who
+#: may answer minutes later…", ~51 tokens), not from the two sentences that
+#: state the fact.
+BUDGET_BILLED_TOKENS = 30_365
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
