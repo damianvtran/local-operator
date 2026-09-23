@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Callable
+from collections import Counter
+from typing import Any, Callable, cast
 
 import pytest
 
@@ -2935,3 +2936,408 @@ def test_a_child_hub_reply_with_parent_shaped_args_still_reaches_the_parent():
     assert isinstance(message, CustomMessage)
     assert message.custom_type == HUB_MESSAGE_TYPE
     assert "review posted" in message.details["text"]
+
+
+# --- the read pass: linear cost, and exactly the same answers ------------------
+#
+# WHY THIS SECTION EXISTS. ``roster()``, ``nodes()`` and the mobile projection's
+# per-node job lookup all run SYNCHRONOUSLY ON THE SESSION'S EVENT LOOP, once per
+# root event of a turn: ``serving._notify`` -> ``_publish_busy`` ->
+# ``_publish_subagents`` -> ``subagent_counts()``, and ``_refresh_state`` ->
+# ``SessionProjection.set_subagent_details``. Each used to answer a question
+# about ONE record by walking all N of them, and ``_live_twin`` walked all N for
+# every record, so ``roster()`` was O(N²) against a registry that is capped at
+# ``MAX_RECORDS``. The harness's own stall dumps catch it:
+# ``~/.local-operator/logs/runtime-stall-*.log`` carries stacks whose innermost
+# frame is this work — the ``TRANSCRIPT_FILENAME`` probe in ``_describe`` most
+# often, then ``_live_twin``'s genexpr, ``_is_running`` and the ``Path.__eq__``
+# comparisons inside the scan — and a starved loop is what trips the bound that
+# kills a runtime mid-turn. Cite the FRAMES, not a census of them: the dump
+# files rotate, and two readers recounted them independently on the day this
+# shipped and got 21 of 128 and 28 of 134.
+#
+# The fix is ONE linear pass (``SubagentComms.roster_pass``). The guard below
+# counts WORK, not TIME: a wall-clock bound measured on this host — ~25
+# concurrent agent sessions — measures the host, which is why AGENTS.md says to
+# prefer a structural invariant and, failing that, to measure CPU. The bug's
+# shape was quadratic work, and a shape is countable without a clock.
+
+
+class _CountingRecords(dict[str, Any]):
+    """``_records`` that counts how often the read path touched a record.
+
+    ``touches`` adds one per lookup and one per step of any walk over the
+    mapping, so linear code touches each record a constant number of times while
+    quadratic code touches each record once per record. That is ~N vs ~N², and
+    it cannot flake: no clock, no load, and no threshold to calibrate.
+
+    Only READS are counted. Building the roster under test writes to the mapping
+    and a write is not a read, so the setup cost stays out of the reading.
+    """
+
+    def __init__(self, source: Any) -> None:
+        super().__init__(source)
+        self.touches = 0
+
+    def _count(self, items: Any) -> Any:
+        for item in items:
+            self.touches += 1
+            yield item
+
+    def values(self) -> Any:
+        return self._count(super().values())
+
+    def keys(self) -> Any:
+        return self._count(super().keys())
+
+    def items(self) -> Any:
+        return self._count(super().items())
+
+    def __iter__(self) -> Any:
+        return self._count(super().__iter__())
+
+    def __getitem__(self, key: str) -> Any:
+        self.touches += 1
+        return super().__getitem__(key)
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        self.touches += 1
+        return super().get(*args, **kwargs)
+
+    def __contains__(self, key: object) -> bool:
+        self.touches += 1
+        return super().__contains__(key)
+
+
+def _settled_roster(n: int, root: Any) -> SubagentComms:
+    """``n`` settled children, each with a REAL transcript file on disk.
+
+    The file is not decoration: the roster's ``resumable`` verdict probes the
+    filesystem for it, and that probe is part of what the quadratic walk paid
+    once per record per pass.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    for i in range(n):
+        jobs.add(f"job-{i:04d}", status="completed")
+        comms.record_launch(f"job-{i:04d}", f"child-{i}")
+    for i in range(n):
+        job_id = f"job-{i:04d}"
+        session_dir = root / job_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+        record = comms._records[job_id]
+        record.session_dir = session_dir
+        record.settled = True
+        record.settled_at = 1_000.0
+    # Instrument AFTER the setup, so the reading is the read path's alone.
+    comms._records = _CountingRecords(comms._records)
+    return comms
+
+
+def _counting_touches(comms: SubagentComms, read: Callable[[], Any]) -> int:
+    """How many record-touches one ``read`` cost, on an instrumented registry.
+
+    The cast is the instrument's own price: the counter subclasses ``dict`` so
+    the production attribute stays a real mapping, and ``SubagentComms`` declares
+    that attribute as a plain ``dict[str, _ChildRecord]`` (rightly — the counting
+    is a test-only concern).
+    """
+    records = cast(_CountingRecords, comms._records)
+    records.touches = 0
+    read()
+    return records.touches
+
+
+def test_status_counts_counts_the_same_population_nodes_reports(tmp_path) -> None:
+    """The histogram the publishers read counts exactly what ``nodes()`` reports.
+
+    THIS is the relationship that keeps ``serving.subagent_counts`` and the TUI
+    twin honest. Both now sum ``status_counts()`` instead of filtering a node
+    list, so if the two derivations ever answered different populations the
+    published counts would silently disagree with every other reader of the same
+    roster — the class of divergence the R1 regression in
+    ``test_subagent_counts_published`` already cost once.
+
+    The awkward keys are the point. ``status_counts`` walks the registry KEYS and
+    resolves each through ``_record`` (skipping ids the alias table no longer
+    points at), while ``nodes()`` does the same — but one counts per key and the
+    other per resolved record, which is exactly where a later edit could open a
+    gap. So the fixture carries both shapes: an ALIASED key that resolves to
+    another record (that record's status must be counted twice) and a DANGLING
+    key that resolves to nothing (must not be counted at all).
+    """
+    comms = _settled_roster(4, tmp_path)
+    comms._records["job-0001-alias"] = comms._records["job-0001"]
+    comms._aliases["job-0001-alias"] = "job-0001"
+    comms._records["job-0002-dangling"] = comms._records["job-0002"]
+    comms._aliases["job-0002-dangling"] = "job-0002-gone"
+
+    nodes = comms.nodes()
+    counts = comms.status_counts()
+
+    assert counts == Counter(node.status for node in nodes), (
+        "status_counts() must count the population nodes() reports: the publishers "
+        "read the histogram and every other reader reads the nodes"
+    )
+    # And the fixture must reach both awkward keys, or the assertion above is
+    # about a plain roster: the alias yields the same node twice, the dangling key
+    # yields none.
+    assert [node.job_id for node in nodes].count("job-0001") == 2
+    assert len(nodes) == 5, "4 records + 1 aliased duplicate, and no dangling row"
+    assert counts["completed"] == 5
+
+
+def test_the_roster_touches_each_record_a_constant_number_of_times(tmp_path) -> None:
+    """``roster()`` is linear: one touch per record plus a constant.
+
+    Both readings are in the PR. Against the code this replaced the same
+    instrument counted 4,160 touches for 64 children (64 + 64×64, the
+    ``_live_twin`` scan per record) and 16,512 for 128 — a 4.0x multiplier for a
+    doubled roster. The bound below is what makes that shape unreachable, and
+    the ratio assertion is what keeps it a statement about complexity rather
+    than about a constant somebody tuned.
+    """
+    small = _settled_roster(64, tmp_path / "small")
+    large = _settled_roster(128, tmp_path / "large")
+
+    rows = small.roster()
+    # The fixture must reach the filesystem probe and the twin scan, or it is
+    # measuring the cheap early exits instead of the path that was quadratic.
+    assert len(rows) == 64
+    assert all(row.resumable for row in rows), "every child must be a resumable row"
+
+    small_touches = _counting_touches(small, small.roster)
+    large_touches = _counting_touches(large, large.roster)
+
+    assert small_touches <= 6 * 64, (
+        f"roster() touched records {small_touches} times for 64 children. Linear "
+        "code touches each record a constant number of times; the quadratic walk "
+        "touched each record once per record."
+    )
+    assert large_touches <= 6 * 128, f"roster() touched records {large_touches} times for 128"
+    assert large_touches <= 3 * small_touches, (
+        f"doubling the roster multiplied the work by "
+        f"{large_touches / small_touches:.1f}x — that is the quadratic shape back "
+        "(a linear read doubles, a quadratic one quadruples)"
+    )
+
+
+def test_the_node_read_touches_each_record_a_constant_number_of_times(tmp_path) -> None:
+    """``nodes()`` too: it resolved a status per record through ``_describe``,
+    which ran the same per-record scan ``roster()`` did."""
+    small = _settled_roster(64, tmp_path / "small")
+    large = _settled_roster(128, tmp_path / "large")
+
+    assert len(small.nodes()) == 64
+
+    small_touches = _counting_touches(small, small.nodes)
+    large_touches = _counting_touches(large, large.nodes)
+
+    assert small_touches <= 8 * 64, f"nodes() touched records {small_touches} times for 64"
+    assert large_touches <= 3 * small_touches, (
+        f"doubling the roster multiplied the work by "
+        f"{large_touches / small_touches:.1f}x — quadratic, not linear"
+    )
+
+
+def test_the_projections_per_node_job_lookup_costs_one_touch_per_record(tmp_path) -> None:
+    """The projection's shape, end to end: one pass, then a job row per node.
+
+    ``comms.job()`` deliberately still discovers the live-child managers per
+    call — the projection does not call it per node any more, it reads the job
+    row off the pass — so this measures the loop the fold actually runs.
+    """
+    comms = _settled_roster(64, tmp_path / "jobs")
+
+    def read() -> None:
+        read_pass = comms.roster_pass()
+        assert len(read_pass.nodes()) == 64
+        for node in read_pass.nodes():
+            read_pass.job(node.job_id)
+
+    # The pass is built INSIDE the measured read, which is what the fold does
+    # per root event: build one, read every collection off it.
+    touches = _counting_touches(comms, read)
+
+    assert touches <= 12 * 64, (
+        f"the fold's read touched records {touches} times for 64 children — it "
+        "must be O(N), because it runs on the event loop once per root event"
+    )
+
+
+def test_a_settled_child_with_a_live_twin_is_not_resumable_and_names_it(tmp_path) -> None:
+    """``_live_twin``'s contract, unchanged: the roster and ``resume()`` agree.
+
+    An already-continued transcript must be FOUND (so the roster does not
+    advertise a resume that ``resume()`` then refuses), and the detail must name
+    the successor so the parent can address the child that actually exists.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    jobs.add("job-1", status="failed")
+    comms.record_launch("job-1", "parser")
+    stopped = comms._records["job-1"]
+    stopped.session_dir = tmp_path
+    stopped.settled = True
+    stopped.settled_at = 1_000.0
+    stopped.outcome = "failed"
+
+    # ...and the successor already running on the SAME transcript directory.
+    jobs.add("job-2", status="running")
+    comms.record_launch("job-2", "parser")
+    successor = comms._records["job-2"]
+    successor.session_dir = tmp_path
+    successor.child = FakeChild()  # type: ignore[assignment]
+
+    rows = {row.job_id: row for row in comms.roster()}
+
+    assert rows["job-1"].status == "failed"
+    assert rows["job-1"].resumable is False
+    assert rows["job-1"].detail == "already resumed as job job-2"
+    # The other half of the contract: the node agrees, and resume() refuses with
+    # the same id the roster named rather than a different one.
+    assert {node.job_id: node.status for node in comms.nodes()}["job-1"] == "failed"
+    assert comms._live_twin(stopped) is successor
+    new_id, error = comms.resume("job-1", "carry on")
+    assert new_id is None
+    assert "already resumed as job job-2" in (error or "")
+
+
+def test_a_paused_child_whose_row_still_runs_reads_as_pausing() -> None:
+    """The ``pausing`` early return, which the extracted ladder must keep.
+
+    A pause is implemented as a cancel, so while the row still says running the
+    child is neither running nor resumable — and it must not be advertised as
+    resumable, or the parent resumes a child that is still stopping.
+    """
+    comms, _jobs, _child, _parent = wire()
+    comms._records["job-1"].paused = True
+
+    [row] = comms.roster()
+
+    assert row.status == "pausing"
+    assert row.resumable is False
+    assert row.age_s is None
+    assert row.detail == "pause is still landing; it becomes resumable in a moment"
+
+
+def test_a_record_with_an_outcome_ahead_of_its_running_row_is_still_settling(tmp_path) -> None:
+    """The settle window, from the roster's side.
+
+    ``record_outcome`` lands inside the runner's settle path while the manager
+    only stamps the row once that coroutine returns, so there is a real window
+    where the record says finished and the row says running. The STATUS must come
+    from the record (a finished child is not running) and the RESUMABLE verdict
+    from the row (``resume()`` asks the row, and a roster promising a resume that
+    is then refused is worse than an honest refusal).
+    """
+    comms, _jobs, _child, _parent = wire()
+    (tmp_path / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), tmp_path)
+    comms.record_outcome("job-1", "completed", result_text="finished report")
+
+    [row] = comms.roster()
+
+    assert row.status == "completed"  # the record wins...
+    assert row.result_text == "finished report"  # ...and carries its own payload
+    assert row.resumable is False  # ...but the row still gates the resume
+    assert row.detail == "still settling; it becomes resumable in a moment"
+
+
+def test_a_child_whose_transcript_vanished_is_not_resumable(tmp_path) -> None:
+    """The filesystem probe, which the pass now pays once per directory.
+
+    A session directory that outlived its transcript is not a resume target, and
+    memoising the probe inside one pass must not turn that into a Yes.
+    """
+    comms, jobs, _child, _parent = wire()
+    session_dir = tmp_path / "gone"
+    session_dir.mkdir()
+    comms.attach("job-1", FakeChild(), session_dir)
+    comms.record_outcome("job-1", "failed", "provider 500")
+    comms.detach("job-1")
+    # The row must be terminal, or the settle-window branch answers first — the
+    # transcript check sits AFTER the running check, in this order, on purpose.
+    jobs.jobs["job-1"].status = "failed"
+
+    [row] = comms.roster()
+
+    assert row.status == "failed"
+    assert row.resumable is False
+    assert row.detail == "transcript is gone from disk"
+
+
+def test_the_roster_and_the_nodes_keep_insertion_order() -> None:
+    """Launch order is the roster's contract: the model says "the last one".
+
+    Asserted with ids that do NOT sort into launch order, so a mapping that
+    happened to answer in sorted order could not pass this by accident.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    for job_id in ("job-c", "job-a", "job-b"):
+        jobs.add(job_id)
+        comms.record_launch(job_id, job_id)
+
+    assert [row.job_id for row in comms.roster()] == ["job-c", "job-a", "job-b"]
+    assert [node.job_id for node in comms.nodes()] == ["job-c", "job-a", "job-b"]
+
+
+def _nested_roster() -> SubagentComms:
+    """A root with two children and a grandchild, plus an alias pair.
+
+    The shapes ``children`` resolves differently: a parent id, a leaf, the root
+    (``None``), an id that is not in the registry, an ALIAS of a real id, and an
+    id the alias table points at a record that is gone.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    for job_id in ("job-0000", "job-0001", "job-0002", "job-0003"):
+        jobs.add(job_id, status="completed")
+    comms.record_launch("job-0000", "manager", prompt="plan")
+    comms.record_launch("job-0001", "coder", parent_job_id="job-0000")
+    comms.record_launch("job-0002", "reviewer", parent_job_id="job-0000")
+    comms.record_launch("job-0003", "scout", parent_job_id="job-0001")
+    comms._aliases["job-0000-alias"] = "job-0000"
+    comms._aliases["job-0000-gone"] = "job-0000-nothere"
+    return comms
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        None,
+        "",
+        "job-0000",
+        "job-0001",
+        "job-0002",
+        "job-0003",
+        "job-0000-alias",
+        "job-0000-gone",
+        "no-such-record",
+    ],
+)
+def test_the_pass_children_mirrors_the_registry_children(target) -> None:
+    """``RosterPass.children`` is a mirror, not a re-implementation.
+
+    The dock reads ``read.children(...)`` off the tick's pass (review round 1,
+    M1), so a divergence here silently changes WHICH rows the dock shows — and
+    the failure mode that matters is an empty list, which reads as "this child
+    has no children" rather than as a bug. Asserted as equality with the method
+    it mirrors, across the id shapes that resolve differently, because the
+    parent resolution is the part that could drift: an aliased parent, an id the
+    alias table points past, a leaf, and the root.
+    """
+    comms = _nested_roster()
+
+    assert comms.roster_pass().children(target) == comms.children(target)
+    # ...and the equality is not two empty lists on the shapes that have rows.
+    if target in ("job-0000", "job-0000-alias"):
+        assert [node.job_id for node in comms.roster_pass().children(target)] == [
+            "job-0001",
+            "job-0002",
+        ]
+    if target is None:
+        assert [node.job_id for node in comms.roster_pass().children(target)] == ["job-0000"]
