@@ -182,6 +182,40 @@ def test_restore_fills_the_text_when_the_attachment_is_empty(tmp_path: Path) -> 
     assert session._goal_state.text == "only in the record"
 
 
+def test_a_cleared_goal_journals_the_record_so_a_resume_cannot_resurrect_it(
+    tmp_path: Path,
+) -> None:
+    """A clear takes BOTH halves with it: the tail AND the sidecar.
+
+    The attachment is not enough on its own, and that is the test above's rule
+    seen from the other side: ``_restore_goal_record`` fills the goal's TEXT from
+    ``goal.json`` whenever the attachment carries none, so a clear that journalled
+    only the attachment left the objective in the sidecar and the next resume read
+    it straight back. Measured end to end before this was pinned: a
+    ``lop exec --resume SID --clear-goal`` followed by ``lop exec --resume SID
+    --loop 1`` STARTED a loop instead of raising the refusal ``--loop`` owes a
+    session with no objective (``exec_startup``).
+    """
+    session = _stub_session(tmp_path)
+    # ``arm_goal`` is ``/goal <text>`` — the path that journals the record as well
+    # as the attachment, and therefore the state ``--clear-goal`` clears from.
+    session.arm_goal("land the OAuth refresh fix")
+    armed = read_goal_record(tmp_path)
+    assert armed is not None
+    assert armed["goal"] == "land the OAuth refresh fix"
+
+    session.set_goal("")
+
+    cleared = read_goal_record(tmp_path)
+    assert cleared is not None
+    assert cleared["goal"] == ""
+    # A resumed session must not be handed the cleared objective back — the fold
+    # and the judge both read this text as standing work.
+    resumed = _stub_session(tmp_path)
+    resumed._restore_goal_record()
+    assert resumed.goal == ""
+
+
 def test_a_directory_with_no_record_leaves_the_pre_lifecycle_state(tmp_path: Path) -> None:
     write_session_attachment(tmp_path, team="", agent="", goal="standing work")
     session = _stub_session(tmp_path)
