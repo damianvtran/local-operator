@@ -25,11 +25,18 @@ from local_operator.harness.types import (
     ChatRequest,
     MessageStartEvent,
     ModelSpec,
+    NoticeEvent,
     StreamEndEvent,
     StreamTextDelta,
 )
 from local_operator.session.goal import GoalState
-from local_operator.session.goal_judge import goal_continuation_prompt
+from local_operator.session.goal_judge import (
+    GOAL_JUDGE_FAILURES,
+    MAX_GOAL_CONTINUATIONS,
+    STALLED_BREAKER_NOTICE,
+    STALLED_CAP_NOTICE,
+    goal_continuation_prompt,
+)
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -39,6 +46,8 @@ MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
 JUDGE_CONTINUE = "VERDICT: CONTINUE\nThere is more to do"
 JUDGE_ACHIEVED = "VERDICT: ACHIEVED\nAll the work is done"
+#: An answer with no readable verdict: the strike the breaker counts.
+JUDGE_UNREADABLE = "I think it is probably done, maybe?"
 
 #: How the judge's own request is recognised in the stream. Matched on the
 #: JUDGE PROMPT's opening words, never on a request count: a count makes every
@@ -292,6 +301,10 @@ class GoalDouble(FakeSession):
         super().__init__()
         self.goal_state = GoalState()
         self.complete_aside_calls: list[str] = []
+        #: The judge's answer for the next aside. One field rather than a scripted
+        #: queue: the two arms below stall on their FIRST judge call, so a queue
+        #: would only be carrying a fiction.
+        self.verdict = JUDGE_ACHIEVED
         self.runtime_locality = locality  # type: ignore[misc]
 
     @property
@@ -323,7 +336,7 @@ class GoalDouble(FakeSession):
 
     async def complete_aside(self, turns: list[Any], **kwargs: Any) -> str:
         self.complete_aside_calls.append(turns[0].text)
-        return JUDGE_ACHIEVED
+        return self.verdict
 
 
 def _double_handle(session: GoalDouble) -> ServingSessionHandle:
@@ -409,5 +422,111 @@ async def test_a_stalled_record_is_not_rearmed_by_a_restart():
         handle.rearm_goal_judge()
         await asyncio.sleep(0.05)
         assert session.complete_aside_calls == []
+    finally:
+        await handle.dispose()
+
+
+def _capture_notices(session: GoalDouble) -> list[Any]:
+    """Install the runtime's emit seam and hand back what it collects.
+
+    ``_emit_notice`` reads ``session._emit`` and drops to a log when it is
+    absent, so a test that wants the user-visible half has to supply the seam —
+    the same substitution ``test_serving``'s notice tests make.
+    """
+    seen: list[Any] = []
+
+    async def _emit(event: Any) -> None:
+        seen.append(event)
+
+    session._emit = _emit
+    return seen
+
+
+async def _drain_notices(handle: ServingSessionHandle) -> None:
+    """Let any queued notice task run, then drain its holder.
+
+    ``_emit_notice`` is fire-and-forget by design (a notice must not delay the
+    judge), so the work it did is only observable once these settle.
+    """
+    await asyncio.sleep(0.05)
+    for task in list(handle._mcp_reload_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_stall_reaches_attached_surfaces_once_and_names_the_bound():
+    """Design round 1, D2: the state was announced nowhere.
+
+    A goal whose judge has stopped auto-continuing looked exactly like one that
+    is quietly waiting, which is the reading this receipt removes.
+
+    Both arms stall on the FIRST judge call of the run, so no continuation turn
+    is ever admitted — the assertion is about the announcement and not about the
+    prompt queue — and each is reached through the runtime's OWN trigger
+    (``rearm_goal_judge``, the boot path that drives ``_drive`` without the
+    turn-end streak reset).
+    """
+    breaker = GoalDouble()
+    breaker.goal_state.arm("Ship it")
+    # A restored record that is one strike short of the breaker: the next
+    # unreadable verdict is what fires it.
+    breaker.goal_state.judge.state = "continuing"
+    breaker.goal_state.judge.failures = GOAL_JUDGE_FAILURES - 1
+    breaker.verdict = JUDGE_UNREADABLE
+    breaker_seen = _capture_notices(breaker)
+    handle = _double_handle(breaker)
+    try:
+        handle.rearm_goal_judge()
+        await _drain_notices(handle)
+        assert [event.text for event in breaker_seen] == [STALLED_BREAKER_NOTICE]
+        assert breaker.goal_judge_state.reason == "judge could not decide"
+        # ONCE PER ENTRY. The boot re-arm on a record that already reads
+        # `stalled` publishes nothing at all (RULINGS R3), so it cannot announce
+        # a second time; and a later frame that MOVES a field while the state
+        # stays put is what the edge rule exists to keep quiet.
+        handle.rearm_goal_judge()
+        await _drain_notices(handle)
+        assert len(breaker_seen) == 1
+    finally:
+        await handle.dispose()
+
+    capped = GoalDouble()
+    capped.goal_state.arm("Ship it")
+    # The other bound: the run is already at the cap, so the next readable
+    # CONTINUE is judged and then refused a continuation.
+    capped.goal_state.judge.state = "continuing"
+    capped.goal_state.judge.run = MAX_GOAL_CONTINUATIONS
+    capped.verdict = JUDGE_CONTINUE
+    cap_seen = _capture_notices(capped)
+    handle = _double_handle(capped)
+    try:
+        handle.rearm_goal_judge()
+        await _drain_notices(handle)
+        assert [event.text for event in cap_seen] == [STALLED_CAP_NOTICE]
+        assert capped.goal_judge_state.run == MAX_GOAL_CONTINUATIONS
+        # `{"run": 0}` is exactly the diff `_drive`'s streak reset publishes at
+        # the next turn end (`tests/unit/session/test_goal_judge.py` pins that
+        # shape): the state does NOT move, so the receipt must not repeat.
+        handle._goal_judge_driver()._publish(run=0)
+        await _drain_notices(handle)
+        assert [event.text for event in cap_seen] == [STALLED_CAP_NOTICE]
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_achieved_goal_reaches_surfaces_with_no_stall_receipt():
+    """The negative control: settling passes through `done`, never `stalled`."""
+    session = GoalDouble()
+    session.goal_state.arm("Ship it")
+    session.goal_state.judge.state = "continuing"
+    session.verdict = JUDGE_ACHIEVED
+    seen = _capture_notices(session)
+    handle = _double_handle(session)
+    try:
+        handle.rearm_goal_judge()
+        await _drain_notices(handle)
+        assert session.goal_status == "done"
+        assert [event for event in seen if isinstance(event, NoticeEvent)] == []
     finally:
         await handle.dispose()

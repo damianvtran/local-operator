@@ -34426,7 +34426,7 @@ class OperatorApp(App[None]):
         REPLACED under it (`/reload`), and a cached driver would go on judging
         the disposed session it was built for.
         """
-        from local_operator.session.goal_judge import GoalJudge
+        from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
 
         async def judge(question: str) -> str:
             answer = await self._ask_judge(session, question)
@@ -34468,6 +34468,18 @@ class OperatorApp(App[None]):
             # reporting a goal nothing is acting on.
             session.note_goal_judge(**fields)
             self.call_later(self._source_frontend_changed, source)
+            # The TUI's HALF OF THE STALL RECEIPT, in the same register and off
+            # the same edge as the runtime's (design round 1, D2): a goal that
+            # has stopped being auto-continued is indistinguishable from one
+            # that is quietly waiting unless the transition says WHICH bound
+            # fired. `warning` matches the sibling notice this app already
+            # paints when the judge cannot answer. Scheduled through
+            # `call_later` like the row above, so this callback never mutates
+            # the UI from inside the judge's own task, and emitted once because
+            # the helper answers only on the transition into `stalled`.
+            notice = goal_stalled_notice(fields)
+            if notice is not None:
+                self.call_later(self._notice_for, source, notice, "warning")
 
         def settled(reason: str) -> None:
             # The same call `/goal --done` makes, so a verdict and a typed

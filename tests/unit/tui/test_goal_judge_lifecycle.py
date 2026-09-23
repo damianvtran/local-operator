@@ -24,15 +24,25 @@ from __future__ import annotations
 import pytest
 
 from local_operator.session.errors import TurnInFlight
-from local_operator.session.goal_judge import goal_continuation_prompt
+from local_operator.session.goal_judge import (
+    MAX_GOAL_CONTINUATIONS,
+    STALLED_BREAKER_NOTICE,
+    STALLED_BREAKER_REASON,
+    STALLED_CAP_NOTICE,
+    STALLED_CAP_REASON,
+    goal_continuation_prompt,
+)
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import TurnEnded, UserMessageStart
+from local_operator.tui.widgets.transcript import NoticeBlock
 
 from .test_app_pilot import GoalSession, _factory
 
 GOAL = "land the OAuth refresh fix"
 CONTINUE = "VERDICT: CONTINUE\nmore to do"
 ACHIEVED = "VERDICT: ACHIEVED\nthe work is done"
+#: An answer with no readable verdict: the strike the breaker counts.
+UNREADABLE = "I think it is probably done, maybe?"
 
 
 def _armed(verdicts: list[str] | None = None) -> GoalSession:
@@ -196,3 +206,85 @@ async def test_the_stamp_alone_suppresses_a_row_the_recogniser_would_miss() -> N
             if isinstance(block, UserBlock)
         ]
         assert painted == []
+
+
+def _stall_notices(app) -> list[str]:
+    """The stall receipts actually PAINTED, off the widgets in the transcript.
+
+    Read from the mounted blocks rather than from a recorded call, so a notice
+    that was built and never shown cannot pass this.
+    """
+    return [
+        block.text() or ""
+        for block in app.query(NoticeBlock)
+        if "goal stalled" in (block.text() or "")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stall_is_announced_once_and_names_the_breaker() -> None:
+    """Design round 1, D2 on THIS host: the TUI announced the state nowhere.
+
+    Three unreadable verdicts are enough to fire the breaker inside ONE run —
+    each strike admits a fail-safe continuation, which the fake serial advances
+    so the chain keeps going (`test_three_consecutive_unreadable_verdicts_stall_
+    the_goal` pins that policy) — and the state must then reach the transcript,
+    naming the breaker rather than the cap.
+    """
+    session = _armed([UNREADABLE] * 4)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        app.post_message(TurnEnded(aborted=False, error=None))
+        await _settle(pilot)
+        assert session.goal_judge is not None
+        assert session.goal_judge["state"] == "stalled"
+        assert session.goal_judge["reason"] == STALLED_BREAKER_REASON
+        assert _stall_notices(app) == [STALLED_BREAKER_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_a_cap_stall_is_announced_once_and_names_the_cap() -> None:
+    """The other bound, in the same one-word state: the receipt must say which.
+
+    A goal that stopped at the continuation cap and one the judge gave up on send
+    the user to two different places, and the reason on the record is what tells
+    them apart.
+    """
+    session = _armed([CONTINUE] * (MAX_GOAL_CONTINUATIONS + 1))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        app.post_message(TurnEnded(aborted=False, error=None))
+        await _settle(pilot, 24)
+        assert session.goal_judge is not None
+        assert session.goal_judge["state"] == "stalled"
+        assert session.goal_judge["reason"] == STALLED_CAP_REASON
+        assert len(session.prompts) == MAX_GOAL_CONTINUATIONS
+        assert _stall_notices(app) == [STALLED_CAP_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_the_stall_is_not_announced_again_by_a_later_frame() -> None:
+    """ONCE PER ENTRY: a later frame beside the SAME state announces nothing.
+
+    The frame used here is the streak reset — a turn that ended in error resets
+    it, and that publish (`{"run": 0}`) lands while the state still reads
+    `stalled`, which is exactly the "later frame that still reads stalled" the
+    receipt must not repeat on. The state then moves to `waiting` and stays
+    silent too, so what this pins is that only the ENTRY into `stalled` speaks.
+    The state after is asserted as well: the silence above is the guard working,
+    not the second frame failing to run.
+    """
+    session = _armed([UNREADABLE] * 4)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        app.post_message(TurnEnded(aborted=False, error=None))
+        await _settle(pilot)
+        assert _stall_notices(app) == [STALLED_BREAKER_NOTICE]
+        app.post_message(TurnEnded(aborted=False, error="provider exploded"))
+        await _settle(pilot)
+        assert session.goal_judge is not None
+        assert session.goal_judge["state"] == "waiting"
+        assert _stall_notices(app) == [STALLED_BREAKER_NOTICE]

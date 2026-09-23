@@ -2790,7 +2790,7 @@ class ServingSessionHandle(SessionHandle):
         lose (read ``session/goal_judge.py``'s module docstring for why that is
         the design rather than an implementation detail).
         """
-        from local_operator.session.goal_judge import GoalJudge
+        from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
 
         if self._goal_judge is None:
 
@@ -2833,6 +2833,19 @@ class ServingSessionHandle(SessionHandle):
                 # republishes, and the driver only hands it what moved.
                 self._session.note_goal_judge(**fields)
                 self._notify()
+                # THE STALL'S RECEIPT, and this callback is the seam every
+                # published state already passes through — a goal that has
+                # stopped being auto-continued looks to a user exactly like one
+                # that is quietly waiting, so the transition owes an
+                # announcement naming WHICH bound fired (design round 1, D2).
+                # Emitted AFTER the state is journalled and published, so a
+                # receipt never leads the fact it describes. One per entry, not
+                # per publish: the helper returns a sentence only for the
+                # transition itself (see its docstring), so the streak reset and
+                # every other later frame stay silent.
+                notice = goal_stalled_notice(fields)
+                if notice is not None:
+                    self._emit_notice(notice, "warning")
 
             def settled(reason: str) -> None:
                 # The SAME call the user's own ``/goal --done`` makes: an ACHIEVED

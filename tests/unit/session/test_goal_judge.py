@@ -30,10 +30,14 @@ from local_operator.session.goal_judge import (
     GOAL_JUDGE_FAILURES,
     MAX_GOAL_CONTINUATIONS,
     MAX_GOAL_REJUDGES,
+    STALLED_BREAKER_NOTICE,
     STALLED_BREAKER_REASON,
+    STALLED_CAP_NOTICE,
     STALLED_CAP_REASON,
+    STALLED_UNKNOWN_NOTICE,
     GoalJudge,
     goal_continuation_prompt,
+    goal_stalled_notice,
 )
 
 ACHIEVED = "VERDICT: ACHIEVED\nAll the work is done"
@@ -234,6 +238,124 @@ async def test_the_continuation_cap_stalls_with_the_caps_own_reason():
     # The cap's reason, NOT the breaker's: a surface that mixed them up would send
     # the user looking for a provider problem that does not exist.
     assert STALLED_BREAKER_REASON not in h.state.reason
+
+
+# --- the stall's announcement (design round 1, D2) ----------------------------
+
+
+def test_the_stall_notice_names_the_bound_that_fired():
+    """The two bounds are one state and two sentences, and they must not mix.
+
+    A surface that reported the cap's stop as the breaker's would send the user
+    looking for a provider problem that does not exist — the same argument the
+    two reason constants make, one layer up.
+    """
+    assert (
+        goal_stalled_notice({"state": "stalled", "reason": STALLED_BREAKER_REASON})
+        == STALLED_BREAKER_NOTICE
+    )
+    assert (
+        goal_stalled_notice({"state": "stalled", "reason": STALLED_CAP_REASON})
+        == STALLED_CAP_NOTICE
+    )
+    # Each sentence carries its OWN bound's words and not the other's, which is
+    # the whole of what "names which bound fired" means to a reader.
+    assert STALLED_CAP_REASON not in STALLED_BREAKER_NOTICE
+    assert STALLED_BREAKER_REASON not in STALLED_CAP_NOTICE
+
+
+def test_only_a_move_INTO_stalled_is_an_announceable_edge():
+    """The once-per-entry rule, at the seam the hosts call.
+
+    `{"run": 0}` is the diff the streak reset publishes at a foreign turn end
+    (`test_the_streak_resets_when_a_foreign_turn_ends` pins that shape), which is
+    the ordinary "later frame" beside a state that stays `stalled`: it must not
+    announce. Neither may a move to any other state, nor an empty diff.
+    """
+    assert goal_stalled_notice({"run": 0}) is None
+    assert goal_stalled_notice({"state": "stalled", "reason": STALLED_CAP_REASON}) is not None
+    assert goal_stalled_notice({"state": "waiting"}) is None
+    assert goal_stalled_notice({"state": "judging"}) is None
+    assert goal_stalled_notice({}) is None
+
+
+def test_a_stall_reason_this_build_cannot_name_still_says_something():
+    """A newer writer's cause must not leave a stall unannounced."""
+    assert goal_stalled_notice({"state": "stalled", "reason": "a newer cause"}) == (
+        STALLED_UNKNOWN_NOTICE
+    )
+    assert goal_stalled_notice({"state": "stalled"}) == STALLED_UNKNOWN_NOTICE
+
+
+@pytest.mark.asyncio
+async def test_the_breaker_announces_once_across_its_whole_episode():
+    """Three strikes publish three diffs; exactly ONE is the stall's entry.
+
+    The two strike publishes move `failures` and leave the state alone, so a
+    host that emitted per publish would repeat itself twice before saying the
+    thing worth saying at all.
+    """
+    h = Harness(answers=[UNREADABLE] * 10)
+    h.on_prompt = lambda _h: _continue_then_achieved(_h)
+    await _judge_all(h)
+    announced = [notice for notice in map(goal_stalled_notice, h.changed) if notice]
+    assert announced == [STALLED_BREAKER_NOTICE]
+    # The strikes really did publish their own diffs — so the count above is not
+    # one because nothing else moved.
+    assert [fields.get("failures") for fields in h.changed if "failures" in fields] == [
+        1,
+        2,
+        GOAL_JUDGE_FAILURES,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_cap_announces_once_across_its_whole_episode():
+    h = Harness(answers=[CONTINUE] * (MAX_GOAL_CONTINUATIONS + 4))
+    h.on_prompt = lambda _h: _continue_then_achieved(_h)
+    await _judge_all(h)
+    announced = [notice for notice in map(goal_stalled_notice, h.changed) if notice]
+    assert announced == [STALLED_CAP_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_stall_still_carries_its_reason_on_the_transition():
+    """The reason is in the diff even when the SAME bound fires twice.
+
+    The diff publishes only what moved, and a second stall from the same bound
+    publishes the reason it published the first time — so the one fact the
+    receipt exists to carry would be dropped, and every surface reading the
+    transition would announce a stop it cannot name. Driven here rather than
+    through a host because it is a property of what the judge PUBLISHES.
+    """
+    h = Harness(answers=[UNREADABLE] * 10)
+    h.on_prompt = lambda _h: _continue_then_achieved(_h)
+    await _judge_all(h)
+    assert [fields for fields in h.changed if fields.get("state") == "stalled"]
+
+    # A second episode, begun the way the real one is: a turn end re-arms the
+    # judge on the stalled goal, and the breaker fires again.
+    h.answers = [UNREADABLE] * 10
+    await h.build().on_turn_end(error=False, aborted=False, serial=h.serial_value)
+
+    stalls = [fields for fields in h.changed if fields.get("state") == "stalled"]
+    assert len(stalls) == 2
+    assert [fields.get("reason") for fields in stalls] == [
+        STALLED_BREAKER_REASON,
+        STALLED_BREAKER_REASON,
+    ]
+    assert [goal_stalled_notice(fields) for fields in stalls] == [
+        STALLED_BREAKER_NOTICE,
+        STALLED_BREAKER_NOTICE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_settled_goal_announces_no_stall():
+    """The negative control: ACHIEVED passes through `done`, never `stalled`."""
+    h = Harness(answers=[ACHIEVED])
+    await _judge_all(h)
+    assert [notice for notice in map(goal_stalled_notice, h.changed) if notice] == []
 
 
 @pytest.mark.asyncio
