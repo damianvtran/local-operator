@@ -260,13 +260,15 @@ stylistic, and both are documented at length in `tests/e2e/watchdog.py`:
 - **Its failure mode is a hang, not an assertion.** The deadlock parks two
   threads inside syscalls, so `asyncio.wait_for`, thread watchdogs and
   signal-based timeouts all fail to fire — verified, not assumed. Only
-  `faulthandler.dump_traceback_later(exit=True)` survives it, because it runs
-  in a C thread and needs no GIL. A tripped watchdog kills the process and
-  writes every thread's stack to a file; `python -m tests.e2e.watchdog` prints
-  it back.
-- **It is why the stage is deselected and runs `-n0`.** Under xdist a fired
-  watchdog would kill a worker carrying unrelated tests and report them as an
-  infrastructure error rather than as the freeze they are.
+  `faulthandler.dump_traceback_later` survives it, because it runs in a C
+  thread and needs no GIL. It is armed dump-only (`exit=False`): the C callback
+  writes every thread's stack to a file and ends nothing, and the fast-fail is
+  a kernel-level `SIGALRM` one grace later. `python -m tests.e2e.watchdog`
+  prints the retained dump back.
+- **It is why the stage is deselected and runs `-n0`.** `faulthandler`'s timer
+  is process-global, so under xdist a `bounded` block would take a worker's
+  stacks with it for the rest of the item, and a hang nothing in-process can end
+  would strand the run as an infrastructure error rather than a freeze.
 
 Most of it is headless (Textual's `run_test()` pilot, no window, no display),
 but not all of it, and the exception is load-bearing: a few members drive the
@@ -2636,12 +2638,14 @@ because a Python signal handler only runs between bytecodes. The pre-fix code
 ignored a 20 s thread watchdog and had to be `kill -9`'d.
 
 That class is covered by `tests/e2e/watchdog.py`, whose
-`faulthandler.dump_traceback_later(exit=True)` is armed in C and fires from a
-separate OS thread, so it survives a wedged interpreter and takes the process
-down with a full thread dump. It runs as its own CI stage (`tui-e2e`, both
-Linux and macOS) rather than in the unit run, since firing it under `-n auto`
-would kill a worker carrying unrelated tests. If you are guarding against a
-hang rather than a stall, that is the file to read.
+`faulthandler.dump_traceback_later(exit=False)` is armed in C and fires from a
+separate OS thread, so it survives a wedged interpreter and dumps every thread —
+and whose `SIGALRM` arm is what ends a process still wedged at its bound a 5 s
+grace later, so the run fails at the bound instead of the job ceiling. It runs as
+its own CI stage (`tui-e2e`, both Linux and macOS) rather than in the unit run:
+`faulthandler`'s timer is process-global, so under `-n auto` a `bounded` block
+would take a worker's stacks for the rest of the item. If you are guarding
+against a hang rather than a stall, that is the file to read.
 
 ## TUI conventions worth knowing before you edit a widget
 

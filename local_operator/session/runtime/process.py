@@ -3801,8 +3801,9 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
                     f" -- and the supervision GIVES UP here: {len(deaths)} deaths inside "
                     f"{STALL_BEAT_WINDOW_S:g}s. Terminal for this session by design; what that "
                     f"costs is stated plainly: from here on nothing watches whether the "
-                    f"workload plane reports, its stamp is left to freeze, and the bound ends "
-                    f"this runtime one deadline after its last stamp"
+                    f"workload plane reports, its stamp is left to freeze, and the bound dumps "
+                    f"every thread one deadline after that last stamp (dump-only: the fire "
+                    f"ends nothing)"
                 )
             # THE RECORD IS BEST-EFFORT AND THE GIVE-UP IS NOT, and since round 3 (M2)
             # that covers the CLAUSE as well as the write: everything the give-up needs is
@@ -3872,8 +3873,9 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
         except Exception:  # noqa: BLE001 — nothing here may end the supervision unobserved
             # THROUGH THE TOTAL CALL, and this one matters most: a raise from this log line
             # escapes the handler, so the ``while`` ends and the supervision dies — the tick is
-            # never re-created, the stamp freezes and the bound ends a healthy runtime, which is
-            # the incident this function exists to prevent (agent review round 4, MINOR).
+            # never re-created, the stamp freezes and the bound fires over a healthy runtime,
+            # which is the incident this function exists to prevent (agent review round 4,
+            # MINOR). The fire itself is dump-only and ends nothing -- see stall_watchdog.
             _safe_warning(
                 "session runtime: the stall bound's WORKLOAD supervision raised in its own "
                 "recovery path and is continuing; the plane is not stamped on this path, so "

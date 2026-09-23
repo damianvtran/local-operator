@@ -187,6 +187,49 @@ def _run_script(
     )
 
 
+#: One COMPLETE thread header, exactly as ``faulthandler`` writes it
+#: (``Thread 0x000000016c147000 (most recent call first):``). A file cut mid-write
+#: ends at the bare ``Thread 0x`` of the next header, which is what a reader keyed on
+#: ``FIRED_MARKER`` alone cannot tell from a finished one (QA round 3, Q-2).
+_THREAD_HEADER_RE = re.compile(r"^Thread 0x[0-9a-f]+ \(most recent call first\):$", re.MULTILINE)
+
+#: One COMPLETE frame line, as ``faulthandler`` writes it under a thread header:
+#: ``  File "/path/to/x.py", line 12 in func``. The anchor at the END of the pattern is
+#: what rejects a line the writer had only begun, which is the second shape a reap
+#: mid-write leaves (the first being a bare ``Thread 0x``).
+_FRAME_RE = re.compile(r'^  File ".+", line \d+ in .+$')
+
+
+def _dump_settled(text: str, *, settled: tuple[str, ...] = ()) -> bool:
+    """Is this dump FINISHED, rather than caught mid-write?
+
+    The reap below fires as soon as a fire is attributed, and the fire's stacks are
+    written by ``faulthandler``'s C thread while this process reads the file -- so the
+    two race under load and the reaped file can end in the middle of a header (measured
+    on this fleet: the retained artifact ended at ``Thread 0x`` with no address and no
+    ``parked_child.py`` frame, and the cell asserting on it went red against a product
+    that was fine). This is an ARTIFACT-SHAPE condition rather than a wait on the
+    clock: it asks whether the file is where a finished dump stops.
+
+    ``faulthandler`` writes one block per thread -- a complete header, then its frames
+    indented -- and the last block it writes is the one the caller names, so requiring
+    the shape AND the caller's own evidence is what says the write finished rather than
+    started. A finished dump ends on a FRAME line; a truncated one ends on a thread
+    header, or mid-word inside either. ``repeat`` is False, so a settled file stays
+    settled.
+    """
+    if stall_watchdog.FIRED_MARKER not in text:
+        return False
+    if not text.endswith("\n"):
+        return False
+    lines = text.splitlines()
+    if len(lines) < 2 or not _FRAME_RE.match(lines[-1]):
+        return False
+    if not _THREAD_HEADER_RE.search(text):
+        return False
+    return all(needle in text for needle in settled)
+
+
 def _run_stalled_script(
     script: str,
     config_dir: Path,
@@ -195,13 +238,23 @@ def _run_stalled_script(
     timeout: float = 30.0,
     env_extra: dict[str, str] | None = None,
     dump_pid: int | None = None,
+    settled: tuple[str, ...] = (),
 ) -> SimpleNamespace:
-    """Wait for a real native dump, prove the parked child survived, then reap it.
+    """Wait for a real native dump, prove the parked child SURVIVED, then reap it.
 
     ``subprocess.run`` cannot express the expected state for a GIL-held child:
     after a diagnostic fire it remains parked, so waiting for natural completion
     deadlocks the test until its generic timeout. This harness observes the dump
     and child liveness together, then kills only the process group it created.
+
+    IT WAITS FOR A **COMPLETE** DUMP, NOT FOR THE FIRED MARKER (QA round 3, Q-2).
+    The child is reaped the instant a fire is attributed, and the stacks are written by
+    ``faulthandler``'s own C thread -- so a reap that lands between two of its writes
+    leaves a file ending at the bare ``Thread 0x`` of the next header, and the cells
+    below then assert on frames that were never flushed. Observed on this fleet under
+    load: a retained dump ended mid-write with no ``parked_child.py`` frame in it, so
+    the assertion read as a product failure. ``settled`` names the frames the caller
+    needs, and :func:`_dump_settled` holds the file to its own shape as well.
     """
     path = config_dir / "parked_child.py"
     path.write_text(script, encoding="utf-8")
@@ -241,7 +294,7 @@ def _run_stalled_script(
             fresh_dump = stat is not None and (
                 previous_mtime_ns is None or stat.st_mtime_ns != previous_mtime_ns
             )
-            if fresh_dump and stall_watchdog.FIRED_MARKER in text:
+            if fresh_dump and _dump_settled(text, settled=settled):
                 observed_fire = proc.poll() is None
                 break
             time.sleep(0.02)
@@ -1190,6 +1243,48 @@ asyncio.run(main())
 """
 
 
+def test_the_stalled_harness_only_reads_a_settled_dump(tmp_path: Path) -> None:
+    """Q-2: the reap waits for a COMPLETE artifact, not for the fired marker.
+
+    The helper below kills the child it created as soon as it attributes a fire, and
+    the stacks are written by ``faulthandler``'s own C thread -- so under load the reap
+    can land mid-write and leave a file ending at the bare ``Thread 0x`` of the next
+    thread header. A cell asserting on the frames of that file then fails against a
+    product that is fine (measured on this fleet: the retained dump held no
+    ``parked_child.py`` frame at all). The condition this pins is the artifact's own
+    shape, and it is what the helper breaks on instead of the marker.
+    """
+    header = f"{stall_watchdog.ARM_MARKER}policy: dump-only (exit=False)\n"
+    complete = (
+        f"{header}{stall_watchdog.FIRED_MARKER}0:00:01.5)!\n"
+        "Thread 0x000000016c147000 (most recent call first):\n"
+        '  File "parked_child.py", line 7 in park_the_loop_deliberately\n'
+        '  File "parked_child.py", line 14 in <module>\n'
+    )
+    # THREE SHAPES A REAP MID-WRITE LEAVES, each caught by a different part of the
+    # condition, so removing any one part is visible here (the reviewer's Q-2 artifact
+    # was the first).
+    at_bare_header = complete[: complete.index("Thread 0x")] + "Thread 0x"
+    after_a_header = complete[: complete.index('  File "parked_child.py"')]
+    mid_frame = complete[: complete.index('", line 14')] + '", line 1\n'
+
+    assert _dump_settled(complete)
+    assert _dump_settled(complete, settled=("parked_child.py",))
+    assert not _dump_settled(
+        at_bare_header
+    ), "a dump cut inside the next thread header was read as whole"
+    assert not _dump_settled(
+        after_a_header
+    ), "a dump cut between a header and its frames was read as whole"
+    assert not _dump_settled(mid_frame), "a dump cut inside a frame line was read as whole"
+    assert not _dump_settled(
+        complete.replace(stall_watchdog.FIRED_MARKER, "no fire")
+    ), "an artifact with no fire is not a settled dump"
+    assert not _dump_settled(
+        complete, settled=("a_frame_that_was_never_flushed",)
+    ), "the caller's own evidence is part of what makes the write finished"
+
+
 def test_the_bound_fires_on_the_real_runtime_while_its_serving_plane_stays_healthy(
     tmp_path: Path,
 ) -> None:
@@ -1222,6 +1317,10 @@ def test_the_bound_fires_on_the_real_runtime_while_its_serving_plane_stays_healt
             str(Path(__file__).resolve().parents[4]),
         ),
         timeout=60.0,
+        # THE FRAME THE ASSERTIONS BELOW NEED, so the helper cannot reap the child
+        # between the fire's marker and the frame that names the parked workload
+        # (see _dump_settled).
+        settled=("parked_child.py",),
     )
 
     assert result.returncode is None, (
@@ -6371,6 +6470,41 @@ def test_no_production_timer_site_can_arm_a_fatal_expiry() -> None:
         ), f"the native timer is no longer dump-only: {ast.unparse(node)}"
 
 
+#: The sentences that SHIPPED as promises this build cannot keep, as substrings rather
+#: than the bare words: a message MAY say this bound ends nothing — that is the policy —
+#: and a check on the words alone would forbid the correction along with the defect. Each
+#: entry is a fragment of a line that really was written into a dump or a log.
+STALE_EXIT_PHRASES = (
+    "and ends the runtime",
+    "holds the exit",
+    "ENDED this runtime",
+    "is dumped and exited",
+    "the exit faulthandler takes",
+    "armed with exit=True",
+    "_exit(1)",
+    "hit its bound and is gone",
+)
+
+
+def _assert_no_stale_exit_claim(name: str, text: str) -> None:
+    """Both halves of the stale-claim guard, for ONE surface.
+
+    Shared rather than inlined so the SAME assertion covers every bound shape the
+    arming can take (agent review round 3, MINOR-3): the cell used to arm once, with
+    the default two-bound split, so the equal-bounds sentence was never observed and a
+    stale fragment appended to it left the guard green.
+    """
+    for phrase in STALE_EXIT_PHRASES:
+        assert (
+            phrase not in text
+        ), f"{name} still asserts an exit this build cannot take: {phrase!r}"
+    for legacy in stall_watchdog.LEGACY_FATAL_POLICY_PHRASES:
+        assert legacy not in text, (
+            f"{name} spells a LEGACY policy sentence, which would make every dump "
+            f"this build writes read as a fatal-build artifact: {legacy!r}"
+        )
+
+
 def test_no_runtime_message_claims_the_bound_ends_the_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -6383,58 +6517,62 @@ def test_no_runtime_message_claims_the_bound_ends_the_process(
     promises; the legacy sentences are asserted absent from this build's own output, so
     a future header cannot accidentally make every dump read as a legacy-fatal artifact
     to :func:`fire_outcome`.
+
+    BOTH BOUND SHAPES ARE DRIVEN, because ``arm`` writes a DIFFERENT sentence for each
+    and the guard is only as wide as the surfaces it looks at (agent review round 3,
+    MINOR-3). ``arm(seconds=…)`` sets the boot and steady bounds to one number and takes
+    the single-bound line; the default arming takes the two-bound line. Measured on the
+    head this cell was reviewed at: appending the shipped fragment ``"and ends the "
+    "runtime"`` to the single-bound sentence left the cell GREEN, because the default
+    arming it used never rendered that sentence. Both shapes are asserted now, so the
+    same edit goes red.
     """
-    # THE SENTENCES THAT SHIPPED, as substrings rather than the bare words: a message
-    # MAY say this bound ends nothing — that is the policy — and a check on the words
-    # alone would forbid the correction along with the defect. Each entry below is a
-    # fragment of a line that really was written into a dump or a log.
-    stale = (
-        "and ends the runtime",
-        "holds the exit",
-        "ENDED this runtime",
-        "is dumped and exited",
-        "the exit faulthandler takes",
-        "armed with exit=True",
-        "_exit(1)",
-        "hit its bound and is gone",
-    )
     fake = _FakeFaulthandler()
     monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    shapes = {
+        # The default arming: a boot bound that differs from the steady one.
+        "two bounds (the default arming)": {"directory": tmp_path},
+        # ``seconds`` alone is a statement about this process's WHOLE arming, so it
+        # stands as both bounds and the runtime announces the one-bound sentence.
+        "one bound (equal boot and steady)": {
+            "seconds": stall_watchdog.DEFAULT_STALL_S,
+            "directory": tmp_path,
+        },
+    }
     try:
-        assert stall_watchdog.arm(directory=tmp_path) is True
-        header = stall_watchdog.dump_path(os.getpid(), tmp_path).read_text(encoding="utf-8")
-        with caplog.at_level(logging.INFO, logger=stall_watchdog.logger.name):
-            stall_watchdog.announce()
-        logged = " ".join(
-            record.getMessage()
-            for record in caplog.records
-            if record.name == stall_watchdog.logger.name
-        )
-        surfaces = {
-            "the dump header": header,
-            "the arm-time log line": logged,
-            "OBSERVATION_NOT_VERDICT": stall_watchdog.OBSERVATION_NOT_VERDICT,
-            "HOW_TO_READ_THE_FIRED_VALUE": stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE,
-            "DUMP_ONLY_STATEMENT": stall_watchdog.DUMP_ONLY_STATEMENT,
-        }
-        for name, text in surfaces.items():
-            for phrase in stale:
-                assert (
-                    phrase not in text
-                ), f"{name} still asserts an exit this build cannot take: {phrase!r}"
-            for legacy in stall_watchdog.LEGACY_FATAL_POLICY_PHRASES:
-                assert legacy not in text, (
-                    f"{name} spells a LEGACY policy sentence, which would make every dump "
-                    f"this build writes read as a fatal-build artifact: {legacy!r}"
+        for label, kwargs in shapes.items():
+            assert stall_watchdog.arm(**kwargs) is True
+            try:
+                header = stall_watchdog.dump_path(os.getpid(), tmp_path).read_text(encoding="utf-8")
+                caplog.clear()
+                with caplog.at_level(logging.INFO, logger=stall_watchdog.logger.name):
+                    stall_watchdog.announce()
+                logged = " ".join(
+                    record.getMessage()
+                    for record in caplog.records
+                    if record.name == stall_watchdog.logger.name
                 )
-        assert (
-            stall_watchdog.DUMP_POLICY_MARKER in header
-        ), f"the header does not state this build's policy: {header[:400]!r}"
-        assert "dumps every thread" in logged, logged
-        # ...AND THE LINE SAYS WHAT IT IS: the policy, in the one word both bound-shapes
-        # share. The stale-phrase scan above is the guard that matters; this is the
-        # positive half, so a line rewritten to say nothing at all cannot pass.
-        assert "dump-only" in logged, logged
+                assert logged, f"{label}: the arming said nothing at all"
+                surfaces = {
+                    "the dump header": header,
+                    "the arm-time log line": logged,
+                    "OBSERVATION_NOT_VERDICT": stall_watchdog.OBSERVATION_NOT_VERDICT,
+                    "HOW_TO_READ_THE_FIRED_VALUE": stall_watchdog.HOW_TO_READ_THE_FIRED_VALUE,
+                    "DUMP_ONLY_STATEMENT": stall_watchdog.DUMP_ONLY_STATEMENT,
+                }
+                for name, text in surfaces.items():
+                    _assert_no_stale_exit_claim(f"{label}: {name}", text)
+                assert (
+                    stall_watchdog.DUMP_POLICY_MARKER in header
+                ), f"the header does not state this build's policy: {header[:400]!r}"
+                assert "dumps every thread" in logged, logged
+                # ...AND THE LINE SAYS WHAT IT IS: the policy, in the one word both
+                # bound-shapes share. The stale-phrase scan above is the guard that
+                # matters; this is the positive half, so a line rewritten to say nothing
+                # at all cannot pass.
+                assert "dump-only" in logged, logged
+            finally:
+                stall_watchdog.disarm()
     finally:
         stall_watchdog.disarm()
 
@@ -6462,14 +6600,24 @@ def test_the_teardown_annotation_is_read_off_the_ordering_alone(tmp_path: Path) 
         ),
         14: (CURRENT_HEADER + FIRED_BODY, None),
         15: (CURRENT_HEADER + note, None),
-        # A SECOND FIRE BELOW THE SAME ANNOTATION STILL READS AS TEARDOWN (the reader
-        # takes the first fire's position, which is the one the annotation preceded).
+        # SEVERAL FIRES AROUND ONE ANNOTATION, which is the shape a dump-only build can
+        # really leave: a fire ends nothing, so a runtime can take one, return from
+        # ``amain``, be annotated, and then take the teardown fire in the executor join.
+        # The annotation stands ABOVE the fire it belongs to and BELOW an earlier one, so
+        # a reader keyed on the FIRST fire cannot claim the class its own comment names
+        # (agent review round 3, MINOR-1). Every fire below the annotation answers True,
+        # the last one is what the ordering is asked about, and a dump whose fires ALL
+        # sit above the annotation is still unknown.
         16: (CURRENT_HEADER + note + FIRED_BODY + FIRED_BODY, True),
+        17: (CURRENT_HEADER + FIRED_BODY + note + FIRED_BODY, True),
+        18: (CURRENT_HEADER + FIRED_BODY + FIRED_BODY + note, None),
     }
     for pid, (text, expected) in cases.items():
         _write_dump(logs, pid, text)
         assert stall_watchdog.fired_in_runner_teardown(pid, logs) is expected, (pid, text)
-    assert stall_watchdog.fired_in_runner_teardown(17, logs) is None
+    # A pid with NO artifact at all is unknown too, and it is the last case rather
+    # than the first because 17 above is now a real multi-fire row.
+    assert stall_watchdog.fired_in_runner_teardown(99, logs) is None
 
 
 def test_the_teardown_annotation_is_a_no_op_when_unarmed_and_idempotent_when_armed(

@@ -669,10 +669,15 @@ DUMP_ONLY_STATEMENT = "PRODUCTION EXPIRY IS DUMP-ONLY"
 DUMP_POLICY_MARKER = "[stall watchdog] policy: dump-only (exit=False)"
 
 #: Every phrase a header can carry that proves the build which wrote it was dump-only.
-#: Two, because the era's own sentence (see :data:`DUMP_ONLY_STATEMENT`) covers the
-#: dumps written between the dump-only change and this marker: those artifacts do prove
-#: their policy, and a reader that ignored them would narrate a survived fire as
-#: unknown for no reason.
+#: Two, because the statement and this marker are both spellings of the SAME policy: a
+#: header that says the timer is dump-only proves it however it is worded, and a reader
+#: keying on one spelling alone would narrate a dump-only fire as unknown for no reason.
+#:
+#: NO RELEASED BUILD WRITES THE STATEMENT ALONE (agent review round 3, NIT-1). The
+#: era sentence shipped only in the branch commit that introduced it (`2555c7a21`, never
+#: on ``main``), so this alias is DEFENSIVE rather than a reader for artifacts in the
+#: wild: it costs a substring test and covers a header that states the policy without
+#: the marker, which is the shape a build BETWEEN the two spellings would have written.
 DUMP_ONLY_POLICY_PHRASES = (DUMP_POLICY_MARKER, DUMP_ONLY_STATEMENT)
 
 #: The sentences a LEGACY (pre-dump-only) header carried that state the OPPOSITE
@@ -3204,6 +3209,14 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     fire ENDED the runtime is a different question with its own reader,
     :func:`fire_outcome`, because on a dump-only build the answer is no for every fire.
 
+    PRODUCTION ASKS THIS PER-PID QUESTION IN BULK, THROUGH :func:`held_pids` — named so
+    the answer is not read as dead weight (agent review round 3, NIT-2). The listings
+    behind ``/info``, the TUI panel and ``lop sessions --json`` scan every live dump for
+    the held reading, so the readers a person sees go through ``held_pids`` while the
+    verdicts go through :func:`fire_outcome`; this function is the one-pid spelling of
+    exactly that reading, used by the cells and by any future caller asking about a
+    single pid.
+
     ``False`` for a pid with no fire at all and for anything unreadable: production
     watchdog fires are never fatal, and the quiet direction is the
     one that cannot narrate a runtime as stalled when it never fired.
@@ -3283,24 +3296,34 @@ def fired_in_runner_teardown(pid: int | None = None, directory: Path | None = No
     phase it thinks a stack is in. The dump's fire is teardown-attributed exactly when
     the annotation stands above it; where the annotation is absent, or the artifact
     cannot place it above that fire, the answer is unknown rather than inferred.
+
+    THE ANNOTATION ATTRIBUTES ANY FIRE IT STANDS ABOVE, AND ONE DUMP CAN HOLD SEVERAL
+    (agent review round 3, MINOR-1). A dump-only build does not end on a fire, so a
+    runtime can take one, carry on, return from ``amain`` and then be annotated before
+    the runner parks in its executor join — the artifact then reads fire, annotation,
+    fire, and the fire the annotation belongs to is the one BELOW it. Reading the FIRST
+    fire's index answers ``None`` for that shape: the annotation is at or below it, so
+    the one artifact that proves this class cannot claim it. The predicate is therefore
+    "does any fire stand below the annotation", which is the LAST fire's index — a
+    fire taken after the runner began tearing down can only be a teardown fire, since
+    ``amain`` has already returned. Every single-fire row answers exactly as it did.
     """
     text = _dump_text(dump_path(pid, directory))
     if not _fires(text):
         return None
     lines = text.splitlines()
-    fire_at = next(index for index, line in enumerate(lines) if line.startswith(FIRED_MARKER))
+    fire_at = max(index for index, line in enumerate(lines) if line.startswith(FIRED_MARKER))
     marker_at = next(
         (index for index, line in enumerate(lines) if line.startswith(TEARDOWN_MARKER)),
         None,
     )
     if marker_at is None:
         return None
-    # STRICTLY ABOVE, and a marker at or below the fire is NOT the opposite answer:
-    # an artifact can hold several fires, and the annotation lands after an earlier
-    # one's line on the path where the coroutine returns and the runner then joins a
-    # parked executor worker — which is exactly the fire this exists to attribute, so
-    # a reader that read "after" as "not teardown" would deny the class it was built
-    # for. Unknown, never inferred.
+    # STRICTLY ABOVE, and a marker at or below EVERY fire is NOT the opposite answer:
+    # the annotation lands after an earlier fire's line on the path where the coroutine
+    # returns and the runner then joins a parked executor worker — which is exactly the
+    # fire this exists to attribute, so a reader that read "after" as "not teardown"
+    # would deny the class it was built for. Unknown, never inferred.
     return True if marker_at < fire_at else None
 
 

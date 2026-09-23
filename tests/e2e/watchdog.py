@@ -25,9 +25,19 @@ process that ignored a 20 s thread watchdog and had to be ``kill -9``'d.
 ``faulthandler.dump_traceback_later`` is the one instrument that survives it.
 It arms a timer in a dedicated **C** thread that writes the stacks of every
 thread with ``write(2)`` directly to a file descriptor without the GIL, Python
-frames or interpreter state. E2E bounds are dump-only: pytest cannot safely be
-ended from the native callback, so CI must inspect the retained dump and its
-outer job timeout remains the eventual failure bound.
+frames or interpreter state. It is armed with ``exit=False``, so it is a
+DIAGNOSTIC and never the fast-fail: a step that can return after its dump does
+so, and ``bounded`` then raises a normal ``TimeoutError`` for pytest to report.
+
+THE FAST-FAIL IS A SECOND, KERNEL-LEVEL ARM (``SIGALRM``, see
+:data:`BOUND_GRACE_S`), because the case that needs it is precisely the case
+nothing in-process can reach: a process wedged with the GIL held takes no
+Python signal handler and no thread, so the only instrument that can still fail
+it is one the KERNEL acts on. It fires ``BOUND_GRACE_S`` after the dump was due,
+so the order is dump first, terminate second, and a wedged run fails at its own
+bound instead of holding a CI slot until the job ceiling. The process surviving
+is not the failure; a bound that expires without a dump would be, and the
+stage's own reporting step says which of the two it is looking at.
 
 The GRANULARITY is deliberate: the timer is armed around the specific step
 under test rather than around the whole test, so the dump names the operation
@@ -35,7 +45,11 @@ that hung instead of "the test was slow".
 
 ONE PROCESS-GLOBAL TIMER, SHARED WITH THE SHARD WATCHDOG
 ``faulthandler``'s timer is process-wide, so a ``bounded`` block displaces any
-other armed timer and its ``finally`` leaves nothing armed. ``tests.shard_stall_watchdog``
+other armed timer and its ``finally`` leaves nothing armed. The same is true of
+the ``SIGALRM`` arm (one interval timer per process), so two nested ``bounded``
+blocks leave only the INNER one's backstop armed until it exits -- the same
+displacement the dump timer already has, and the reason neither instrument is a
+substitute for the outer job ceiling. ``tests.shard_stall_watchdog``
 arms the same timer around one xdist test item, so a test body that entered
 ``bounded`` would take that worker's stacks away for the rest of the test (the
 controller would still name the test from xdist reports; only the stacks are
@@ -52,10 +66,16 @@ configuration: it arms only inside the runtime child's ``__main__`` branch, so
 it lives in a spawned runtime process, never in the pytest process this file's
 ``bounded`` blocks run in.
 
-The watchdog is diagnostic-only. ``exit=True`` would terminate the whole pytest
+The watchdog is diagnostic-only where the PRODUCT's bound is concerned -- and
+that is the property this file must never break: nothing here ends a runtime, and
+no arm here (the dump timer or the ``SIGALRM`` backstop) is ever taken by
+the runtime child. ``exit=True`` would terminate the whole pytest
 worker from a C callback, losing pytest's normal reporting and any unrelated
-work in that process. A fired dump survives for CI to report, while the workflow's
-outer timeout remains the failure boundary for a test that never returns.
+work in that process, so the C callback stays diagnostic and the fast-fail lives
+one rung out, on the pytest process the test's own bound owns. A fired dump
+survives for CI to report, and the workflow's outer timeout remains the backstop
+for anything that escapes the ``SIGALRM`` arm (an unkillable syscall, a stop the
+kernel cannot deliver).
 """
 
 from __future__ import annotations
@@ -64,6 +84,7 @@ import contextlib
 import faulthandler
 import itertools
 import os
+import signal
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -89,6 +110,40 @@ DUMP_PREFIX = "lo-tui-e2e-hang"
 FIRED_MARKER = "Timeout ("
 
 
+#: How long after a block's own bound the KERNEL ends the process if the step is still
+#: wedged. THIS IS THE FAST-FAIL, and it is deliberately not the dump timer: the bound
+#: that catches a GIL-held hang cannot be a Python one (see the module docstring), so the
+#: instrument that acts on it is ``SIGALRM`` at its default disposition, which the kernel
+#: delivers without needing the GIL, a bytecode, or a thread of ours.
+#:
+#: THE ORDER IS THE WHOLE DESIGN, and it is what makes this honest under a dump-only
+#: policy: the C timer writes every thread's stacks AT ``seconds`` and this ends the
+#: process ``BOUND_GRACE_S`` later, so the artifact exists before anything dies and a
+#: wedged step fails at its own bound rather than holding a CI runner until
+#: ``timeout-minutes``. The grace is not a second bound on the hang -- it is the
+#: settling allowance for the DUMP WRITE, which runs in one pass from a C thread and is
+#: measured in milliseconds for the handful of threads these stages park (against a
+#: bound of 60-300 s on every call site, and a 20-minute job ceiling). It is therefore
+#: two orders of magnitude above the write it waits for and still seconds, not minutes,
+#: after the failure it reports.
+#:
+#: IT IS NOT A WALL-CLOCK DETECTOR: nothing here decides that a test has hung. The C
+#: timer's expiry is that decision, and it is what leaves the evidence; this only turns
+#: "dumped and still wedged" into a process end, which is the part no in-process
+#: instrument can do. A step that returns after its dump is never reached by it -- the
+#: alarm is cancelled in ``bounded``'s ``finally``, and the ``TimeoutError`` below is
+#: then what reports the failure, through pytest's own machinery.
+#:
+#: WHAT THE GRACE DECIDES, stated because it is the visible trade: a step that
+#: overshoots its bound by LESS than the grace returns and fails as one test, with a
+#: ``TimeoutError`` pytest reports normally; one still running when the grace expires is
+#: ended by the kernel, so its shard ends with a signal and no XML. Before this PR the
+#: same overshoot ended the process AT the bound (``exit=True``), so the grace only
+#: widens the window in which a slow-but-returning step can still fail cleanly; it does
+#: not narrow one.
+BOUND_GRACE_S = 5.0
+
+
 @contextlib.contextmanager
 def bounded(seconds: float, what: str) -> Iterator[None]:
     """Capture every thread's stack if ``what`` outlives its diagnostic bound.
@@ -100,13 +155,21 @@ def bounded(seconds: float, what: str) -> Iterator[None]:
     raw file descriptor from a C thread, so the handle and header exist before
     the timer is armed. Ordinary exit paths remove the file; when the timer fires,
     this context manager cannot run while the blocked code holds the GIL, so the
-    diagnostic remains for CI to report. The C callback does not exit the worker.
+    diagnostic remains for CI to report. The C callback does not exit the worker;
+    the ``SIGALRM`` arm ends the process one grace later if the step is still
+    wedged, with the dump already written.
     """
     # Unique per block and per process: pytest may run several bounded blocks,
     # and under a fired watchdog the surviving file must be attributable to the
     # block that actually hung rather than to whichever ran last.
     path = DUMP_DIR / f"{DUMP_PREFIX}-{os.getpid()}-{next(_COUNTER)}.log"
     handle = path.open("w", encoding="utf-8")
+    # ``SIG_DFL`` RATHER THAN A PYTHON HANDLER, and this is the point rather than a
+    # shortcut: a Python-level handler only runs between bytecodes, which is exactly what
+    # a wedged process never produces -- the same reason this file does not use
+    # ``pytest-timeout``'s signal method. The previous disposition is restored on the way
+    # out so a block cannot silently disarm something else's alarm.
+    previous_alarm = signal.signal(signal.SIGALRM, signal.SIG_DFL)
     try:
         handle.write(f"[e2e watchdog] {what!r} exceeded {seconds:g}s; every thread follows.\n")
         handle.flush()
@@ -114,16 +177,24 @@ def bounded(seconds: float, what: str) -> Iterator[None]:
         # re-entrant-safe. A diagnostic must not terminate pytest from the C thread:
         # normal assertion reporting and the CI dump reporter stay in control.
         faulthandler.dump_traceback_later(seconds, file=handle, exit=False)
+        # THE FAST-FAIL, one grace after the dump is due (see BOUND_GRACE_S). Set AFTER
+        # the dump timer so the two expiries cannot invert on a loaded host.
+        signal.setitimer(signal.ITIMER_REAL, seconds + BOUND_GRACE_S)
         try:
             yield
         finally:
             faulthandler.cancel_dump_traceback_later()
+            signal.setitimer(signal.ITIMER_REAL, 0)
         # A cooperative operation may return after the native timer wrote its
         # diagnostic. Keep the test red in that case; the C callback itself must
         # not terminate pytest to report the bound.
         if _is_real_dump(path):
             raise TimeoutError(f"{what!r} exceeded {seconds:g}s; thread dump retained at {path}")
     finally:
+        # Reached on the ordinary paths only: a step that is still wedged when the grace
+        # expires is ended by the kernel and never gets here, which is the fast-fail.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_alarm)
         handle.close()
         # The timer's C thread may have written a real dump before the step returned.
         # Keep that diagnostic for CI; only a header without a fire is disposable.
