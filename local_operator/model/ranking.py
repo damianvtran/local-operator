@@ -44,10 +44,10 @@ _VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+(?:[.]\d+)?)")
 _MINOR_VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+)-(\d{1,2})(?![\d])")
 
 #: Everything that is not a lowercase letter or a digit, as a word separator.
-#: Every run of punctuation, whitespace and symbols collapses to ONE space; a
-#: letter next to a digit is separated too, so compact model queries converge.
+#: This is the match-normaliser's whole rule (see :func:`_match_key`): every run
+#: of punctuation, whitespace and symbols collapses to ONE space, so a query and
+#: a row that spell the same words with different separators compare equal.
 _MATCH_SEPARATOR_PATTERN = re.compile(r"[^0-9a-z]+")
-_MATCH_ALPHANUMERIC_BOUNDARY = re.compile(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -298,13 +298,6 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     ranked_strong: list[_RankEntry] = []
     ranked_fuzzy: list[_RankEntry] = []
     for row in rows:
-        # Only treat a number as a model-version constraint when the immediately
-        # preceding query word belongs to this row's model ID. This keeps an
-        # OpenRouter/provider number from filtering out an Opus row, while still
-        # constraining `openrouter opus 5.5` on the `opus` term and selector.
-        query_version = _query_version(query, row.model_id)
-        if query_version is not None and not _matches_query_version(row, query_version):
-            continue
         # SCORED against every string a user can SEE, not the selector alone.
         # The selector is `openrouter/x-ai/grok-4.7`; the row also carries
         # `SpaceXAI: Grok 4.7` as ``listing_name``, and the human name is what
@@ -402,59 +395,7 @@ def _match_key(text: str) -> str:
     That is the intended behaviour, and a future change that "restores" a
     non-match by fusing ``47`` back into one token would regress it.
     """
-    separated = _MATCH_SEPARATOR_PATTERN.sub(" ", text.lower()).strip()
-    return _MATCH_ALPHANUMERIC_BOUNDARY.sub(" ", separated)
-
-
-def _query_version(query: str, model_id: str) -> float | None:
-    """Read a numeric constraint only when its preceding family term is in this ID.
-
-    Decimal punctuation is meaningful here, even though `_match_key` turns it
-    into separate words: `opus 5.5`, `opus-5.5`, and `opus5.5` name minor 5.5,
-    while `grok 47` is not a version spelling and remains a fuzzy subsequence
-    query. A provider or unrelated metadata number has no model-family token
-    immediately before it and therefore cannot hide otherwise matching rows.
-    """
-    # Aggregator IDs can include a leading owner namespace such as
-    # `anthropic/claude-opus-5.5`; that namespace is not the model-family term
-    # whose number this filter constrains.
-    model_part = model_id.partition("/")[2] or model_id
-    model_words = [word for word in _match_key(model_part).split() if not word.isdigit()]
-    decimals = list(re.finditer(r"(?<!\d)(\d+)[.-](\d{1,2})(?!\d)", query))
-    for match in reversed(decimals):
-        preceding = _match_key(query[: match.start()]).split()
-        if preceding and _term_names_model(preceding[-1], model_words):
-            return float(f"{match.group(1)}.{match.group(2)}")
-
-    key = _match_key(query)
-    numeric = list(re.finditer(r"(?<!\d)(\d+)(?!\d)", key))
-    if not numeric or len(numeric[-1].group(1)) != 1:
-        return None
-    preceding = key[: numeric[-1].start()].split()
-    if not preceding or not _term_names_model(preceding[-1], model_words):
-        return None
-    return float(numeric[-1].group(1))
-
-
-def _term_names_model(term: str, model_words: list[str]) -> bool:
-    """Accept a typed family prefix/subsequence found in the row's model ID."""
-    return any(word.startswith(term) or term in word for word in model_words)
-
-
-def _matches_query_version(row: ModelRow, query_version: float) -> bool:
-    """Match the row's family version, not incidental digits in its label.
-
-    ``_match_key`` deliberately removes punctuation, so the selector's original
-    model ID is the authoritative source for distinguishing a decimal version
-    from two unrelated numbers. The established version helper already handles
-    short hyphen minors and dated suffixes consistently with picker ordering.
-    """
-    version = -_version_key(row)[0]
-    if version <= 0:
-        return False
-    if query_version.is_integer():
-        return int(version) == int(query_version)
-    return version == query_version
+    return _MATCH_SEPARATOR_PATTERN.sub(" ", text.lower()).strip()
 
 
 def _version_key(row: ModelRow) -> tuple[float, float, str]:
