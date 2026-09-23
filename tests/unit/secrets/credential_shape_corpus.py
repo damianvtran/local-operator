@@ -207,8 +207,6 @@ COUNT_QUALIFIER_NAMES: tuple[str, ...] = (
 )
 
 
-
-
 def _angled(inner: str) -> str:
     """``<inner>``, assembled rather than spelled.
 
@@ -365,7 +363,69 @@ TYPE_ANNOTATION_POSITIVES: tuple[Case, ...] = (
         "DB" + "_PASSWORD=" + "Correct" + "_horse" + _angled("Battery") + "7",
         "a passphrase carrying angles and digits: not confined to the type alphabet",
     ),
+    # --- the digit-carrying half of the residual class, which had NO row --------
+    # The residual below is ``Ident<Ident>``: capitals on both sides, no digit, no
+    # symbol and no word break. Before this round the arm released the WHOLE class
+    # around it — a digit on EITHER side, and a lowercase base — with no hit at all,
+    # and the corpus pinned only the digit-free spelling, so nothing in the suite
+    # caught the dangerous half (agent review R1-1). These five rows are that half,
+    # and each is a value the arm released before the confinement was enforced.
+    Case(
+        "API" + "_KEY=" + _generic("Pass", "Word") + "7",
+        "the digit-carrying sibling of the residual: a digit in the ARGUMENT masks",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Pass7", "Word"),
+        "the same with the digit in the BASE: also masks",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Abc", "Xyz") + "1",
+        "both capitals, digit in the ARGUMENT: the grid row that was released whole",
+    ),
+    Case(
+        "DB" + "_PASSWORD=" + _generic("Correcthorse", "Battery") + "7",
+        "the DIGIT-FREE passphrase with its underscore removed: the digit is enough",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("foo", "Bar"),
+        "a LOWERCASE base under a generic: a word is not a type",
+    ),
+    # --- the R1-2 class: a credential WORD as the base of an application ---
+    # ``_TYPE_PRIMITIVES`` admits 44 ordinary words, several of them plain English in
+    # the languages that own them (``any``, ``void``, ``object``, ``null``), so an
+    # argument rule that accepted one released ``Pass<int>`` — 70 of the 81 new
+    # releases an enumeration found. The discriminating fact is not the argument but
+    # the BASE: a type application's base is a type name (``Vec``, ``Option``, ``Foo``)
+    # and is never a credential word. These rows pin that, and ``Vec<u8>`` /
+    # ``Option<Vec<u8>>`` stay released above as the boundary on the other
+    # side.
+    Case(
+        "API" + "_KEY=" + _generic("Pass", "int"),
+        "a credential-stem base over a bare PRIMITIVE argument",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Pass", "any"),
+        "the same: ``any`` is an ordinary English word, not a type",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Secret", "str"),
+        "a credential WORD base over a primitive",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("Token", "void"),
+        "the same with ``void``",
+    ),
+    # --- the R1-1 half the corpus had no row for: a bare ``::`` path ---
+    Case(
+        "API" + "_KEY=" + "Sv" + "::" + "Secret",
+        "a CamelCase MODULE segment: a namespace is lowercase, so this masks",
+    ),
+    Case(
+        "SESSION" + "_TOKEN=" + "Camel" + "::" + "Word9",
+        "the same convention violation with a digit-carrying leaf",
+    ),
 )
+
 
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
@@ -1491,9 +1551,19 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     # them — every vendor prefix is lowercase, and the escape routes a credential
     # actually has (a rendered blob, a DSN, a header) all carry the symbols the
     # whole-value confinement check rejects.
+    #
+    # The residual is now the WHOLE-CONDITION spelling, and the boundary is on both
+    # sides: a digit in either the base or the argument masks, and so does a word
+    # break in either. ``Correcthorse<Battery>`` is the same value with its
+    # underscore dropped — digit-free, no word break — and it is pinned here for the
+    # same reason: the arm releases it, so it is a boundary rather than an accident.
     Case(
         "API" + "_KEY=" + _generic("Pass", "Word"),
         "the accepted residual: Ident<Ident> is a type by spelling, and is recorded",
+    ),
+    Case(
+        "DB" + "_PASSWORD=" + _generic("Correcthorse", "Battery"),
+        "the residual's no-word-break spelling: underscore removed, still digit-free",
     ),
 )
 

@@ -85,6 +85,11 @@ from tests.unit.secrets.credential_shape_corpus import (
     Case,
 )
 
+#: The angle brackets, assembled rather than spelled: this file is read by agents
+#: THROUGH the pass it describes, so the spellings below are built from ordinals and
+#: never appear as literals in the source.
+_LT, _GT = chr(60), chr(62)
+
 #: A synthetic credential. Never a real one, and never asserted into anything a
 #: human reads: the corpus carries the shapes, this carries the containment.
 SENTINEL = "mongodb+srv://svc_user:sh4pedSentinelPw@db.internal/app"
@@ -321,8 +326,40 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
 #: already releases (a bare primitive below the value floor, an annotation carrying
 #: ``[``, a keyword argument in a function signature); they are in the corpus as
 #: regression rows, and the count says so rather than leaving a reader to wonder.
+#:
+#: The SECOND count is an EQUALITY since agent review R1-1, and deliberately: its
+#: number is the whole size of ``TYPE_ANNOTATION_POSITIVES``, because a wide arm must
+#: release every one of them. It was ``8`` while the table held eight rows only
+#: because a wide arm happened to release the eight the table happened to hold — the
+#: assertion proved nothing about the rows it did not name. Pinning it to
+#: ``len(TYPE_ANNOTATION_POSITIVES)`` means a row added to the table without a
+#: discriminating reading FAILS here rather than sitting inert in the corpus.
 _TYPE_CLAUSE_ROWS_THE_ARM_HOLDS = 15
-_TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM = 8
+#: Asserted below as ``len(TYPE_ANNOTATION_POSITIVES)``: every positive must be
+#: released by a wide arm, so the row count IS the floor and no stale constant can
+#: drift away from the table it measures.
+_TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM = len(TYPE_ANNOTATION_POSITIVES)
+
+#: The spellings the confinement must MASK, and the arm each one is confined by.
+#: They are the digit-carrying half of the residual class that had no row before
+#: agent review R1-1, and they are asserted as VALUES rather than left to the corpus
+#: because the corpus only proves the whole-line reading: this blocks SAYS which
+#: condition of the documented release each spelling violates.
+_CONFINEMENT_MUST_MASK: tuple[tuple[str, str], ...] = (
+    ("Pass" + _LT + "Word" + "7", "a digit in the ARGUMENT"),
+    ("Pass7" + _LT + "Word", "a digit in the BASE"),
+    ("Abc" + _LT + "Xyz" + "1", "both capitals, a digit in the argument"),
+    ("Correct" + "horse" + _LT + "Battery" + "7", "a digit, underscore removed"),
+    ("foo" + _LT + "Bar" + _GT, "a LOWERCASE base under a generic"),
+    ("abc" + "::" + "def" + _LT + "Bar" + _GT, "a lowercase-qualified leaf under a generic"),
+    ("Option" + _LT + "Sha256" + _GT, "a digit inside a NON-primitive type name"),
+    ("Pass" + _LT + "int" + _GT, "a credential-stem BASE over a bare primitive"),
+    ("Pass" + _LT + "any" + _GT, "the same: ``any`` is English, not a type"),
+    ("Secret" + _LT + "str" + _GT, "a credential WORD base over a primitive"),
+    ("Token" + _LT + "void" + _GT, "the same with ``void``"),
+    ("Sv" + "::" + "Secret", "a CamelCase MODULE segment in a bare path"),
+    ("Camel" + "::" + "Word9", "the same convention violation with a digit"),
+)
 
 
 def test_the_type_annotation_clause_is_load_bearing_in_both_directions(
@@ -361,9 +398,87 @@ def test_the_type_annotation_clause_is_load_bearing_in_both_directions(
     released = [
         case for case in TYPE_ANNOTATION_POSITIVES if rs.scrub_shapes(case.text) == case.text
     ]
-    assert len(released) >= _TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM, [
+    assert len(released) == _TYPE_CLAUSE_ROWS_THAT_CATCH_A_WIDE_ARM, [
         case.reason for case in TYPE_ANNOTATION_POSITIVES if case not in released
     ]
+
+
+def test_the_type_clause_masks_a_digit_carrying_spelling() -> None:
+    """The confinement the module documents is the confinement it ENFORCES (R1-1).
+
+    The documented release is the digit-free, symbol-free, single-token spelling
+    (``Ident<Ident>``). The first implementation documented that and enforced only
+    the symbol half: a digit on EITHER side released the value whole, with NO hit at
+    all — a real credential released with nothing in the report to notice, which is
+    the dangerous direction the corpus could not see because it pinned only the
+    digit-free spelling.
+
+    Each row below is a spelling the arm RELEASED before this round, measured on
+    that revision, and each names the condition of the documented release it
+    violates. They are asserted as VALUES rather than as corpus lines because this
+    block is what says WHICH condition failed — a corpus row proves only that the
+    whole line comes back unchanged.
+
+    The last row is the price of the digit rule and is asserted the other way: a
+    digit-carrying NON-primitive type name is now MASKED, so ``Option<Sha256>`` is
+    the false positive this re-admits. That is the safe direction — masking a type
+    is strictly better than releasing a credential — and pinning it here keeps the
+    trade visible instead of letting a later change discover it.
+    """
+    import local_operator.redaction_shapes as rs
+
+    for value, condition in _CONFINEMENT_MUST_MASK:
+        assert rs._is_type_expression(value) is False, condition
+        text = "DB" + "_PASSWORD=" + value
+        assert rs.scrub_shapes(text) != text, f"released with no hit: {condition}"
+
+    # The primitives are UNCHANGED by the digit rule: they are type names by fiat.
+    for value in (
+        "Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT,
+        "Vec" + _LT + "u8" + _GT,
+        "Cow" + _LT + "'a" + _GT,
+        "Arc" + _LT + "Mutex" + _LT + "T" + _GT + _GT,
+        "Option" + _LT + "str" + _GT,
+    ):
+        assert rs._is_type_expression(value) is True, value
+        assert rs._carries_a_non_primitive_digit(value) is False, value
+
+    # A bare primitive is proven by a NON-credential base and refused by a
+    # credential-stem one — the boundary R1-2 was about, in both directions.
+    assert rs._is_type_expression("Vec" + _LT + "u8" + _GT) is True
+    assert rs._is_type_expression("HashMap" + _LT + "u8,u8" + _GT) is True
+    assert rs._is_type_expression("Pass" + _LT + "int" + _GT) is False
+    assert rs._base_is_a_credential_stem("Pass") is True
+    assert rs._base_is_a_credential_stem("Vec") is False
+    assert rs._has_a_bare_primitive_argument("Vec" + _LT + "u8" + _GT) is True
+    assert (
+        rs._has_a_bare_primitive_argument("Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT) is False
+    )
+
+
+def test_the_digit_rule_ignores_a_bare_integer_argument() -> None:
+    """A const generic's integer is not a NAME, so the digit rule must not read it.
+
+    ``ArrayVec<u8, 32>`` is a real annotation and its second argument is a bare
+    integer, which belongs to no :data:`_TYPE_NAME_TOKEN`. A digit rule that flagged
+    any digit in the value would mask every const-generic annotation — and one of
+    those is a corpus row that ESCALATED before the fix, so the regression would be
+    the exact incident this clause exists to remove.
+
+    The const-generic spelling is NOT released by the arm (the parser reads ``32`` as
+    a const argument and the corpus row is contained by another rule), so this test
+    asserts the digit rule's own reading and the primitives' rather than claiming the
+    row is arm-released. ``Sha256`` is the counter-example: a digit inside a NAME is
+    flagged, which is what the enforcement is for.
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._carries_a_non_primitive_digit("ArrayVec" + _LT + "u8, 32" + _GT) is False
+    assert rs._carries_a_non_primitive_digit("u8") is False
+    assert rs._carries_a_non_primitive_digit("f64") is False
+    assert rs._carries_a_non_primitive_digit("Sha256") is True
+    assert rs._carries_a_non_primitive_digit("Ident7") is True
+    assert rs._carries_a_non_primitive_digit("Option" + _LT + "Sha256" + _GT) is True
 
 
 def test_the_type_clause_needs_a_type_only_marker() -> None:
@@ -429,6 +544,12 @@ def test_the_type_clauses_accepted_residual_is_a_row(monkeypatch: pytest.MonkeyP
     described in prose so a later change has to meet it, and the two assertions here
     are what make it a boundary of THIS clause: the row survives today, and it is
     released by this arm (removed, the same value masks).
+
+    The boundary is now on BOTH sides, and this test asserts the widening that used
+    to sit beside it: the residual is the digit-free, symbol-free, single-token
+    spelling, so the digit-carrying sibling of the same row MASKS. Before the
+    confinement was enforced that sibling was released whole, which is why a test
+    that only asserted the residual would have passed while releasing credentials.
     """
     import local_operator.redaction_shapes as rs
 
@@ -439,6 +560,11 @@ def test_the_type_clauses_accepted_residual_is_a_row(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(rs, "_is_type_expression", lambda value: False)
     assert rs.scrub_shapes(case.text) != case.text, "the residual must be this arm's"
+
+    # ...and the sibling that a wide arm used to take with it.
+    monkeypatch.undo()
+    sibling = "DB" + "_PASSWORD=" + "Pass" + _LT + "Word" + "7"
+    assert rs.scrub_shapes(sibling) != sibling, "the digit-carrying sibling must MASK"
 
 
 def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
@@ -3501,7 +3627,28 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #: pending a verdict. NONE of the 8 added positives moves: they were masked before
 #: and they are masked now, which is what makes them evidence that the clause is
 #: scoped rather than broad.
-_CORPUS_GRADING_DIGEST = "eb72b005904af2d9c068642a2cd91315ab4a2fb8072865da1d7aa6aad2bb64ad"
+#: MOVED AGAIN on 2026-09-23, in the R1-1 remediation, and the argument has the same
+#: two halves as the move above it.
+#:
+#: 1. **The MODULE change moved no pre-existing row, measured.** The confinement is
+#:    now enforced (a digit outside a primitive name, and a lowercase base, each stop
+#:    the release — see :func:`_carries_a_non_primitive_digit`), and the 471 rows of
+#:    the recovered corpus graded with ``git show 7a0d3cbc:local_operator/redaction_shapes.py``
+#:    loaded as a second module produce ``bd30424e…`` BYTE FOR BYTE under BOTH modules.
+#:    That is the whole safety claim of this round: the enforcement narrowed the
+#:    release class the branch introduced and touched nothing the branch had not.
+#:
+#: 2. **The corpus grew by seven rows, which is what moves the constant.** Five are the
+#:    DIGIT-CARRYING and LOWERCASE-BASE half of the residual class — spellings the arm
+#:    released WHOLE with no hit at all before this round, and which the corpus had no
+#:    row for because it pinned only the digit-free spelling (agent review R1-1). They
+#:    sit in ``TYPE_ANNOTATION_POSITIVES`` because they MUST mask. The other two are
+#:    negatives: the same digit-free passphrase with its underscore removed, and the
+#:    ``Pass<int>`` primitive-argument spelling — both released, so both are boundaries
+#:    of the confined arm. The table's own counts moved with them, and the wide-arm
+#:    assertion is now pinned to the table's length rather than to a stale ``8``, so a
+#:    positive row with no discriminating reading fails instead of sitting inert.
+_CORPUS_GRADING_DIGEST = "bee10950878787b704adc228b84b2de62ba10098bed85e332554aff3cf6ffb99"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:

@@ -806,12 +806,20 @@ _URL_LIKE = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 _DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+")
 
 #: The characters a type ANNOTATION may be spelled with, used as a whole-value
-#: confinement check. A credential literal is full of characters a type never
-#: carries — a quote, ``/``, ``@``, ``=``, ``$``, ``%``, a backtick — so a value
-#: spelled entirely inside this alphabet cannot be one of those spellings, which
-#: is what stops this clause from releasing a credential that merely CONTAINS an
-#: angle bracket. ``[``/``]``/``(``/``)`` are deliberately absent: a value carrying
-#: one of them is released by :data:`_EXPRESSION_CHARS` before this test runs.
+#: confinement check — NECESSARY, not sufficient.
+#:
+#: A value outside it is decidable as a credential by alphabet alone: a quote, ``/``,
+#: ``@``, ``=``, ``$``, ``%`` or a backtick is in no type annotation, so membership
+#: REJECTS a credential spelling that carries one of those. It does NOT accept a
+#: value as a type, and that distinction is what agent review R1-1 measured the cost
+#: of believing: a human-chosen password is usually spelled with no symbol at all,
+#: and ``&Secret1`` and ``Camel::Word9`` are both confined to this alphabet while
+#: being credential material. The alphabet narrows the class; the parser and the
+#: conditions in :func:`_is_type_expression` are what decide.
+#:
+#: ``[``/``]``/``(``/``)`` are deliberately absent: a value carrying one of them is
+#: released by :data:`_EXPRESSION_CHARS` before this test runs — a PRE-EXISTING
+#: release, identical at base and head, and not one this clause introduces.
 _TYPE_ALPHABET = frozenset(
     "abcdefghijklmnopqrstuvwxyz" "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "0123456789" "_<>,:&'."
 )
@@ -822,6 +830,14 @@ _TYPE_ALPHABET = frozenset(
 #: CamelCase: ``Vec<u8>``, ``Map<string, string>``, ``Optional[str]``. Without it
 #: the argument rule would have to accept any lowercase word, and a value spelled
 #: ``SomePassword<secret>`` would be read as a type.
+#:
+#: **A primitive proves a type only as an ARGUMENT of a parsed generic application**
+#: (agent review R1-2). Several of these words are ordinary English in the languages
+#: that use them — ``any``, ``void``, ``object``, ``null``, ``type`` — so an ungated
+#: allowance released ``Pass<int>`` and ``Pass<any>``, a passphrase whose
+#: argument happens to be one. The gate is enforced where the argument is read, in
+#: :func:`_parse_type_expression`; a value with no argument list never reaches the
+#: allowance at all, which is also what keeps a bare ``&Password1`` out.
 _TYPE_PRIMITIVES = frozenset(
     {
         # Rust
@@ -886,8 +902,39 @@ _TYPE_NESTING_LIMIT = 8
 #: one (``Base64``, ``Sha256``, ``Utf8``), and the digit test there exists to keep a
 #: real AWS session token — a bare CamelCase run of digits and letters — out. A
 #: value reaching this test has already had to parse as a type application, which
-#: no session token does.
+#: no session token does. **Where a digit is allowed is decided by
+#: :func:`_carries_a_non_primitive_digit`, not by this pattern**: the release is
+#: confined to the digit-free residual, so a digit-carrying name is read as a type
+#: only when it is a primitive.
 _TYPE_NAME = re.compile(r"[A-Z][A-Za-z0-9]*|[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*")
+
+#: One IDENTIFIER in a value, for the digit confinement below: a name may carry
+#: digits, and ``1`` alone (a const-generic argument) is deliberately not a match.
+_TYPE_NAME_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: The stems a CREDENTIAL WORD begins with, matched against a type application's
+#: BASE (agent review R1-2). A primitive argument is ordinary English in the
+#: languages that use primitives — ``any``, ``void``, ``object``, ``null``, ``int``
+#: — so an application whose base is spelled like a credential and whose argument is
+#: a bare primitive (``Pass<int>``, ``Secret<str>``, ``Token<void>``) is a
+#: passphrase, not an annotation. ``Pass`` is not a whole credential word, which is
+#: why the match is a STEM and not :func:`is_credential_name`.
+_CREDENTIAL_STEMS = (
+    "pass",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "credential",
+    "auth",
+    "login",
+    "apikey",
+)
+
+#: A qualified path with NO argument list: ``Sv::Secret``, ``collections::HashMap``.
+#: Used only to refuse a value that is a path and nothing else — the spelling a person
+#: reaches for when a credential carries ``::`` (agent review R1-1).
+_TYPE_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+")
 
 
 #: Qualifier words that make an otherwise ambiguous ``*_KEY``/``*_KEYS`` name a
@@ -1049,6 +1096,29 @@ def _repeats_its_own_name(value: str, name: str) -> bool:
     return value_norm in name_norm or name_norm in value_norm
 
 
+def _carries_a_non_primitive_digit(value: str) -> bool:
+    """Whether any NAME in ``value`` carries a digit without being a primitive.
+
+    The release is confined to the DIGIT-FREE residual, and this is the
+    enforcement of that half of the condition: a digit is read as a type's only
+    where it belongs to a primitive type name (``u8``, ``i32``, ``f64``), because
+    ``Option<Vec<u8>>`` is a real annotation and no human password is spelled
+    ``u8``. Everywhere else a digit is exactly what separates a chosen password
+    from a type spelling: ``Ident<Ident7>`` and ``Ident7<Ident>`` are released
+    WHOLE by an arm that ignores this, with no hit at all — the dangerous
+    direction, and one the corpus had no row for (agent review R1-1).
+
+    The cost is the false positive this re-admits, deliberately: ``Option<Sha256>``
+    is a real type name and is now masked. That is the safe direction — the same
+    class the clause exists to *reduce* rather than to eliminate — and masking a
+    type is strictly better than releasing a credential.
+    """
+    for token in _TYPE_NAME_TOKEN.findall(value):
+        if any(char.isdigit() for char in token) and token not in _TYPE_PRIMITIVES:
+            return True
+    return False
+
+
 def _is_type_leaf_name(segment: str) -> bool:
     """Whether a path segment is spelled as a TYPE name rather than a word.
 
@@ -1136,27 +1206,91 @@ def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple
     if index < end and text[index] == "<":
         index += 1
         argument_is_a_type = False
+        argued = False
+        argument_names_are_types = True
         while index < end:
+            argument_start = index
             parsed, index, argument_is_a_type_here = _parse_generic_argument(
                 text, index, end, depth + 1
             )
             if not parsed:
                 return False, index, is_a_type_name
+            argued = True
             if argument_is_a_type_here:
                 argument_is_a_type = True
+            elif not _is_type_leaf_name(text[argument_start:index]):
+                # A lowercase word that is NOT a type name: ``Foo<word>``. A
+                # PRIMITIVE is a type name here, which is how ``Vec<u8>`` passes —
+                # and the allowance is spent only where an argument list was
+                # actually parsed, which is what keeps ``Pass<int>`` out.
+                argument_names_are_types = False
             if index < end and text[index] == ",":
                 index += 1
                 continue
             if index < end and text[index] == ">":
                 index += 1
             break
+        if not argued or not argument_names_are_types:
+            # ``Foo<>`` (nothing to prove) or ``Foo<word>`` (a word is not a type):
+            # neither is an application, so neither is released.
+            return False, index, is_a_type_name
         if not argument_is_a_type:
             # ``Foo<word>`` — a generic application whose arguments are not
             # types. That spelling is exactly how a person writes a passphrase
             # with angle brackets in it, so it is NOT released.
             return False, index, is_a_type_name
-        is_a_type_name = True
+        # The BASE's own verdict is NOT overwritten here, and that is the second
+        # half of R1-1: forcing it True released a lowercase base (``foo<Bar>``,
+        # ``abc::def<Bar>``, ``Correcthorse<Battery7>``) under a strong credential
+        # name. Only the argument is new evidence; a generic spelling does not
+        # make a word-shaped base into a type.
     return True, index, is_a_type_name
+
+
+def _has_a_bare_primitive_argument(value: str) -> bool:
+    """Whether a generic argument is a BARE primitive word rather than a type name.
+
+    ``Vec<u8>`` and ``Map<string, string>`` have one; ``Option<Vec<u8>>`` does not
+    (its argument is the nested application ``Vec<u8>``), which is what keeps a real
+    annotation over a primitive released while ``Pass<int>`` is refused.
+    """
+    start = value.find("<")
+    if start < 0:
+        return False
+    depth = 0
+    arguments: list[list[str]] = [[]]
+    for char in value[start + 1 :]:
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            if depth == 0:
+                break
+            depth -= 1
+        elif char == "," and depth == 0:
+            arguments.append([])
+            continue
+        arguments[-1].append(char)
+    # Only a TOP-LEVEL argument counts. ``Option<Vec<u8>>`` has one argument — the
+    # nested application ``Vec<u8>`` — which is not a bare primitive, whereas
+    # ``Vec<u8>`` has the argument ``u8`` and ``Pass<int>`` the argument ``int``.
+    return any("".join(argument).strip() in _TYPE_PRIMITIVES for argument in arguments)
+
+
+def _base_is_a_credential_stem(base: str) -> bool:
+    """Whether a type application's BASE is spelled like a credential word.
+
+    Used for one decision only: whether a bare PRIMITIVE argument may be read as
+    proof of a type. ``Vec<u8>`` and ``Map<string, string>`` keep that reading; a
+    base a person reaches for when they choose a password — ``Pass``, ``Passwd``,
+    ``Secret``, ``Token``, ``Auth``, ``Login``, ``ApiKey`` — does not, because
+    ``Pass<int>`` is far more likely to be a chosen passphrase than an annotation,
+    and a credential released is worse than a type masked (agent review R1-2).
+
+    A stem match is deliberately blunt: it only ever REFUSES a release, so the cost
+    of a false hit is a masked type, which is the direction this clause trades in.
+    """
+    lowered = base.lower()
+    return any(lowered.startswith(stem) for stem in _CREDENTIAL_STEMS)
 
 
 def _is_type_expression(value: str) -> bool:
@@ -1186,10 +1320,42 @@ def _is_type_expression(value: str) -> bool:
     same residual class the neighbouring clauses already carry, and it is bounded
     by construction: no issuer's alphabet contains ``<`` or ``>`` (base64url, hex,
     JWT and UUID all exclude them), every vendor prefix is lowercase, and a
-    human-chosen password must additionally be spelled with capitals on both the
-    base and the argument and carry no digit, no symbol and no word break. A
-    credential that meets all of that is not distinguishable from a type by
+    human-chosen password must additionally be spelled with capitals on BOTH the
+    base and the argument and carry **no digit, no symbol and no word break**.
+    A credential that meets all of that is not distinguishable from a type by
     spelling at all, so it is recorded here rather than guessed at.
+
+    **The confinement is ENFORCED, not just documented** (agent review R1-1, R1-2).
+    Every condition the release is stated to have is a check this function runs,
+    because the first implementation documented four and enforced one: a digit on
+    either side of the angle brackets, a lowercase base, and a bare ``::`` path each
+    released the value WHOLE with NO hit at all. The conditions, in the order they
+    are checked:
+
+    * **no symbol** — the ``_TYPE_ALPHABET`` membership test below, and it is
+      necessary rather than sufficient: a symbol-less password is confined to the
+      alphabet too;
+    * **no digit** — :func:`_carries_a_non_primitive_digit`, which allows a digit
+      only inside a primitive name, so ``Option<Vec<u8>>`` still parses and
+      ``Ident<Ident7>`` does not;
+    * **no word break** — the base and every argument must each be a single
+      :data:`_TYPE_NAME` token, and the base's own verdict is no longer overwritten
+      by the generic that follows it (``foo<Bar>`` is a word, not a type);
+    * **no bare path** — a value that is a ``::`` path and NOTHING else is refused,
+      so ``Sv::Secret`` is not released; only an attached argument list
+      (``collections::HashMap``) is evidence enough.
+
+    A separate release sits underneath this clause and is NOT its doing: a value
+    carrying ``[``, ``]``, ``(`` or ``)`` is released earlier by the pre-existing
+    expressions clause — ``DB_PASSWORD=x(y)``, ``a[b]`` and ``P@ss(w)0rd`` are
+    released identically at base and head — which is the same
+    "the type alphabet is not a credential's alphabet" gap and is recorded here
+    rather than claimed away.
+
+    What remains released is therefore the digit-free, symbol-free, single-token,
+    application-or-bare-name spelling — and nothing wider. The price is taken in the
+    safe direction: a digit-carrying type name (``Option<Sha256>``) is now masked,
+    which is the false positive this clause *reduces* rather than one it eliminates.
     """
     if not value:
         return False
@@ -1200,6 +1366,39 @@ def _is_type_expression(value: str) -> bool:
         return False
     if not set(value) <= _TYPE_ALPHABET:
         return False
+    if _carries_a_non_primitive_digit(value):
+        return False
+    base = value.split("<", 1)[0]
+    if _base_is_a_credential_stem(base) and _has_a_bare_primitive_argument(value):
+        # ``Pass<int>``, ``Secret<str>``, ``Token<void>``: a credential-stem base
+        # whose argument is a bare ordinary word. The positional primitive allowance
+        # would release it, and the argument being English rather than a type name is
+        # the only difference between this spelling and ``Vec<u8>`` (agent review
+        # R1-2). A nested application as the argument (``Option<Vec<u8>>``) is not a
+        # bare primitive and is unaffected.
+        return False
+    if is_credential_name(value.split(chr(60), 1)[0]):
+        # The BASE is a credential WORD, whatever the arguments are (agent review
+        # R1-2): ``Pass<int>``, ``Pass<any>``, ``Token<void>``, ``Secret<str>``. A
+        # type's own base is never spelled as a credential word — ``Vec``, ``Option``,
+        # ``HashMap``, ``String`` and every custom type name are not — so this rejects
+        # the class the argument grammar alone cannot, and it does it on the base
+        # rather than on the argument, which is what keeps a real annotation over a
+        # primitive (``Vec<u8>``, ``Option<Vec<u8>>``) released.
+        return False
+    path = _TYPE_PATH_RE.fullmatch(value)
+    if path:
+        # A qualified path and NOTHING else: ``Sv::Secret``, ``collections::HashMap``.
+        # The conditions above do not reach this spelling (no digit, one token per
+        # segment, a type-shaped leaf), and a person writing a credential with a path
+        # separator reaches for exactly it, so the path must obey the MODULE-PATH
+        # CONVENTION to be a type: every segment but the leaf is lowercase (
+        # ``std::collections::HashMap``), because a namespace segment is never
+        # CamelCase. ``Sv::Secret`` and ``Camel::Word9`` violate it and mask
+        # (agent review R1-1); ``std::collections::HashMap`` keeps its corpus row.
+        segments = value.split("::")
+        if any(seg != seg.lower() for seg in segments[:-1]):
+            return False
     parsed, index, is_a_type_name = _parse_type_expression(value, 0, len(value), 0)
     return parsed and index == len(value) and is_a_type_name
 
