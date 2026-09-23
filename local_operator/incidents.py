@@ -443,14 +443,17 @@ def _update_failed_cause_sentence() -> str:
     one sentence would tell a reader to go looking for a handover that never occurred.
 
     IT NAMES NO NUMBER, and that is a correction rather than an omission (design
-    review round 1, D2). TWO arms publish this token with two different bounds — the
-    bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds) and the build DRAIN
-    (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) — so a sentence rendered from
-    the constant is wrong for one of them by construction: an update that spent a
-    quarter of an hour in the drain reported that it "did not finish within 5s". The
+    review round 1, D2). THREE arms publish this token with THREE different bounds —
+    the bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds), the build DRAIN
+    whose work went SILENT (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) and the
+    build drain that was HELD with work still in flight
+    (``types.BUILD_DRAIN_DWELL_S``, thirty minutes; ``process._abandon_move``'s dwell
+    arm, which is the second bound the drain can run out of) — so a sentence rendered
+    from any one constant is wrong for the other two by construction: an update that
+    spent half an hour in the dwell reported that it "did not finish within 5s". The
     bound is known at the only place that can name it, so it rides the incident's
     DETAIL (``RuntimeServer.note_update_failed`` renders it from the argument its
-    caller passed), and this sentence says the thing that is true of both arms.
+    caller passed), and this sentence says the thing that is true of every arm.
     """
     return (
         "the update to the build on disk did not finish within its bound; the runtime "
@@ -462,11 +465,13 @@ def update_failed_detail(pair: str, bound: float) -> str:
     """The detail a failed handover's incident carries: the pair, and the bound spent.
 
     A HELPER RATHER THAN AN INLINE JOIN, because the bound is the fact that was
-    silently wrong until design review round 1 (D2): the sentence names none (two arms
-    publish this token with two different bounds), so this is the ONLY place a reader
-    can learn which bound the runtime actually ran out of — 5 s for the bounded update
-    window, fifteen minutes for the build drain. ``bound`` of 0 means the caller did
-    not say, and then no number is claimed rather than a default being invented.
+    silently wrong until design review round 1 (D2): the sentence names none (three
+    arms publish this token with three different bounds), so this is the ONLY place a
+    reader can learn which bound the runtime actually ran out of — 5 s for the bounded
+    update window, fifteen minutes for a drain whose work went silent, thirty minutes
+    for a drain held with work still in flight (``types.BUILD_DRAIN_DWELL_S``).
+    ``bound`` of 0 means the caller did not say, and then no number is claimed rather
+    than a default being invented.
     """
     from local_operator.session.runtime.types import bound_text
 

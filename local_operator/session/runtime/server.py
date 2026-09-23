@@ -3962,8 +3962,41 @@ class RuntimeServer:
         Deduped like :meth:`set_busy`, and it matters more here: the drain calls
         this once, but a repeat signal or a second drain arm on the same runtime
         must not put a staged write and rename on the far side of a signal.
+
+        A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
+        rule one rung over (its NIT 4) and is required here for the same reason plus
+        one of its own. The reason is the window's: without it the record keeps
+        describing an abandoned move after the runtime has started a NEW one, so a
+        fleet row reads "update failed" about a session that is moving right now.
+
+        The reason it has one of its own is that the record's OTHER half,
+        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
+        keeps the ordinary build phrase by design (``process._abandon_move``), so
+        that field is the only thing separating a handover still waiting from one
+        that was given up, and its readers are the fleet surfaces that print the two
+        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
+        row). A stale failure left beside a freshly latched drain makes that pair
+        report the new attempt as the abandoned one. Cleared here rather than only on
+        a change of phrase, because the second attempt at the same build announces
+        the same words — the case that matters would otherwise be the one it got
+        wrong.
+
+        WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
+        ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
+        the bound it spent on the detail), which is the account an issue report
+        cites, and the field is re-published if THIS attempt fails too. The handle's
+        own memo is NOT part of that account — it is the WINDOW rung's
+        (``serving.ServingSessionHandle.note_update_failed``, written by
+        ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
+        rung's ONE permitted retry: the pair is refused only once ``_update_retried``
+        already holds it, so the memo stops a THIRD attempt rather than "re-opening a
+        window that burned its bound") and the drain rung deliberately does
+        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
         """
-        if self._leaving == phrase:
+        superseded = bool(phrase) and bool(self._record.update_failed)
+        if superseded:
+            self._record.update_failed = ""
+        if self._leaving == phrase and not superseded:
             return
         self._leaving = phrase
         self._record.leaving = phrase
