@@ -60,6 +60,7 @@ import yaml
 
 from local_operator import keymap as _keymap
 from local_operator.model.effort import EFFORT_ORDER
+from local_operator.providers.failover import SUPPORTED_EFFORTS
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -3402,17 +3403,37 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
                 # accepts `gpt-4o`, which `expand_fallback_targets` then drops
                 # for having no provider. That is this bug wearing a different
                 # hat: stored, confirmed, and routing nothing. It still gates
-                # the mapping form, whose label carries the effort a string
-                # hop may not; `validate_hop` — the predicate the page's hop
-                # editor and the server's `_write_cascade` already share — is
-                # what a string hop is held to, so the three writers cannot
-                # disagree about what a hop is.
+                # the mapping form's provider/model presence, whose label
+                # carries the effort a string hop may not; `validate_hop` —
+                # the predicate the page's hop editor and the server's
+                # `_write_cascade` already share — is what a string hop is
+                # held to. The mapping arm's `effort` value below is the rest
+                # of that shape's contract.
                 if not _hop_label(hop):
                     return f"chain {key!r} has a hop that is not provider/model: {hop!r}"
                 if isinstance(hop, str):
                     problem = validate_hop(hop)
                     if problem is not None:
                         return f"chain {key!r}: {problem}"
+                elif isinstance(hop, Mapping):
+                    # `_hop_label` above only checks provider/model are
+                    # non-empty; it does not read `effort` at all, so a
+                    # mapping hop with an unsupported effort passed it,
+                    # was stored, and reported as success — the same
+                    # silent-drop this whole setting exists to refuse, one
+                    # shape over. `_normalize_chain_entry` (the runtime's
+                    # own reader) already rejects the same value with a
+                    # warning at materialization; holding it here instead
+                    # of there is what makes the refusal visible to the
+                    # user who typed it, at the command that caused it.
+                    raw_effort = hop.get("effort")
+                    if raw_effort is not None and str(raw_effort).strip().lower() not in (
+                        SUPPORTED_EFFORTS
+                    ):
+                        return (
+                            f"chain {key!r}: effort {raw_effort!r} is not one of "
+                            f"{', '.join(sorted(SUPPORTED_EFFORTS))}"
+                        )
         return None
     return None
 

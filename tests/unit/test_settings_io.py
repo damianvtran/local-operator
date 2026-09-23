@@ -2337,6 +2337,12 @@ class TestConfigEditStoresACascadeAsAMapping:
             '{"default":["gpt-4o"]}',
             '{"default":["anthropic/claude-opus-5 (low)"]}',
             '{"":["anthropic/claude-opus-5"]}',
+            # The mapping-hop shape (F8, round 2): `_hop_label` only checks
+            # `provider`/`model` are non-empty strings, so this passed it,
+            # was stored, and reported success — `_normalize_chain_entry`
+            # then dropped it with a log warning nobody sees at the command
+            # line, and `expand_fallback_targets` routed nothing.
+            '{"default":[{"provider":"anthropic","model":"claude-opus-5","effort":"bogus"}]}',
         ):
             code = config_edit_command(argparse.Namespace(key="retry.fallbackChains", value=bad))
             assert code == 1, f"{bad!r} was accepted: {capsys.readouterr()}"
@@ -2344,3 +2350,55 @@ class TestConfigEditStoresACascadeAsAMapping:
             assert (
                 stored == good
             ), f"{bad!r} was refused but still overwrote the cascade: {stored!r}"
+
+    def test_a_mapping_hop_with_an_unsupported_effort_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """F8 (round 2): the mapping-hop arm must check `effort` too.
+
+        `_hop_label`, which gates a structured hop, only checks that
+        `provider` and `model` are non-empty strings — it does not read
+        `effort` at all. Before this fix, `{"provider": ..., "model": ...,
+        "effort": "bogus"}` passed `validate`, was reported as stored, and
+        then `_normalize_chain_entry` (the runtime's own reader) dropped it
+        with a log warning nobody sees at the command line, so
+        `expand_fallback_targets` resolved zero routes for it — byte-for-byte
+        the defect this PR exists to close, one hop shape over from F1's
+        string-array repro.
+
+        Resolved through `RetrySettings.from_settings` and
+        `expand_fallback_targets` rather than re-reading the raw config,
+        matching `test_the_stored_cascade_resolves_for_the_failover_layer`
+        above: the contract is "a configured hop routes somewhere", not
+        merely "is a dict".
+        """
+        import argparse
+        import json as _json
+
+        from local_operator.cli import config_edit_command
+        from local_operator.providers.failover import (
+            RetrySettings,
+            expand_fallback_targets,
+            resolve_chain,
+        )
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        bad = {"default": [{"provider": "anthropic", "model": "claude-opus-5", "effort": "bogus"}]}
+        code = config_edit_command(
+            argparse.Namespace(key="retry.fallbackChains", value=_json.dumps(bad))
+        )
+        assert code == 1, capsys.readouterr()
+
+        raw = ConfigManager(tmp_path).get_config_value("retry")
+        stored_chains = (raw or {}).get("fallbackChains") or {}
+        assert not stored_chains, f"refused edit still wrote a cascade: {stored_chains!r}"
+        # Even if it HAD been written, prove it resolves to nothing — the
+        # silent-drop this whole setting exists to refuse.
+        chains = RetrySettings.from_settings({"retry": {"fallbackChains": bad}}).fallback_chains
+        selector = "openai/gpt-5"
+        chain = resolve_chain(selector, chains)
+        assert chain is not None, "no chain resolved for the configured selector"
+        assert expand_fallback_targets(selector, chain) == []
