@@ -4314,9 +4314,7 @@ def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
     else:
         # Python 3.11+ can reject integer literals above its digit limit during
         # JSON decoding; that is malformed stamp data and must trigger a rerun.
-        stamp_path.write_text(
-            '{"completed_at":' + "9" * 5000 + "}", encoding="utf-8"
-        )
+        stamp_path.write_text('{"completed_at":' + "9" * 5000 + "}", encoding="utf-8")
 
     first_count = len(calls)
     session_factory._run_store_maintenance(
