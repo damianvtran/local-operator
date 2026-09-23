@@ -359,12 +359,15 @@ async def test_a_trailing_space_does_not_turn_a_flag_into_a_loop_start(arg: str)
 @pytest.mark.parametrize(
     ("command", "arg", "supported"),
     [
-        # The `supported` cell pins the form the refusal TEACHES, which is the
-        # flag spelled in its own command form. The goal pair asserts the flags
-        # the sentence now names — all of them, because four flags share one
-        # notice row and the verbs live in the palette and picker rows instead
-        # (see `_FLAG_FORMS`).
-        ("goal", "--stop", "/goal --clear/--done/--history"),
+        # The `supported` cell pins the form the refusal TEACHES, so it has to be
+        # the string the sentence actually carries. For `/goal` that is the
+        # clause after `sets it` — the flags BARE, `/goal` named only once at the
+        # head — because four flags now share one notice row and each spelling
+        # its own command would not fit the wrap budget the sentence is cut to
+        # (see `_FLAG_FORMS`); `/loop` teaches each form in full, and its cells
+        # say so. A cell that re-spelled the command here asserted a substring
+        # the sentence never contained.
+        ("goal", "--stop", "--clear/--done/--history"),
         ("goal", "--cli", "/goal <text> sets it"),
         ("loop", "--clearx", "/loop <n> runs n turns"),
         ("loop", "--stopx", "/loop --stop cancels"),
