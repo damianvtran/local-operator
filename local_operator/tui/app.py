@@ -38588,7 +38588,7 @@ class OperatorApp(App[None]):
         # user picks between them. 67 composed cells against the 74 ceiling.
         lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
-        lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
+        lines.append(_key_row("ctrl/cmd+d", "empty: quit; draft: delete forward"))
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
