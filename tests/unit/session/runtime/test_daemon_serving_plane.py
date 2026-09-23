@@ -554,7 +554,16 @@ async def test_a_binding_guest_is_live_but_not_yet_authoritative(
     gate's own window with everything else healthy: liveness is admitted, a
     session op is refused with a sentence rather than executed or dropped, and the
     same op is admitted once the sync has landed.
+
+    THE OFF-LOOP FALLBACK IS DELIBERATELY BLINDED HERE. A stalled on-loop bind no
+    longer stalls the sync at all — past ``_ONLOOP_BIND_GRACE_S`` the runtime
+    binds off-loop and the guest is authoritative in ~100 ms, which is the
+    improvement and is covered by its own test in ``test_server``. This test is
+    about the ADMISSION window, so it keeps a handle that cannot take that path
+    (the shape the TUI kind has), and the gate's window is the whole of what is
+    left on that shape.
     """
+    monkeypatch.delattr(ServingSessionHandle, "subscribe_frontend_nowait")
     real_subscribe_frontend = ServingSessionHandle.subscribe_frontend
 
     def slow_frontend(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -590,7 +599,10 @@ async def test_a_binding_guest_is_live_but_not_yet_authoritative(
         runtime.close()
         await asyncio.wait_for(session.dispose(), timeout=20)
 
-    assert seen["welcome"].get("op") == "projection", seen
+    # The guest asks for the canonical frontend AND the event stream, so its
+    # welcome is the identity-only one (``_slim_welcome_frame``); it is a welcome
+    # either way, and what this walk is about is the frames after it.
+    assert seen["welcome"].get("op") in ("projection", "welcome"), seen
     # LIVENESS IS ADMITTED while the bind is still in flight.
     assert seen["ping"].get("detail") == "pong", seen
     # A SESSION OP IS REFUSED, through the ordinary error frame, with the sentence
