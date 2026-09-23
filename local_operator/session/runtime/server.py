@@ -3974,8 +3974,31 @@ class RuntimeServer:
         Deduped like :meth:`set_busy`, and it matters more here: the drain calls
         this once, but a repeat signal or a second drain arm on the same runtime
         must not put a staged write and rename on the far side of a signal.
+
+        A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
+        rule one rung over (its NIT 4) and is required here for the same reason plus
+        one of its own. The reason is the window's: without it the record keeps
+        describing an abandoned move after the runtime has started a NEW one, so a
+        fleet row reads "update failed" about a session that is moving right now.
+
+        The reason it has one of its own is that the record's OTHER half,
+        ``update_failed``, is read as a PAIR with this field by every surface that has
+        to tell a handover that is still waiting from one that was given up
+        (``tui.app.drain_notice_for``; the abandon keeps this phrase by design, see
+        ``process._abandon_move``). A stale failure left beside a freshly latched
+        drain makes that pair say "given up" about a drain that is refusing work, so
+        the pair has to mean exactly one thing: **the handover this record's phrase
+        announces, and whether it was given up**. Cleared here rather than only on a
+        change of phrase, because the second attempt at the same build announces the
+        same words — the case the pair exists for would otherwise be the one it got
+        wrong. Nothing is lost: the failure itself is an incident row
+        (``note_update_failed``'s ``UPDATE_FAILED_CAUSE``) and the handle's own memo,
+        and the field is re-published if THIS attempt fails too.
         """
-        if self._leaving == phrase:
+        superseded = bool(phrase) and bool(self._record.update_failed)
+        if superseded:
+            self._record.update_failed = ""
+        if self._leaving == phrase and not superseded:
             return
         self._leaving = phrase
         self._record.leaving = phrase
