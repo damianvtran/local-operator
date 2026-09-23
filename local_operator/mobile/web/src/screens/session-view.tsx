@@ -46,7 +46,7 @@ import {
 } from "../store";
 import type { SessionProjection } from "../types";
 
-/** The header strip's control box, and the HIT SLOP that makes it reachable.
+/** The header strip's control box, and the HIT SLOP that widens its target.
 
     The strip is one compact line, so each control is a 32px box (`min-h-8`
     `min-w-8`) — the size the back button has always been. 32px is below the
@@ -54,12 +54,18 @@ import type { SessionProjection } from "../types";
     are `min-h-11`), and a small target is a real cost on a phone even when the
     glyph is legible.
 
-    The fix is SLOP, not a bigger box: an absolutely-positioned pseudo-element
-    extends the touchable area 6px each side (`-inset-1.5`; 32 + 12 = 44) while
-    the painted strip keeps its height, so the header does not grow and the
-    layout the composer sits under does not move. Applied to every control in
-    the strip — the back button included — so the three cannot end up with
-    different hit areas (design round 1, D3).
+    The fix is SLOP, not a taller box: an absolutely-positioned pseudo-element
+    extends the touchable area 6px each side while the painted strip keeps its
+    height, so the header does not grow and the layout the composer sits under
+    does not move.
+
+    THE TARGET IS NOT A CLEAN 44px, and the measured truth is stated rather than
+    the arithmetic (design round 2, D7): the controls sit `gap-2` (8px) apart, so
+    two 6px slops OVERLAP by 4px between neighbours and the effective horizontal
+    target is ~40px, not 44 (the vertical IS 44). The overlap is not a tap-steal
+    — the later sibling wins its 4px — and 40px is still a large improvement on
+    32. Recorded because the earlier version of this comment claimed "32 + 12 =
+    44", which the rendered pixels do not support.
 
     One constant rather than the classes repeated inline, for the reason every
     shared class here is shared: three copies drift. */
