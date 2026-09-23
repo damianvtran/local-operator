@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 
 from local_operator.context_files import (
     _read_head,
+    _walks_past_git_root,
     discover_context_files,
     load_repo_guidance,
     render_context_files,
@@ -52,17 +53,162 @@ def test_claude_md_stands_in_when_agents_md_absent(tmp_path: Path) -> None:
 
 
 def test_stops_at_git_root(tmp_path: Path) -> None:
+    # The file sits in the repo's real PARENT, the next directory up the walk:
+    # a file in a child of the repo is never on the upward path, so it cannot
+    # tell a walk that stops from one that keeps going. tmp_path is outside
+    # the fixture home, so this pins the stop for a repo outside home.
+    (tmp_path / "AGENTS.md").write_text("outside repo\n")
     repo = _make_repo(tmp_path)
     (repo / "AGENTS.md").write_text("in repo\n")
-    outside = repo / "above"
-    outside.mkdir()
-    (outside / "AGENTS.md").write_text("outside repo\n")
-    # A cwd INSIDE the repo: the repo root is the boundary.
     inner = repo / "pkg"
     inner.mkdir()
     files = discover_context_files(inner)
-    assert len(files) == 1
-    assert files[0].read_text() == "in repo\n"
+    assert [f.read_text() for f in files] == ["in repo\n"]
+
+
+def test_nested_repo_under_home_loads_the_folder_above_it_but_not_home(
+    tmp_path: Path,
+) -> None:
+    home = Path.home()
+    (home / "AGENTS.md").write_text("home\n")
+    domain = home / "domain"
+    repo = _make_repo(domain)
+    (domain / "AGENTS.md").write_text("domain\n")
+    (repo / "AGENTS.md").write_text("repo\n")
+    inner = repo / "src"
+    inner.mkdir()
+    files = discover_context_files(inner)
+    # Farthest first. Home's own file is user scope, not guidance for this
+    # repo, so the walk stops just below home.
+    assert [f.read_text() for f in files] == ["domain\n", "repo\n"]
+
+
+def test_repo_at_home_still_includes_homes_own_guidance(tmp_path: Path) -> None:
+    home = Path.home()
+    (home / ".git").mkdir()
+    (home / "AGENTS.md").write_text("home\n")
+    inner = home / "src"
+    inner.mkdir()
+    (inner / "AGENTS.md").write_text("src\n")
+    files = discover_context_files(inner)
+    assert [f.read_text() for f in files] == ["home\n", "src\n"]
+
+
+@pytest.mark.parametrize(
+    ("guided", "repo_parts"),
+    [
+        # A tool's user-scope file: Codex reads ~/.codex/AGENTS.md; lop does not.
+        ((".codex",), (".codex", "worktrees", "repo")),
+        # An in-repo worktree folder: the main checkout may be on another branch.
+        (("dom", "main"), ("dom", "main", ".worktrees", "repo")),
+    ],
+    ids=["tool-folder", "in-repo-worktree"],
+)
+def test_repo_under_a_hidden_folder_in_home_stops_at_its_git_root(
+    tmp_path: Path, guided: tuple[str, ...], repo_parts: tuple[str, ...]
+) -> None:
+    home = Path.home()
+    (home / "AGENTS.md").write_text("home\n")
+    above = home.joinpath(*guided)
+    above.mkdir(parents=True)
+    (above / "AGENTS.md").write_text("above\n")
+    repo = home.joinpath(*repo_parts)
+    repo.mkdir(parents=True)
+    (repo / ".git").write_text("gitdir: elsewhere\n")  # the worktree/submodule form
+    (repo / "AGENTS.md").write_text("repo\n")
+    files = discover_context_files(repo)
+    # A dot-prefixed folder below home keeps the stop at the git root.
+    assert [f.read_text() for f in files] == ["repo\n"]
+
+
+def test_no_git_root_under_home_includes_homes_own_guidance(tmp_path: Path) -> None:
+    home = Path.home()
+    (home / "AGENTS.md").write_text("home\n")
+    notes = home / "notes"
+    notes.mkdir()
+    (notes / "AGENTS.md").write_text("notes\n")
+    files = discover_context_files(notes)
+    assert [f.read_text() for f in files] == ["home\n", "notes\n"]
+
+
+def test_repo_containing_home_stops_at_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("repo above home\n")
+    home = repo / "users" / "ben"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    (home / "AGENTS.md").write_text("home\n")
+    work = home / "work"
+    work.mkdir()
+    (work / "AGENTS.md").write_text("work\n")
+    files = discover_context_files(work)
+    # Home is reached before the repo root, so it stays the boundary. omp walks
+    # on to the repo root here; lop deliberately does not.
+    assert [f.read_text() for f in files] == ["home\n", "work\n"]
+
+
+def test_symlinked_home_still_stops_a_no_git_walk_at_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "AGENTS.md").write_text("above home\n")
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    link = tmp_path / "home-link"
+    link.symlink_to(real_home, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(link))
+    monkeypatch.setenv("USERPROFILE", str(link))
+    (real_home / "AGENTS.md").write_text("home\n")
+    notes = real_home / "notes"
+    notes.mkdir()
+    files = discover_context_files(notes)
+    # The walk visits resolved directories, so an unresolved symlinked home
+    # never matched one and the walk ran on past it.
+    assert [f.read_text() for f in files] == ["home\n"]
+
+
+@pytest.mark.parametrize(
+    ("root", "home", "expected"),
+    [
+        (PureWindowsPath(r"c:\users\ben\Dom\Repo"), PureWindowsPath(r"C:\Users\Ben"), True),
+        (PureWindowsPath(r"c:\users\ben"), PureWindowsPath(r"C:\Users\Ben"), False),
+        (PureWindowsPath(r"D:\src\repo"), PureWindowsPath(r"C:\Users\Ben"), False),
+        (
+            PureWindowsPath(r"\\srv\share\ben\dom\r"),
+            PureWindowsPath(r"\\SRV\Share\Ben"),
+            True,
+        ),
+        (PureWindowsPath(r"C:\Users\Ben\.codex\wt\r"), PureWindowsPath(r"C:\Users\Ben"), False),
+        (PurePosixPath("/home/ben/dom/repo"), PurePosixPath("/home/ben"), True),
+        (PurePosixPath("/home/ben2/repo"), PurePosixPath("/home/ben"), False),
+        (PurePosixPath("/home/Ben/dom/repo"), PurePosixPath("/home/ben"), False),
+        (PurePosixPath("/home"), PurePosixPath("/home/ben"), False),
+        (PurePosixPath("/home/ben"), PurePosixPath("/home/ben"), False),
+        (PurePosixPath("/home/ben/dom/.worktrees/x"), PurePosixPath("/home/ben"), False),
+        (None, PurePosixPath("/home/ben"), False),
+    ],
+    ids=[
+        "windows-mixed-case-nested",
+        "windows-root-is-home-in-other-case",
+        "windows-other-drive",
+        "windows-unc-mixed-case",
+        "windows-hidden-component",
+        "posix-nested",
+        "posix-sibling-prefix",
+        "posix-case-sensitive",
+        "posix-root-above-home",
+        "posix-root-is-home",
+        "posix-hidden-component",
+        "no-git-root",
+    ],
+)
+def test_walks_past_git_root_by_path_semantics_not_by_platform(
+    root: PurePath | None, home: PurePath, expected: bool
+) -> None:
+    # Pure paths only, so the Windows rows run on every OS.
+    assert _walks_past_git_root(root, home) is expected
 
 
 def test_no_git_root_stops_at_home(tmp_path: Path) -> None:

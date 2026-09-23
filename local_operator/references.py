@@ -155,7 +155,7 @@ REFERENCE_BLOCK_CLOSE = "</operator-references>"
 
 #: Kill switch, read PER CALL and never cached at import. Two precedents, and
 #: both are deliberate: ``LOCAL_OPERATOR_CONTEXT_FILES``
-#: (``context_files.py:344``) supplies the exact string vocabulary matched
+#: (``context_files.py:378``) supplies the exact string vocabulary matched
 #: below, and ``_internal_read_limit`` (``builtin.py:2638-2654``) supplies the
 #: per-call discipline — its docstring says why, "so the override can be set
 #: after this module is imported". Env-only by design: neither precedent is in
@@ -1068,7 +1068,7 @@ def _file_payload_of(path: Path, limit: int, shown: str) -> tuple[str, dict[str,
 def _shown(path: Path, cwd: str) -> str:
     """``path`` relative to ``cwd``, absolute only when it lies outside.
 
-    Mirrors ``context_files.py:591-593``, the established shape for this exact
+    Mirrors ``context_files.py:632-634``, the established shape for this exact
     element, and the design's §2.3 example (``path="src/app.py"``). Three
     reasons, and the first is the one that compounds: this string is PERSISTED
     and re-sent on every turn of the session, so an absolute path bills its
