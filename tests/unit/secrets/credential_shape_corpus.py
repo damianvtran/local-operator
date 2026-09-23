@@ -206,8 +206,19 @@ COUNT_QUALIFIER_NAMES: tuple[str, ...] = (
     "MY_PAGE_ACCESS_TOKEN",
 )
 
+
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
+def _secret_run(specification: str) -> str:
+    """The documented way to hand a stored secret to a child, assembled from parts.
+
+    A helper rather than a literal because this file is read by agents THROUGH the
+    pass it describes: "``--secret`` followed by a value" is exactly the shape that
+    pass rewrites, so the flag and its argument are never adjacent in this SOURCE.
+    """
+    return "lop secret run " + "--" + "secret " + specification + " -- npm publish"
+
+
 POSITIVE_CASES: tuple[Case, ...] = (
     # --- added in round 2: the leaks the original corpus did not spell ---------
     # Every one of these was published at some point in this PR's own history, and
@@ -664,6 +675,34 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case(
         "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material",
         "the same with a run shorter than the floor before the break: still masked",
+    ),
+    # --- 2026-09-22: the VALUE side of the flag-NAME judgement ----------------
+    # The reported failure is a flag's argument that IS a store NAME being masked.
+    # The judgement that replaced the credential-word tail check releases the NAME
+    # spelling ONLY, so these are the arms it must not reach — each is a value a
+    # reader hands the same flags, and each is byte-identical at ``origin/main``.
+    # The two underscore-carrying rows are what a widening that dropped the CASE
+    # requirement would eat, which is why they are here rather than left to a
+    # differential (see ``_is_a_name_in_the_store_grammar``).
+    Case(
+        "--token " + "ghp_AbCd1234EfGhIjKlMnOpQr",
+        "an issuer token under the token flag: lower case keeps it a VALUE",
+    ),
+    Case(
+        "--secret " + IDENTIFIER_ARM_VALUES[0][1],
+        "a digit-free underscore phrase: the R1-1 class in a flag position",
+    ),
+    Case(
+        "--password " + IDENTIFIER_ARM_VALUES[2][1],
+        "a digit-carrying underscore phrase: the same class, with a digit",
+    ),
+    Case(
+        "--api-key " + "hunter" + "2" + "xyz",
+        "a single unseparated token: no separator, so no NAME",
+    ),
+    Case(
+        "--token=" + "dGhp" + "cyBpcyBhIHRva2Vu=",
+        "a padded base64 flag value: case and a symbol keep it a VALUE",
     ),
 )
 
@@ -1159,6 +1198,60 @@ NEGATIVE_CASES: tuple[Case, ...] = (
             f"the count trap under the six-character escape {escape}",
         )
         for escape in ("\\u2028", "\\u000a")
+    ),
+    # --- 2026-09-22: a secret NAME in a credential-flag position --------------
+    # The reported failure, measured on the installed build: the command the
+    # credentials guide teaches, run with a store entry named after the SYSTEM it
+    # belongs to (the tail is USERNAME, which is not one of the credential words
+    # the guard used to require). Every tool result masked that name, so the script
+    # an agent then authored from the displayed text asked the store for a secret
+    # literally named ``[redacted]``. It cost no incident — a mask is not an
+    # escalation — which is why only the workflow caught it. Joined from its
+    # segments, like the 2026-09-19 row above, so no literal in this SOURCE is a
+    # flag VALUE.
+    Case(
+        _secret_run("MINERVA_UI_NPROD_USERNAME --secret MINERVA_UI_NPROD_USERNAME"),
+        "the guide's own publish command: a store NAME under the flag, twice",
+    ),
+    Case(
+        "--secret " + "MINERVA_UI_NPROD_USERNAME",
+        "a bare store NAME after the secret flag: the spelled-alone case",
+    ),
+    Case(
+        "--token " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the token flag: the argument position decides",
+    ),
+    Case(
+        "--password " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the password flag: the same",
+    ),
+    Case(
+        "--api-key " + "MINERVA_UI_NPROD_USERNAME",
+        "a store NAME under the api-key flag: the same",
+    ),
+    Case(
+        "--secret=" + "MINERVA_UI_NPROD_USERNAME",
+        "the = spelling of the same argument: one verdict, whichever binds it",
+    ),
+    Case(
+        _secret_run("MINERVA_UI_NPROD_USERNAME=MINERVA_UI_NPROD_STORE"),
+        "the two-part form whose right half is not a credential word either",
+    ),
+    Case(
+        "cat publish.sh" + "\n" + _secret_run("OS_PROD2_ADMIN_HOST"),
+        "a cat of the script the agent authored from the displayed text",
+    ),
+    Case(
+        "grep -n secret publish.sh" + "\n" + "4:" + _secret_run("OS_PROD2_ADMIN_HOST"),
+        "a grep rendering of the same line",
+    ),
+    # The residual, pinned rather than left to a differential: this spelling IS a
+    # store entry's name, and an arm that reads the argument by shape cannot tell it
+    # from a credential someone chose in caps. Released deliberately; the value side
+    # above is what keeps the release narrow.
+    Case(
+        "--token " + "ABC_123_XYZ",
+        "the accepted residual: an all-caps underscore token is read as a NAME",
     ),
 )
 

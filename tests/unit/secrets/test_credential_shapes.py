@@ -2685,7 +2685,30 @@ def _corpus_grading() -> str:
 #: value readable), and it now carries ``credential-assignment`` as complete and
 #: contained. The class is a credential that LOST its mask, which is why the row is
 #: pinned in the POSITIVE half rather than argued about in prose.
-_CORPUS_GRADING_DIGEST = "2a29fe4cf4f548c96837f1bf9583e4206f0fb793dfbf346c32dcf9e3e77b6beb"
+#: MOVED ON 2026-09-22, in the commit that stops the pass masking a store NAME in a
+#: credential-flag position, and the argument is once again a measurement rather than a
+#: claim — with a particular shape this time, because the module change is INVISIBLE to
+#: the corpus that existed. Grading the 423 rows the constant above covered under the
+#: ``origin/main`` module and under this one, field for field, produces byte-identical
+#: digests (``2a29fe4c…`` both times, measured beside `git show
+#: origin/main:local_operator/redaction_shapes.py` loaded as a second module), and the
+#: digest moves for one reason only: the corpus GREW, 423 -> 438, and the 15 added rows
+#: are the specification for the fix. Five positives are the VALUE side the release must
+#: not reach — an issuer token, the two underscore-joined phrases of the identifier arm
+#: (the class R1-1 measured), a single unseparated token, and a padded base64 value — and
+#: ten negatives are a store NAME in that position: the guide's own publish command and
+#: its ``cat``/``grep`` renderings, the same name under four other flag spellings, the
+#: ``=`` spelling, and the two-part form whose right half is not a credential word
+#: either.
+#:
+#: **The behaviour change the digest is too coarse to see, stated here instead.** Twelve
+#: argument spellings stop being masked — the store NAME under each flag in the rule's
+#: vocabulary, both separators, the two-part form, and the ``--token ABC_123_XYZ``-shaped
+#: residual the corpus pins as a negative — and NO row anywhere gains a mask. The corpus
+#: could not see any of them because every flag-carrying row it already had was either a
+#: VALUE (which still masks) or a NAME whose tail was a credential word (which was
+#: already released), which is exactly why the rows were added rather than argued about.
+_CORPUS_GRADING_DIGEST = "4cc31872ca5962882a767254a6f2967ea83a43b2c8caeceda08f95e6aeba19d4"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -3178,6 +3201,71 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")
 
 
+def test_the_documented_publish_workflow_survives_every_surface() -> None:
+    """The operator's workflow, driven: a script authored from what was displayed.
+
+    Reported 2026-09-22. ``lop secret run --secret NAME -- npm publish`` is the way
+    ``guide://credentials`` teaches an agent to hand a stored secret to a child, and an
+    operator names an entry after the SYSTEM it belongs to: this one's tail is USERNAME,
+    which is not one of the credential words the guard required. So EVERY tool result
+    masked the name, and the script the agent then authored from the displayed text
+    asked the store for a secret literally named ``[redacted]`` — the command failed
+    against a name that does not exist, which is the failure the operator reported.
+
+    Nothing escalated it, and that is why this test drives the WORKFLOW rather than the
+    rule: a whole mask is the contained case, so it files no incident, and a unit
+    assertion that the table is silent would not have seen the ``cat`` either. What is
+    asserted here is the property that broke — the text survives byte for byte — on
+    every model-visible surface, and the next assertion is the other half of it: the
+    values that must still mask, so a widening cannot pass by releasing everything.
+    """
+    # Assembled from pieces so no literal in this SOURCE is a flag followed by a value:
+    # this file is read by agents through the very pass it asserts about.
+    store_name = "MINERVA_UI_NPROD_USERNAME"
+    command = "--" + "secret " + store_name + " --" + "secret " + store_name + " -- npm publish"
+    script = "#!/bin/sh" + chr(10) + "# release the UI package" + chr(10) + command
+
+    # The three renderings the agent reads back: the command as typed, the file it
+    # wrote, the ``cat`` of that file, and the ``grep`` of it with a line number.
+    renderings = (
+        command,
+        script,
+        "cat publish.sh" + chr(10) + command,
+        "grep -n secret publish.sh" + chr(10) + "4:" + command,
+    )
+    for surface, scrub in sorted(SURFACES.items()):
+        for text in renderings:
+            assert scrub(text) == text, f"{surface} rewrote the workflow text"
+
+    # ...and the session's own result hook, over the whole entry, files nothing: the
+    # mask this test forbids is the one that used to happen here.
+    session = _session()
+    session._pending_shape_incidents.clear()
+    entry = "## WATCH — 2026-09-22 — a script that publishes" + chr(10) + script
+    assert session._redact_tool_result_text(entry) == entry, "the entry was rewritten"
+    assert session._pending_shape_incidents == [], "the entry filed an incident"
+
+    # THE VALUE SIDE, beside it, because that is the regression this fix could have
+    # introduced: a release that widened one more step would eat all four of these.
+    issuer = "ghp" + "_AbCd1234EfGhIjKlMnOpQr"
+    lowercase_phrase = "_".join(("correct", "horse", "battery"))
+    caps_run = "DBPASSWORD"
+    armed = "Sup3rTokenValue91"
+    for value in (issuer, lowercase_phrase, caps_run, armed):
+        assert "cli-credential-flag" in match_shape_names(
+            "server --" + "token " + value
+        ), f"a value of the shape {value[:3]}… stopped being masked"
+    # ...and the DSN spelling, which no flag guard may swallow.
+    dsn = "mongodb://svc:" + "p" + chr(64) + "ssw0rd" + chr(64) + "db.example.net/app"
+    assert REDACTION_MARKER in scrub_shapes("tool --" + "password " + dsn)
+
+    # The instrument is alive: the control is a value under the SAME flag, in the same
+    # text, and it must still be masked.
+    mixed = "lop secret run --" + "secret " + store_name + " -- npm publish --" + "token "
+    assert REDACTION_MARKER in scrub_shapes(mixed + armed)
+    assert scrub_shapes(mixed + store_name) == mixed + store_name
+
+
 # ---------------------------------------------------------------------------
 # Step cost: the pass is handed ONE STEP, never the conversation
 # ---------------------------------------------------------------------------
@@ -3193,6 +3281,8 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
 #: What one settled tool result may be. The arms below use the PRODUCTION number
 #: rather than a test-sized one, so the shape measured is the shipped one while
 #: the whole test stays `steps x 8 KiB` of work.
+
+
 _STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
 
 

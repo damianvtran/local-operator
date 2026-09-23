@@ -1272,42 +1272,107 @@ _ENV_NAME_SHAPED = re.compile(r"[A-Z][A-Z0-9_]*")
 #: :func:`_is_a_credential_flags_argument`.
 _ARGUMENT_BOUNDARIES = frozenset(" \t\r\n|;&")
 
+#: The flag names that carry a credential, in ONE place. Three readers depend
+#: on this vocabulary — the ``cli-credential-flag`` shape's own pattern, the
+#: flag-before-an-argument check and the ``--flag=VALUE`` check — and three
+#: copies of it drift, so a spelling added to one and not the others is a hole
+#: nobody is looking at.
+_CREDENTIAL_FLAG_WORDS = (
+    r"(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
+    r"client[-_]?secret|auth[-_]?token|access[-_]?token)"
+)
+
 #: A credential FLAG immediately before the argument under test, built from the flag
 #: rule's own vocabulary rather than retyped, in either separator spelling. The
 #: joined spelling is deliberately absent: it puts the whole argument inside the flag
 #: token, so an assignment can never begin inside it.
-_CLI_CREDENTIAL_FLAG_BEFORE = re.compile(
-    r"(?:^|[\s|;&])(?i:--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
-    r"client[-_]?secret|auth[-_]?token|access[-_]?token))\s+$"
-)
+_CLI_CREDENTIAL_FLAG_BEFORE = re.compile(r"(?:^|[\s|;&])(?i:--" + _CREDENTIAL_FLAG_WORDS + r")\s+$")
+
+#: The same flag read as an ASSIGNMENT's NAME. ``--secret=NAME`` binds the flag to
+#: its argument with ``=``, so the assignment rules read ``--secret`` as the name
+#: and the store's entry as the value; recognising the flag there is what gives the
+#: ``=`` spelling the verdict the space spelling gets from
+#: :func:`_flag_value_guard`.
+_CLI_CREDENTIAL_FLAG_NAME = re.compile(r"(?i)^--" + _CREDENTIAL_FLAG_WORDS + r"$")
+
+
+def _is_a_name_in_the_store_grammar(token: str) -> bool:
+    """Whether ``token`` is spelled the way a stored secret's NAME is spelled.
+
+    Caps, digits and underscores, with at least one underscore. That is the spelling
+    :func:`local_operator.variables.normalize_credential_key` collapses every
+    operator-typed key to — ``github token``, ``github-token`` and ``GITHUB_TOKEN``
+    are one entry named ``GITHUB_TOKEN`` — and the spelling ``lop secret run`` exports
+    into a child's environment.
+
+    **The underscore is the measured floor, not a stylistic preference.** A single run
+    of capitals is a credential someone chose, and agent review R1-1 measured that
+    dropping the separator released ``--password PASSWORD``, ``--token TOKEN``,
+    ``--api-key KEY``, ``--api-key APIKEY`` and ``--secret DBPASSWORD`` — silently,
+    with no mask and no notice, because no hit means no labels and no exposure.
+
+    Lower case is deliberately NOT admitted, and that is the arm this judgement refuses
+    to widen: ``PASSWORD=correct_horse_battery`` is pinned in the corpus as a credential
+    that must stay masked (the identifier arm's R1-1 class), and a lowercase identifier
+    in a flag position is not distinguishable from it. The cost is a false positive on a
+    store entry named in lower case — the store permits one, because
+    :func:`local_operator.secrets.crypto.normalize_name` keeps case so ``token`` and
+    ``TOKEN`` can coexist — and masking it is the direction this pass errs in.
+    """
+    return "_" in token and _ENV_NAME_SHAPED.fullmatch(token) is not None
 
 
 def _value_is_a_reference_to_a_credential(value: str) -> bool:
     """Whether a flag's argument is the NAME of a stored credential, not one.
 
-    Two spellings, both of them a NAME: the store's own (``--secret
-    OS_PROD2_ADMIN_PASSWORD``) and the two-part one ``guide://credentials`` teaches
-    for handing that secret to a child under a different name
-    (``--secret NPM_TOKEN=NODE_AUTH_TOKEN``). A NAME is all caps, digits and
-    underscores and carries no lower case; the two-part form additionally requires
-    the RIGHT half — the one the child will read — to end in a credential word.
+    Two spellings, both of them a NAME: the store's own
+    (``--secret OS_PROD2_ADMIN_PASSWORD``) and the two-part one ``guide://credentials``
+    teaches for handing that secret to a child
+    under a different name (``--secret NPM_TOKEN=NODE_AUTH_TOKEN``).
+
+    **Why a NAME no longer has to END in a credential word.** The previous predicate
+    asked for that, and it is the defect this function no longer has. The judgement
+    belongs to the argument's POSITION, not to the name's last word:
+    :func:`local_operator.secrets.handlers._run` reads every token after ``--secret``
+    as a key in the store (``retrieve_secret(name)`` is the lookup,
+    ``environment[variable or name]`` the exported variable), and an operator names a
+    store entry after the SYSTEM it belongs to rather than after the credential word —
+    ``MINERVA_UI_NPROD_USERNAME`` names an account whose password lives elsewhere. Requiring
+    ``PASSWORD``/``TOKEN``/``KEY`` at the tail masked that name in every tool result,
+    and the masked text is what an agent copies: the operator authored a publish script
+    from the displayed output and the script asked the store for a secret literally
+    named ``[redacted]`` (2026-09-22, the reported failure; the guide's own command is
+    pinned in the corpus's negative half).
+
+    **The two-part form's right half is a NAME for the same reason.** The flag's grammar
+    is ``NAME[=VAR]`` (``secrets/cli.py``'s ``metavar``), so both halves are references
+    and neither has to end in a credential word. The halves are judged by the env-name
+    SHAPE alone rather than by :func:`_is_a_name_in_the_store_grammar`, because a
+    run-together name is the conventional spelling of the CHILD's variable — ``--secret
+    OS_PROD2_ADMIN_PASSWORD=PGPASSWORD`` hands the store's entry to a ``pg_dump`` under the one name
+    that tool reads.
 
     **One predicate, two rules** (agent review R1-1). It is factored out because the
     assignment rule sees the same text from inside: ``--secret NPM_TOKEN=NODE_AUTH_TOKEN``
-    is also an assignment whose name is ``NPM_TOKEN`` and whose value is the other
-    NAME, and a mask there files an ESCALATED rotation demand for the guide's own
-    documentation. Whichever rule sees it must reach the same verdict, so they share
-    the clause rather than each carrying a copy.
+    is also an assignment whose name is ``NPM_TOKEN`` and whose value is the other NAME, and a mask
+    there files an ESCALATED rotation demand for the guide's own documentation.
+    Whichever rule sees it must reach the same verdict, so they share the clause rather
+    than each carrying a copy.
+
+    **What this keeps masked, and the residual it accepts.** A real issuer token after
+    the flag (``--secret ghp_…``) carries lower case and stays masked; a value with no
+    separator (``--password hunter2xyz``) stays masked; a single run of capitals
+    (``--secret DBPASSWORD``) stays masked; and the digit-free lowercase phrase R1-1
+    pinned stays masked. The residual is a real credential spelled all-caps and
+    underscore-separated (``--token ABC_123_XYZ``-shaped): that spelling IS what a store
+    entry looks like and this arm cannot tell the two apart, so it is read as a NAME,
+    released, and pinned as a corpus negative carrying that reason rather than left to a
+    differential to discover.
     """
-    if "_" in value and _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+    if _is_a_name_in_the_store_grammar(value):
         return True
     left, sep, right = value.partition("=")
-    return bool(
-        sep
-        and _ENV_NAME_SHAPED.fullmatch(left)
-        and _ENV_NAME_SHAPED.fullmatch(right)
-        and is_credential_name(right)
-    )
+    return bool(sep and _ENV_NAME_SHAPED.fullmatch(left) and _ENV_NAME_SHAPED.fullmatch(right))
 
 
 def _is_a_credential_flags_argument(match: Match[str]) -> bool:
@@ -1363,20 +1428,20 @@ def _flag_value_guard(match: Match[str]) -> bool:
     and filed an ESCALATED rotation demand naming no shape at all.
 
     **The SEPARATOR is required, and that is the whole of the narrowing.** Capitals
-    plus a credential-word tail is not enough on its own: it also describes exactly
-    the values this rule exists to catch — ``--password PASSWORD``, ``--token
-    TOKEN``, ``--api-key APIKEY``, ``--secret DBPASSWORD`` — and a first cut that
-    omitted the underscore stopped masking all four (agent review R1, reproduced
-    through the session hook: the values came back byte-identical with no mask and
-    no notice at all). Multi-segment capitals is what a NAME in a store or an
-    environment looks like; a single run of capitals is a credential someone chose,
-    and it stays masked. The residual is a real value spelled ``PROD_SECRET``-style,
-    and it is accepted deliberately — that spelling IS the shape of a stored
-    secret's name, which is the same judgement the rule already made for
-    ``--secret NAME[=VAR]``.
+    alone is not enough: it also describes exactly the values this rule exists to catch
+    — ``--password PASSWORD``, ``--token TOKEN``, ``--api-key KEY``, ``--api-key
+    APIKEY``, ``--secret DBPASSWORD`` — and a first cut that omitted the underscore
+    stopped masking all five (agent review R1, reproduced through the session hook: the
+    values came back byte-identical with no mask and no notice at all).
 
-    A value that could BE a credential — mixed case, any lower case, a single
-    unseparated token, or any token without a credential-word tail — is still masked.
+    **The credential-word TAIL is no longer required, and that requirement was the
+    reported failure.** It masked ``--secret MINERVA_UI_NPROD_USERNAME`` in every tool result — a
+    name that ends in the SYSTEM it belongs to rather than in a credential word — and
+    the masked text is what an agent then copies: the operator authored a publish script
+    from the displayed output and the script asked the store for a secret literally
+    named ``[redacted]`` (2026-09-22). See
+    :func:`_value_is_a_reference_to_a_credential` for the judgement that replaces it,
+    for the value-side cases it keeps masked, and for the residual it accepts.
     """
     value = match.group(2)
     if any(char in value for char in _EXPRESSION_CHARS):
@@ -1540,6 +1605,19 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     # reading of a span the flag rule rejected is an assignment (agent review R1-1,
     # see :func:`_is_a_credential_flags_argument`).
     if _is_a_credential_flags_argument(match):
+        return False
+    # ...and a credential FLAG's argument is a NAME this rule must not judge: on
+    # ``--secret=NAME`` the text left of the ``=`` is the flag itself, so this rule
+    # reads ``--secret`` as the assignment's NAME and the store's entry as its VALUE.
+    # Refusing here — and only when the value is name-shaped — hands the ``=``
+    # spelling the verdict :func:`_flag_value_guard` reaches for the space spelling
+    # (one verdict per argument, whichever character binds it) and keeps a
+    # VALUE-shaped argument on this rule's own path, which is why a token after
+    # ``--token=`` still masks and still carries the flag rule's label. See
+    # :func:`_value_is_a_reference_to_a_credential` for the failure that motivated it.
+    if _CLI_CREDENTIAL_FLAG_NAME.match(name) and _value_is_a_reference_to_a_credential(
+        match.group(4)
+    ):
         return False
     # The VALUE is read the way the NAME is: the rendering's line breaks are line
     # breaks for the judgement too, so what is judged is the run before the first
@@ -2106,13 +2184,11 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # easy to keep honest.
         #
         # The guard's NAME clause extends that judgement to the spelling real
-        # commands use — ``--secret OS_PROD2_ADMIN_PASSWORD``, where the token
-        # after the flag is a reference to a stored secret. See
-        # ``_flag_value_guard`` for the production incident that measured it.
-        re.compile(
-            r"(?i)(--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
-            r"client[-_]?secret|auth[-_]?token|access[-_]?token)(?:=|\s+))([^\s\"']{3,})"
-        ),
+        # commands use — ``--secret MINERVA_UI_NPROD_USERNAME``, where the token after the
+        # flag is the NAME of a stored secret rather than a value. See
+        # ``_flag_value_guard`` and ``_value_is_a_reference_to_a_credential`` for the
+        # production incident that measured it.
+        re.compile(r"(?i)(--" + _CREDENTIAL_FLAG_WORDS + r"(?:=|\s+))([^\s\"']{3,})"),
         None,
         2,
         guard=_flag_value_guard,
