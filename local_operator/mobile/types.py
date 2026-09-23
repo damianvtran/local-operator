@@ -820,8 +820,11 @@ class SessionProjection:
         # It lives HERE because the rows being re-capped are this object's, and
         # the object is retained across repaints by both wire paths, which is
         # the whole precondition for the memo (see
-        # ``projection._frame_capped``). Bounded by that function's pruning to
-        # the roster the last capped frame published.
+        # ``projection._frame_capped``). ``projection._reconcile_frame_cap_memo``
+        # is what bounds it: to the roster, and to the shape each live row
+        # carries, of the last frame PUBLISHED — capped or under the cap, since
+        # the reconcile runs before the size check and the frame that shrinks a
+        # roster is the one that comes in under the cap.
         self._frame_cap_memo: dict[str, dict[Any, tuple[str, int, Any, str]]] = {}
 
 

@@ -645,6 +645,114 @@ def test_frame_cap_memo_is_slotted_per_row_and_releases_departed_rows() -> None:
     assert set(memo) == {row.job_id for row in projection.subagents}
 
 
+def _memo_source_bytes(memo: dict[str, dict[Any, Any]], live: set[str]) -> int:
+    """Bytes of source text the memo pins for rows the roster no longer carries.
+
+    Superseded SOURCES are the whole of what the memo holds — the entry keeps the
+    row's own preview/result/reason objects alive, not copies of any frame — so
+    this is the figure review round 1 and QA round 1 both measured on their own
+    fixtures (1,694,671 B for a 32 -> 3 row shrink, 18,409,240 B at 256 x 25).
+    """
+    return sum(
+        len(entry[0])
+        for row_id, row_memo in memo.items()
+        if row_id not in live
+        for entry in row_memo.values()
+    )
+
+
+def test_frame_cap_memo_is_released_by_a_frame_that_comes_in_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: the release keys on the PUBLISHED ROSTER, never on a tier having run.
+
+    The frame that most needs the release is the one that just shrank a roster —
+    and that frame is the SMALLER one, so it can land under the cap and return
+    before a tier runs. That is exactly where the release used to live, which is
+    why the slots of every departed row stayed pinned: 1,694,671 B measured on a
+    32 -> 3 row shrink with the frame under the cap, and 18,409,240 B at 256 rows
+    x 25 todos (review round 1 R1-1; QA round 1 section 5, byte figures).
+    """
+    from local_operator.mobile.projection import (
+        PROJECTION_FRAME_SOFT_CAP_BYTES,
+        cap_projection_frame,
+    )
+
+    fold, _comms = _roster_with_todos(32)
+    projection = fold.projection
+    memo = projection._frame_cap_memo
+    calls = _counted_compaction(monkeypatch)
+    cap_projection_frame(projection, cap_bytes=_over_cap(projection))
+    assert len(memo) == 32
+    live = {row.job_id for row in projection.subagents}
+    assert _memo_source_bytes(memo, live) == 0
+
+    while len(projection.subagents) > 3:
+        projection.subagents.pop()
+    shrunk_live = {row.job_id for row in projection.subagents}
+    before = dict(calls)
+
+    frame, degraded = cap_projection_frame(projection, cap_bytes=PROJECTION_FRAME_SOFT_CAP_BYTES)
+
+    # The cell has to be the UNDER-cap one or it would not reproduce R1-1 at all:
+    # no tier ran on this push, which is precisely why the old release site —
+    # inside tier 1 — was never reached for it.
+    assert degraded is False
+    assert calls == before, "no tier ran on the shrunken frame"
+    assert len(frame["subagents"]) == 3
+    assert set(memo) == shrunk_live
+    assert _memo_source_bytes(memo, shrunk_live) == 0
+    assert sum(len(row_memo) for row_memo in memo.values()) < 32 * (3 + 2 * 6)
+
+
+def test_frame_cap_memo_is_reduced_to_the_shape_a_row_still_publishes() -> None:
+    """A LIVE row's superseded slots are released too, not only a departed row's.
+
+    Review round 1 measured a row grown to 40 items and then shrunk to 1 keeping
+    all 89 of its slots (``3 + 2 x 40``), because entries are replaced in place
+    and nothing dropped the ones the row had shed. What the memo holds per row is
+    now the shape that row publishes — its three previews plus two slots per todo
+    item it still carries — and nothing else.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+
+    fold, _comms = _roster_with_todos(2)
+    projection = fold.projection
+    memo = projection._frame_cap_memo
+    cap = _over_cap(projection)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 6
+
+    def hydrate(items: int) -> None:
+        fold.set_subagent_hydrated_details(
+            "child-0",
+            [],
+            [
+                {
+                    "name": "Verification",
+                    "items": [
+                        {
+                            "text": f"grown {item} " + "detail " * 90,
+                            "status": "pending",
+                            "reason": "reason " + "x" * 200,
+                        }
+                        for item in range(items)
+                    ],
+                }
+            ],
+        )
+
+    hydrate(40)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 40
+
+    hydrate(1)
+    cap_projection_frame(projection, cap_bytes=cap)
+    assert len(memo["child-0"]) == 3 + 2 * 1
+    # The other row is untouched: the release is per row, not a reset.
+    assert len(memo["child-1"]) == 3 + 2 * 6
+
+
 def test_nested_subagent_completion_refreshes_selected_detail() -> None:
     """A nested row has no root lifecycle event to settle its phone detail."""
 

@@ -933,3 +933,41 @@ def test_every_child_row_the_marks_resolve_reads_them_off_the_pass(tmp_path) -> 
         f"{large_comms._records.touches / small_touches:.1f}x — that is the "
         "quadratic shape back on the per-row half"
     )
+
+
+def test_a_row_that_cannot_name_itself_costs_a_mark_and_not_the_band(tmp_path: Any) -> None:
+    """R1-2: the row-IDENTITY read is guarded, because ``getattr`` is not a guarantee.
+
+    ``getattr(job, "id", "")`` swallows only the ``AttributeError`` it would have
+    raised itself and propagates anything a property or an ``__getattr__`` raises.
+    Executed against a row whose ``id`` raises, the unguarded form escaped this
+    method's whole-body totality contract into a Textual message handler —
+    ``RuntimeError: id exploded`` out of ``_subagent_child_counts`` (review round
+    1 on this PR, R1-2) — and the docstring beside it claimed the opposite.
+
+    So the identity read has its own guard now, and what that buys is stated in
+    behaviour rather than in a comment: a row that cannot name itself earns the
+    same nothing a row outside the roster window does, and every row that CAN name
+    itself still carries its real mark. The nested fixture is the one that reaches
+    the per-row resolver at all (see ``_docked_registry``).
+    """
+
+    class _Unnameable:
+        """A roster row whose ``id`` raises on read, not merely missing."""
+
+        @property
+        def id(self) -> str:  # noqa: A003 - the row's own field name
+            raise RuntimeError("id exploded")
+
+    app, _comms = _docked_registry(4, tmp_path / "unnameable", nested=True)
+    jobs, _selected = app._subagent_roster()
+    assert jobs, "the fixture must reach a full roster"
+    expected = app._subagent_child_counts(jobs)
+    assert expected == {"job-0000": 3}, expected
+
+    counts = app._subagent_child_counts([_Unnameable(), *jobs])
+
+    assert counts == expected, (
+        "an unreadable row must cost its own mark and nothing else: the rest of "
+        f"the roster still resolves — {counts}"
+    )

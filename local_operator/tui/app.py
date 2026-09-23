@@ -27144,15 +27144,36 @@ class OperatorApp(App[None]):
         convenience, not the only route back into the registry: ``read.children``
         and ``read.nodes`` on a class without them still reach
         ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` may raise
-        outside this guard. EVERY raising step in both callers is guarded, so a
-        raising reader blanks the dock rather than escaping into a Textual
-        handler; the only statements either caller leaves outside a guard are
-        ``getattr``/attribute reads, which cannot raise, and
-        ``_subagent_child_counts``' ``paused_child_ids``, which guards its own
-        body and degrades to an empty set. The narrower statement is the exact
-        one — "both callers wrap their whole body" held for the OUTCOME, not for
-        the syntax (review round 3, N3-1). That is the behavior this must keep,
-        and why the capability check is a ``getattr`` rather than a cast.
+        outside this guard. Every step in either caller that CAN raise is inside a
+        guard, so a raising reader blanks the dock rather than escaping into a
+        Textual handler. What each caller leaves outside one is ENUMERATED rather
+        than generalised, because the general form was wrong twice: "both callers
+        wrap their whole body" held for the outcome and not the syntax (review
+        round 3, N3-1), and so did "``getattr``/attribute reads, which cannot
+        raise" (review round 1 on this PR, R1-2).
+
+        * :meth:`_subagent_roster` leaves, before its ``try``, ``self._session``,
+          the two capability ``getattr`` calls on it, and the ``_subagent_view``
+          read.
+        * :meth:`_subagent_child_counts` leaves, before its ``try``, the same two
+          capability ``getattr`` calls and the ``callable`` test on them; and
+          after it, ``manager``, ``paused``, ``counts = {}`` and the loop header
+          ``for job in jobs:``.
+        * What makes those reads total is that they are PLAIN attribute reads on
+          the session and on a job row, not that they are ``getattr``: ``getattr``
+          swallows only the ``AttributeError`` it would have raised itself and
+          propagates anything a property or an ``__getattr__`` raises. The row
+          identity read beside them was exactly that gap and now has its own
+          guard.
+        * The ``for job in jobs:`` header is left outside deliberately: it walks
+          the roster the caller just built, and a guard there could only convert a
+          caller's own type error into a silently blank band. Its residual risk is
+          that the argument is not a sequence at all, which is the caller's type
+          to get right.
+        * ``paused_child_ids`` guards its own body and degrades to an empty set.
+
+        That is the behavior this must keep, and why the capability check is a
+        ``getattr`` rather than a cast.
 
         The follower's ``SnapshotSubagentComms`` is the case that has no
         ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
@@ -27353,9 +27374,9 @@ class OperatorApp(App[None]):
             # cannot raise today, but a build moved back out would be a raising
             # step outside the guard, and it would escape into a Textual message
             # handler instead of blanking the marks. The guard covers every step
-            # that CAN raise; the ``manager``/``paused`` statements after it sit
-            # outside because ``getattr`` cannot raise and ``paused_child_ids``
-            # guards its own body (review round 3, N3-1).
+            # that CAN raise; what sits outside it is enumerated in
+            # ``_roster_read``'s docstring, which is the single place that list
+            # lives (review round 3, N3-1; review round 1 on this PR, R1-2).
             read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
             for node in cast(Sequence[Any], read.nodes()):
@@ -27368,7 +27389,19 @@ class OperatorApp(App[None]):
         paused = paused_child_ids(comms)
         counts: dict[str, int] = {}
         for job in jobs:
-            job_id = str(getattr(job, "id", "") or "")
+            try:
+                # Identified INSIDE a guard of its own: ``getattr`` is not a
+                # guarantee — it swallows the ``AttributeError`` it would have
+                # raised itself and propagates whatever a property or an
+                # ``__getattr__`` raises. Executed against an ``id`` that raises,
+                # the unguarded form escaped this method's totality contract into
+                # a Textual message handler (``RuntimeError: id exploded``; review
+                # round 1 on this PR, R1-2). A row that cannot name itself cannot
+                # be counted, so it earns the same mark a row outside the window
+                # does: none.
+                job_id = str(getattr(job, "id", "") or "")
+            except Exception:  # noqa: BLE001 — a mark may not cost the band
+                continue
             if not job_id:
                 continue
             try:

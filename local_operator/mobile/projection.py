@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
@@ -664,9 +664,17 @@ def _frame_capped(
     field for a row's own text, the field plus item indices for a todo — and it
     is only ever read THROUGH the guard above, so two callers cannot collide
     into a wrong value: a stale or shared slot can only cost recomputation.
-    That is also why a concurrently written entry needs no lock: the tuple is
-    replaced in one assignment, and the loop that reads it validates before
-    use.
+
+    Nothing on this path holds a lock, and that is deliberate rather than
+    assumed. Installing an entry is ONE assignment, so a concurrent reader sees
+    the whole tuple or no entry at all, and the guard above validates it before
+    use — the entry itself needs no lock. The get-then-create in
+    :func:`_frame_cap_row_memo` is NOT atomic, so two threads capping one
+    projection can install two different dicts for the same row and silently
+    discard one of them; the cost is that the discarded entries are recomputed,
+    and no wrong value can come of it (a lost entry means a miss, and a miss
+    means the normalizer runs). A lock there would sit on the per-row hot path
+    to buy back work that costs one normalizer call.
 
     The published bytes are unchanged BY CONSTRUCTION, not by an invariant
     about the callers: a hit returns exactly what ``normalizer(source, limit)``
@@ -684,16 +692,45 @@ def _frame_capped(
     return capped
 
 
+#: The preview slots tier 1 asks for on every published roster row, and the
+#: family a todo item's two slots are keyed in. Named rather than inlined so the
+#: reconcile below and the tier loops cannot drift apart on what a row holds.
+_FRAME_CAP_PREVIEW_KEYS: tuple[str, ...] = ("prompt", "result_text", "error_text")
+
+
+def _frame_cap_todo_item_count(row: Mapping[str, Any]) -> int:
+    """How many todo items this frame's copy of a roster row carries."""
+    return sum(len(phase.get("items") or []) for phase in (row.get("todos") or []))
+
+
 def _frame_cap_row_memo(projection: SessionProjection, row_id: str) -> dict[Any, _FrameCapEntry]:
     """One roster row's slot in the projection's re-cap memo, created on demand.
 
     The memo is slotted BY ROW so that pruning stays proportional to the roster
     (one delete per departed child) rather than to every cached string — a flat
     memo made the liveness sweep itself the per-frame cost this change exists
-    to remove. Slots are created for the rows a capped frame publishes and
-    dropped when a frame no longer carries them, so the cache cannot outgrow
-    the roster cap; within a row, slots are bounded by the fields and todo
-    items that row has carried, replaced in place whenever one of them changes.
+    to remove.
+
+    WHAT BOUNDS IT, EXACTLY. :func:`_reconcile_frame_cap_memo` runs on every
+    frame this module publishes, before the size check and before any tier —
+    not on the over-cap path only, which is what review round 1 measured
+    (R1-1): a roster shrinking 32 -> 3 rows while the frame fell UNDER the cap
+    ran no tier, so a release that waited for the tiers left every departed
+    row's slots pinned. Once that pass has run, two things are true of the memo
+    rather than merely expected of it: its keys are the roster that frame
+    carried, and a live row holds at most ``previews + 2 x`` the todo items that
+    frame carried for it (the UNION of those, for rows sharing one slot). The
+    second holds because the reconcile sweeps exactly when a row holds MORE
+    slots than that, so a row cannot keep a shape it has shed, and nothing here
+    remembers one.
+
+    ``row_id`` is ``str(row.get("job_id") or "")``, so rows that reach the cap
+    WITHOUT a ``job_id`` all share the ``""`` slot. That costs reuse — the
+    slots churn between those rows, and each churn is a recompute — and never
+    correctness: the entry is validated by source object, limit and normalizer
+    before it is used, so a shared slot can miss but cannot publish another
+    row's text (QA round 1, Q-2: 16 such rows, 359 calls / 329 hits, every row's
+    published text its own).
     """
     memo = projection._frame_cap_memo
     row_memo = memo.get(row_id)
@@ -703,29 +740,84 @@ def _frame_cap_row_memo(projection: SessionProjection, row_id: str) -> dict[Any,
     return row_memo
 
 
-def _prune_frame_cap_memo(projection: SessionProjection, live_row_ids: set[str]) -> None:
-    """Release the memo slot of every roster row this frame does not publish.
+def _reconcile_frame_cap_memo(
+    projection: SessionProjection, rows: Sequence[Mapping[str, Any]]
+) -> None:
+    """Bound the memo by the roster — and the shapes — the frame about to publish carries.
 
-    A fold is bounded by the frame it just emitted, not by memory of every
-    child it has ever shown: a row that has left the roster cannot come back,
-    so its slot can only hold strings nothing will ask for again. Per row, one
-    delete — the rows are the keys, so this walks the ROSTER and not the cache;
-    a flat memo, keyed by row and field together, made the liveness sweep
-    itself the per-frame cost this change exists to remove (13,568 entries at
-    N=256 with a hydrated roster, every repaint). The fold's own path never
-    drops a row (``_sync_subagents`` only sorts them), so what this covers is
-    the projection that DOES publish a shorter roster — a copy rebuilt from a
+    A fold is bounded by the frame it just emitted, not by memory of every child
+    it has ever shown: a row that has left the roster cannot come back, so its
+    slot can only hold strings nothing will ask for again. Per row, one delete —
+    the rows are the keys, so this walks the ROSTER and not the cache; a flat
+    memo, keyed by row and field together, made the liveness sweep itself the
+    per-frame cost this change exists to remove (13,568 entries at N=256 with a
+    hydrated roster, every repaint).
+
+    WHY IT IS CALLED ON EVERY PUBLISHED FRAME rather than from the tiers. This
+    is the fix for review round 1's R1-1, and the mechanism was the defect: the
+    release used to live inside tier 1, so it ran only when the frame was over
+    the cap, and the frame that needs it most — a roster that just shrank — is
+    the frame that gets SMALLER and comes in under the cap. Measured then: a 32
+    -> 3 row shrink with the frame under the cap pinned 1,694,671 B and ran 0
+    tiers, and a 256 x 25 todo roster shrunk to 3 pinned 18,409,240 B. Keying
+    the release on the published roster instead of on the cap tier having run is
+    the whole of the fix; the tiers no longer prune anything.
+
+    WHY IT STILL COSTS NOTHING PER REPAINT. The first test returns on an empty
+    memo, and a projection that has never been over the cap has one — which is
+    every ordinary conversation, including the ``_frame_skips_measurement`` fast
+    path below. Once a memo exists, what remains is one pass over the roster
+    (a ``str`` and a dict lookup per row, plus a length comparison) and, only
+    when a row holds MORE slots than the shape it is publishing needs — i.e.
+    exactly when it shrank — one sweep of that row's slots. A steady roster
+    takes the comparison and nothing else, which is what keeps this from
+    re-introducing the per-frame sweep the memo exists to remove.
+
+    Rows sharing a key (no ``job_id``) are reconciled to the UNION of the
+    shapes they ask for, so two rows on one slot do not sweep each other's
+    entries away on alternate repaints. The fold's own path never drops a row
+    (``_sync_subagents`` only sorts them), so what the roster half covers is the
+    projection that DOES publish a shorter roster — a copy rebuilt from a
     partial frame — and it is what makes "bounded by the roster" true of every
     caller rather than of one.
-
-    Entries inside a LIVE row whose todos shrank are kept until that row
-    leaves: the bound is then one generation of the shape that row had, and it
-    is replaced in place the next time those items change.
     """
     memo = projection._frame_cap_memo
+    if not memo:
+        return
+    live: set[str] = set()
+    shrunk: set[str] = set()
+    for row in rows:
+        row_id = str(row.get("job_id") or "")
+        live.add(row_id)
+        row_memo = memo.get(row_id)
+        if row_memo is None:
+            continue
+        # Preview slots are a fixed three and only a row's todo shape can
+        # shrink, so this is a sound "is anything superseded?" test that costs
+        # one length comparison on a roster that is not changing.
+        if len(row_memo) > len(_FRAME_CAP_PREVIEW_KEYS) + 2 * _frame_cap_todo_item_count(row):
+            shrunk.add(row_id)
     for row_id in tuple(memo):
-        if row_id not in live_row_ids:
+        if row_id not in live:
             del memo[row_id]
+    if not shrunk:
+        return
+    wanted: dict[str, set[Any]] = {row_id: set(_FRAME_CAP_PREVIEW_KEYS) for row_id in shrunk}
+    for row in rows:
+        bucket = wanted.get(str(row.get("job_id") or ""))
+        if bucket is None:
+            continue
+        for phase_index, phase in enumerate(row.get("todos") or []):
+            for item_index in range(len(phase.get("items") or [])):
+                bucket.add(("todo_text", phase_index, item_index))
+                bucket.add(("todo_reason", phase_index, item_index))
+    for row_id, wanted_keys in wanted.items():
+        row_memo = memo.get(row_id)
+        if row_memo is None:
+            continue
+        for key in tuple(row_memo):
+            if key not in wanted_keys:
+                del row_memo[key]
 
 
 def cap_projection_frame(
@@ -786,10 +878,21 @@ def cap_projection_frame(
     ``_send_to`` ceiling in ``session/runtime/server.py``, which refuses to put
     what is left on the wire).
 
-    The projection itself is never mutated (the fold owns it and republishes
-    it; the daemon retains it): degradation happens on the serialized dict.
+    The projection's CONTENT is never mutated (the fold owns the row objects
+    and republishes them; the daemon retains the projection): degradation
+    happens on the serialized dict. The one thing this function does attach to
+    the projection is the private re-cap memo (``_frame_capped``), a non-field
+    attribute that is not payload and is never degraded.
     """
     data = projection.to_json()
+    # Reconcile the memo against the roster THIS frame publishes, BEFORE the
+    # size checks and any tier. Called here rather than from the tiers because
+    # the frame that most needs a release — a roster that just shrank — is the
+    # one that gets smaller, comes in under the cap and returns at one of the
+    # early exits below without running a tier at all (review round 1, R1-1:
+    # 1,694,671 B pinned for a 3-row roster, 18,409,240 B at 256 rows). It costs
+    # one empty-memo test on the repaints that have never been over the cap.
+    _reconcile_frame_cap_memo(projection, data.get("subagents") or [])
     # The under-cap repaint is the hot path (~30/s per streaming session), and
     # measuring it by serializing the whole frame doubles the cost of every
     # push. Skip that only for projections whose STRUCTURE cannot approach the
@@ -833,10 +936,11 @@ def cap_projection_frame(
     # The re-cap goes through ``_frame_capped``: this loop runs on every
     # over-cap repaint and the previews are the same string objects until a
     # field is reassigned, so an unchanged roster re-caps nothing. The memo is
-    # pruned to THIS frame's roster before the loop, so it is bounded by the
-    # rows just published rather than by every child the fold has ever shown.
+    # already reconciled against THIS frame's roster (above), so it is bounded
+    # by the rows just published rather than by every child the fold has ever
+    # shown — and by the shape each of those rows publishes, not by the largest
+    # shape it has ever had.
     rows = data.get("subagents") or []
-    _prune_frame_cap_memo(projection, {str(row.get("job_id") or "") for row in rows})
     for row in rows:
         row_id = str(row.get("job_id") or "")
         row_memo = _frame_cap_row_memo(projection, row_id)
