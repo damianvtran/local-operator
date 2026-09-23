@@ -227,6 +227,40 @@ async def test_an_unknown_flag_of_this_command_is_still_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_flag_form_on_a_viewer_that_cannot_route_says_where_the_act_lives() -> None:
+    """A host with no record of its own is told where the act lives.
+
+    ``_goal_record()`` is ``None`` on anything that is not the session's OWNER
+    (``owns_the_session``), and a cold viewer is exactly that: it advertises no
+    capabilities, so ``_run_slash_command`` has nothing to route ``/goal`` to and
+    the command runs HERE. The four FLAG forms write the OWNER's record, so such
+    a host has nothing local to act on — and the honest answer says so, rather
+    than reporting an act it did not perform or telling the user the session is
+    "still starting" long after it did.
+
+    The SET path deliberately stays open on this same shape —
+    ``test_a_followers_loop_turn_holds_working_between_iterations`` pins that,
+    because the viewer's own LOCAL ``/loop`` iterates toward ``session.goal``.
+    The refusal here is about the record, not about the objective.
+    """
+    session = _armed()
+    # The locality every attached viewer reports, cold or not.
+    session.runtime_locality = "this-machine"
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        notices = await _local(pilot, app, "/goal --clear")
+
+    assert notices == [
+        "the goal record belongs to the session's owner — "
+        "/goal --clear, --done and --dismiss run there"
+    ]
+    assert session.goal == GOAL, "a refused act changes nothing"
+    assert session.goal_status == "active"
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_the_picker_offers_only_the_acts_the_record_allows() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
