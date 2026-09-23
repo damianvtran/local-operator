@@ -14842,6 +14842,7 @@ class OperatorApp(App[None]):
 
         attempt = 0
         remote: Any = None
+        attach_behind = False
         # TAKEN ONCE, AND CHARGED FOR EVERYTHING THE LOOP SPENDS. Each attempt's
         # own duration comes off this deadline as it is spent and each backoff
         # is clamped to what is left, so a silent owner cannot buy more dials by
@@ -14934,6 +14935,43 @@ class OperatorApp(App[None]):
                             "warning",
                         )
                         return
+                    if (
+                        record is not None
+                        and frontend_attach_refusal(record) is None
+                        and (config_root / "sessions" / concrete / "transcript.jsonl").is_file()
+                    ):
+                        # PAINT FIRST, ATTACH BEHIND. A blocking `connect` held
+                        # the screen for the owner's whole canonical sync —
+                        # 15 s and then a refusal against a busy owner, and
+                        # every redial another 15 s — before a single row was
+                        # drawn. The conversation is on disk, so the cold
+                        # facade paints it now, and the eager engage after the
+                        # adopt binds it to this same owner behind the paint:
+                        # the band says `starting…` meanwhile, the composer
+                        # stays usable (a prompt takes the foreground bind and
+                        # the background one yields to it), and
+                        # `AttachedSession._replay_cold_gap` paints whatever
+                        # the owner wrote after the read. A cold open that
+                        # fails falls through to the dial below unchanged.
+                        #
+                        # FIRST ATTEMPT ONLY, and only with a transcript and a
+                        # dialable record: a paint-first open with nothing to
+                        # paint buys nothing (an owner that defers its journal
+                        # until the first write keeps the dial), a static
+                        # refusal keeps its own sentence below, and a redial
+                        # already under way keeps the loop it was narrating.
+                        try:
+                            remote = await AttachedSession.cold(
+                                concrete,
+                                config_dir=config_root,
+                                cwd=str(record.cwd or os.getcwd()),
+                                takeover_factory=takeover_factory,
+                            )
+                            attach_behind = True
+                            settled = True
+                            break
+                        except Exception:  # noqa: BLE001 — the dial is the fallback
+                            logger.debug("paint-first resume unavailable", exc_info=True)
                 if record is None:
                     # An owner that is not there THIS MOMENT: paced and retried,
                     # never reported (see the first-attempt block above).
@@ -15067,6 +15105,11 @@ class OperatorApp(App[None]):
         try:
             self._reset_ledger_for_swap()
             self._adopt_session(remote)
+            if attach_behind:
+                # The bind behind the paint: the same engage a cold boot runs,
+                # which finds this owner's record and attaches to it rather
+                # than starting anything (see the paint-first branch above).
+                self._engage_runtime_eagerly()
             await self._preflight_usage(remote)
         finally:
             self._swapping_session = False

@@ -8986,6 +8986,26 @@ def main() -> int:
                         find_runtime_record, config_directory, session_id
                     )
                 degraded_reason = ""
+                paint_first_cwd = ""
+                # PAINT FIRST, ATTACH BEHIND for a live owner whose conversation
+                # is on disk: the cold facade below paints it, and the TUI's eager
+                # engage binds it to that owner after the first paint (the bind
+                # replays whatever the owner wrote in between). The blocking
+                # `connect` held `lop --resume` on the owner's canonical sync —
+                # 15 s against a busy one — before anything was drawn. A model
+                # override is still sent through the live attach below, which is
+                # the one path that can hand it to an existing owner; a cold
+                # viewer's override is consumed by its bind.
+                if (
+                    record is not None
+                    and not (initial_model is not None and (birth_args.hosting or birth_args.model))
+                    and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
+                ):
+                    # The owner's directory, not this terminal's: the band paints
+                    # it before the bind lands, and a live conversation's cwd is
+                    # the one it is working in.
+                    paint_first_cwd = str(record.cwd or os.getcwd())
+                    record = None
                 if record is not None:
                     try:
                         attached = await AttachedSession.connect(
@@ -9032,7 +9052,7 @@ def main() -> int:
                 viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
-                    cwd=os.getcwd(),
+                    cwd=paint_first_cwd or os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,
                     # Only a RESOLVED spec can be a deliberate override. Setup
