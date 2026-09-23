@@ -350,9 +350,12 @@ rungs cannot be reached from the state being detected: ``_drain_for_signal``,
 is blocked, and the ``SIGTERM`` handler that reaches them is a loop handler that
 needs bytecodes the stuck thread never executes. That is the same fact that
 makes ``lop stop`` refuse a silent-socket runtime without ``--force``. So the
-timer is armed with ``exit=True``: faulthandler writes the dump and calls
-``_exit(1)`` from its own C thread. Write-then-act is therefore structural
-rather than something this module has to sequence.
+graceful rungs cannot be reached at all from that state, and the timer's exit is
+the blunt one: on an IDLE runtime the arm carries ``exit=True`` and faulthandler
+writes the dump and calls ``_exit(1)`` from its own C thread, while a runtime
+HOLDING WORK is dumped and left running (the two arms are stated above).
+Write-then-act is therefore structural rather than something this module has to
+sequence.
 
 WHAT IS LOST: the in-flight turn's uncommitted step — the same loss a SIGKILL
 inflicts, because a turn commits its transcript at each step and the step in
@@ -547,9 +550,13 @@ OBSERVATION_NOT_VERDICT = (
     "NOT a statement that the runtime stopped -- the timer can expire on a process that is "
     "mid-turn and working -- so THIS PROCESS MAY STILL BE ALIVE ON THIS SAME PID, and may carry "
     "on serving, AFTER this dump is written. What would turn the observation into a death is the "
-    "exit faulthandler takes once it has dumped (this timer is armed with exit=True), and THAT "
-    "EXIT MAY NEVER COME. So a fire is not by itself a body count, and THE PID, NOT THIS FILE, "
-    "IS WHAT SAYS WHETHER THE RUNTIME IS STILL THERE."
+    "exit faulthandler takes once it has dumped, and WHETHER THIS TIMER CARRIES THAT EXIT IS "
+    "ANSWERED AT EVERY RE-ARM RATHER THAN FIXED HERE: a runtime HOLDING WORK (a turn under the "
+    "lock, a live subagent lane, a background job, a gate parked on the user) is dumped and LEFT "
+    "RUNNING, while an IDLE one is dumped and exited. This header is written at ARM time, BEFORE "
+    "any of those re-arms, so it cannot name the answer that will hold at the fire -- and so the "
+    "file cannot say whether the runtime is gone either. A fire is not by itself a body count: "
+    "THE PID, NOT THIS FILE, IS WHAT SAYS WHETHER THE RUNTIME IS STILL THERE."
 )
 
 #: How to read the two numbers a fire leaves behind: the value on ``faulthandler``'s own
