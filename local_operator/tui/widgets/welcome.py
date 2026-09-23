@@ -892,8 +892,14 @@ def _hint_lines(width: int, *, setup: bool = False) -> list[Text]:
     key_style = Style(color=theme_mod.semantic_color("fg"))
     desc_style = Style(color=theme_mod.semantic_color("muted"))
 
+    longest_key = max(cell_len(key) for key, _ in hints)
+    tight_column = max(HINT_KEY_WIDTH_TIGHT, longest_key + 1)
     key_column = 0
-    for candidate in (HINT_KEY_WIDTH, HINT_KEY_WIDTH_TIGHT):
+    for candidate in (HINT_KEY_WIDTH, tight_column):
+        # ``ljust`` adds no separator when a key already fills the column. Skip
+        # that tier rather than painting its description directly after the key.
+        if candidate <= longest_key:
+            continue
         block = max(candidate + cell_len(desc) for _, desc in hints)
         if block <= width:
             key_column = candidate
