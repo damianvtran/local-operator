@@ -2943,14 +2943,29 @@ async def test_quit_keys_join_attached_recovery_during_app_shutdown(
     """The real empty-composer quit disposes an attached session before loop teardown."""
     import local_operator.session.attached as attached_module
     from local_operator.session.attached import AttachedSession
+    from local_operator.session.frontend_state import (
+        FrontendModelSpec,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
 
     monkeypatch.setattr(attached_module, "find_runtime_record", lambda *args: (None, None))
     monkeypatch.setattr(attached_module, "_RECOVERY_DIAL_CAP_S", 60.0)
     monkeypatch.setattr(attached_module, "COLD_FALLBACK_S", 60.0)
-    retry_started = asyncio.Event()
+    retry_sleep_entered = asyncio.Event()
+    real_sleep = asyncio.sleep
+    recovery: asyncio.Task[None] | None = None
+
+    async def observe_recovery_sleep(delay: float) -> None:
+        # Signal only for this recovery worker: Textual and the pilot also use
+        # asyncio.sleep, but they are not evidence that the retry loop is parked.
+        if asyncio.current_task() is recovery:
+            retry_sleep_entered.set()
+        await real_sleep(delay)
+
+    monkeypatch.setattr(attached_module.asyncio, "sleep", observe_recovery_sleep)
 
     async def no_takeover():
-        retry_started.set()
         raise attached_module.SessionLeaseHeldError(tmp_path / "s1", 123)
 
     session = AttachedSession(
@@ -2959,8 +2974,25 @@ async def test_quit_keys_join_attached_recovery_during_app_shutdown(
         takeover_factory=no_takeover,
         surface="desktop",
     )
-    session._frontend_store = object()
+    model = FrontendModelSpec(provider="test", model_id="model")
+    session._frontend_store = FrontendStateStore(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="test",
+            selected_model=model,
+            effective_model=model,
+        )
+    )
     app = OperatorApp(lambda: _factory(FakeSession()))
+    dispose = session.dispose
+
+    async def assert_recovery_joined() -> None:
+        await dispose()
+        # Assert at the disposal boundary: a later pilot yield could let a mere
+        # cancel finish and hide the missing join from this regression test.
+        assert recovery is not None and recovery.done()
+
+    monkeypatch.setattr(session, "dispose", assert_recovery_joined)
 
     async def no_retirement(session_arg) -> None:
         del session_arg
@@ -2974,15 +3006,10 @@ async def test_quit_keys_join_attached_recovery_during_app_shutdown(
         session._on_disconnected("owner exited")
         recovery = session._recovery_task
         assert recovery is not None
-        await asyncio.wait_for(retry_started.wait(), timeout=2)
-        # The failed takeover continues into the real retry delay; wait until
-        # the recovery task is actually parked there before Ctrl+D.
-        for _ in range(100):
-            if recovery.done() or recovery.get_coro().cr_await is not None:
-                break
-            await asyncio.sleep(0)
+        await asyncio.wait_for(retry_sleep_entered.wait(), timeout=2)
+        # Hold the failed retry in its real pacing point until dispose cancels
+        # it; this proves shutdown joins the parked worker rather than racing it.
         assert not recovery.done()
-        assert recovery.get_coro().cr_await is not None
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
