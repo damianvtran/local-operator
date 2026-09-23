@@ -3350,34 +3350,35 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
     return len(json.dumps({"op": "result", "req": 9_999_999_999, "data": payload}).encode()) + 1
 
 
-#: Wire clip for the judge's reason, applied only when the frame it rides is over
-#: the line. The ENTRY bound is ``LOOP_REASON_CHARS`` (1000, where the verdict is
-#: parsed); this is the second, cheaper shape a frame that cannot afford the
-#: first gets, so a reader still learns WHY the judge said what it said.
-GOAL_REASON_WIRE_CHARS = 200
-
-
 def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
-    """Yield the goal record when the frame it would ride is over the line.
+    """Yield the goal record's PAYLOAD when the frame it would ride is over the line.
 
     ``goal_history`` is bounded at ENTRY by the record (a swept list of clipped
     entries), and that is still not a wire bound: the entry cap says how big the
     list may get, not that the frame carrying it fits. A frame that has none to
     give would therefore be refused by the socket, which is the failure this
-    field must never be the cause of.
+    field must never be the cause of — so when the frame is over, the record
+    becomes its KEY SKELETON and nothing else:
 
-    So the record yields in two steps, cheapest thing first:
+    * the HISTORY is dropped entirely and ``goal_history_truncated`` is set — the
+      flag is what keeps a reader from reading an empty list as "no completed
+      goals", the lie ``model_catalogue_truncated`` exists to prevent;
+    * the JUDGE is yielded to ``None``.
 
-    * the HISTORY is dropped entirely and ``goal_history_truncated`` is set —
-      the flag is what keeps the reader from reading an empty list as "no
-      completed goals" (the lie ``model_catalogue_truncated`` exists to prevent);
-    * the judge's ``reason`` is clipped to :data:`GOAL_REASON_WIRE_CHARS`, keeping
-      all four scalar keys: a viewer still gets the state, the run count and the
-      verdict, which is what a chip renders, while the prose is the part a
-      viewer can afford to lose.
+    The whole payload yields rather than a clipped share of it, and the reason is
+    the measured price of the alternative: keeping the judge's four keys with its
+    reason clipped to 200 characters costs **287 B** of a frame that has none to
+    give, to render one tooltip line — against 20 B for the key alone. The judge
+    is also the one part of this record that is a LIVE projection rather than
+    accumulated data: the next frame rebuilds it from the session, while the
+    fields this frame is over for are the bounded ones whose budgets are already
+    spent. ``None`` is a shape the contract already defines (the field is
+    ``dict[str, Any] | None`` and a reader must tolerate its absence), so this
+    degrades the tooltip rather than lying about anything.
 
     Neither ``goal``, ``goal_status`` nor any count is touched: the ACTIVE goal
-    is the one thing on this frame a user is looking at.
+    and whether it is DONE are the two things on this frame a user is looking at,
+    and they are the whole reason the skeleton is kept.
 
     Measured the way the neighbouring bounds measure — :func:`_frame_line_bytes`
     over the frame as it will actually be sent, not arithmetic over parts —
@@ -3387,10 +3388,10 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
     will): the bytes this yields are then available to those passes rather than
     being freed after they have already settled. The trade that ordering makes,
     stated so a later editor does not "fix" it: on a frame that is over the line
-    for reasons this record cannot fix (a roster past every cap), the history
-    yields even though the frame still would not fit. The alternative — dropping
+    for reasons this record cannot fix (a roster past every cap), the record
+    yields even though the frame still would not fit. The alternative — yielding
     it after the catalogue has fitted itself — clips the catalogue to make room
-    for a history that is then thrown away, which loses both.
+    for a record that is then thrown away, which loses both.
     """
     history = snapshot.get("goal_history")
     judge = snapshot.get("goal_judge")
@@ -3402,9 +3403,7 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
         snapshot["goal_history"] = []
         snapshot["goal_history_truncated"] = True
     if isinstance(judge, dict):
-        reason = judge.get("reason")
-        if isinstance(reason, str) and len(reason) > GOAL_REASON_WIRE_CHARS:
-            judge["reason"] = reason[:GOAL_REASON_WIRE_CHARS]
+        snapshot["goal_judge"] = None
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:

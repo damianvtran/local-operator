@@ -66,7 +66,6 @@ from local_operator.session.frontend_state import (
     _DERIVED_STATE_LABELS,
     _MODEL_CATALOGUE_LINE_LIMIT,
     _SHAREABLE_STATE_FIELDS,
-    GOAL_REASON_WIRE_CHARS,
     LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
     LIVE_EVENT_END_ROWS_MAX,
     LIVE_EVENT_TEXT_FLOOR_CHARS,
@@ -91,10 +90,7 @@ from local_operator.session.frontend_state import (
     oversized_frame_report,
     sync_wire_payload,
 )
-from local_operator.session.goal import (
-    GOAL_HISTORY_MAX,
-    GOAL_HISTORY_TEXT_CHARS,
-)
+from local_operator.session.goal import GOAL_HISTORY_MAX, GOAL_HISTORY_TEXT_CHARS
 from local_operator.session.goal_loop import (
     LOOP_GOAL_CHARS,
     LOOP_REASON_CHARS,
@@ -129,10 +125,39 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: figures before moving this — the arm's assertion message prints the total.
 #:
 #: "Bounds" here means a ZERO-SLACK EQUALITY on today's numbers, not headroom to
-#: spend (QA round 3, Q7): 1,050,626 − 1,048,576 = 2,050 exactly. One more byte
-#: per roster fails the arm, and raising this constant to clear that red IS the
-#: ceiling decision above, not a way to make the guard pass — report the byte.
-_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_050
+#: spend (QA round 3, Q7): raising this constant to clear a red IS the ceiling
+#: decision above, not a way to make the guard pass — report the byte.
+#:
+#: RAISED BY 95 B for the judged-goal record, from 2,050 to 2,145, and that is
+#: the whole of this feature's ceiling spend. MEASURED on this head by
+#: serializing the arm's own frame twice — once as the new fixture leaves it and
+#: once with the four goal keys removed from the snapshot — with the second
+#: reading 1,050,626 B, the exact figure this comment already documented for
+#: today's head. So the delta is 95 B and it is ADDITIVE here: the released arm's
+#: catalogue is already pinned at ``MODEL_CATALOGUE_FLOOR_ROWS`` (the frame is
+#: over the line even at the floor), so nothing else can absorb the bytes. On the
+#: member arm, where the catalogue still has rows to give, the same 95 B is spent
+#: by the residual budget instead.
+#:
+#: The 95 B is the record's KEY SKELETON at the guard's worst case, and the
+#: breakdown is the whole of it: ``goal_status`` 23 B ("done") + ``goal_judge``
+#: 20 B (yielded to null) + ``goal_history`` 20 B (yielded to the empty list) +
+#: ``goal_history_truncated`` 32 B (set, so the empty list cannot read as "no
+#: completed goals"). Nothing here is padding: the four keys serialize on every
+#: frame because this model dumps every field (no ``exclude_defaults`` anywhere
+#: in ``sync_wire_payload``), and an ordinary session with no settled goal pays
+#: 92 B of the same skeleton at its defaults.
+#:
+#: What the bound deliberately does NOT pay for is the record's PAYLOAD on a full
+#: frame. Keeping the judge's four keys with its reason clipped to 200 characters
+#: measured 362 B in total — 287 B of it the judge — to render one tooltip line on
+#: a frame that already has none to give, which is why
+#: ``_bound_goal_record_in_place`` yields the whole payload rather than a clipped
+#: share of it. A plan drafted before the code quoted +74 B for this spend; the
+#: measured skeleton is 95 B because the ``goal_judge`` KEY itself costs 20 B and
+#: cannot be dropped while the field exists on the model. The measured frame is
+#: the authority; raise this number only with a fresh measurement.
+_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_145
 
 #: No comms node: these released children have no lineage, which is the smaller
 #: of the two shapes `_with_lineage` can produce and the only one this arm needs
@@ -495,10 +520,12 @@ _BOUNDED_COLLECTION_FIELDS = {
     # judge transition rather than appended to: a hundred-turn goal and a
     # one-turn goal serialize the same shape. Its one free-text value is clipped
     # where the model's answer enters the state (LOOP_REASON_CHARS, at the
-    # parse) and clipped AGAIN to GOAL_REASON_WIRE_CHARS at the wire when the
-    # frame is over the line. Typed `dict[str, Any] | None` on the model ON
-    # PURPOSE, because the annotation is what makes the class guard see it.
-    "goal_judge": "fixed four-key judge state; reason clipped at the parse and again at the wire",
+    # parse), and when the frame it would ride is over the line the whole mapping
+    # is YIELDED to None by `_bound_goal_record_in_place` — the key skeleton is
+    # 20 B and the four keys with a clipped reason are 287 B, for a value the
+    # next frame rebuilds. Typed `dict[str, Any] | None` on the model ON PURPOSE,
+    # because the annotation is what makes the class guard see it.
+    "goal_judge": "fixed four-key judge state; clipped at the parse and yielded at the wire",
     # One startup report from the MCP wiring pass, not an accumulator: it is
     # REPLACED on each wiring round rather than appended to, and its size is a
     # function of how many servers are configured.
@@ -1043,7 +1070,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "measuring the unbounded shape (see _bound_goal_record_in_place)"
     )
     assert snapshot["goal_history_truncated"] is True
-    assert len(snapshot["goal_judge"]["reason"]) == GOAL_REASON_WIRE_CHARS
+    assert snapshot["goal_judge"] is None
     assert size < _MAX_LINE_BYTES, (
         f"the attach frame is {size:,} bytes, over the {_MAX_LINE_BYTES:,} limit. "
         "Some field in FrontendSessionState grows without bound and is not "
@@ -6090,11 +6117,12 @@ def test_the_goal_record_yields_only_when_the_frame_is_over_the_line() -> None:
     over["filler"] = "x" * (_MODEL_CATALOGUE_LINE_LIMIT + 1)
     big = {"op": "frontend_sync", "data": {"snapshot": over}}
     _bound_goal_record_in_place(big, big["data"]["snapshot"])
-    # Over it: the list goes with the flag set, the judge keeps all four keys and
-    # clips its prose, and the ACTIVE goal — the thing on this frame a user is
-    # looking at — is untouched.
+    # Over it: the record becomes its KEY SKELETON — the list goes with the flag
+    # set, and the judge yields entirely rather than keeping four keys (287 B) to
+    # render one tooltip line on a frame that has none to give — while the ACTIVE
+    # goal and its state, the two things on this frame a user is looking at, are
+    # untouched.
     assert big["data"]["snapshot"]["goal_history"] == []
     assert big["data"]["snapshot"]["goal_history_truncated"] is True
-    assert len(big["data"]["snapshot"]["goal_judge"]["reason"]) == GOAL_REASON_WIRE_CHARS
-    assert set(big["data"]["snapshot"]["goal_judge"]) == {"state", "run", "verdict", "reason"}
+    assert big["data"]["snapshot"]["goal_judge"] is None
     assert big["data"]["snapshot"]["goal_status"] == "active"
