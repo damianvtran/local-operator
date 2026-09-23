@@ -4229,6 +4229,21 @@ class RuntimeServer:
         See :meth:`_visible_attach_surfaces` for why the machine-wide answer
         wins where it exists and the renderer's flag is the fallback where it
         does not.
+
+        AN EMPTY ``session_id`` IS NOT EVIDENCE AGAINST THIS SESSION. The
+        publisher blanks the field whenever it cannot vouch for which
+        conversation the window shows (``server/utils/desktop_presence.py``), and
+        a renderer-report lapse blanks it too, so denial on an empty name reads
+        absence of evidence as evidence against — which is precisely what told
+        the operator's own focused, visible app that nobody was at a screen.
+        The per-connection flag is the per-session answer, and it is set by a
+        heartbeat that names THIS session's subscription, so falling through to
+        it is also the pre-presence behaviour the docstring above promises an
+        older app: byte-identical for an old UI.
+
+        The denied direction is preserved where the record IS evidence: an app
+        naming a DIFFERENT conversation still denies, which is what stops it
+        suppressing a background session's banner while showing someone else.
         """
         try:
             from local_operator.session.runtime.presence import desktop_presence
@@ -4238,6 +4253,8 @@ class RuntimeServer:
             logger.debug("could not read the desktop presence", exc_info=True)
             return conn.desktop_visible
         if not presence.present:
+            return conn.desktop_visible
+        if not presence.session_id:
             return conn.desktop_visible
         record = getattr(self, "_record", None)
         session_id = str(getattr(record, "session_id", "") or "")

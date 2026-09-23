@@ -1532,6 +1532,20 @@ eligible.
    question, and using it to suppress meant "this machine can banner" read as "a
    human is reading X": with the panel on X and the window behind another app,
    every OS surface went quiet while nobody was looking.
+
+   This rung reads ATTENTION ("a person is looking right now") and must keep
+   reading it. The runtime also publishes `RuntimeServer.attached_surfaces()` —
+   "an interface could PRESENT a question", with no focus in it and the
+   `attach_clients()` desktop clause — and that is a different question serving
+   different consumers: the model's `<interactivity>` block and the gate's park
+   decision, never suppression. Routing on it here would silence the banner for
+   a conversation nobody is looking at, which is what this rung exists to catch
+   (see `docs/design/attached-interface-signal.md`).
+
+   A record whose `session_id` is EMPTY is absence of evidence, not evidence
+   against the session: the publisher blanks the field whenever it cannot vouch
+   for which conversation the window shows, so `_desktop_visible` falls through
+   to the connection's own per-session flag rather than denying.
 2. **A notify-capable desktop app** on this host claims the completion kind —
    the feed above composes it, so the runtime and the TUI stay silent.
 3. **A TUI is running anywhere on this machine** — its 1 s background announcer
