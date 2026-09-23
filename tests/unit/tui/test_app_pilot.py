@@ -29,9 +29,10 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.paths import config_dir
+from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
-from local_operator.session.goal import GoalState
 from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
@@ -5756,10 +5757,33 @@ class GoalSession(FakeSession):
         #: it, because the completion toast fires from `on_turn_ended` off that
         #: queued event, not synchronously from `prompt`.
         self.post_turn_ended_to: Any = None
+        #: Number of leading `prompt` calls that raise `TurnInFlight` before one
+        #: is admitted. This is the REAL session's shape, not a contrivance: the
+        #: judge's continuation is admitted from the turn-end handler, which runs
+        #: on the session's held end event with `_turn_lock` still held, so the
+        #: first admission of every continuation meets this refusal (QA round 1,
+        #: Q1). A fake that accepted everything was why no unit test saw it.
+        self.turn_in_flight_prompts = 0
+        #: The continuation texts admitted WITH the structural `harness_injected`
+        #: stamp. `prompt` declares the keyword because the real `Session` does —
+        #: the driver probes for it, so a `**kwargs` fake would silently record
+        #: nothing and pass a test about a stamp that never arrived.
+        self.injected_prompts: list[str] = []
 
-    async def prompt(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        harness_injected: bool = False,
+    ) -> None:
         if self.fail_on_prompt:
             raise RuntimeError("boom")
+        if self.turn_in_flight_prompts > 0:
+            self.turn_in_flight_prompts -= 1
+            raise TurnInFlight(TURN_IN_FLIGHT)
+        if harness_injected:
+            self.injected_prompts.append(text)
         if self.prompt_gate is not None:
             await self.prompt_gate.wait()
         self.prompts.append(text)

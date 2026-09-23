@@ -253,3 +253,74 @@ def test_an_unreadable_record_costs_the_record_and_not_the_resume(tmp_path: Path
     assert session._goal_state.status == ""
     assert session._goal_state.history == []
     assert os.path.isdir(tmp_path)
+
+
+def test_set_goal_mints_the_token_the_judge_needs(tmp_path: Path) -> None:
+    """Agent review MAJOR-3, the `lop --goal` / mobile-relay half.
+
+    `set_goal` is the plain "replace the text" act behind `--goal` and the mobile
+    relay, and it deliberately does no record bookkeeping — but the judge's
+    `_enabled` requires a token, so without this a goal every surface reported as
+    `active` was never judged by anything.
+    """
+    session = _stub_session(tmp_path)
+
+    stored = session.set_goal("land the OAuth refresh fix")
+
+    assert stored == "land the OAuth refresh fix"
+    assert session.goal_token, "the judge can run on a plainly-set goal"
+    assert session.goal_status == ""
+    # Clearing it takes the token with it: a goal that left has no identity.
+    session.set_goal("")
+    assert session.goal_token == ""
+
+
+def test_a_goal_restored_from_a_pre_lifecycle_build_mints_a_token(tmp_path: Path) -> None:
+    """Agent review MAJOR-3, the R9 migration half — driven through a REAL Session.
+
+    A build that predates the record leaves the goal's text in `attachment.json`
+    and writes no `goal.json` at all, which is the shape the fold reports as
+    `active`. Reproduced here the way a user meets it: build a session over that
+    directory and ask whether anything could ever run on the goal.
+    """
+    from tests.e2e.harness import ScriptedStream, build_session
+
+    directory = tmp_path / "session"
+    directory.mkdir()
+    write_session_attachment(directory, team="", agent="", goal="land the OAuth refresh fix")
+
+    session = build_session(directory, ScriptedStream([]))
+
+    assert session.goal == "land the OAuth refresh fix"
+    assert session.goal_token, "a restored goal is judged, not merely displayed"
+    assert session.goal_status in {"", "active"}
+
+
+def test_a_record_on_disk_keeps_its_own_token(tmp_path: Path) -> None:
+    """The mint is for a goal that never had an identity — not a re-issue.
+
+    A record written by a build that HAS the record carries the token its
+    in-flight verdict was captured against, and the restore must hand back the
+    same one; re-minting on every resume would drop a verdict the goal is still
+    the same goal for (the reasoning `_restore_goal_record` already documents).
+    """
+    from tests.e2e.harness import ScriptedStream, build_session
+
+    directory = tmp_path / "session"
+    directory.mkdir()
+    write_session_attachment(directory, team="", agent="", goal="A")
+    write_goal_record(
+        directory,
+        {
+            "goal": "A",
+            "status": "active",
+            "token": "token-from-disk",
+            "judge": {"state": "waiting"},
+            "history": [],
+        },
+    )
+
+    session = build_session(directory, ScriptedStream([]))
+
+    assert session.goal == "A"
+    assert session.goal_token == "token-from-disk"

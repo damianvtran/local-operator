@@ -21,6 +21,8 @@ pins it. What is local to this host is the wiring, the reuse of the app's single
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from local_operator.session.errors import TurnInFlight
@@ -135,8 +137,25 @@ async def test_an_error_turn_waits_without_judging() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_refused_continuation_waits_and_does_not_retry() -> None:
-    """`TurnInFlight` is a `waiting`, never a retry: the next turn end re-arms."""
+async def test_a_persistently_refused_continuation_parks_at_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The BOUND on the deferred admission, and the no-spin rule it keeps.
+
+    The refusal is waited out only while it can clear (see QA-Q1's test above):
+    a session that refuses for longer than the ceiling parks the record at
+    `waiting`, which is honest — nothing is being spent — and the next turn end
+    re-arms the judge. What must never happen is a SECOND judge run, and that is
+    what this asserts: the driver's policy answers a refused admission with
+    `waiting`, never with another verdict.
+
+    The two windows are shortened rather than slept through, so the test pins the
+    bound instead of depending on how long the suite is willing to wait.
+    """
+    from local_operator.tui import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_GOAL_CONTINUATION_ADMISSION_S", 0.05)
+    monkeypatch.setattr(app_mod, "_GOAL_CONTINUATION_ADMISSION_RETRY_S", 0.005)
 
     session = _armed([CONTINUE, CONTINUE, CONTINUE])
     attempts: list[str] = []
@@ -150,12 +169,16 @@ async def test_a_refused_continuation_waits_and_does_not_retry() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(pilot, 2)
         app.post_message(TurnEnded(aborted=False, error=None))
-        await _settle(pilot)
-        # ONE attempt: a retry loop here is the spin the driver must not have.
-        assert len(attempts) == 1
+        await asyncio.sleep(0.2)
+        await _settle(pilot, 20)
+        # It ASKED again while the refusal could still clear, and gave up at the
+        # ceiling rather than spinning: more than one attempt, bounded.
+        assert len(attempts) > 1
         assert session.judge_calls == 1
         assert session.goal_judge is not None
         assert session.goal_judge["state"] == "waiting"
+        # The goal stays ACTIVE: a refusal is not a release either.
+        assert session.goal_status == "active"
 
 
 @pytest.mark.asyncio
@@ -288,3 +311,93 @@ async def test_the_stall_is_not_announced_again_by_a_later_frame() -> None:
         assert session.goal_judge is not None
         assert session.goal_judge["state"] == "waiting"
         assert _stall_notices(app) == [STALLED_BREAKER_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_refused_by_a_closing_turn_is_admitted_after_it_closes() -> None:
+    """QA-Q1: the edge the judge fires on is the one moment the lock is held.
+
+    `TurnEnded` is posted from the session's HELD end event, which the turn's own
+    pipeline flushes with `_turn_lock` still held — so the FIRST admission of
+    every continuation meets `TurnInFlight`, and a host that gave up there left
+    the goal inert with the verdict already in hand (the measured app behaviour:
+    `calls=3`, `status=active`, `judge=waiting`, and `tests/e2e` `assert 3 == 5`).
+
+    The fake raises it the way the real session does rather than accepting
+    everything, which is the reason no unit test saw this before: a `prompt` that
+    never refuses cannot exercise an admission path that must wait.
+    """
+    session = _armed([CONTINUE, ACHIEVED])
+    session.turn_in_flight_prompts = 1
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        app.post_message(TurnEnded(aborted=False, error=None))
+        # The retry gap is real time (a thread-backed teardown resolves on the
+        # clock, not on a loop-turn budget), so the settle below has to let it
+        # elapse rather than only pumping messages.
+        await asyncio.sleep(0.2)
+        await _settle(pilot, 20)
+        assert session.prompts == [goal_continuation_prompt(GOAL)]
+        # ...and the chain continued: the admitted turn was judged and settled.
+        assert session.judge_calls == 2
+        assert session.goal_status == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_carries_the_structural_harness_stamp() -> None:
+    """Agent review MAJOR-2: the one host that did not stamp its own row.
+
+    The TUI's live paint and its replay are covered by the text recogniser, so
+    the omission was invisible here — but the DESKTOP is marker-only by contract
+    (`docs/DESKTOP_API.md`), and this row is durable in the shared store, so a
+    continuation written by a local TUI replayed there as the user's own words.
+    """
+    session = _armed([CONTINUE, ACHIEVED])
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        app.post_message(TurnEnded(aborted=False, error=None))
+        await _settle(pilot, 20)
+        assert session.prompts == [goal_continuation_prompt(GOAL)]
+        assert session.injected_prompts == [goal_continuation_prompt(GOAL)]
+
+
+@pytest.mark.asyncio
+async def test_a_restored_continuation_re_arms_at_boot_without_a_typed_turn() -> None:
+    """Agent review MAJOR-1: trigger 3 had no caller on this host.
+
+    Driven with NO `TurnEnded` at all: the restored record alone must re-engage
+    the judge, which is the app-reopened case the operator asked for. Reproduced
+    before the fix as `judge_calls after boot = 0`, no prompt admitted.
+    """
+    session = _armed([CONTINUE, ACHIEVED])
+    # The exact restored shape: a continuation was in flight when the terminal
+    # closed, so the record reads `continuing` with a spent streak.
+    session.note_goal_judge(state="continuing", verdict="continue", run=2)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await asyncio.sleep(0.2)
+        await _settle(pilot, 20)
+        assert session.judge_calls >= 1, "the restored record alone re-armed the judge"
+        assert session.prompts == [goal_continuation_prompt(GOAL)]
+        assert session.goal_status == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_restored_waiting_goal_is_not_re_armed_at_boot() -> None:
+    """RULINGS R3's other half: checkpoint state is not an instruction to spend.
+
+    A `waiting` goal had nothing in flight when the app closed, so a restart is
+    not a reason to judge it — it re-arms on the next real turn end like any
+    other. Paired with the test above so the guard cannot be satisfied by
+    re-arming unconditionally.
+    """
+    session = _armed([ACHIEVED])
+    session.note_goal_judge(state="waiting")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await asyncio.sleep(0.2)
+        await _settle(pilot, 20)
+        assert session.judge_calls == 0
+        assert session.prompts == []

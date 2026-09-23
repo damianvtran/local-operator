@@ -398,3 +398,78 @@ def test_the_fold_reads_a_goal_with_no_status_as_active():
 
     empty = _Session()
     assert _fold_goal_status(empty) == ""
+
+
+def test_ensure_token_mints_one_for_a_goal_that_never_had_it():
+    """Agent review MAJOR-3: the goal every surface called `active` and ran on.
+
+    The judge refuses to run without a token — that is its staleness guard — and
+    `arm` was the only minter, so a goal that arrived any other way (a plain
+    `set_goal`, or a restore from a build that predates the record) was silently
+    unjudgeable. Minting is the R9 fold's other half.
+    """
+    state = GoalState()
+    state.set("A")
+    assert state.token == "", "a plain set really does mint nothing"
+
+    assert state.ensure_token() is True
+    assert state.token, "the judge can now run on it"
+    # Idempotent: the goal's identity must not change under a running judge.
+    assert state.ensure_token() is False
+    assert state.token
+
+
+def test_ensure_token_leaves_an_empty_and_a_settled_goal_alone():
+    empty = GoalState()
+    assert empty.ensure_token() is False
+    assert empty.token == ""
+
+    done = GoalState()
+    done.arm("A")
+    token = done.token
+    done.mark_done()
+    # A done goal is RETAINED so the surfaces can show what was achieved; arming
+    # the judge against work that is already finished would be the opposite.
+    assert done.ensure_token() is False
+    assert done.token == token
+
+
+def test_a_person_marked_done_clears_the_stale_judge_reason():
+    """QA-Q4: the card printed a live-looking quote about a closed goal.
+
+    `mark_done` keeps `text` (the chip strikes through WHAT was done) and set the
+    judge to `done`, but the previous tick's REASON stayed on the record — so the
+    surface that renders both fields together read
+    `judge: achieved · 2/12 · — still drafting` about work the user had just
+    closed by hand.
+    """
+    state = GoalState()
+    state.arm("A")
+    state.reset_judge(state="continuing")
+    state.judge.reason = "still drafting"
+
+    state.mark_done()
+
+    assert state.judge.state == "done"
+    assert state.judge.reason == ""
+
+
+def test_a_verdict_marked_done_leaves_the_live_reason_to_the_publish():
+    """...and that clear is for a PERSON's settle only.
+
+    A verdict's reason rides the HISTORY entry, which is the record of what the
+    model said when it closed the goal; the live judge reason beside it is
+    written by the driver's own publish immediately after the settle. So
+    `mark_done` must leave that field alone rather than blanking a value the
+    publish is about to set.
+    """
+    state = GoalState()
+    state.arm("A")
+    state.reset_judge(state="judging")
+    state.judge.reason = "the tick's own words"
+
+    entry = state.mark_done("the artifact exists and the goal is met")
+
+    assert entry is not None
+    assert entry.reason == "the artifact exists and the goal is met"
+    assert state.judge.reason == "the tick's own words"

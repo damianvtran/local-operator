@@ -1026,3 +1026,26 @@ def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
 
     assert last == first
     assert len(last[-1]) == len(first[-1])
+
+
+def test_the_goal_block_is_withheld_once_the_goal_is_done() -> None:
+    """UI review round 1: a finished objective kept riding as the standing one.
+
+    `mark_done` keeps the goal's TEXT on purpose — the chip strikes through WHAT
+    was done and the history names it — so a block gated on the text alone told
+    the model, every turn, to keep pursuing work the judge had just declared
+    complete. The text is for the SURFACES; the prompt is instructions, and
+    "pursue this" must not be the same sentence as "this was achieved".
+    """
+    from local_operator.prompts_api import build_system_blocks
+
+    active = build_system_blocks(TOOLS, SKILLS, ENV, DATE, goal="ship it", goal_status="active")
+    assert "The user's standing objective for this session:\nship it" in active[3]
+
+    # The pre-lifecycle case: no status recorded, and the fold calls that active.
+    unset = build_system_blocks(TOOLS, SKILLS, ENV, DATE, goal="ship it")
+    assert "ship it" in unset[3]
+
+    done = build_system_blocks(TOOLS, SKILLS, ENV, DATE, goal="ship it", goal_status="done")
+    assert "ship it" not in done[3], "a settled goal is not an objective to pursue"
+    assert "<goal>" not in done[3]
