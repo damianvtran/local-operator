@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import Counter
 from typing import Any, Callable, cast
 
 import pytest
@@ -2946,10 +2947,14 @@ def test_a_child_hub_reply_with_parent_shaped_args_still_reaches_the_parent():
 # ``SessionProjection.set_subagent_details``. Each used to answer a question
 # about ONE record by walking all N of them, and ``_live_twin`` walked all N for
 # every record, so ``roster()`` was O(N²) against a registry that is capped at
-# ``MAX_RECORDS``. The harness's own stall dumps caught it: in 24 of the 35 fired
-# dumps under ``~/.local-operator/logs/runtime-stall-*.log`` the loop thread was
-# inside this path, and a starved loop is what trips the bound that kills a
-# runtime mid-turn.
+# ``MAX_RECORDS``. The harness's own stall dumps catch it:
+# ``~/.local-operator/logs/runtime-stall-*.log`` carries stacks whose innermost
+# frame is this work — the ``TRANSCRIPT_FILENAME`` probe in ``_describe`` most
+# often, then ``_live_twin``'s genexpr, ``_is_running`` and the ``Path.__eq__``
+# comparisons inside the scan — and a starved loop is what trips the bound that
+# kills a runtime mid-turn. Cite the FRAMES, not a census of them: the dump
+# files rotate, and two readers recounted them independently on the day this
+# shipped and got 21 of 128 and 28 of 134.
 #
 # The fix is ONE linear pass (``SubagentComms.roster_pass``). The guard below
 # counts WORK, not TIME: a wall-clock bound measured on this host — ~25
@@ -3042,6 +3047,45 @@ def _counting_touches(comms: SubagentComms, read: Callable[[], Any]) -> int:
     records.touches = 0
     read()
     return records.touches
+
+
+def test_status_counts_counts_the_same_population_nodes_reports(tmp_path) -> None:
+    """The histogram the publishers read counts exactly what ``nodes()`` reports.
+
+    THIS is the relationship that keeps ``serving.subagent_counts`` and the TUI
+    twin honest. Both now sum ``status_counts()`` instead of filtering a node
+    list, so if the two derivations ever answered different populations the
+    published counts would silently disagree with every other reader of the same
+    roster — the class of divergence the R1 regression in
+    ``test_subagent_counts_published`` already cost once.
+
+    The awkward keys are the point. ``status_counts`` walks the registry KEYS and
+    resolves each through ``_record`` (skipping ids the alias table no longer
+    points at), while ``nodes()`` does the same — but one counts per key and the
+    other per resolved record, which is exactly where a later edit could open a
+    gap. So the fixture carries both shapes: an ALIASED key that resolves to
+    another record (that record's status must be counted twice) and a DANGLING
+    key that resolves to nothing (must not be counted at all).
+    """
+    comms = _settled_roster(4, tmp_path)
+    comms._records["job-0001-alias"] = comms._records["job-0001"]
+    comms._aliases["job-0001-alias"] = "job-0001"
+    comms._records["job-0002-dangling"] = comms._records["job-0002"]
+    comms._aliases["job-0002-dangling"] = "job-0002-gone"
+
+    nodes = comms.nodes()
+    counts = comms.status_counts()
+
+    assert counts == Counter(node.status for node in nodes), (
+        "status_counts() must count the population nodes() reports: the publishers "
+        "read the histogram and every other reader reads the nodes"
+    )
+    # And the fixture must reach both awkward keys, or the assertion above is
+    # about a plain roster: the alias yields the same node twice, the dangling key
+    # yields none.
+    assert [node.job_id for node in nodes].count("job-0001") == 2
+    assert len(nodes) == 5, "4 records + 1 aliased duplicate, and no dangling row"
+    assert counts["completed"] == 5
 
 
 def test_the_roster_touches_each_record_a_constant_number_of_times(tmp_path) -> None:

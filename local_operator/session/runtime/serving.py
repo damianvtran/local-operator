@@ -6587,9 +6587,10 @@ class ServingSessionHandle(SessionHandle):
         # registry in ``SubagentComms`` is the only place that knows it. Both
         # hosts must therefore agree about the same row, or a runtime-hosted
         # session 404s every child transcript while a TUI-hosted one serves it.
-        # The cost is the one the TUI already pays per folded event (one
-        # registry walk plus a bounded copy); no child transcript ever leaves
-        # with it.
+        # The cost is the one the TUI already pays per folded event: one linear
+        # registry pass, plus a job-row lookup and the outcome/error text caps
+        # per node (both listed as unaddressed in the PR). No child transcript
+        # ever leaves with it.
         comms = getattr(self._session, "_subagent_comms", None)
         if comms is not None:
             self._fold.set_subagent_details(comms)

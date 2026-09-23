@@ -591,9 +591,15 @@ class RosterPass:
     per root event of a turn, and each of them used to answer a question about
     ONE record by walking all N of them — and ``_live_twin`` walked all N per
     record, so ``roster()`` was O(N²). Three quadratic walks per event saturated
-    the loop on a roster at the ``MAX_RECORDS`` cap; the runtime's own stall
-    dumps caught it (see the PR: 24 of 35 fired dumps had the loop thread inside
-    this path). One pass makes each of those callers linear.
+    the loop on a roster at the ``MAX_RECORDS`` cap. The runtime's own stall dumps
+    catch it: ``~/.local-operator/logs/runtime-stall-*.log`` carries stacks whose
+    innermost frame is this work — the ``TRANSCRIPT_FILENAME`` probe in
+    ``_describe`` most often, then ``_live_twin``'s genexpr, ``_is_running`` and
+    the ``Path.__eq__`` comparisons inside the scan. Cite the FRAMES, not a
+    census of them: the dump files rotate (a count taken at 10:45 and another at
+    11:20 differ by an order of magnitude on this host), and two readers
+    recounted them independently on the day this shipped and got 21 of 128 and
+    28 of 134. One pass makes each of those callers linear.
 
     A pass is a SNAPSHOT and is deliberately never retained across calls: it
     hoists state that cannot change *within* one pass — a job row's running bit
@@ -840,6 +846,17 @@ class RosterPass:
             result_text=record.result_text or "",
             error_text=record.error_text or "",
         )
+
+    def children(self, job_id: str | None) -> list[SubagentNode]:
+        """``SubagentComms.children`` off this pass: one walk, not two.
+
+        Same parent resolution as the method it mirrors — the alias table is
+        applied through ``_record``, so an aliased parent id still selects the
+        children of the job it resolves to.
+        """
+        selected = self._comms._record(job_id) if job_id else None
+        parent_id = selected.job_id if selected is not None else job_id
+        return [node for node in self.nodes() if node.parent_job_id == parent_id]
 
     def node_for(self, job_id: str) -> SubagentNode | None:
         record = self._comms._record(job_id)

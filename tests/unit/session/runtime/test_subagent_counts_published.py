@@ -27,6 +27,7 @@ Two properties are load-bearing and both are asserted here:
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -341,6 +342,14 @@ async def test_the_probe_counts_a_REAL_SubagentComms_roster(tmp_path: Path) -> N
     assert statuses == {
         row.job_id: row.status for row in comms.roster()
     }, "node() and roster() must agree; two derivations of one fact is how they drift"
+    # ...and the histogram the PROBE reads is that same population. `subagent_counts`
+    # sums `status_counts()` while every other reader filters `nodes()`, so this is
+    # the pair that can drift silently: a histogram counting per registry KEY while
+    # `nodes()` counts per resolved RECORD would publish a total the tree disagrees
+    # with, and nothing else in this file would notice.
+    assert comms.status_counts() == Counter(
+        node.status for node in comms.nodes()
+    ), "status_counts() must count exactly the population nodes() reports"
     assert handle.subagent_counts() == (1, 1), "a live child is not 'gone'"
 
 

@@ -27037,10 +27037,22 @@ class OperatorApp(App[None]):
                 wake_rows = 0
         return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
-    def _subagent_job(self, job_id: str) -> Any:
+    def _subagent_job(self, job_id: str, read: Any = None) -> Any:
+        """One node's execution row, through the roster's own resolvers.
+
+        ``read`` is a prebuilt :meth:`SubagentComms.roster_pass` when the caller
+        already has one. Its ``job`` is the SAME search ``comms.job`` performs
+        (root, then each live child in insertion order, then the record's
+        retained row), but the session list it searches was built once for the
+        whole pass instead of once per call — so a dock tick that resolves a row
+        per node stops being O(N^2) at the ``MAX_RECORDS`` cap. Callers with no
+        pass (the follower's snapshot facade, an older host) keep the per-call
+        lookup, which is what they have always done.
+        """
         session = self._session
         comms = getattr(session, "_subagent_comms", None)
-        lookup = getattr(comms, "job", None)
+        source = read if read is not None else comms
+        lookup = getattr(source, "job", None)
         job = lookup(job_id) if callable(lookup) else None
         manager = getattr(session, "jobs", None)
         if job is None and manager is not None:
@@ -27050,6 +27062,31 @@ class OperatorApp(App[None]):
             frontend = getattr(session, "frontend_state", None)
             job = next((row for row in getattr(frontend, "jobs", ()) if row.id == job_id), None)
         return job
+
+    def _roster_read(self, comms: Any) -> Any:
+        """One linear pass over the comms graph for a whole dock tick, or the
+        graph itself where there is no pass to build.
+
+        WHY THE RESOLVERS TAKE ONE. Every dock path resolves a job row per node
+        it shows, and ``comms.job`` rebuilds the live-child session list by
+        scanning all N records on every call — so N lookups cost O(N^2) at the
+        cap, once per tick and once per ``Subagent*`` handler. One pass answers
+        all of them from the single scan it had to make anyway.
+
+        Total by design, like the readers that use it: this feeds a status
+        surface, so a graph that cannot build a pass is the graph, not an
+        exception. The follower's ``SnapshotSubagentComms`` is that case — it
+        has no ``roster_pass`` and does not need one (its ``job`` is a dict
+        lookup), and returning it unchanged is what keeps a follower and an
+        owner reading the same members.
+        """
+        build = getattr(comms, "roster_pass", None)
+        if callable(build):
+            try:
+                return build()
+            except Exception:  # noqa: BLE001 — a tick may not cost the band
+                logger.debug("could not build the roster pass", exc_info=True)
+        return comms
 
     @staticmethod
     def _within_roster_window(jobs: list[Any], manager: Any, paused_ids: set[str]) -> list[Any]:
@@ -27148,18 +27185,24 @@ class OperatorApp(App[None]):
         manager = getattr(session, "jobs", None)
         view = self._subagent_view
         try:
-            job_for = self._subagent_job
+            # ONE pass for the whole tick: the child list, every node's job row
+            # and the ``children()`` scan below all come off it.
+            read = self._roster_read(comms)
 
             if comms is not None and callable(getattr(comms, "children", None)):
-                nodes = comms.children(view.job_id if view is not None else None)
-                jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
+                nodes = read.children(view.job_id if view is not None else None)
+                jobs = [
+                    job
+                    for node in nodes
+                    if (job := self._subagent_job(node.job_id, read)) is not None
+                ]
                 jobs = self._within_roster_window(jobs, manager, paused_child_ids(comms))
-                return jobs, job_for(view.job_id) if view is not None else None
+                return jobs, self._subagent_job(view.job_id, read) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
             return (
                 manager.list() if manager is not None and view is None else [],
-                self._subagent_job(view.job_id) if view is not None else None,
+                self._subagent_job(view.job_id, read) if view is not None else None,
             )
         except Exception:
             return [], None
@@ -27199,6 +27242,16 @@ class OperatorApp(App[None]):
         roster row, and only to the children of rows actually listed: a page
         deep in a large tree reads its own children, never the whole graph.
 
+        AND the per-row resolver reads that same pass (review round 1, M1).
+        Resolving each child through ``comms.job`` rebuilt the live-child
+        session list by scanning every registry record per call, so the
+        per-row half of this method was STILL quadratic in the record count —
+        66,816 registry touches at ``MAX_RECORDS`` on the reviewer's rig,
+        against 1,280 for the fold's shape. ``_roster_read`` builds one pass for
+        the tick and every lookup below comes off it, so the grouping and the
+        resolutions are two reads of one scan rather than one scan plus a
+        quadratic sweep.
+
         Total and silent by design, because this runs from the 1 Hz poll and
         from every ``Subagent*`` handler: a host with no comms graph, or one
         whose ``nodes`` is not callable, answers ``{}`` — i.e. no marks — and a
@@ -27210,9 +27263,12 @@ class OperatorApp(App[None]):
         nodes = getattr(comms, "nodes", None)
         if not callable(nodes):
             return {}
+        # One pass for the tick: the grouping walk and the per-row resolvers
+        # below both read it (see ``_roster_read``).
+        read = self._roster_read(comms)
         try:
             buckets: dict[str, list[Any]] = {}
-            for node in cast(Sequence[Any], nodes()):
+            for node in cast(Sequence[Any], read.nodes()):
                 parent_id = str(getattr(node, "parent_job_id", "") or "")
                 if parent_id:
                     buckets.setdefault(parent_id, []).append(node)
@@ -27229,11 +27285,13 @@ class OperatorApp(App[None]):
                 # Resolved LAZILY, per roster row rather than per node in the
                 # graph: a page deep in a large tree reads its own children
                 # only, and `_subagent_job` is the roster's own resolver, whose
-                # follower form detaches a public job per call.
+                # follower form detaches a public job per call. Each lookup is
+                # answered by the tick's shared pass (`read`), not by a fresh
+                # session scan.
                 children = [
                     child
                     for node in buckets.get(job_id, ())
-                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or "")))
+                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or ""), read))
                     is not None
                 ]
                 counts[job_id] = len(self._within_roster_window(children, manager, paused))

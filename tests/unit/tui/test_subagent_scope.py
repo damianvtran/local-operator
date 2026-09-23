@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.comms import SubagentComms
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
     FrontendSessionState,
@@ -19,11 +20,14 @@ from local_operator.session.frontend_state import (
     SnapshotSubagentComms,
     TodoPhaseState,
 )
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.subagent_view import entry_block, fold_trajectory
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
+from tests.unit.harness.test_comms import _CountingRecords
+from tests.unit.tui.test_band_panels import _fake_jobs, _Job
 from tests.unit.tui.test_subagent_view import (
     FakeSession,
     _async_factory,
@@ -764,3 +768,98 @@ async def test_the_compact_caption_names_the_level_it_counts() -> None:
         assert "running" not in caption, caption  # a count yields to the name
         assert caption.endswith("ctrl+g"), caption
         assert cell_len(caption) <= panel._row_width(), (caption, panel._row_width())
+
+
+class _SpyComms(SubagentComms):
+    """A real registry that notes every per-node ``job`` lookup the dock makes.
+
+    The dock resolves a job row per node it shows. ``comms.job`` answers by
+    rebuilding the live-child session list from a scan of every registry record,
+    so a row-per-node dock paid O(N^2) at the ``MAX_RECORDS`` cap — 256 ``job``
+    calls where the fold makes none (review round 1, M1). This spy is what makes
+    that per-node call observable, because a clock cannot assert it on a host at
+    load 100+.
+    """
+
+    def __init__(self, session: Any) -> None:
+        super().__init__(session)
+        self.job_calls = 0
+
+    def job(self, job_id: str) -> Any:
+        self.job_calls += 1
+        return super().job(job_id)
+
+
+def _docked_registry(n: int, tmp_path: Any) -> tuple[Any, Any]:
+    """An app whose session carries a real registry of ``n`` settled children.
+
+    Each child gets a real transcript file: the roster's resumable verdict probes
+    the filesystem, and that probe is part of what the old per-record walk paid.
+    """
+    jobs = _fake_jobs(*[_Job(f"job-{i:04d}", f"child-{i}", "completed") for i in range(n)])
+    session = FakeSession()
+    session.jobs = jobs
+    comms = _SpyComms(session)
+    for i in range(n):
+        comms.record_launch(f"job-{i:04d}", f"child-{i}")
+    for i in range(n):
+        session_dir = tmp_path / f"job-{i:04d}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+        record = comms._records[f"job-{i:04d}"]
+        record.session_dir = session_dir
+        record.settled = True
+        record.settled_at = 1_000.0
+    comms._records = _CountingRecords(comms._records)
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    # ``_session`` is assigned by the boot path; both resolvers under test only
+    # read it, ``_subagent_view`` (None until a view opens) and module-level
+    # helpers, so no mount is needed to drive them.
+    app._session = session
+    return app, comms
+
+
+def test_the_dock_resolves_its_rows_from_ONE_pass(tmp_path) -> None:
+    """A dock tick reads one linear pass, not one session scan per node.
+
+    Counted rather than timed, and on the two methods review round 1 named
+    (``_subagent_roster``, ``_subagent_child_counts``). Base, same instrument:
+    the 256 node tick touched the registry 197,888 times in ``_subagent_roster``
+    and 132,096 in ``_subagent_child_counts`` (x3.95 and x3.97 per doubling), with
+    256 per-node ``comms.job`` calls; head is 2,304 and 2,048 (exactly x2 per
+    doubling) and ZERO ``comms.job`` calls. The zero is the assertion that
+    matters: it is the call that rebuilt the session list per node.
+    """
+    small_app, small_comms = _docked_registry(64, tmp_path / "small")
+    large_app, large_comms = _docked_registry(128, tmp_path / "large")
+
+    jobs, selected = small_app._subagent_roster()
+    assert len(jobs) == 64, "the fixture must reach a full roster"
+    assert small_app._subagent_child_counts(jobs), "the child-count map must be non-empty"
+
+    small_comms._records.touches = 0
+    small_comms.job_calls = 0
+    small_app._subagent_roster()
+    small_app._subagent_child_counts(jobs)
+    small_touches = small_comms._records.touches
+
+    large_jobs, _ = large_app._subagent_roster()
+    large_comms._records.touches = 0
+    large_comms.job_calls = 0
+    large_app._subagent_roster()
+    large_app._subagent_child_counts(large_jobs)
+    large_touches = large_comms._records.touches
+
+    assert small_comms.job_calls == 0, (
+        "the dock must resolve its rows off the tick's pass: per-node comms.job "
+        f"rebuilt the session list {small_comms.job_calls} times for 64 children"
+    )
+    assert large_comms.job_calls == 0
+    assert (
+        small_touches <= 20 * 64
+    ), f"a dock tick touched the registry {small_touches} times for 64 children"
+    assert large_touches <= 3 * small_touches, (
+        f"doubling the roster multiplied the tick's work by "
+        f"{large_touches / small_touches:.1f}x — that is the quadratic shape back"
+    )
