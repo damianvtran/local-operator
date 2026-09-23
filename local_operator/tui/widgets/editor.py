@@ -8,7 +8,7 @@ submit-on-Enter. The subclass inverts that and takes the terminal key idioms:
 - ``Shift+Enter`` inserts a newline
 - ``Ctrl+C`` copies a live range (posts :class:`EditorCopied`); with no range
   it posts :class:`InterruptRequested` (abort the turn) — never exits
-- ``Ctrl+D`` on an EMPTY buffer quits; otherwise it falls through to delete
+- ``Ctrl+D`` or ``Cmd+D`` on an EMPTY buffer quits; otherwise they fall through to delete
 - ``Up``/``Down`` move the picker's highlight while it is open; otherwise they
   cycle prompt history when the caret sits at the top/bottom edge of the
   buffer, and inside the text they keep their cursor-move meaning
@@ -1574,7 +1574,7 @@ class ShellModeChanged(Message):
 
 
 class EditorQuit(Message):
-    """Posted on Ctrl+D with an empty buffer."""
+    """Posted on Ctrl+D or Cmd+D with an empty buffer."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -3654,7 +3654,10 @@ class Editor(TextArea):
             event.stop()
             event.prevent_default()
             return
-        if key == "ctrl+d" and not self.text:
+        # Textual names the macOS Command modifier ``super``. Pair it with
+        # Ctrl+D because kitty-protocol terminals deliver it as ``super+d``;
+        # non-empty editing still falls through to TextArea's native delete.
+        if key in ("ctrl+d", "super+d") and not self.text:
             self.post_message(EditorQuit())
             event.stop()
             event.prevent_default()

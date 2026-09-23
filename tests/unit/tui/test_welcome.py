@@ -87,7 +87,7 @@ def _has_plain_wordmark(lines: list[str]) -> bool:
 
 def _has_hints(lines: list[str]) -> bool:
     return any("command picker" in row for row in lines) or any(
-        row.strip() in {"/", "/help", "ctrl+d"} for row in lines
+        row.strip() in {"/", "/help", "ctrl/cmd+d"} for row in lines
     )
 
 
@@ -1216,7 +1216,7 @@ def test_a_tip_is_drawn_as_the_blocks_last_row() -> None:
     # joined — and the hint table's last row is what sits above that blank.
     assert lines[-1] == rows[0]
     assert not lines[-2].strip()
-    assert "ctrl+d" in lines[-3]
+    assert "ctrl/cmd+d" in lines[-3]
 
 
 def test_the_tip_is_quieter_than_the_hints_it_sits_under() -> None:
