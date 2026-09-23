@@ -69,7 +69,6 @@ if TYPE_CHECKING:
     from local_operator.agents import AgentData, AgentRegistry
     from local_operator.compaction.api import CompactionSettings
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.types import AgentTool
     from local_operator.mcp.manager import McpManager
     from local_operator.model.configure import SessionStreamFn
@@ -1631,6 +1630,28 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
     return hints
 
 
+def _knowledge_credential(key: str, config_dir: Path) -> str | None:
+    """Resolve an embedder key for the session's semantic backend.
+
+    A provider-class ``LOP_PROVIDER_<key>`` STORE row, then an exported variable.
+    ``provider_secret_value`` is namespace-scoped, so an ordinary agent secret
+    under this name is simply not found here. The legacy ``credentials.env`` leg
+    is GONE (PR2a): an embedder key the operator never stored or exported
+    resolves to nothing.
+
+    A NAMED function rather than an inline closure so the plaintext sweep
+    (``tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py``) can
+    drive THIS resolver directly. A removed leg that no callable reaches is a
+    removal nothing exercises, which is the gap that sweep exists to close.
+    """
+    from local_operator.providers.registry import provider_secret_value
+
+    stored = provider_secret_value(key, base=config_dir)
+    if stored:
+        return stored
+    return os.environ.get(key) or None
+
+
 def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
     """Expose configured names before deferred live connections can race turn one."""
     try:
@@ -1650,7 +1671,6 @@ def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
 
 
 async def _setup_knowledge(
-    credential_manager: CredentialManager,
     config_dir: Path,
     agent_registry: AgentRegistry,
     warnings_out: list[str],
@@ -1662,6 +1682,13 @@ async def _setup_knowledge(
     only their short descriptions join the ordinary skill descriptions sent to
     the configured semantic backend. Agent hints always use ``LocalEmbedder``.
     Any layer can fail independently without making session startup fail.
+
+    No credential carrier is threaded in, deliberately: the embedder's
+    credential closure below reads a provider-class STORE row and the process
+    environment, and the store is reached by config ROOT through
+    ``provider_secret_value``. Carrying one was the shape the retired plaintext
+    leg needed (PR2a), and an unused parameter reads as a live dependency the
+    next reader would wire back up.
     """
     hooks = _KnowledgeHooks()
     try:
@@ -1699,13 +1726,10 @@ async def _setup_knowledge(
             ),
         )
 
-        def get_credential(key: str) -> str | None:
-            secret = credential_manager.get_credential(key)
-            value = secret.get_secret_value() if secret else ""
-            return value or None
-
         if resources:
-            backend = default_backend_from_env(get_credential)
+            backend = default_backend_from_env(
+                functools.partial(_knowledge_credential, config_dir=config_dir)
+            )
             try:
                 hooks.index = SkillIndex(resources, backend, cache_dir=config_dir / "cache")
                 await hooks.index.build()
@@ -1810,7 +1834,6 @@ def _classification_enabled(section: Mapping[str, Any]) -> bool:
 def _attach_classification(
     hooks: _KnowledgeHooks,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     warnings_out: list[str],
 ) -> None:
     """Build the classification seam when the layer is switched on (§7, §9).
@@ -1849,7 +1872,9 @@ def _attach_classification(
             shortlist,
         )
 
-        hooks.classifier = ClassificationService(manager=credential_manager, settings=values)
+        hooks.classifier = ClassificationService(
+            config_dir=config_manager.config_dir, settings=values
+        )
         # The message path's shortlist, captured HERE so that path never imports
         # the package (see ``_classification_request``).
         hooks.classification_shortlist = shortlist
@@ -3252,7 +3277,6 @@ def _start_store_maintenance(
 async def _prepare(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     *,
     has_ui: bool,
@@ -3400,7 +3424,7 @@ async def _prepare(
             configure_model,
             hosting=hosting,
             model_name=model_name,
-            credential_manager=credential_manager,
+            config_dir=config_manager.config_dir,
             env_config=get_env_config(),
             # The standing config effort, CLAMPED inside ``configure_model``
             # against this spec's own ladder. Carried unconditionally, even when
@@ -3415,7 +3439,7 @@ async def _prepare(
 
     from local_operator.providers.auth_store import AuthStore
 
-    auth_store = AuthStore(credential_manager=credential_manager)
+    auth_store = AuthStore(config_dir=config_manager.config_dir)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.
@@ -3438,9 +3462,7 @@ async def _prepare(
     config_dir = Path(agent_registry.config_dir)
     effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
-    hooks = await _setup_knowledge(
-        credential_manager, config_dir, agent_registry, knowledge_warnings, effective_cwd
-    )
+    hooks = await _setup_knowledge(config_dir, agent_registry, knowledge_warnings, effective_cwd)
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving
     # names only from the eventual manager let the knowledge block freeze empty
@@ -3450,7 +3472,7 @@ async def _prepare(
     # not land inside a turn (see ``_attach_classification``). Built unless
     # values.classification.auto is explicitly off — the default is ON, so the
     # import happens for a stock install.
-    _attach_classification(hooks, config_manager, credential_manager, knowledge_warnings)
+    _attach_classification(hooks, config_manager, knowledge_warnings)
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
@@ -4444,7 +4466,6 @@ def _warm_mcp_wiring_imports() -> None:
 async def create_session(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     *,
     has_ui: bool = False,
@@ -4565,7 +4586,6 @@ async def create_session(
                 return await create_session(
                     args,
                     config_manager,
-                    credential_manager,
                     agent_registry,
                     has_ui=True,
                     cwd=effective_cwd,
@@ -4582,7 +4602,6 @@ async def create_session(
     plan = await _prepare(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=has_ui,
         cwd=effective_cwd,
@@ -4724,7 +4743,6 @@ async def create_session(
 async def build_initial_blocks(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
 ) -> list[str]:
     """Render the session's initial system blocks WITHOUT running a turn.
@@ -4734,7 +4752,7 @@ async def build_initial_blocks(
     (instructions + tools inventory + skills + env) against the <=30k start
     budget without instantiating the session facade.
     """
-    plan = await _prepare(args, config_manager, credential_manager, agent_registry, has_ui=False)
+    plan = await _prepare(args, config_manager, agent_registry, has_ui=False)
     # No session facade is built on this path, so the lease and store lifetimes
     # end here rather than waiting for a Session.dispose that cannot happen.
     if plan.session_lease is not None:

@@ -42,12 +42,12 @@ from local_operator.clients.radient import (
     build_instruction_set_document,
     validate_document_overrides,
 )
-from local_operator.credentials import CredentialManager
+from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_agent_registry,
-    get_credential_manager,
+    get_config_manager,
     get_provider_auth_store,
 )
 from local_operator.server.models.schemas import (
@@ -480,7 +480,7 @@ async def upload_agent_to_radient(
     agent_id: str = Path(..., description="ID of the agent to upload", examples=["agent123"]),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
 ):
     """
@@ -494,7 +494,7 @@ async def upload_agent_to_radient(
         )
 
         api_key = await resolve_radient_credential(
-            credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+            config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
         )
         if not api_key:
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
@@ -968,7 +968,7 @@ async def publish_agent_to_radient(
     publication: AgentPublicationRequest = Body(default_factory=AgentPublicationRequest),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
 ):
     """
@@ -987,7 +987,7 @@ async def publish_agent_to_radient(
         )
 
         api_key = await resolve_radient_credential(
-            credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+            config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
         )
         if not api_key:
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
@@ -1058,7 +1058,7 @@ async def republish_agent_to_radient(
     publication: AgentPublicationRequest = Body(default_factory=AgentPublicationRequest),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
 ):
     """
@@ -1074,7 +1074,7 @@ async def republish_agent_to_radient(
         )
 
         api_key = await resolve_radient_credential(
-            credential_manager, env_config.radient_api_base_url, store=provider_auth_store
+            config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
         )
         if not api_key:
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")

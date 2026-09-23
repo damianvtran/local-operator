@@ -395,7 +395,14 @@ def scan_directory_report(directory: str, cwd: str) -> tuple[list["ArgumentChoic
                     is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
                     continue
-                if _ignored(name, is_dir, rules):
+                # TWO arguments, not three: ``_ignored`` does not read a directory
+                # flag — the directory-only distinction lives in the COMPILED rule
+                # (``_IgnoreRule.dir_only``), so this call site was computing one for
+                # it and would have been the one left behind when the parameter was
+                # removed (QA round 1, Q-1: the three-arg call survived that change
+                # here and broke the ``@`` picker). ``is_dir`` is still read below, so
+                # nothing else about this loop changes.
+                if _ignored(name, rules):
                     continue
                 eligible.append((name, is_dir, entry))
     except OSError:

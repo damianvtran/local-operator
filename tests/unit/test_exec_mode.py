@@ -374,7 +374,9 @@ def test_build_worker_argv_train_threaded_to_worker(monkeypatch: pytest.MonkeyPa
         return None
 
     monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
-    monkeypatch.setattr("local_operator.credentials.CredentialManager", lambda *a: object())
+    # No credential-manager stub: the worker's composition root builds only a
+    # ``ConfigManager`` now that PR2b deleted the ``CredentialManager`` it used to
+    # thread through (the config root is read off the manager).
     monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_worker._default_session_factory(parsed)
@@ -1392,7 +1394,6 @@ def test_worker_session_factory_resolves_the_config_dir_override(
         return factory
 
     monkeypatch.setattr("local_operator.config.ConfigManager", capture("config"))
-    monkeypatch.setattr("local_operator.credentials.CredentialManager", capture("credentials"))
     monkeypatch.setattr("local_operator.agents.AgentRegistry", capture("agents"))
     monkeypatch.setattr(
         "local_operator.session_factory.create_session", lambda *a, **k: None  # noqa: ARG005
@@ -1403,7 +1404,6 @@ def test_worker_session_factory_resolves_the_config_dir_override(
 
     assert seen == {
         "config": override,
-        "credentials": override,
         "agents": override,
     }, (
         f"the worker built its managers under {sorted(set(map(str, seen.values())))} "
@@ -1417,13 +1417,15 @@ def test_worker_session_factory_writes_nothing_outside_the_override(
     """The same site, asserted on the SIDE EFFECTS of the real managers.
 
     The stub test above pins the argument; this one pins where the bytes land,
-    with the genuine ``ConfigManager``/``CredentialManager``/``AgentRegistry``
-    constructed. That distinction is the whole lesson of #737's analytics half:
-    a redirected read path is not automatically a redirected WRITE path, and only
-    looking at the filesystem afterwards tells them apart. Constructing these
-    managers creates ``agents/`` and ``credentials.env``, so a hardcoded root
-    leaves that litter under ``HOME`` (the scratch ``HOME`` here — never the
-    operator's real one, which is what makes this safe to assert on).
+    with the genuine ``ConfigManager``/``AgentRegistry`` constructed. That
+    distinction is the whole lesson of #737's analytics half: a redirected read
+    path is not automatically a redirected WRITE path, and only looking at the
+    filesystem afterwards tells them apart. Constructing these managers creates
+    ``agents/`` and the config dir, so a hardcoded root leaves that litter under
+    ``HOME`` (the scratch ``HOME`` here — never the operator's real one, which is
+    what makes this safe to assert on). No ``credentials.env`` is created: PR2a
+    stopped every writer and PR2b deleted the class, so the file cannot come back,
+    and the assertion is about the roots, which is unchanged.
     """
     override = tmp_path / "override-config"
     monkeypatch.setenv(CONFIG_DIR_ENV, str(override))

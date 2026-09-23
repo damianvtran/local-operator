@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
+from local_operator.model.discovery import FAILED_LISTING_STATUSES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -122,9 +123,46 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
     try:
         failures: dict[str, str] = {}
         if live:
-            entries, raw_failures = await controller.live_catalogue()
-            # Provider exceptions can carry response bodies or credential URLs.
-            failures = {key: "Model listing unavailable" for key in raw_failures}
+            entries, statuses = await controller.live_catalogue()
+            # ``live_catalogue`` returns a STATUS for EVERY provider it
+            # considered (``ok``/``cached``/``stale``/``static``/
+            # ``unauthenticated``/``empty``), not a failure map. Naming every key
+            # as an error is how this endpoint told the desktop that all 23
+            # providers had "not answered" while two aggregators' 452 rows were
+            # on screen (D1). A status answers "how did we get these rows", and
+            # two of its values are not failures: ``cached`` served a stored
+            # document on purpose, and ``unauthenticated`` providers were never
+            # asked because they need a credential the caller did not supply.
+            #
+            # ``static`` is the one status that is BOTH shapes. It means "the
+            # registry is all there is", which for a provider that bundles rows
+            # is a fine answer — but a provider with NO bundled rows whose fetch
+            # failed with nothing cached also reports ``static``, and that is
+            # exactly the operator's original "refresh failed" state (R1-4/Q1:
+            # ``available_models('openrouter', base_url=dead)`` → ``static``, 0
+            # rows; a real 401 against api.openai.com likewise). ``FAILED_LISTING_STATUSES``
+            # alone would go SILENT there, where the old code named it.
+            #
+            # So a provider is reported when it has no listing AND contributed no
+            # rows at all: the intersection of the no-listing statuses with
+            # "contributed zero entries". Same shape the mobile daemon's model
+            # route uses (``status != "empty" and provider not in
+            # listed_providers``). The deliberate silence is kept for the
+            # row-ful ``static``/``unauthenticated`` cases — a 401 provider whose
+            # catalogue still shows its bundled rows has answered the user's
+            # question, and the TUI footer already names the missing credential.
+            #
+            # The VALUE stays the generic sentence on purpose: the surface that
+            # consumes this reads only the keys, and provider exceptions can
+            # carry response bodies or credential URLs, so an unvetted reason
+            # string must never reach the wire here.
+            contributed = {entry.provider for entry in entries}
+            failures = {
+                key: "Model listing unavailable"
+                for key, status in statuses.items()
+                if status in FAILED_LISTING_STATUSES
+                or (status == "static" and key not in contributed)
+            }
         else:
             # NOT `asyncio.to_thread`. `initial_catalogue` is synchronous and
             # I/O-free by contract (it exists to paint on the keystroke that

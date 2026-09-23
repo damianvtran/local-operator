@@ -27,7 +27,6 @@ from local_operator.classification.recommend import RecommendationRequest
 from local_operator.classification.service import ClassificationService
 from local_operator.classification.types import DecisionRequest, Question
 from local_operator.classification.vendors import OpenRouterVendor
-from local_operator.credentials import CredentialManager
 
 LIVE_KEY = os.environ.get("OPENROUTER_API_KEY_DEV") or os.environ.get("OPENROUTER_API_KEY", "")
 
@@ -49,10 +48,17 @@ CANDIDATES = (
 )
 
 
-def _manager(tmp_path) -> CredentialManager:
-    manager = CredentialManager(tmp_path)
-    manager.set_credential("OPENROUTER_API_KEY", LIVE_KEY, write=False)
-    return manager
+def _config_dir(tmp_path):
+    """The config ROOT the live classification leg resolves under.
+
+    A provider-class STORE ROW is how a static key is armed now: PR2b deleted the
+    ``CredentialManager`` whose in-memory mapping this used to seed, so the row a
+    real ``lop credential update`` would write is the only sanctioned source.
+    """
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("OPENROUTER_API_KEY", LIVE_KEY, base=tmp_path)
+    return tmp_path
 
 
 def _settings(**overrides: object) -> dict[str, object]:
@@ -69,8 +75,8 @@ async def test_the_route_answers_a_choice_and_a_score_question_in_our_shape(tmp_
     ARRAY — and prints the request and the response so the shape and the cost can
     be quoted verbatim. This is the check a green MockTransport test cannot make.
     """
-    manager = _manager(tmp_path)
-    vendor = OpenRouterVendor(manager)
+    config_dir = _config_dir(tmp_path)
+    vendor = OpenRouterVendor(config_dir)
     request = DecisionRequest(
         state={"request": DEPLOY_MESSAGE},
         questions=(
@@ -156,8 +162,8 @@ async def test_the_service_recommends_the_matching_skill_end_to_end(tmp_path) ->
     """§11.4's end-to-end claim, on one message: the block, the vendor, the cost."""
     from local_operator.classification.context import Candidate
 
-    manager = _manager(tmp_path)
-    service = ClassificationService(manager=manager, settings=_settings())
+    config_dir = _config_dir(tmp_path)
+    service = ClassificationService(config_dir=config_dir, settings=_settings())
     recommendation = await service.recommend_resources(
         RecommendationRequest(
             user_message=DEPLOY_MESSAGE,
@@ -228,8 +234,8 @@ async def test_the_local_overhead_is_a_small_fraction_of_a_real_call(tmp_path) -
         build_questions,
     )
 
-    manager = _manager(tmp_path)
-    vendor = OpenRouterVendor(manager)
+    config_dir = _config_dir(tmp_path)
+    vendor = OpenRouterVendor(config_dir)
     candidates = tuple(
         __import__("local_operator.classification.context", fromlist=["Candidate"]).Candidate(
             kind="skill",
@@ -243,7 +249,7 @@ async def test_the_local_overhead_is_a_small_fraction_of_a_real_call(tmp_path) -
     settings = _settings()
 
     # Warm the credential memo so the loop measures the path, not the resolve.
-    await vendor.credential(manager)
+    await vendor.credential(config_dir)
 
     iterations = 50
     started = time.perf_counter()
@@ -257,7 +263,7 @@ async def test_the_local_overhead_is_a_small_fraction_of_a_real_call(tmp_path) -
             roster_cache=roster_cache,
         )
         build_decision_request(plan, state)
-        await vendor.credential(manager)
+        await vendor.credential(config_dir)
     local_ms = (time.perf_counter() - started) / iterations * 1000
 
     response = await vendor.decide(

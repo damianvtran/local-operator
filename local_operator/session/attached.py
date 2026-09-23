@@ -8474,11 +8474,17 @@ class AttachedSession:
             await asyncio.gather(refresh, return_exceptions=True)
         if self._gate_task is not None:
             self._gate_task.cancel()
-        if self._recovery_task is not None and self._recovery_task is not asyncio.current_task():
+        recovery = self._recovery_task
+        if recovery is not None and recovery is not asyncio.current_task():
             # The takeover callback adopts the real Session and disposes this
-            # facade FROM the recovery task. Cancelling the current task there
-            # interrupts adoption halfway through and strands the lease winner.
-            self._recovery_task.cancel()
+            # facade FROM the recovery task. Cancelling or joining the current
+            # task there interrupts adoption halfway through and strands the
+            # lease winner.
+            recovery.cancel()
+            # Cancellation is cooperative: without joining, an in-flight retry
+            # sleep can outlive this facade until the app's event loop closes.
+            # Wait here so normal TUI shutdown leaves no recovery task pending.
+            await asyncio.gather(recovery, return_exceptions=True)
         if self._client is not None:
             if self._client not in self._snapshot_clients:
                 self._client.close()

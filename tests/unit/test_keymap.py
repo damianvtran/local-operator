@@ -111,7 +111,9 @@ def test_validate_rejects_malformed_keys(bad: str) -> None:
     assert keymap.validate_key(bad) is not None
 
 
-@pytest.mark.parametrize("key", ["escape", "ctrl+c", "ctrl+d", "ctrl+q", "ctrl+m", "enter", "tab"])
+@pytest.mark.parametrize(
+    "key", ["escape", "ctrl+c", "ctrl+d", "super+d", "ctrl+q", "ctrl+m", "enter", "tab"]
+)
 def test_validate_refuses_reserved_keys_with_a_reason(key: str) -> None:
     """A refusal names the key's job. `ctrl+m` is refused because it is the
     SAME BYTE as enter — binding it would silently unbind the composer's

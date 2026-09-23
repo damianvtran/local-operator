@@ -74,10 +74,8 @@ class _Harness:
         self.app.include_router(desktop_catalogues.router)
         self.pool = DesktopSessions(root)
         self.app.state.desktop_sessions = self.pool
-        from local_operator.credentials import CredentialManager
 
         self.app.state.config_manager = ConfigManager(config_dir=root)
-        self.app.state.credential_manager = CredentialManager(root)
         self.inputs = root / "workspace"
         self.inputs.mkdir(parents=True, exist_ok=True)
         self.session_id = ""

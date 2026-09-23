@@ -32,6 +32,7 @@ through the cost log rather than through a user-facing line.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +42,7 @@ from local_operator.classification.types import DecisionVendor
 from local_operator.classification.vendors import VENDOR_CLASSES, build_vendor
 
 if TYPE_CHECKING:
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def leg_order(settings: Mapping[str, Any] | None) -> tuple[str, ...]:
 
 
 async def resolve_vendor(
-    manager: "CredentialManager",
+    config_dir: "Path | None",
     settings: Mapping[str, Any] | None = None,
     *,
     client: httpx.AsyncClient | None = None,
@@ -132,9 +133,9 @@ async def resolve_vendor(
     """
     model = model_override(settings)
     for name in leg_order(settings):
-        vendor = build_vendor(name, manager, model=model, client=client)
+        vendor = build_vendor(name, config_dir, model=model, client=client)
         try:
-            credential = await vendor.credential(manager)
+            credential = await vendor.credential(config_dir)
         except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
             logger.warning("classification: %s credential resolution failed", name, exc_info=True)
             continue
@@ -144,7 +145,7 @@ async def resolve_vendor(
 
 
 def vendor_status(
-    manager: "CredentialManager",
+    config_dir: "Path | None",
     settings: Mapping[str, Any] | None = None,
 ) -> list[tuple[str, bool]]:
     """``[(vendor_name, available)]`` for diagnostics and tests. Never performs I/O.
@@ -155,12 +156,12 @@ def vendor_status(
     answers, and it is the one the diagnostics actually ask.
 
     The probe is the credential tiers a synchronous, disk-free read can see: the
-    credential store and the environment (both of which ``CredentialManager``
-    already holds in memory). Radient's OAuth session is therefore NOT visible
-    here — see the module docstring — so ``radient`` reports ``False`` on a host
-    whose only Radient credential is a signed-in session. :func:`resolve_vendor`
-    is the authority; this function exists so a ``/info`` line or a login-status
-    read can be produced without an ``await`` and without a store read.
+    provider credential store and the process environment. Radient's OAuth
+    session is therefore NOT visible here — see the module docstring — so
+    ``radient`` reports ``False`` on a host whose only Radient credential is a
+    signed-in session. :func:`resolve_vendor` is the authority; this function
+    exists so a ``/info`` line or a login-status read can be produced without an
+    ``await`` and without a store read.
     """
     pin = pinned_vendor(settings)
     status: list[tuple[str, bool]] = []
@@ -170,26 +171,34 @@ def vendor_status(
             # their credentials say.
             status.append((name, False))
             continue
-        status.append((name, _static_credential_present(manager, name)))
+        status.append((name, _static_credential_present(config_dir, name)))
     return status
 
 
-def _static_credential_present(manager: "CredentialManager", name: str) -> bool:
+def _static_credential_present(config_dir: "Path | None", name: str) -> bool:
     """Whether the leg's disk-free credential tier is populated.
 
     Each leg's key names mirror :mod:`local_operator.classification.vendors`
     exactly; the duplication is two tuples of constant names, and it is kept
     here rather than imported because the vendor classes resolve Radient
-    through the AuthStore and this function must not. ``get_credential`` reads
-    the environment tier too (without writing it back to disk), which is how a
-    shell-exported key is discovered.
+    through the AuthStore and this function must not. The environment tier is
+    read here too, which is how a shell-exported key is discovered.
     """
     keys = {
         "radient": ("RADIENT_API_KEY",),
         "typesafe": ("TYPESAFE_API_KEY", "JEV_API_KEY"),
         "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_DEV"),
     }[name]
-    return any(bool(manager.get_credential(key)) for key in keys)
+    # Store-first, matching the vendor legs' own resolution: a provider-class
+    # store row counts as a populated static tier, then the process environment.
+    # The legacy ``credentials.env`` rung is GONE (PR2a), so a name neither the
+    # store nor the environment holds is simply not present.
+    from local_operator.providers.registry import provider_secret_value
+
+    # The caller's own root (R4), matching the sibling vendor legs in
+    # ``vendors.py``: a provider-class row under a non-default config root is the
+    # one this probe must see, or the diagnostic reports a host it never read.
+    return any(provider_secret_value(key, base=config_dir) or os.environ.get(key) for key in keys)
 
 
 __all__ = [

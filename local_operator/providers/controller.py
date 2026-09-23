@@ -51,6 +51,7 @@ from local_operator.providers.registry import (
     is_decision_only,
     list_login_providers,
     resolve_env_key,
+    stored_provider_env_keys,
 )
 from local_operator.providers.usage import (
     USAGE_PROVIDERS,
@@ -73,7 +74,8 @@ from local_operator.providers.usage_cache import (
 )
 
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
+
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
@@ -275,8 +277,80 @@ def _chat_providers() -> list[ProviderDefinition]:
     It also keeps the LIVE fetch honest: :func:`available_models` would otherwise
     be asked to list a decision endpoint's models and offer them as chat models,
     spending a network round trip to build a list that must not be shown.
+
+    LOGIN FLAVOURS ARE DROPPED HERE TOO, and this is the ONE place that rule
+    lives: a flavour declares ``store_credentials_as`` naming the provider it
+    actually authenticates, and it adds NO catalogue its base does not already
+    add. The two resolve to the SAME credential and therefore the SAME listing —
+    ``_listing_credential`` follows ``store_credentials_as`` for the api_key,
+    the ``is_oauth`` flag and the account scope alike — so the base row already
+    carries everything the flavour row would.
+
+    WHAT THIS FIXES, measured on the operator's catalogue: the picker offered a
+    duplicated Radient listing under two labels. A key-only install saw 444
+    ``radient/`` rows AND 444 ``radient-key/`` rows, the identical listing twice;
+    querying ``auto`` returned ``radient/auto`` beside ``radient-key/auto``. The
+    requirement is a single ``radient/`` namespace whenever the account is usable
+    in EITHER form.
+
+    WHY IT IS NOT RADIENT-SPECIFIC, and why an OAuth-only gate would be wrong.
+    The credential-view suppression in :meth:`usable_providers` (
+    ``store_credentials_as`` and the storage id in ``oauth_providers``) only
+    hides a flavour when an OAUTH row exists — so a key-only install, before
+    this, was offered BOTH labels (measured 2026-09-22 with a seeded
+    ``upsert_credential("radient-key", {"type": "api_key", ...})``). And the
+    duplication is not a Radient peculiarity: every flavour in
+    ``PROVIDER_REGISTRY`` carries it — ``openai``/``openai-device``,
+    ``xai``/``xai-oauth``, ``zai``/``zai-oauth``,
+    ``alibaba-token-plan``/``alibaba-token-plan-oauth`` as well. Those four are
+    already de-duplicated on the DESKTOP picker by the connected-only filter, but
+    the filter that does it is NOT "only the base is usable": the flavour is
+    suppressed only when an OAUTH row exists, so a KEY-ONLY OpenAI install has
+    BOTH ``openai`` and ``openai-device`` in ``usable_providers`` (measured
+    2026-09-22: ``usable_openai_key_only`` has both, while adding an OAuth row
+    drops ``openai-device``). What actually keeps the desktop clean on every
+    install is this catalogue filter, which is the point — the four flavours still
+    reached the LIVE catalogue and the phone's sheet, so naming radient here would
+    have been a special case of a general rule. The flavour's target is always a
+    non-decision-only registry row, so a flavour is dropped exactly when its base
+    is in the chat providers — which is always.
+
+    A caller that names a flavour explicitly is served the BASE catalogue ONLY IF
+    IT ALSO NAMES THE BASE. A flavour-ONLY ``providers`` set matches no chat
+    provider (the flavour is already gone from the registry above), so
+    ``live_catalogue(providers={"radient-key"})`` returns ``rows: []`` and
+    ``statuses: {}``. The alias is NOT resolved in the narrowing step: that
+    argument is a credential-admission filter and an empty answer is the CORRECT
+    one for a CHAT catalogue request naming only a row that can never feed one —
+    the same answer an empty collection gets, honoured literally. No in-tree
+    caller hits it: the phone passes :meth:`persisted_providers`, whose answer CAN
+    name the flavour (a key-only install measures ``['radient', 'radient-key']``)
+    but ALWAYS names the BASE alongside it — the stored row lands under the base,
+    and the flavour is admitted only because that base row is present — so a
+    flavour-ONLY set never arises. Adding a translation there would put a second
+    spelling of ``store_credentials_as`` on the admission path, which is what this
+    filter exists to avoid.
+
+    A flavour IS a hosting that ``configure_model`` accepts — ``get_provider_definition``
+    resolves all five, so a spec can be built and the sentence that used to stand
+    here ("flavours are not hostings ``configure_model`` accepts, so nothing may
+    run under one") was false. A session that names one RUNS: the spec carries the
+    flavour's own id (measured: ``build_model_spec("radient-key", "auto")`` yields
+    ``provider="radient-key"`` at ``https://api.radienthq.com/v1``) and the stream
+    path resolves the credential through the auth store's own alias cascade, which
+    is why ``get_api_key`` returns the same key under both spellings (measured:
+    ``radient-key`` and ``radient`` both yield the stored key). Dropping the
+    flavour ROW is therefore lossless for a different reason than "nothing can run
+    under it": the base and the flavour resolve to ONE credential and therefore ONE
+    listing, so the base row already carries every model the flavour row would.
     """
-    return [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
+    chat = [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
+    ids = {definition.id for definition in chat}
+    return [
+        definition
+        for definition in chat
+        if not (definition.store_credentials_as and definition.store_credentials_as in ids)
+    ]
 
 
 class ProviderController:
@@ -285,13 +359,18 @@ class ProviderController:
     def __init__(
         self,
         auth_store: ControllerAuthStore,
-        credential_manager: "CredentialManager | None" = None,
+        config_dir: "Path | None" = None,
         *,
         login_callbacks: LoginCallbackFactory | None = None,
         usage_cache: UsageCacheStore | None = None,
     ) -> None:
         self.auth_store = auth_store
-        self.credential_manager = credential_manager
+        # The config ROOT the store-first readers resolve under. Only the path is
+        # kept: PR2b deleted the ``CredentialManager`` whose ``config_dir`` this
+        # used to be read off, and a second carrier of a path ``ConfigManager``
+        # already owns is the "second way of doing things" the working
+        # principles call a defect.
+        self.config_dir = config_dir
         # Terminal-bound login callbacks. The CLI's print/input callbacks are
         # used by default; an embedding host (e.g. a Textual app) injects
         # callbacks that yield the terminal before the flow runs.
@@ -423,13 +502,15 @@ class ProviderController:
 
         BOTH persisted stores count, because the two sanctioned flows write
         different ones: ``/login`` writes the AuthStore (auth.db) and ``lop
-        credential update`` writes the legacy ``CredentialManager`` file. A
-        reader consulting only the first hides every API-key provider the owner
-        configured by hand; only the second hides every OAuth login, which on a
-        current install is most of them. The legacy file is read WITHOUT
-        ``get_credential``, whose convenience fallback imports a matching
-        environment variable into the store on miss — that would smuggle the
-        ambient key back in through the door this method exists to shut.
+        credential update`` writes a provider-class ROW in the encrypted secret
+        store. A reader consulting only the first hides every API-key provider
+        the owner configured by hand; only the second hides every OAuth login,
+        which on a current install is most of them.
+
+        The plaintext ``credentials.env`` file is NO LONGER READ here (PR2a);
+        the provider-class store rows below are the consolidated source it used
+        to supplement, so this method's answer is unchanged for any host whose
+        keys live in the store or in auth.db.
 
         Everything else is deliberately IDENTICAL to ``usable_providers``,
         including the oauth-flavour suppression (an active ``radient`` OAuth
@@ -450,21 +531,14 @@ class ProviderController:
             raise
         except (sqlite3.Error, OSError):
             return None
-        legacy: set[str] = set()
-        manager = self.credential_manager
-        if manager is not None:
-            try:
-                legacy = {
-                    name
-                    for name, value in manager.get_credentials().items()
-                    if value and value.get_secret_value()
-                }
-            except OSError:
-                # An unreadable legacy file is not grounds to claim the whole
-                # credential picture is unknowable: auth.db was read fine, and
-                # degrading to ``None`` here would show EVERY provider rather
-                # than the ones we positively established.
-                legacy = set()
+        # The store's provider-class rows, keyed by env-key NAME to match the
+        # rung list ``credential_file_names`` returns. This is the consolidated
+        # source; the plaintext file it used to union is gone.
+        #
+        # Through the controller's OWN root (R4): a controller built against a
+        # non-default config root must consult the store under that root, not the
+        # HOME-derived default.
+        legacy: set[str] = set(stored_provider_env_keys(self.config_dir))
         persisted: set[str] = set()
         for definition in PROVIDER_REGISTRY:
             storage = credential_provider_id(definition.id)
@@ -481,7 +555,7 @@ class ProviderController:
             # listed 18 models for. It is alias-aware for the same reason
             # ``resolve_env_key`` is: a login flavour declares no key name of its
             # own, but the provider it stores under does, and that name is what
-            # the legacy file holds.
+            # the store holds.
             if any(name in legacy for name in credential_file_names(definition.id)):
                 persisted.add(definition.id)
         return persisted

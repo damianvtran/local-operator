@@ -15,6 +15,8 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import os
+from collections.abc import Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
@@ -801,6 +803,243 @@ def resolve_env_key(provider_id: str) -> str | None:
     return None
 
 
+def _config_root(base: Path | None) -> Path | None:
+    """Normalise a config-root argument: a ``Path``/``str``, else ``None``.
+
+    The store and file legs take ``base`` straight into filesystem calls, so a
+    value that is not a path is treated as "no override" and the HOME-derived
+    default applies rather than being handed to ``open()``. Callers pass
+    ``getattr(manager, "config_dir", None)``, which on a test double is an
+    auto-generated attribute rather than a path.
+    """
+    if base is None or isinstance(base, Path):
+        return base
+    if isinstance(base, str):
+        return Path(base)
+    return None
+
+
+def provider_secret_value(env_key: str, *, base: Path | None = None) -> str | None:
+    """The VALUE of the provider-owned store row for ``env_key``, else ``None``.
+
+    The store reader every provider-key resolution leg shares, so the cascade
+    (``auth_store._env_api_key``), the static-key readers and the search
+    transports cannot disagree about whether a key the operator stored runs a
+    provider. ``env_key`` is the ENV VAR NAME (``OPENROUTER_API_KEY``); the row
+    lives under ``LOP_PROVIDER_<env_key>`` and is read with ``role="provider"``,
+    the only namespace that may touch the reserved prefix.
+
+    **Never raises, and never imports the crypto stack at module scope.** The
+    store is reached lazily inside the function: this module is imported on the
+    CLI startup path, and ``tests/unit/test_import_graph.py`` pins that the CLI
+    import must not pull the store's crypto machinery. A store that is absent,
+    locked, corrupted or served by an incompatible broker degrades to ``None``
+    — a MISSING credential, which the caller resolves by falling through to its
+    next leg — rather than turning a resolution into an error. That trade is
+    deliberate: the store is an optional capability (design §13), and a
+    credential lookup that raised would take down the provider picker on any
+    host whose store has not been created.
+    """
+    if not env_key:
+        return None
+    from local_operator.secrets.access import retrieve_secret
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import provider_secret_name
+
+    root = _config_root(base)
+    # **The existence guard is load-bearing, not an optimisation (R1).**
+    # `retrieve_secret` reaches `ensure_broker` BEFORE it considers whether a
+    # store exists, and `ensure_broker` creates `secrets/` and spawns
+    # `python -m local_operator.secrets.brokerd`. So an unguarded READ on the
+    # very common host that has never run `lop secret set` leaves both a
+    # directory and a detached daemon behind — the "leaves new state on a read"
+    # fault class `info/collect.py` and `mcp/credentials.py` explicitly ban, and
+    # this is the hottest such path: the credential cascade, the model
+    # catalogue, the classification legs and every search transport all read
+    # through here. `stored_provider_env_keys` below and the qwencloud ticket
+    # reader in `providers/controller.py` already carry the same gate.
+    if not store_path(root).exists():
+        return None
+    try:
+        raw = retrieve_secret(provider_secret_name(env_key), root, role="provider")
+    except (SecretStoreError, OSError, ValueError):
+        return None
+    # ``surrogateescape``, matching the legacy plaintext reader this consolidates
+    # (``secrets.legacy_env.read_credentials``, the migration's only reader): a
+    # credential is an arbitrary byte string, and ``errors="replace"`` would
+    # substitute U+FFFD so the provider authenticates with a corrupted key
+    # instead of the stored one.
+    value = raw.decode("utf-8", "surrogateescape").strip()
+    return value or None
+
+
+def provider_env_key(provider_id: str, *, base: Path | None = None) -> str | None:
+    """Resolve ``provider_id``'s API key value, STORE FIRST then environment.
+
+    Returns the same VALUE :func:`resolve_env_key` does, but its resolution order
+    is the one the credential consolidation introduces: a provider-class store
+    row wins and the process environment is the second leg.
+
+    Why store-first: the store is the sanctioned home for a key the harness now
+    writes (``lop credential update``, ``lop search setup``), and a stale export
+    left in a shell profile must not outrank the value the operator deliberately
+    saved. The env leg stays behind the store for the opposite reason it always
+    did — an explicit ``ANTHROPIC_API_KEY`` export is still a real instruction,
+    and is not what PR2a removes.
+
+    Alias-aware like :func:`resolve_env_key`: a login flavour resolves through
+    the name of the provider it stores under.
+    """
+    definition = get_provider_definition(provider_id)
+    if definition is None or definition.env_keys is None:
+        definition = get_provider_definition(credential_provider_id(provider_id))
+    if definition is None or definition.env_keys is None:
+        return None
+    names = env_key_names(provider_id) or credential_file_names(provider_id)
+    return first_provider_key(names, resolve_env_key(provider_id), base=base)
+
+
+def first_provider_key(
+    names: Iterable[str], env_value: str | None = None, *, base: Path | None = None
+) -> str | None:
+    """First configured value across the store, then ``env_value``.
+
+    The rung ORDER every provider-key reader shares, split out from
+    :func:`provider_env_key` for the callers that carry their OWN key names and
+    have already resolved their env value. Two spellings of that order is how
+    one surface ends up reading a different credential than the one a login
+    wrote.
+
+    ``names`` are ENV VAR NAMES; each is looked up as a ``LOP_PROVIDER_<name>``
+    store row. ``env_value`` is the caller's already-resolved environment value,
+    if it has one, and is consulted when no store row holds the key.
+
+    The plaintext ``credentials.env`` leg this function used to consult last is
+    GONE (PR2a): the file is no longer a credential source, so a name the store
+    does not hold and the environment does not export resolves to nothing rather
+    than to a file read.
+    """
+    for name in names:
+        stored = provider_secret_value(name, base=base)
+        if stored:
+            return stored
+    if env_value:
+        return env_value
+    return None
+
+
+def store_provider_key(
+    env_key: str, value: str, *, description: str = "", base: Path | None = None
+) -> None:
+    """Write a provider-class store row for ``env_key`` (set or update).
+
+    The ONE writer for the provider namespace, so every surface that saves a
+    key — ``lop credential update``, ``lop search setup``, the credentials
+    route's PATCH — files it under the same name with the same ``role``. Raises
+    :class:`~local_operator.secrets.errors.SecretStoreError` for the caller to
+    report; unlike the READERS this does not swallow failures, because a write
+    the operator asked for and did not get must not look like success.
+
+    ``base`` selects the config root the store lives under; ``None`` is the
+    HOME-derived default, which is what the CLI wants. The credentials route
+    passes the manager's own ``config_dir`` so a server configured with a
+    non-default root writes its provider rows to the SAME root it reads its
+    other state from.
+
+    ``update`` is tried first and ``set`` second: ``set`` refuses an existing
+    name by design (a mistyped name must not clobber a live credential), so a
+    re-run that changed a key would otherwise fail with ``SecretExists``.
+    """
+    from local_operator.secrets.access import open_store, session_id
+    from local_operator.secrets.errors import SecretExists, SecretStoreError
+    from local_operator.secrets.store import provider_secret_name
+
+    name = provider_secret_name(env_key)
+    payload = value.encode("utf-8")
+    store = open_store(_config_root(base), create=True)
+    # ``update`` first, then ``set``: ``set`` refuses an existing name by design
+    # (a mistyped name must not clobber a live credential), so a re-run that
+    # changed a key would otherwise fail with ``SecretExists``. The fall-through
+    # is on any store error — a missing row AND a store that does not exist yet
+    # both land here — and ``set`` surfaces its own, more specific failure rather
+    # than this branch hiding it.
+    try:
+        store.update(name, payload, role="provider", session_id=session_id())
+        return
+    except SecretStoreError:
+        pass
+    try:
+        store.set(
+            name,
+            payload,
+            description=description or f"Provider API key {env_key}",
+            role="provider",
+            session_id=session_id(),
+        )
+    except SecretExists:
+        # Another writer created the row between the update and the set; the
+        # caller's intent is still "this name holds this value".
+        store.update(name, payload, role="provider", session_id=session_id())
+
+
+def remove_provider_key(env_key: str, *, base: Path | None = None) -> bool:
+    """Delete the provider-class row for ``env_key``; ``True`` if one was removed.
+
+    Best-effort on an absent store (returns ``False``): a delete of something
+    that is not there is the desired end state, not an error.
+
+    Passes ``role="provider"``, which the store now REQUIRES for this name: the
+    reserved namespace check on ``delete`` that keeps an agent surface from
+    destroying a provider credential also refuses a caller that has not
+    declared itself as the provider side.
+    """
+    from local_operator.secrets.access import open_store, session_id
+    from local_operator.secrets.errors import SecretNotFound, SecretStoreError
+    from local_operator.secrets.store import provider_secret_name
+
+    try:
+        open_store(_config_root(base)).delete(
+            provider_secret_name(env_key), role="provider", session_id=session_id()
+        )
+        return True
+    except (SecretNotFound, SecretStoreError, OSError):
+        return False
+
+
+def stored_provider_env_keys(base: Path | None = None) -> set[str]:
+    """ENV KEY names that have a provider-class row in the store.
+
+    The name-source reader the controller's ``persisted_providers`` rung uses in
+    place of enumerating the plaintext file: it returns the env-key spelling
+    (``OPENROUTER_API_KEY``), stripped of the reserved ``LOP_PROVIDER_`` prefix,
+    so a caller can match it against :func:`credential_file_names` exactly as it
+    matched the legacy file's keys.
+
+    An absent, locked or damaged store yields an EMPTY set — "no provider rows I
+    can see" — never an error, for the same availability reason
+    :func:`provider_secret_value` documents. Enumeration must not become the one
+    path that takes down the provider picker, which is precisely the failure the
+    store's ``list`` verb was reworked to avoid.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+
+    try:
+        root = _config_root(base)
+        if not store_path(root).exists():
+            return set()
+        return {
+            record.name[len(PROVIDER_SECRET_PREFIX) :]
+            for record in open_store(root).list()
+            if record.name.startswith(PROVIDER_SECRET_PREFIX)
+        }
+    except (SecretStoreError, OSError, ValueError):
+        return set()
+
+
 def env_key_names(provider_id: str) -> tuple[str, ...]:
     """Every env var NAME ``provider_id`` reads, primary first.
 
@@ -833,10 +1072,10 @@ def env_key_name(provider_id: str) -> str | None:
 
 
 def credential_file_names(provider_id: str) -> list[str]:
-    """The ``CredentialManager`` key names ``provider_id`` can be configured under.
+    """The key NAMES ``provider_id`` can be configured under, every ``env_keys`` form.
 
-    THE reader for the legacy credential file, for every ``env_keys`` form.
-    ``env_key_name`` answers only for the plain-string form and returns ``None``
+    The name-source for the store-first rungs: ``env_key_name`` answers only for
+    the plain-string form and returns ``None``
     for the callable one — today exactly ``anthropic`` — so any caller built on
     it alone silently drops the provider whose key the user is most likely to
     have set by hand. That is not hypothetical: it is how an install configured
@@ -855,7 +1094,7 @@ def credential_file_names(provider_id: str) -> list[str]:
 
     Alias-aware in the same way :func:`resolve_env_key` is: a login flavour
     (``xai-oauth``) declares no key name of its own but the provider it stores
-    under does, and that is the name the legacy file holds.
+    under does, and that is the name a store row or the environment holds.
 
     Returns an empty list for an unknown provider or one with no key name at
     all, so it is safe to call unconditionally and iterate over.

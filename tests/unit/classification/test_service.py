@@ -51,7 +51,7 @@ def service(manager, install_legs, settings_map=None, **leg_specs):
     """A service on stub legs, with the behaviours returned for assertions."""
     behaviours = install_legs(**leg_specs)
     effective = settings() if settings_map is None else settings_map
-    return ClassificationService(manager=manager, settings=effective), behaviours
+    return ClassificationService(config_dir=manager, settings=effective), behaviours
 
 
 # ---------------------------------------------------------------------------

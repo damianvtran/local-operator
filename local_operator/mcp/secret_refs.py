@@ -12,26 +12,27 @@ spawned or sent, so a refusal leaves nothing to unwind (an OAuth server's
 proactive refresh, :func:`~local_operator.mcp.auth.ensure_mcp_oauth_fresh`, runs
 after this and is therefore skipped entirely for a server that cannot start).
 
-**The store is the encrypted one; the legacy file is a read-only fallback.**
+**The store is the encrypted one and it is the ONLY leg.**
 ``<config dir>/secrets/store.db`` through
 :class:`~local_operator.secrets.access`, which is what the desktop MCP
 credential write (``POST /v1/desktop/sessions/{id}/mcp/credentials``) and MCP
-sign-in put values in. ``<config dir>/credentials.env`` through
-:class:`~local_operator.credentials.CredentialManager` is consulted only on
-DEFINITIVE ABSENCE from the encrypted store — the pre-migration location, for a
-machine whose credentials were entered before it — and is never written: a
-reference that resolves must not move or create the file, and a corrupt or
-unreadable store is a refusal rather than a reason to fall back. The memory-only
+sign-in put values in. The legacy ``<config dir>/credentials.env`` file is no
+longer consulted: the consolidation removed its writers, so a fallback would
+serve a file nothing maintains — a key present only there reads as MISSING
+until ``lop secret migrate-env`` moves it. A reference that resolves must not
+move or create the file, and a corrupt or unreadable store is a refusal rather
+than a reason to fall back. The memory-only
 session credentials that ``/credential`` collects (``VariableStore._credentials``)
 are deliberately NOT consulted: they never reach disk, so a config file referring
 to one could not resolve in the next process, and a reference that works once and
 then silently does not is the same class of failure this module removes.
 
-``CredentialManager.get_credential`` falls back to ``os.environ`` for a key the
-file does not hold, and that fallback is deliberately not used here. Two
-reasons, and the second is the load-bearing one: the file's key set is exactly
-what the credentials surface LISTS, so "the reference names something the user
-can see and edit" stays true; and an environment fallback would let a
+A legacy file reader also falls back to ``os.environ`` for a key the file
+does not hold, and that fallback is deliberately not used here. Two reasons,
+and the second is the load-bearing one: the key set the references are matched
+against is exactly what the credentials surface LISTS, so "the reference names
+something the user can see and edit" stays true; and an environment fallback
+would let a
 project-scoped ``.mcp.json`` — untrusted input, see the trust model in
 ``docs/mcp.md`` — copy any variable out of the daemon's own environment into a
 remote server's headers, which the allowlisted stdio child environment
@@ -54,8 +55,8 @@ remote server's headers, which the allowlisted stdio child environment
   reference from a literal.
 * A fragment whose inner text contains a name the store holds — whatever
 decorates it (see :func:`_candidate_keys`) — is REFUSED, never handed over. The
-store accepts any key (``CredentialManager.set_credential`` checks only control
-characters), and a shell or compose file wraps one in anything at all —
+store accepts any key (the secret store checks only control characters), and a
+shell or compose file wraps one in anything at all —
 ``${hubspot-token}``, ``${TOKEN:-}``, ``${TOKEN#suffix}``, ``${!TOKEN}``,
 ``${env:TOKEN}`` — so a fragment naming a stored key cannot be a legitimate
 literal, and passing it through is the silent-unauthenticated-server failure
@@ -220,32 +221,6 @@ def _candidate_keys(inner: str) -> list[str]:
     return keys
 
 
-def _store_values_legacy(base: Path) -> dict[str, SecretStr]:
-    """The credential store's values, as ``SecretStr``, keyed by name.
-
-    Values stay WRAPPED: the mapping is built on every connect that has a
-    reference, and unwrapping here would copy every credential in the file —
-    unrelated providers' keys included — into plaintext ``str`` for no benefit.
-    :func:`_resolve_value` unwraps the one key it actually substitutes.
-
-    Read fresh on each call rather than cached: the store is written by the API
-    server process (``PATCH /v1/credentials``) while a session that already
-    holds MCP connections reads it, so a cached snapshot would keep reporting a
-    credential the user has just added as missing until something restarted.
-    The file is a handful of lines.
-    """
-    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
-
-    if not (base / CREDENTIALS_FILE_NAME).exists():
-        # No store exists, so every reference is unresolvable. Read directly
-        # rather than constructing CredentialManager, whose constructor CREATES
-        # an empty credentials file: a connect must not write to the config dir
-        # as a side effect of reading a reference.
-        return {}
-    # ``dict(...)`` is a shallow copy: the manager hands back its own live dict.
-    return dict(CredentialManager(base).get_credentials())
-
-
 def _reference_fragments(value: str):
     """The resolver's left-to-right opener/escape scan, without reading a store."""
     index = 0
@@ -292,12 +267,10 @@ def _store_values(
         for value in (getattr(cfg, field, None) or {}).values():
             for text in _reference_fragments(value):
                 candidates.update(_candidate_keys(text))
-    # Legacy values remain wrapped and read-only. Never obtain unrelated
-    # encrypted values just to decide whether a malformed fragment names a key.
-    legacy: dict[str, SecretStr] | None = None
+    # The store's own values; a candidate NOT in the store is simply absent.
+    # Never obtain unrelated encrypted values just to decide whether a malformed
+    # fragment names a key.
     values: dict[str, SecretStr] = {}
-    if cfg is None:
-        return _store_values_legacy(base)
     for key in candidates:
         try:
             absent = not store_path(base).exists()
@@ -313,11 +286,6 @@ def _store_values(
                         values[key] = SecretStr("present")
                 except SecretNotFound:
                     absent = True
-            if absent:
-                if legacy is None:
-                    legacy = _store_values_legacy(base)
-                if key in legacy:
-                    values[key] = legacy[key]
             if register is not None and key in values and key in required:
                 register(values[key].get_secret_value())
         except Exception:
@@ -417,9 +385,9 @@ def _substitute_value(
     if isinstance(entry, SecretStr):
         return entry.get_secret_value() or None
     if isinstance(entry, str):
-        # Not what ``CredentialManager`` returns, but a plain mapping is a shape
-        # a test or a future store may hand us; accepting it keeps that from
-        # masquerading as an unreadable value.
+        # Not what the store's reader returns (a ``SecretStr``), but a plain
+        # mapping is a shape a test or a future store may hand us; accepting it
+        # keeps that from masquerading as an unreadable value.
         return entry or None
     raise _unreadable(server, field, entry_name, key)
 

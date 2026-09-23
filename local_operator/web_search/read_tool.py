@@ -56,7 +56,6 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -260,7 +259,7 @@ async def execute_web_read(
     settings: WebSearchSettings = load_read_settings(manager)
     if not settings.enabled or not settings.read_enabled:
         return _result(tool_call_id, "Web reading is disabled in settings.", error=True)
-    credentials = CredentialManager(config_dir())
+    config_dir_path = config_dir()
 
     session_id = context.session_id if context is not None else ""
     page_context = PAGE_CONTEXTS.for_session(session_id)
@@ -280,13 +279,13 @@ async def execute_web_read(
         # explicit "never".
         forced = (
             "deepseek"
-            if provider_available("deepseek", credentials, settings)
+            if provider_available("deepseek", config_dir_path, settings)
             and "deepseek" not in settings.excluded_providers
             else None
         )
         service = WebSearchService(
             settings,
-            credentials,
+            config_dir_path,
             io=context.web_io if context is not None else None,
         )
         try:
@@ -329,7 +328,7 @@ async def execute_web_read(
             details={"page_context": None},
         )
 
-    key = await resolve_deepseek_key(credentials)
+    key = await resolve_deepseek_key(config_dir_path)
     if not key:
         return _result(
             tool_call_id,

@@ -33,7 +33,6 @@ from local_operator.analytics.store import (
     _local_day_month,
 )
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.server.routes import capabilities, desktop_catalogues
 from tests.unit.analytics.test_store import _snap
 
@@ -232,7 +231,7 @@ async def test_info_route_serves_a_host_snapshot_in_the_reply_envelope(desktop):
 async def test_info_route_creates_nothing_on_the_host_it_describes(desktop, tmp_path):
     """A read path must not leave the store it reads behind.
 
-    ``CredentialManager.__init__`` creates the config directory and an empty
+    The retired ``CredentialManager.__init__`` created the config directory and an empty
     ``credentials.env``, so the credential probe used to WRITE while answering a
     question about a host — the fault class this collector's own comment bans.
     The store is absent before the call and absent after it.
@@ -391,7 +390,13 @@ async def test_info_route_names_credentials_without_carrying_one(desktop, tmp_pa
     """Secret hygiene: the payload may name a key, never a value or a prefix."""
     client, _ = desktop
     secret = "sk-DIAGPROBE-0123456789abcdef-PREFIX"
-    CredentialManager(tmp_path).set_credential("DESKTOP_DIAG_PROBE_KEY", secret, write=True)
+    # A provider-class STORE ROW is the shape a stored key takes now
+    # (PR2a): the legacy credentials.env file view the probe used to
+    # union is gone, so the probe reads the store directly and this is
+    # where the name must appear.
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("DESKTOP_DIAG_PROBE_KEY", secret, base=tmp_path)
 
     body = (await client.get("/v1/desktop/info")).text
     data = json.loads(body)["result"]["data"]
@@ -404,7 +409,17 @@ async def test_info_route_names_credentials_without_carrying_one(desktop, tmp_pa
     assert secret[:12] not in body
     # No field OTHER than the key listing may be derived from the store, and
     # every listed entry is a name the manager itself reports.
-    known = set(CredentialManager(tmp_path).list_credential_keys())
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+
+    known = {
+        (
+            record.name[len(PROVIDER_SECRET_PREFIX) :]
+            if record.name.startswith(PROVIDER_SECRET_PREFIX)
+            else record.name
+        )
+        for record in open_store(tmp_path).list()
+    }
     assert set(data["env"]["credential_keys"]) <= known
     leaves = [leaf for leaf in _leaves(data) if isinstance(leaf, str)]
     assert not any(secret in leaf for leaf in leaves)

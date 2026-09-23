@@ -383,7 +383,30 @@ def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
     body = resolver("guide://scratchpad")
 
     assert body is not None
-    assert body.count("deleted with the session") == 1
+    # The lifetime, stated once and stated so it cannot be read as ephemeral. The
+    # earlier wording ("deleted with the session") was read by a measured session
+    # as meaning "like a temp directory", and it kept a duplicate copy of its state
+    # outside the pad for an hour rather than test that reading: the pad is
+    # session-DIR backed and rides out runtime restarts and rollovers.
+    assert body.count("survives runtime restarts") == 1
+    assert "deleted with the session" not in body
+    assert "dies with the session" not in body
+    # The shell channel's one limit, in the copy an agent reads BEFORE choosing
+    # where to write (round 1, R4): a relative redirect is not resolved. The home
+    # spellings are pinned beside it because the two sentences are one
+    # instruction — what the scan can see, and what it refuses — and the refusal
+    # half is what an agent has to know to spell a path it wants noticed.
+    #
+    # Asserted against a whitespace-flattened body: these are phrases, and a
+    # phrase re-wrapped in the source is the same sentence to the reader.
+    flat = " ".join(body.split())
+    assert "needs the path NAMED, not related" in flat
+    assert "`~/`, `$HOME/` or `${HOME}/` is expanded to the real home" in flat
+    assert "`~other/tmp/x.md` is another user's home" in flat
+    # The quoting clause is here because the tilde spelling makes a pre-existing
+    # class newly REACHABLE (`'~/x'` could not fire at all before the expansion),
+    # so the copy an agent reads has to say that a quoted token is read anyway.
+    assert "expanded here anyway" in flat
     assert "one-off script" in body
     assert "Data you are still shaping" in body
     assert "real extension" in body
@@ -438,6 +461,70 @@ def test_scratchpad_guide_says_where_binary_scratch_goes() -> None:
     assert "three days" in section
     # Where the made temp dir's path is recorded, so a later turn finds the files.
     assert "scratchpad://" in section
+
+
+def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
+    """The content policy is enforced at the TOOLS, and this guide is the
+    document read right next to the ``$LOCAL_OPERATOR_SCRATCHPAD`` recipe that
+    hands a shell the pad path.
+
+    Review round 1 (F1): the bullet said build output was "refused by name if you
+    try" beside that recipe, which reads as a property of the pad — while the
+    channel that produced the measured 34.8 GB (a compiler and a package manager
+    in a shell) is not policed at all, and the check has one call site either
+    way. The claim and its boundary are pinned TOGETHER, because the failure this
+    guards is a later revision keeping the rule and dropping the honest half —
+    which is exactly how the over-claim got written. The material is named as the
+    list the generality round asked for (build trees, dependency trees, compiled
+    artefacts, archives, anything the shell built) rather than as "build output"
+    alone: a dependency tree is the largest single shape in the audit and calling
+    it build output is what let it read as somebody else's problem.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    section = body[body.index("## Use something else for") : body.index("## The protocol")]
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so an
+    # assertion on the raw bytes would pin the line width rather than the claim.
+    collapsed = " ".join(section.split())
+
+    assert "build trees, dependency trees, compiled artefacts" in collapsed
+    assert "git worktree add" in collapsed
+    # The boundary: the tools are checked, a shell is not.
+    assert "enforced at the TOOLS and not in a shell" in collapsed
+    assert "NOT policed" in collapsed
+
+
+def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:
+    """The content policy is a SHAPE rule plus a backstop, and both halves are
+    what a reader has to be able to act on: the "do not put these here" list, the
+    shapes a list of names would miss (a build tree qualified by its toolchain, a
+    versioned shared library), and the pad's own 256 MiB total — the arm that
+    refuses material whose name no list has ever seen.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so an
+    # assertion on the raw bytes would pin the line width rather than the list.
+    collapsed = " ".join(body.split())
+
+    assert "Do not put these here: build trees, dependency trees, compiled artefacts" in collapsed
+    assert "anything the shell built" in collapsed
+    # Both ceilings, as the numbers a reader compares against: a per-write one and
+    # the pad's own.
+    assert "32 MiB (33,554,432 bytes)" in collapsed
+    assert "256 MiB (268,435,456 bytes)" in collapsed
+    # The third refusal condition (N1) — a pad of many small files, nowhere near
+    # the byte ceiling, that refuses every write — and the ONE exemption that gets
+    # a pad back under (M4), since nothing here deletes.
+    assert "over 20,000 entries" in collapsed
+    assert "replaced file is not counted twice" in collapsed
+    # The shapes, not only the names: the trees the list never held.
+    assert "cmake-build-*" in collapsed
+    assert "libfoo.so.1.2" in collapsed
 
 
 def test_scratchpad_guide_makes_a_rendered_frame_first_class_content() -> None:

@@ -57,6 +57,7 @@ from local_operator.tui.widgets.welcome import (
     WORDMARK_SPACED,
     WelcomeInfo,
     WelcomeView,
+    _hint_lines,
     _resolve_tip,
     build_welcome_lines,
     mark_pulse_color,
@@ -87,7 +88,7 @@ def _has_plain_wordmark(lines: list[str]) -> bool:
 
 def _has_hints(lines: list[str]) -> bool:
     return any("command picker" in row for row in lines) or any(
-        row.strip() in {"/", "/help", "ctrl+d"} for row in lines
+        row.strip() in {"/", "/help", "ctrl/cmd+d"} for row in lines
     )
 
 
@@ -189,6 +190,17 @@ def test_no_line_exceeds_the_box_width() -> None:
         lines = build_welcome_lines(info, width, ROOMY_H)
         for line in lines:
             assert cell_len(line.plain) <= width, f"{width}: {line.plain!r}"
+
+
+@pytest.mark.parametrize("width", [24, 25, 26])
+def test_hint_key_and_description_keep_a_separator(width: int) -> None:
+    """A full-width key must not run into its description at the column edge."""
+    lines = [line.plain for line in _hint_lines(width)]
+    quit_row = next(row for row in lines if "ctrl/cmd+d" in row)
+    # At 24 cells the description tier does not fit and keys-only is correct;
+    # when a description does fit, a full-width key must retain its separator.
+    assert quit_row == "ctrl/cmd+d" or quit_row.startswith("ctrl/cmd+d ")
+    assert "ctrl/cmd+dquit" not in quit_row
 
 
 def test_hint_descriptions_never_truncate_into_nonsense() -> None:
@@ -1216,7 +1228,7 @@ def test_a_tip_is_drawn_as_the_blocks_last_row() -> None:
     # joined — and the hint table's last row is what sits above that blank.
     assert lines[-1] == rows[0]
     assert not lines[-2].strip()
-    assert "ctrl+d" in lines[-3]
+    assert "ctrl/cmd+d" in lines[-3]
 
 
 def test_the_tip_is_quieter_than_the_hints_it_sits_under() -> None:

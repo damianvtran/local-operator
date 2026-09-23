@@ -17,7 +17,6 @@ from httpx import ASGITransport, AsyncClient
 from local_operator import settings_io
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.jobs import JobManager
 from local_operator.providers import registry
 from local_operator.scheduler_service import SchedulerService
@@ -62,7 +61,6 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.middleware("http")(managed_desktop_boundary)
     app.exception_handler(RequestValidationError)(desktop_validation_error)
     app.state.config_manager = ConfigManager(tmp_path)
-    app.state.credential_manager = CredentialManager(tmp_path)
     app.state.agent_registry = AgentRegistry(tmp_path)
     app.state.job_manager = JobManager()
     # Never started: these tests assert on the HTTP boundary, and a running

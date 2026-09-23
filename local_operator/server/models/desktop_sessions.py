@@ -6,9 +6,10 @@ projection would drop new runtime fields and turn unknown accounting into zeros.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from local_operator.session.frontend_state import FrontendSync, SlashResult
+from local_operator.session.runtime.types import reported_subagent_count
 
 
 class SessionRow(BaseModel):
@@ -82,6 +83,35 @@ class SessionRow(BaseModel):
     #: an absence the client is entitled to read as no claim, and an archived
     #: conversation would sit in the ordinary list with nothing saying so.
     archived: bool
+    #: How many of this session's OWN delegated children are running, and how
+    #: many are parked waiting for a capacity slot — or ``null`` when nothing
+    #: reported them.
+    #:
+    #: DECLARED HERE RATHER THAN LEFT TO ``extra="allow"``. The pair does reach a
+    #: client either way — the row is built from ``SessionRow._asdict()`` in
+    #: ``server.utils.desktop_sessions`` — but this model IS the contract a client
+    #: mirrors by hand (the app's own ``SessionCatalogueRow``), and a count the
+    #: contract does not name is one a renderer cannot know to draw, or to leave
+    #: alone. ``null`` is the wire's "not reported" and must never be read as
+    #: ``0``: zero is a measurement that says there are no children.
+    #:
+    #: NORMALISED AT THE EDGE, through the one shared rule
+    #: (``session.runtime.types.reported_subagent_count``) rather than by a
+    #: pydantic coercion. A record is written by whatever process owns it and
+    #: ``from_json`` validates nothing, so a damaged value is possible; and here
+    #: the difference between degrading and failing is the whole conversation
+    #: list, because a validation error on ONE row fails the response. An
+    #: unusable value becomes ``null`` — which every client already handles —
+    #: instead of a 500 the list cannot survive. The same rule runs in
+    #: ``info.collect`` and in the sidebar's ``resume._counted``.
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
+
+    @field_validator("subagents_running", "subagents_queued", mode="before")
+    @classmethod
+    def _a_reported_count(cls, value: Any) -> int | None:
+        """Refuse an unusable count the way every other reader does."""
+        return reported_subagent_count(value)
 
 
 class SessionList(BaseModel):

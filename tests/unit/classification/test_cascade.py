@@ -15,6 +15,7 @@ from local_operator.classification.cascade import (
     resolve_vendor,
     vendor_status,
 )
+from tests.unit.classification.support import store_row
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,8 +27,21 @@ ALL_KEYS = {
 
 
 def arm(bare_manager, *legs: str) -> None:
+    """Arm the named legs with PROVIDER-CLASS STORE ROWS (the static tier, PR2a).
+
+    The plaintext file and the in-memory mapping it fed are gone, so "a static
+    key is present" now means a ``LOP_PROVIDER_*`` row — written through the
+    production writer so the row name and namespace cannot drift from the reader.
+    """
     for leg in legs:
-        bare_manager.set_credential(ALL_KEYS[leg], f"{leg}-key", write=False)
+        store_row(bare_manager, ALL_KEYS[leg], f"{leg}-key")
+
+
+def disarm(bare_manager, leg: str) -> None:
+    """Remove the store row the leg would resolve, so the cascade moves past it."""
+    from local_operator.providers.registry import remove_provider_key
+
+    remove_provider_key(ALL_KEYS[leg], base=bare_manager)
 
 
 # ---------------------------------------------------------------------------
@@ -82,14 +96,12 @@ async def test_the_first_available_leg_wins(bare_manager) -> None:
     vendor = await resolve_vendor(bare_manager)
     assert vendor is not None and vendor.name == "radient"
 
-    unarmed_typesafe = bare_manager
-    unarmed_typesafe.set_credential("RADIENT_API_KEY", "", write=False)
-    vendor = await resolve_vendor(unarmed_typesafe)
+    disarm(bare_manager, "radient")
+    vendor = await resolve_vendor(bare_manager)
     assert vendor is not None and vendor.name == "typesafe"
 
-    unarmed_openrouter = bare_manager
-    unarmed_openrouter.set_credential("TYPESAFE_API_KEY", "", write=False)
-    vendor = await resolve_vendor(unarmed_openrouter)
+    disarm(bare_manager, "typesafe")
+    vendor = await resolve_vendor(bare_manager)
     assert vendor is not None and vendor.name == "openrouter"
 
 
@@ -166,7 +178,7 @@ async def test_vendor_status_performs_no_io(bare_manager) -> None:
     store, i.e. never did the disk half of what it promises not to do.
     """
     vendor_status(bare_manager)
-    assert not (bare_manager.config_dir / "auth.db").exists()
+    assert not (bare_manager / "auth.db").exists()
 
 
 async def test_vendor_status_cannot_see_an_oauth_only_radient_session(bare_manager) -> None:
@@ -177,6 +189,6 @@ async def test_vendor_status_cannot_see_an_oauth_only_radient_session(bare_manag
     ``resolve_vendor`` is the authority; this function exists for the notice and
     diagnostics paths that must not await.
     """
-    assert not (bare_manager.config_dir / "auth.db").exists()
+    assert not (bare_manager / "auth.db").exists()
     assert dict(vendor_status(bare_manager))["radient"] is False
     assert await resolve_vendor(bare_manager) is None

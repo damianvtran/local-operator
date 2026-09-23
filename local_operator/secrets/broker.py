@@ -1046,12 +1046,23 @@ class SecretBroker:
             self._reply_error(connection, "locked", str(exc))
             return
 
-        from local_operator.secrets.store import SecretStore
+        # The role arrives over the wire and defaults to the RESTRICTIVE side, so
+        # a client that omits it gets the namespace check rather than an
+        # unguarded read. The broker holds the key, so the check has to live
+        # here as well as in the store — a guard only in the client would be
+        # decoration for anything that spoke this protocol directly.
+        # Imported here, beside `SecretStore`, for the reason that import is
+        # function-local: reaching for the store's crypto stack must stay a cost
+        # the broker pays when it decrypts, not one it pays at import.
+        from local_operator.secrets.store import ROLES, SecretStore
 
+        role = request.get("role")
+        if role not in ROLES:
+            role = "agent"
         session = self._session_for(identity)
         try:
             value = SecretStore(key, base=self._base).get(
-                name, session_id=session.session_id if session else None
+                name, role=role, session_id=session.session_id if session else None
             )
         except SecretStoreError as exc:
             # **The class name rides along (R11/Q5).** `"store"` alone erased
