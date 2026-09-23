@@ -34394,16 +34394,23 @@ class OperatorApp(App[None]):
         if self._goal_judge_in_flight:
             return
         self._goal_judge_in_flight = True
-        self.run_worker(
-            self._goal_judge_worker(
-                session,
-                source,
-                aborted=bool(message.aborted),
-                error=message.error,
-            ),
-            thread=False,
-            group=source.worker_group("goal_judge"),
-        )
+        try:
+            self.run_worker(
+                self._goal_judge_worker(
+                    session,
+                    source,
+                    aborted=bool(message.aborted),
+                    error=message.error,
+                ),
+                thread=False,
+                group=source.worker_group("goal_judge"),
+            )
+        except Exception:  # noqa: BLE001 — an additive worker must not fail the turn
+            # The flag is released HERE because the worker never ran, so its own
+            # `finally` will not: a terminal that believed a judge was in flight
+            # would never judge this session again.
+            self._goal_judge_in_flight = False
+            logger.debug("goal judge worker could not be started", exc_info=True)
 
     async def _goal_judge_worker(
         self,
