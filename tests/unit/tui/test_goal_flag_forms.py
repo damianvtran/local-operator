@@ -12,7 +12,10 @@ those rows are the only place ``/goal`` teaches anything.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
+from rich.text import Text
 
 from local_operator.session.goal import CLEARED_GOAL_ECHO_CHARS
 from local_operator.tui.app import OperatorApp
@@ -51,6 +54,17 @@ async def _local(pilot, app: OperatorApp, text: str) -> list[str]:
     before = len(_notice_texts(app))
     await _submit(pilot, app, text)
     return _notice_texts(app)[before:]
+
+
+def _card_text(app: OperatorApp) -> str:
+    """The goal card's whole body, as plain text.
+
+    Typed here rather than at each call site: ``GoalPanel`` subclasses ``Static``
+    without overriding ``render()``, so the declared return is the broad
+    ``RenderableType`` union while the renderable it actually holds is a
+    ``Text`` — the same ``cast`` the repo's other widget tests use.
+    """
+    return cast(Text, app.query_one(GoalPanel).render()).plain
 
 
 @pytest.mark.asyncio
@@ -169,11 +183,11 @@ async def test_the_bare_report_names_the_state_on_either_host() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         assert await _local(pilot, app, "/goal") == [], "a read prints no receipt"
-        active_card = app.query_one(GoalPanel).render().plain
+        active_card = _card_text(app)
         active = await app.run_slash_authoritative("goal", "")
         session.mark_goal_done("done")
         assert await _local(pilot, app, "/goal") == [], "still no receipt when done"
-        done_card = app.query_one(GoalPanel).render().plain
+        done_card = _card_text(app)
         done = await app.run_slash_authoritative("goal", "")
 
     assert GOAL in active_card and "— active" in active_card
