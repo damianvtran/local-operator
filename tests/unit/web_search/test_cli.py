@@ -49,11 +49,10 @@ def test_setup_tavily_oauth_writes_http_oauth_server(monkeypatch, tmp_path) -> N
     }
     # Assert the EFFECTIVE chain, not the stored prefix: `enable` no longer appends
     # to `providers`, and membership of the chain is what the user is asking about.
-    from local_operator.credentials import CredentialManager
     from local_operator.web_search.providers import resolve_providers
 
     settings = load_search_settings(ConfigManager(config_dir()))
-    assert "tavily" in resolve_providers(settings, CredentialManager.readonly(config_dir()))
+    assert "tavily" in resolve_providers(settings, config_dir())
 
 
 def test_setup_tavily_oauth_repairs_global_non_oauth_entry(monkeypatch, tmp_path) -> None:
@@ -128,14 +127,13 @@ def test_setup_searxng_validates_and_stores_endpoint(monkeypatch, tmp_path) -> N
         search_command(_args("setup", "searxng", "--endpoint", "https://search.example.test/")) == 0
     )
 
-    from local_operator.credentials import CredentialManager
     from local_operator.web_search.providers import resolve_providers
 
     settings = load_search_settings(ConfigManager(config_dir()))
     assert settings.searxng_endpoint == "https://search.example.test"
     # `setup` calls `enable`, which now means "clear the exclusion" rather than
     # "append to the stored list". Pin the effective chain instead of the list.
-    assert "searxng" in resolve_providers(settings, CredentialManager.readonly(config_dir()))
+    assert "searxng" in resolve_providers(settings, config_dir())
     assert "searxng" not in settings.excluded_providers
 
 

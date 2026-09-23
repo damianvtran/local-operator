@@ -58,7 +58,7 @@ graph TD
         Executor -- "Uses" --> ToolRegistry["ToolRegistry (local_operator/tools/general.py)"]
         ToolRegistry -- "Provides" --> GeneralTools["General Tools"]
         ToolRegistry -- "Provides" --> GoogleTools["Google Tools (local_operator/tools/google.py)"]
-        ToolRegistry -- "Manages" --> CredentialManager["CredentialManager (local_operator/credentials.py)"]
+        ToolRegistry -- "Manages" --> ConfigManager["ConfigManager (local_operator/config.py)"]
         ToolRegistry -- "Interacts" --> SchedulerService["Scheduler Service"]
 
         GeneralTools -- "Browse" --> WebBrowsing["Web Browsing"]
@@ -126,7 +126,7 @@ graph TD
 
     ToolRegistry --> GeneralTools
     ToolRegistry --> GoogleTools
-    ToolRegistry --> CredentialManager
+    ToolRegistry --> ConfigManager
     ToolRegistry --> SchedulerService
 
     GeneralTools --> WebBrowsing

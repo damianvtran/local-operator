@@ -199,7 +199,7 @@ async def test_encrypted_mcp_http_rpc_restart(headless_tui_env, workspace, monke
                 assert session is not None
                 result = await session.call_tool("ping", {})
                 assert "pong" in str(result) and pings
-                # The desktop app's own startup constructs a CredentialManager
+                # The desktop app's own startup builds a ConfigManager
                 # (`server/app.py:113`), which CREATES an empty `credentials.env`.
                 # That is pre-existing behaviour unrelated to this path, and it is
                 # recorded rather than changed here: what this change must

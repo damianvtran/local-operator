@@ -30,6 +30,7 @@ local-operator config instructions
 - `secrets/store.db`: the encrypted secret store — credentials from `lop secret`,
   the provider keys a login or `lop credential update` writes (`LOP_PROVIDER_*`
   rows), and anything migrated out of the retired plaintext `credentials.env`
+  (which was deleted in PR2; `lop secret migrate-env` is the last thing to read it)
 - `mcp.json`: user-scoped MCP servers
 - `agents/<id>/agent.yml`: persistent agent profiles
 - `sessions/`: ephemeral transcripts

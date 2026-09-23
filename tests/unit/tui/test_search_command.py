@@ -134,8 +134,6 @@ def test_chain_markers_carry_the_shared_ink(tmp_path) -> None:
     """
     from rich.style import Style
 
-    from local_operator.credentials import CredentialManager
-
     # A provider-class store ROW (PR2a): the plaintext file leg is gone, so the
     # row is what the resolver and the status rows read.
     from local_operator.providers.registry import store_provider_key
@@ -149,7 +147,7 @@ def test_chain_markers_carry_the_shared_ink(tmp_path) -> None:
         provider_statuses,
     )
 
-    credentials = CredentialManager.readonly(tmp_path / "config")
+    credentials = tmp_path / "config"
     store_provider_key("DEEPSEEK_API_KEY", "stored", base=tmp_path / "config")
     settings = WebSearchSettings(providers=["duckduckgo", "brave", "deepseek"])
     statuses = provider_statuses(settings, credentials)

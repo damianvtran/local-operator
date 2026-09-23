@@ -35,7 +35,8 @@ from local_operator.providers.registry import (
 logger = logging.getLogger("local_operator.providers.auth_cli")
 
 if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
+
     from local_operator.providers.auth_store import AuthStore
 
 
@@ -82,7 +83,7 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     def read_line() -> str:
         """Read the pasted value, hiding it when it is a long-lived secret.
 
-        ``getpass`` for an API KEY, which is the discipline ``CredentialManager``
+        ``getpass`` for an API KEY, which is the discipline the key prompt
         and the web-search CLI already apply to this same class of value: a
         provider key does not expire, and ``input()`` leaves it sitting in the
         scrollback of a terminal that is frequently being screen-shared while
@@ -302,14 +303,14 @@ def _cancelled_message(definition: ProviderDefinition) -> str:
 
 def run_login(
     provider_id: str | None,
-    _credential_manager: "CredentialManager | None",
+    _config_dir: "Path | None",
     auth_store: "AuthStore",
 ) -> int:
     """Log in to ``provider_id`` (or list options when ``None``). Exit code 0/1.
 
-    The legacy credential manager is accepted for call-shape symmetry with
+    The config ROOT is accepted for call-shape symmetry with
     :func:`list_logins` but plays no part in a login: new credentials land in
-    ``auth_store`` only.
+    ``auth_store`` only. It used to be a ``CredentialManager``, deleted in PR2b.
     """
     if provider_id is None:
         print("Available login providers:")
@@ -607,7 +608,7 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
     return 0
 
 
-def stored_login_key_names(credential_manager: "CredentialManager") -> list[str]:
+def stored_login_key_names(config_dir: "Path | None") -> list[str]:
     """ENV KEY names the provider-class STORE rows hold, sorted.
 
     The name-source reader ``list_logins`` prints under "secret store". Reading
@@ -625,14 +626,12 @@ def stored_login_key_names(credential_manager: "CredentialManager") -> list[str]
     try:
         from local_operator.providers.registry import stored_provider_env_keys
 
-        return sorted(stored_provider_env_keys(credential_manager.config_dir))
+        return sorted(stored_provider_env_keys(config_dir))
     except Exception:  # noqa: BLE001 — a status listing must not raise
         return []
 
 
-def list_logins(
-    auth_store: "AuthStore", credential_manager: "CredentialManager | None" = None
-) -> int:
+def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> int:
     """Print one line per active credential plus env/legacy keys in the cascade."""
     rows = auth_store.list_credentials()
     if rows:
@@ -661,12 +660,12 @@ def list_logins(
         if name and os.environ.get(name):
             print(f"  {definition.id:<14} {name}=<set>")
             found = True
-    if credential_manager is not None:
+    if config_dir is not None:
         # The provider-class store rows, keyed by env-key name, reported as names
         # only. The plaintext ``credentials.env`` loop this used to print is GONE
         # (PR2a): the file is no longer a credential source, and
         # ``stored_login_key_names`` is the one callable that reads those names.
-        for key in stored_login_key_names(credential_manager):
+        for key in stored_login_key_names(config_dir):
             print(f"  secret store  {key}=<set>")
             found = True
     if not found:

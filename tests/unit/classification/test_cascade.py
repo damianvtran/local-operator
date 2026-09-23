@@ -41,7 +41,7 @@ def disarm(bare_manager, leg: str) -> None:
     """Remove the store row the leg would resolve, so the cascade moves past it."""
     from local_operator.providers.registry import remove_provider_key
 
-    remove_provider_key(ALL_KEYS[leg], base=bare_manager.config_dir)
+    remove_provider_key(ALL_KEYS[leg], base=bare_manager)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ async def test_vendor_status_performs_no_io(bare_manager) -> None:
     store, i.e. never did the disk half of what it promises not to do.
     """
     vendor_status(bare_manager)
-    assert not (bare_manager.config_dir / "auth.db").exists()
+    assert not (bare_manager / "auth.db").exists()
 
 
 async def test_vendor_status_cannot_see_an_oauth_only_radient_session(bare_manager) -> None:
@@ -189,6 +189,6 @@ async def test_vendor_status_cannot_see_an_oauth_only_radient_session(bare_manag
     ``resolve_vendor`` is the authority; this function exists for the notice and
     diagnostics paths that must not await.
     """
-    assert not (bare_manager.config_dir / "auth.db").exists()
+    assert not (bare_manager / "auth.db").exists()
     assert dict(vendor_status(bare_manager))["radient"] is False
     assert await resolve_vendor(bare_manager) is None

@@ -1323,7 +1323,7 @@ def test_cli_hides_an_api_key_and_echoes_an_oauth_code(
 ) -> None:
     """Round 1 F2: an API key must not be echoed into the terminal scrollback.
 
-    ``CredentialManager`` and the web-search CLI already read this same class of
+    The credential prompt and the web-search CLI already read this same class of
     value through ``getpass``; the login prompt used ``input()``, and making the
     paste-a-key providers work is what made that path reachable for nine real
     provider keys.

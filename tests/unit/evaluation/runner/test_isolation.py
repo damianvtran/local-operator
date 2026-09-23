@@ -586,9 +586,9 @@ def test_provider_client_defers_its_configure_import() -> None:
 def test_host_secrets_is_the_only_other_store_seam_and_takes_it_by_injection() -> None:
     """``host_secrets`` may serve the credential store but never imports it.
 
-    It takes a live ``CredentialManager`` from its caller (the script that
-    also opened the store for the model client), so even the lazy import is
-    absent: importing the module pulls in nothing from the application.
+    It takes the config ROOT from its caller (the script that also opened the
+    store for the model client), so even the lazy import is absent: importing
+    the module pulls in nothing from the application.
     """
 
     imported = _fresh_import_modules("local_operator.evaluation.runner.host_secrets")
