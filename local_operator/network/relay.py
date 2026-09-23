@@ -337,6 +337,44 @@ PROBE_CONNECT_TIMEOUT_S = 3.0
 #: a reachability result (QA round 2, Q-R2-2).
 NOT_ATTEMPTED_REASON = "not_attempted: the listing budget ran out before this member was probed"
 
+#: The CLOSED set of colon-free codes a probe attempt's ``detail`` can carry.
+#:
+#: ONE HOME FOR THE VOCABULARY, because a second consumer reads it: a human
+#: surface renders a machine list of these as a sentence
+#: (``resume.peer_reason_words``), and it recognises the list by asking whether
+#: each ``<endpoint> <detail>`` segment ends in one of these codes
+#: (:func:`is_probe_detail`). A detail written as a bare English word OUTSIDE this
+#: set would therefore hand the whole list back to the reader verbatim — endpoint
+#: addresses and exception class names included — which is the leak that
+#: recognition exists to prevent (round 10, MINOR-2). Every site that writes one of
+#: these spells it from the constant rather than as a literal, so the set and the
+#: writes cannot drift; the tests enumerate both sides.
+DETAIL_OK = "ok"
+DETAIL_NOT_ATTEMPTED = "not_attempted"
+DETAIL_NO_ANSWER = "no_answer"
+DETAIL_BAD_ENDPOINT = "bad_endpoint"
+PROBE_DETAIL_CODES: frozenset[str] = frozenset(
+    {DETAIL_OK, DETAIL_NOT_ATTEMPTED, DETAIL_NO_ANSWER, DETAIL_BAD_ENDPOINT}
+)
+
+#: The one OPEN detail family: the dial RAISED, so the code carries the exception
+#: the OS gave us. Left open deliberately — a vocabulary of exception class names
+#: would be a second registry to keep, and the reader's question ("did anything
+#: answer?") does not depend on which one it was.
+CONNECT_FAILED_PREFIX = "connect_failed:"
+
+
+def is_probe_detail(detail: str) -> bool:
+    """Is this string one of the details :func:`probe_candidates` can write?
+
+    THE PRODUCER'S OWN ANSWER TO "IS THIS MINE", used by the human surfaces to tell
+    a machine list from a ``stage: <sentence>`` (see ``resume._carries_wire_tokens``
+    for why the distinction cannot be made by shape alone). ``ok`` is a member: it
+    is a detail an attempt carries, even though no row's ``reason`` is ever built
+    from it (a reason exists only when nothing connected).
+    """
+    return detail in PROBE_DETAIL_CODES or detail.startswith(CONNECT_FAILED_PREFIX)
+
 
 @dataclass(frozen=True)
 class CandidateAttempt:
@@ -448,20 +486,22 @@ def probe_candidates(
         if deadline is not None:
             budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
         if budget <= 0:
-            results.put(_AttemptOutcome(endpoint, None, "not_attempted", 0.0))
+            results.put(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
             return
         address, _, port_text = endpoint.rpartition(":")
         try:
             port = int(port_text)
         except ValueError:
-            results.put(_AttemptOutcome(endpoint, None, "bad_endpoint", 0.0))
+            results.put(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
             return
         started = time.monotonic()
         try:
             sock = socket.create_connection((address or endpoint, port), timeout=budget)
         except OSError as exc:
             results.put(
-                _AttemptOutcome(endpoint, None, f"connect_failed:{exc.__class__.__name__}", 0.0)
+                _AttemptOutcome(
+                    endpoint, None, f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}", 0.0
+                )
             )
             return
         latency = round((time.monotonic() - started) * 1000, 1)
@@ -472,7 +512,7 @@ def probe_candidates(
                 _close_quietly(sock)
                 return
             opened.append(sock)
-        results.put(_AttemptOutcome(endpoint, sock, "ok", latency))
+        results.put(_AttemptOutcome(endpoint, sock, DETAIL_OK, latency))
 
     threads = [
         threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
@@ -525,7 +565,9 @@ def probe_candidates(
     for endpoint in endpoints:
         if endpoint not in reported:
             attempts.append(
-                CandidateAttempt(endpoint, False, "not_attempted" if starved else "no_answer", None)
+                CandidateAttempt(
+                    endpoint, False, DETAIL_NOT_ATTEMPTED if starved else DETAIL_NO_ANSWER, None
+                )
             )
 
     return CandidateProbe(
@@ -554,20 +596,54 @@ def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
     winner has no reason, and a caller that asks anyway must not be handed
     ``unreachable: ... ok`` — a sentence that contradicts itself.
 
-    THE COMPOUND FORM IS FOR MACHINES, AND IS GLOSSED BY SHAPE. It is the
+    THE COMPOUND FORM IS FOR MACHINES, AND IS GLOSSED BY ITS OWN DETAILS. It is the
     ``reason`` field of the ``--json`` payloads that carry these rows, which is
     where an endpoint address beside its own failure code belongs. The human
     surfaces render the same field through ``resume.peer_reason_words``, which
-    recognises a list of wire tokens by what it is made of rather than by the
-    ``unreachable`` prefix — so an entry added here later, or a second compound
-    shape, is glossed rather than leaked (QA round 21, Q-R21-1).
+    recognises a list of wire tokens by whether EVERY ``<endpoint> <detail>``
+    segment ends in a code this module can write (:func:`is_probe_detail`) rather
+    than by the ``unreachable`` prefix — so an entry added here later, or a second
+    compound shape, is glossed rather than leaked (QA round 21, Q-R21-1).
+
+    THE INVARIANT THAT HOLDS THAT RECOGNITION UP is the vocabulary above: a detail
+    this function can emit is a member of ``PROBE_DETAIL_CODES`` or carries
+    ``CONNECT_FAILED_PREFIX``, which is why the codes here are spelled from those
+    constants. A detail written outside that set ends a segment unrecognised, so
+    the whole tail is handed to the reader as prose — endpoints and exception class
+    names included — which is the leak the recognition exists to prevent.
     """
-    codes = [row.detail for row in attempts if row.detail != "ok"]
+    codes = [row.detail for row in attempts if row.detail != DETAIL_OK]
     if not codes:
         return ""
     if len(set(codes)) == 1:
         return codes[0]
     return "unreachable: " + "; ".join(f"{row.endpoint} {row.detail}" for row in attempts)
+
+
+#: The stage word for the one reason that says an address ANSWERED and this
+#: device's own listing budget expired before the handshake could start.
+#:
+#: A STAGE rather than a bare code, because its tail is prose that names the
+#: winning endpoint — and a human surface has to tell that sentence from a machine
+#: list without trusting the shape of its fields, since the endpoint it names is a
+#: bare ``host:port`` rather than one of our details (round 10, MAJOR-1; see
+#: ``resume.peer_reason_words``). The stage is spelled here for this module's use;
+#: the gloss keys on the same word, and the test that builds this reason and
+#: asserts its reading is what holds the two spellings together.
+HANDSHAKE_NOT_ATTEMPTED = "handshake_not_attempted"
+
+
+def handshake_not_attempted_reason(winner: str) -> str:
+    """Why a member is unreachable when its address DID answer, in the relay's words.
+
+    A wrapper rather than an f-string at the call site so this sentence has one
+    home: its stage word is what the human surfaces key on and its tail is what
+    they must drop, so the two halves are read by code that does not otherwise meet.
+    """
+    return (
+        f"{HANDSHAKE_NOT_ATTEMPTED}: {winner} answered and the listing "
+        "budget ran out before the handshake"
+    )
 
 
 def _row_for_id(record: NetworkRecord, device_id: str) -> MemberRecord | None:
@@ -5055,10 +5131,7 @@ class RelayServer:
                 # handshake: "unreachable" would be a claim about the peer when
                 # the truth is a claim about our clock.
                 _close_quietly(probe.sock)
-                return None, (
-                    f"handshake_not_attempted: {probe.winner} answered and the listing "
-                    "budget ran out before the handshake"
-                )
+                return None, handshake_not_attempted_reason(probe.winner)
             link, dial_reason = self.dial(
                 record.network_id,
                 host=probe.winner,

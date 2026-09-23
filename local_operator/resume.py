@@ -2316,42 +2316,98 @@ class SessionRow(NamedTuple):
 UNNAMED_DEVICE = "unnamed device"
 
 
+#: What a row says when NONE of a member's declared addresses answered.
+#:
+#: One spelling for THREE arrivals: the ``unreachable`` stage word (a member whose
+#: addresses all failed the same way), the bare ``no_answer`` code the probe reports
+#: when every address it DIALLED went quiet, and the compound list below (a member
+#: whose addresses failed differently). They are the same answer to the reader, and
+#: the branches that produce it must not drift into three sentences for it.
+_NO_ADDRESS_ANSWERED = "no address of it answered"
+
+#: What a row says for the one reason whose body is a SENTENCE WITH AN ADDRESS IN IT.
+#:
+#: ``handshake_not_attempted`` is the relay's own prose — an address ANSWERED and
+#: THIS device's listing budget expired before the handshake could start
+#: (``relay.handshake_not_attempted_reason``). It is keyed on its stage word rather
+#: than by shape because its body carries the winning endpoint, a bare
+#: ``host:port``: a shape test that asks "is there a colon with something after
+#: it" reads the sentence as a machine list and tells the reader NOTHING answered —
+#: the exact inverse of what happened, and the state whose remedy differs (a peer
+#: that never answered versus a listing that gave up on our side) — which is what
+#: round 10's MAJOR-1 was. The address itself is not for a human line and not for
+#: the reader's question (the row is about the DEVICE); it stays in the ``--json``
+#: payload, where the whole sentence does.
+_HANDSHAKE_ANSWERED_WORDS = "it answered, and the listing ran out of time before the handshake"
+
+#: What a BARE wire code with no entry in the table below reads as.
+#:
+#: The arrivals this is for, none of which mean silence: the dial's own handshake
+#: refusals (``handshake.REASON_*`` — ``epoch_stale``, ``untrusted``,
+#: ``protocol_mismatch`` …) and the phase guard
+#: (``pair_phase_requires_the_ceremony``), where the peer ANSWERED and the link was
+#: not made. Saying "nothing answered" for those would be the same inversion
+#: MAJOR-1 is about, one state over; printing the code would put a bare wire word
+#: on a human line. A peer's own refusal message is the one arrival in this field
+#: this device did not write, and its single-word form reads the same way — as that
+#: peer's own refusal, which is what it is.
+_BARE_CODE_WORDS = "the link was refused"
+
 #: The relay's ``reason`` tokens, in the words a person reads. See
 #: :func:`peer_reason_words` for why the token itself is not the answer.
 PEER_REASON_WORDS: dict[str, str] = {
     "no_endpoint": "no address published for it",
     "not_a_member": "it is not a member of this network",
     "member_removed": "it was removed from this network",
+    # THE PROBE'S OWN CODES (round 10, MAJOR-2). The single-code path reports one of
+    # these bare, and it used to reach a human line unchanged: a row read
+    # ``… (no_answer)``. Every code in the probe's vocabulary has an entry here, and
+    # a test fails if one is added to the vocabulary without a reading.
+    #
+    # ``not_attempted`` and ``no_answer`` are not the same state and read
+    # differently on purpose: nothing was dialled versus everything dialled was
+    # silent — which is also why ``no_answer`` takes the spelling the other two
+    # arrivals of "nothing answered" already use.
+    "no_answer": _NO_ADDRESS_ANSWERED,
+    "not_attempted": "the listing ran out of time before it was tried",
+    "bad_endpoint": "the address it publishes cannot be dialled",
 }
-
-#: What a row says when NONE of a member's declared addresses answered.
-#:
-#: One spelling for two arrivals: the ``unreachable`` stage word (a member whose
-#: addresses all failed the same way) and the compound list below (a member whose
-#: addresses failed differently). They are the same answer to the reader, and the
-#: two branches that produce it must not drift into two sentences for it.
-_NO_ADDRESS_ANSWERED = "no address of it answered"
 
 
 def _carries_wire_tokens(tail: str) -> bool:
     """Does a ``stage:`` tail carry the relay's OWN tokens rather than a sentence?
 
-    THE TEST THAT DECIDES A ``stage: <sentence>`` BY SHAPE (QA round 21,
-    Q-R21-1). It used to be ``" " in tail``, and the COMPOUND failure reason broke
-    that test: a member advertising several addresses reports every one of them as
-    ``unreachable: <endpoint> <detail>; <endpoint> <detail>`` — a MACHINE list that
-    contains spaces — so the sentence test matched and the whole line, addresses and
-    Python class names included, was printed to the user verbatim.
+    THE QUESTION IS ASKED OF EACH SEGMENT, AND EACH SEGMENT ENDS IN A CODE THE
+    RELAY CAN WRITE (QA round 21, Q-R21-1; round 10, MAJOR-1). It used to be
+    ``" " in tail``, and the COMPOUND failure reason broke that test: a member
+    advertising several addresses reports every one of them as ``unreachable:
+    <endpoint> <detail>; <endpoint> <detail>`` — a MACHINE list that contains
+    spaces — so the sentence test matched and the whole line, addresses and Python
+    class names included, was printed to the user verbatim. The replacement asked
+    whether ONE wire token appears anywhere in the tail, which then broke the
+    relay's prose: its ``handshake_not_attempted`` reason embeds the endpoint that
+    ANSWERED, and an endpoint is a ``host:port`` — a colon with something after it
+    — so that reason was read as a machine list and told the reader nothing
+    answered, when the truth was a listing budget that expired on this side.
 
-    Deciding it by the one prefix that shape happens to start with would fix
-    today's string and leave the next compound shape free to leak the same way, so
-    the question asked here is what the tail is MADE OF. Every failure code the
-    relay writes is either ``stage:detail`` with no space around the colon
-    (``connect_failed:OSError``) or a bare snake_case token (``bad_endpoint``,
-    ``no_answer``), and a sentence written for a person — the only one this field
-    carries is the relay's :data:`NOT_ATTEMPTED_REASON` — is words with neither
-    property. One wire token anywhere in the tail therefore means the field is the
-    relay's vocabulary rather than prose, whatever surrounds it.
+    A machine list is a ``;``-separated sequence of ``<endpoint> <detail>`` pairs,
+    so the unit is the SEGMENT and the field that decides it is the one each
+    segment ENDS with: is it a detail the relay's own probe can write
+    (:func:`local_operator.network.relay.is_probe_detail`)? Every segment of a
+    compound answers yes; a sentence that merely contains an address ends in prose
+    and answers no. Nothing is decided by a bare ``host:port`` any more, because a
+    ``host:port`` is not a detail.
+
+    THE INVARIANT, AND WHAT MOVES IF YOU CHANGE IT (round 10, MINOR-2): this test
+    is only as good as the CLOSED vocabulary it reads. Every detail
+    ``relay.probe_candidates`` writes is a member of ``relay.PROBE_DETAIL_CODES`` or
+    carries ``relay.CONNECT_FAILED_PREFIX``, and the sites that write them spell
+    them from those constants. A detail written OUTSIDE that set — a bare English
+    word, in a compound whose endpoints declare no port — ends a segment
+    unrecognised, so the whole tail is handed back as prose: the endpoint-and-code
+    leak this function exists to prevent, back in the middle of a sentence. That is
+    why the recognition reads the producer's set rather than a shape of its own,
+    and why the tests enumerate both sides.
 
     FAILING TOWARDS THE GLOSS IS DELIBERATE. A tail mistaken for wire tokens loses
     a sentence and reads as "it did not answer", which is blander than the truth but
@@ -2360,17 +2416,40 @@ def _carries_wire_tokens(tail: str) -> bool:
     prevent, and it puts endpoint addresses and exception class names on a user's
     screen.
     """
-    for field in tail.split():
-        # ``stage:detail`` — a colon with something after it INSIDE one field (a
-        # field that is only ``stage:`` carries no detail and so proves nothing).
-        colon = field.find(":")
-        if 0 <= colon < len(field) - 1:
-            return True
-        # A bare token: the relay's own spellings are snake_case identifiers, which
-        # a sentence written for a person does not contain.
-        if "_" in field:
-            return True
-    return False
+    segments = [segment for segment in tail.split(";") if segment.strip()]
+    if not segments:
+        return False
+    return all(_segment_ends_in_wire_detail(segment) for segment in segments)
+
+
+def _segment_ends_in_wire_detail(segment: str) -> bool:
+    """Is one ``<endpoint> <detail>`` segment of a machine list spelled like one?
+
+    The detail is the LAST field: the relay writes each entry as
+    ``f"{outcome.endpoint} {outcome.detail}"`` (``relay.probe_reason``), and a
+    declared endpoint can carry no port at all (hosts are advertised verbatim), so
+    the field count is not fixed and the endpoint cannot be told from the detail by
+    position from the left.
+    """
+    fields = segment.split()
+    if not fields:
+        return False
+    from local_operator.network.relay import is_probe_detail
+
+    return is_probe_detail(fields[-1])
+
+
+def _is_bare_code(token: str) -> bool:
+    """Is this whole reason ONE bare wire code rather than a sentence or a list?
+
+    ``str.isidentifier`` is the test the wire's own spellings pass and a sentence
+    written for a reader does not: ``epoch_stale`` and
+    ``pair_phase_requires_the_ceremony`` are identifiers, while ``asked, and it did
+    not answer`` — and even a one-word ``asked,`` — is not. It cannot tell a code
+    from a peer's own one-word refusal message, and it does not need to: each is a refusal
+    from that peer, and each reads the same way (:data:`_BARE_CODE_WORDS`).
+    """
+    return token.isidentifier()
 
 
 def peer_reason_words(reason: str) -> str:
@@ -2392,10 +2471,11 @@ def peer_reason_words(reason: str) -> str:
     ``unreachable: <endpoint> <detail>; <endpoint> <detail>``, so it rides a
     ``stage: `` prefix while being a machine list rather than prose. It is glossed
     whole here, because an endpoint address and a Python class name are exactly the
-    two things a human line must not carry — and it is recognised by its SHAPE
-    (:func:`_carries_wire_tokens`) rather than by its prefix, so a compound reason
-    written a different way later cannot leak the same fields through the same
-    sentence test.
+    two things a human line must not carry — and it is recognised SEGMENT BY
+    SEGMENT, by the codes the relay's own probe can write (:func:`_carries_wire_tokens`),
+    rather than by its prefix or by the shape of its fields: "a colon somewhere"
+    was true of the relay's prose as well, and read the reason that says an address
+    ANSWERED as one that says nothing did (round 10, MAJOR-1).
 
     ONE FUNCTION, THREE SURFACES. It moved here from the network panel (UX round
     3, U23) because by the last round three surfaces printed the same token three
@@ -2407,17 +2487,43 @@ def peer_reason_words(reason: str) -> str:
     shared strings (``UNNAMED_DEVICE``, ``UNTITLED_CONVERSATION``) live for the
     same reason.
 
+    WHAT A READER IS TOLD FOR EVERY CODE THIS FIELD CARRIES (round 10, MAJOR-2).
+    Four producers write it, and each arrival has a stated reading: the record's own
+    facts (``no_endpoint``, ``not_a_member``, ``member_removed``) and the probe's
+    codes (``no_answer``, ``not_attempted``, ``bad_endpoint``) are TABLE ENTRIES, so
+    no bare token reaches a human line; ``connect_failed:<exception>`` and the bare
+    handshake refusals (``epoch_stale``, ``untrusted``, … — ``handshake.REASON_*``
+    and the dial's own phase guard) fall to the two STRUCTURAL FALLBACKS below,
+    which are sentences rather than tokens; the relay's ``handshake_not_attempted``
+    sentence is keyed on its stage and keeps its meaning without its address; and a
+    sentence written for a reader — the relay's ``not_attempted`` reason, a peer's
+    own refusal message — is returned as written. The tests walk that vocabulary
+    from the source, so a code added without a reading fails them.
+
     Prefix-matched on the stage before the ``:`` rather than on the exception
     class, because the tail is whatever the dial raised: a vocabulary of Python
     class names would be a second registry to keep, and the distinction a reader
     needs is "nothing answered", not which exception said so — which is also why
-    the compound list is glossed whole rather than summarised entry by entry. The
-    token is not lost — it is the ``reason`` field of the ``--json`` payload every
-    one of these verbs still ships, which is the machine surface these summaries
-    are a summary
-    OF. It used to be printed per candidate by ``lop network peers`` as well, and
-    UX round 5's U28 removed that: a human listing is not where a Python class
-    name belongs, and the human line and the payload are the two registers.
+    the compound list is glossed whole rather than summarised entry by entry.
+
+    WHERE THE TOKEN SURVIVES. It is the ``reason`` field of the ``--json`` payload
+    every one of these verbs ships, which is the machine surface these summaries
+    are a summary OF. It used to be printed per candidate by ``lop network peers``
+    as well, and UX round 5's U28 removed that: a human listing is not where a
+    Python class name belongs, and the human line and the payload are the two
+    registers. ``lop network doctor`` is the ONE human surface that prints a peer's
+    reachability REASON as a wire code, deliberately: that column is the instrument's
+    own reading — the dial result of one address (the endpoint is its own column, so
+    nothing is smuggled), or the record fact when nothing was dialled — and the code
+    IS the diagnosis the command exists to make, since "refused" and "a black hole"
+    want different remedies. The member-level sentences in this function would be
+    FALSE on such a row: ``no_answer`` reads "no address of it answered", a claim
+    about every address, on a row about one. The guide routes doctor's diagnosis
+    through ``--json`` for that reason: "``lop network doctor --json`` reports the
+    same per link, one row per address plus the handshake". (``lop network log`` also
+    prints codes, and is not a third case: it prints the audit RECORD — event and
+    detail as the record — so its human form and its ``--json`` carry the same
+    bytes.)
     """
     token = (reason or "").strip()
     if not token:
@@ -2425,11 +2531,21 @@ def peer_reason_words(reason: str) -> str:
     if token in PEER_REASON_WORDS:
         return PEER_REASON_WORDS[token]
     stage, sep, tail = token.partition(":")
-    if not sep or not tail:
-        # Not a ``stage:tail`` pair, so whatever this is (a token this module has
-        # no entry for, or a sentence with a colon in it) was written for a
-        # reader already.
-        return token
+    if stage == "handshake_not_attempted":
+        # THE RELAY'S OWN PROSE ABOUT AN ADDRESS THAT ANSWERED. Keyed on the stage
+        # word rather than on the tail, because the tail's first field is the
+        # endpoint that answered: a machine-list reading of this sentence is not
+        # merely blunter, it is the opposite of the truth (round 10, MAJOR-1), and
+        # the reader's question is about the DEVICE, so the address is not lost by
+        # leaving it in the ``--json`` field it came from.
+        return _HANDSHAKE_ANSWERED_WORDS
+    if not sep:
+        # NOT a ``stage:tail`` pair, so it is one of two things: a sentence written
+        # for a reader already, or a BARE WIRE CODE. ``epoch_stale`` and
+        # ``pair_phase_requires_the_ceremony`` are the latter, and neither means
+        # silence — the peer answered and refused — so they may not fall to the
+        # "nothing answered" default below.
+        return _BARE_CODE_WORDS if _is_bare_code(token) else token
     if " " in tail.strip():
         # A tail containing a space is EITHER the compound failure list or a
         # ``stage: <sentence>``, and the two are told apart by what the tail is made

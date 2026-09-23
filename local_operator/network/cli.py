@@ -1856,7 +1856,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # D3) so this listing, `/sessions`'s own `--all-peers` line and the
         # sidebar tooltip say the same thing about the same state. The raw reason
         # is not lost: it is this verb's ``--json`` field, which is the machine
-        # surface (`peer_reason_words`' own line — no human line prints it, R21).
+        # surface. THE ONE HUMAN SURFACE THAT DOES PRINT ONE IS `lop network doctor`,
+        # deliberately and alone (round 10, MINOR-1): its rows are PER ADDRESS and
+        # the wire code is the diagnosis the command exists to make — which address
+        # was dialled and how it failed — while the member-level sentences
+        # `peer_reason_words` returns would be false on such a row. That function's
+        # own docstring is where the boundary is argued; do not widen it back to a
+        # claim about every surface.
         from local_operator.resume import peer_reason_words
 
         lines.append(

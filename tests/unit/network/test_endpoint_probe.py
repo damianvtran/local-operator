@@ -270,6 +270,47 @@ def test_one_failure_code_is_reported_as_itself_and_several_are_named() -> None:
     assert relay.probe_reason([]) == ""
 
 
+def test_every_detail_the_probe_writes_is_a_code_the_human_gloss_can_read() -> None:
+    """Round 10, MAJOR-2 and MINOR-2, made structural at the producer.
+
+    A human surface tells a compound ``unreachable: <endpoint> <detail>; …`` reason
+    from the relay's prose by asking whether EVERY segment ends in one of these codes
+    (``resume._carries_wire_tokens`` reads :func:`relay.is_probe_detail`), and it
+    reads each code through ``resume.PEER_REASON_WORDS``. That makes this vocabulary
+    a CONTRACT between the probe and every reader: a detail written outside the set
+    hands the whole list back to the reader as prose — endpoints and exception class
+    names included — and a code with no entry prints itself.
+
+    Both halves are asserted over the codes the REAL producer writes on the three
+    deterministic paths a unit test can drive: a budget that expired before this
+    candidate's turn came, an endpoint whose port cannot be parsed, and an address
+    that refuses the connection.
+    """
+    import local_operator.resume as resume
+
+    expired = relay.probe_candidates(
+        ["127.0.0.1:1"], deadline=time.monotonic() - 1.0, connect_cap=1.0
+    )
+    unparseable = relay.probe_candidates(
+        ["not-a-host-port"], deadline=time.monotonic() + 10.0, connect_cap=1.0
+    )
+    refused = relay.probe_candidates(
+        [_refused_endpoint()], deadline=time.monotonic() + 10.0, connect_cap=10.0
+    )
+    written = {row.detail for probe in (expired, unparseable, refused) for row in probe.attempts}
+    assert {"not_attempted", "bad_endpoint"} <= written, written
+    for detail in sorted(written):
+        assert relay.is_probe_detail(detail), detail
+        # The reader's half: no code reaches a person as itself.
+        assert resume.peer_reason_words(detail) != detail, detail
+    # The set the recognition reads is also the set the writer writes: the open
+    # exception family is admitted by its prefix, and a bare word is not admitted
+    # at all — that admission is what the recognition turns on (MINOR-2).
+    assert relay.is_probe_detail(f"{relay.CONNECT_FAILED_PREFIX}OSError")
+    assert relay.is_probe_detail("refused") is False
+    assert relay.is_probe_detail("host-a") is False
+
+
 # ---------------------------------------------------------------------------
 # The member table, learned from a peer
 # ---------------------------------------------------------------------------
