@@ -104,6 +104,7 @@ coverage, where under-masking is still a leak and over-masking is still a defect
 
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, replace
 from typing import (
@@ -1747,6 +1748,19 @@ def _tolerant(token_class: str) -> str:
 _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY")
 
 
+#: One NUMBERED unit of a tool's line numbering: an optional opening bracket, the digit
+#: run, an optional closing bracket, whitespace, and an optional separator.
+#:
+#: It is a NAMED fragment rather than inline text because the `-open` rule needs a second
+#: spelling of this unit (`_PEM_PREFIX_UNIT_MAX`, below), and a second hand-written copy
+#: of a grammar fragment is exactly how the shape table and the pipe's classifier drift
+#: apart — the defect Q9-F1/Q10-F1 recorded above, one level down.
+_PEM_PREFIX_UNIT = r"\[?\d+\]?[ \t]*(?:(?:[.)\]]|\.\]|->|[|:>-])[ \t]*)?"
+
+#: bat's boxed numbering (`│ 12 │`). Its digit run is delimited on BOTH sides, so it has
+#: no partial form to spell: no unit and no content can extend into it.
+_PEM_PREFIX_BOX_UNIT = r"\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
+
 #: The line-number prefix tools actually emit, as ONE definition shared by the shape
 #: table and the pipe's own body classifier (``tools/builtin.py`` imports these). A second
 #: hand-written allowance is what published the body for `cat -n` output after the shape
@@ -1754,49 +1768,75 @@ _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE
 #: between the two is a silent leak rather than a missed match.
 #:
 #: Covered: `12|`, `12:`, `12>`, `12->`, `12)`, `12.]`, `[12]`, `12<TAB>` (cat -n), bat's
-#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator.
+#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator,
+#: and it is built from the two units above so that a third spelling (this rule's maximal
+#: one) cannot be written by hand beside it.
 LINE_PREFIX = (
     r"[ \t]*(?:(?:"
-    r"\[?\d+\]?[ \t]*(?:[.)\]]|\.\]|->|[|:>-])?[ \t]*"
-    r"|\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
-    r")+)?"
+    # THE SEPARATOR'S TRAILING WHITESPACE LIVES INSIDE THE OPTIONAL GROUP, and that
+    # is the difference from `[ \t]*(?:SEP)?[ \t]*`. Both accept exactly the same
+    # strings (`[ \t]*` | `[ \t]*SEP[ \t]*`), but this one consumes a run of
+    # whitespace in ONE place per unit instead of two, and that removes a whole
+    # family of partition paths: the old spelling could split a gap between two
+    # digit runs across the trailing and the leading `[ \t]*`, so 2**k paths for
+    # k digit runs on a line. Measured on the released fragment: one 65-character
+    # numeric table row (`%8d`-padded columns, i.e. a numpy row or a padded column
+    # dump) cost 1.34 s in `PEM_HEADER_LINE_RE.search` and 1.74 s in
+    # `PEM_BODY_LINE_RE.match`; 48 characters of space-separated 2-digit runs did
+    # not return in 190 s. This spelling: 12 ms and 14 ms for the same 65
+    # characters.
+    #
+    # IT DOES NOT REMOVE THE EXPONENTIAL, and the comment says so because the next
+    # reader will otherwise "simplify" one of two things back. The remaining paths
+    # are the DIGIT runs: a unit may end in the middle of `\d+` (nothing forbids it
+    # when no separator follows), and every split is live, so the engine still
+    # walks 2**k for k digit runs. THREE OTHER language-preserving spellings were
+    # measured alongside this one — whitespace made maximal with a `(?![ \t])`
+    # assertion, possessive `[ \t]*+`, and both together — and all four still grow
+    # by a factor per digit run. Two narrower spellings are NOT available: making `\d+`
+    # possessive or forbidding a unit to end before a digit both DROP matches
+    # (`12 34 MIIEowIBAAKCA` is a doubly-numbered body line that the second loses
+    # outright), and a dropped body line is a published key, which is the one
+    # failure this grammar must not have. The cost is therefore bounded by a
+    # number of partitions INHERENT to the language, and the fix for a caller that
+    # runs it over arbitrary text is a guard or a linear matcher, not a cheaper
+    # fragment: `local_operator/tools/builtin.py` shields its two hot call sites
+    # with necessary-condition gates and records the residual.
+    + _PEM_PREFIX_UNIT
+    + r"|"
+    + _PEM_PREFIX_BOX_UNIT
+    + r")+)?"
 )
 
 #: A line separator in either spelling: escaped (inside a JSON value) or real, CRLF
 #: included.
 LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
 
-#: One PEM body line with that prefix. Eight characters is the floor for a line that
-#: stands on its own; a SHORTER line counts only when a full one follows it (a truncated
-#: run) or when it is the block's last line before the closing quote or the end of the
-#: text — inside an open block nothing may be published, which is the block's whole point
-#: (Q10-F2: a sub-eight-character line in the MIDDLE published everything after it, and a
-#: short FINAL line published where the previous head masked).
-#:
-#: The floor is a NAME because the pipe needs the same number for a different question:
-#: a cap-forced release can end INSIDE a line, and a fragment shorter than the floor is
-#: read as PROSE (the full-line alternative needs the floor) — which CLOSES an open
-#: block. `tools/builtin.py` holds that cut back to the line boundary by at most
-#: ``PEM_BODY_FLOOR - 1`` bytes, and reads this constant rather than restating the
-#: number, for the same reason the regexes above are shared.
-#:
-#: ONE definition, TWO readers today and a THIRD expected — and the third is where a
-#: merge has to reconcile rather than pick. The pipe-filter-spin branch (#1427) replaces
-#: the three ``PEM_*_LINE_RE`` patterns at the pipe's call sites with LINEAR DECIDERS
-#: (``pem_body_line`` / ``pem_end_line`` / ``pem_header_line_end``) and spells BOTH ends
-#: of this floor by hand: ``{8,}`` and ``{1,7}`` in its copies of the two fragments
-#: below, and an ``8``/``7`` pair in its ``_pem_body_arm_span`` calls. A decider whose
-#: floor is a byte LOWER than the hold's under-holds the tail of a line, and
-#: under-holding is the leak direction — the fragment is then read as prose, which
-#: closes the block. So the deciders read ``PEM_BODY_FLOOR`` and
-#: ``PEM_BODY_FLOOR - 1`` from here, and the two quantifier spellings below are built
-#: from the same number so a pattern cannot drift from it either.
+#: The body grammar's FLOOR: how many class characters a body line needs to stand on its
+#: own. It is a NAME because three readers ask three different questions of it — the body
+#: grammar accepts at exactly this width, `tools/builtin.py` HOLDS a cap-forced cut back
+#: to the line boundary by at most `PEM_BODY_FLOOR - 1` bytes when a release can end in
+#: the MIDDLE of a line, and this branch's linear deciders
+#: (`pem_body_line` / `pem_end_line` / `pem_header_line_end`) read it for both arms of
+#: the grammar they decide. `#1445` landed the constant and the hold (#1445's own comment
+#: carried the note that this branch would be the third reader, spelling an `8` / `7`
+#: pair by hand); the deciders read `PEM_BODY_FLOOR` and `PEM_BODY_FLOOR - 1` now, because
+#: a decider a byte BELOW the hold's floor under-holds — the fragment is then read as
+#: PROSE, which closes the block and publishes what follows, which is the leak direction.
 PEM_BODY_FLOOR = 8
-#: The floor's two spellings, as the regexes below need them and built from the number
-#: above: a MINIMUM run (a line that stands on its own) and a run bounded one below it
-#: (the truncated-line allowance). Not restated as literals anywhere in this module.
+
+#: The floor's two spellings, as the regexes need them and built from the number above:
+#: a MINIMUM run (a line that stands on its own) and a run bounded one below it (the
+#: truncated-line allowance). Not restated as a literal anywhere below.
 _PEM_FLOOR_MIN_RUN = "{" + str(PEM_BODY_FLOOR) + ",}"
 _PEM_FLOOR_SUB_RUN = "{1," + str(PEM_BODY_FLOOR - 1) + "}"
+
+#: One PEM body line with that prefix. `PEM_BODY_FLOOR` characters is the floor for a
+#: line that stands on its own; a SHORTER line counts only when a full one follows it (a
+#: truncated run) or when it is the block's last line before the closing quote or the end
+#: of the text — inside an open block nothing may be published, which is the block's
+#: whole point (Q10-F2: a sub-eight-character line in the MIDDLE published everything
+#: after it, and a short FINAL line published where the previous head masked).
 _PEM_FULL_LINE = r"[A-Za-z0-9+/=]" + _PEM_FLOOR_MIN_RUN + r",?[ \t]*"
 _PEM_SHORT_MID_LINE = (
     r"[A-Za-z0-9+/=]"
@@ -1812,16 +1852,144 @@ _PEM_SHORT_MID_LINE = (
 #: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
 #: survive, which is why the end-of-run allowance is not a free-standing alternative.
 _PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
+
+#: The `-open` rule's OWN body grammar: the two fragments above with every digit run
+#: required to be MAXIMAL (`\d+(?!\d)`).
+#:
+#: WHY IT EXISTS. This is the one rule in the table that runs the prefix fragment
+#: over text nobody shaped — a tool result, a grep hit, a README quoting a banner —
+#: and `LINE_PREFIX`'s digit runs are ambiguous BY CONSTRUCTION (see the fragment's
+#: own comment: `12` is one unit or two, and every split is a live path). For the
+#: pipe's classifiers that ambiguity is bounded by the linear deciders; inside a
+#: PATTERN it is a backtracking walk of 2**(digits-1) paths per digit run, and the
+#: walk is EXHAUSTED rather than pruned whenever a body line does not parse — so the
+#: cost is not a constant factor away, it is unbounded in the input. Measured
+#: through the real `_PipeRedactor` (QA round 2, Q3 on #1427): an anchored
+#: `"private_key": ` spelling plus a header phrase plus ONE `%8d` row of four-digit
+#: columns costs 23 s of CPU at six columns and runs past a 60 s cap at eight, and
+#: the 140-row payload that `_release_point` hands this rule once a read exceeds the
+#: deferral cap is past 60 s at `bdf3b6cd` (past 45 s at the base revision, so the
+#: worst of it is pre-existing rather than this branch's). Nothing is masked in that
+#: shape, so the whole cost is pure.
+#:
+#: WHY IT SPELLS THE SAME LANGUAGE, which is the obligation a second spelling of a
+#: language takes on. A split inside a CONTIGUOUS digit run always has an equivalent
+#: one-unit parse: the characters between the two chunks are the unit's own `\]`,
+#: whitespace and separator, and all three are epsilon exactly when the next
+#: character is still a digit — so extending the run by one digit and re-parsing
+#: leaves the rest of the line untouched, and by induction every split collapses to
+#: the maximal run. What DOES drop strings is a restriction on the unit END (the
+#: fragment's comment cites `12 34 MIIEowIBAAKCA`, which needs a unit to end
+#: immediately before `34`), and that is a different change. Both directions are
+#: enumerated rather than argued:
+#: `test_the_digit_maximal_prefix_spells_the_released_fragment_language` sweeps the
+#: two fragment languages against each other in both directions, and
+#: `test_the_open_rule_matches_its_released_spelling_on_every_fixture` compares the
+#: two RULES' matches (start, end, group 1, group 2) over the corpus, the dense
+#: payloads and a generated sweep — a divergence either way is a released mask or a
+#: published body line, so neither direction may be sampled.
+#:
+#: SCOPE, and it is deliberately narrow: THIS rule only. `LINE_PREFIX` itself and the
+#: three `PEM_*_RE` patterns keep the released spelling, because the pipe's deciders
+#: (`_pem_prefix_end_flags`, and the three classifiers built on it) mirror THAT
+#: fragment and are pinned against those patterns, while those three patterns are
+#: the DEFINITION of their languages rather than a hot path — the deciders decide
+#: them. The other two block rules (`pem-private-key`, `gcp-service-account-key`) do
+#: not embed the fragment at all, and the fragment alone decides nothing here: it is
+#: the ambiguity's combination with this rule's unbounded body run that made the
+#: engine walk 2**(digits-1) partitions per digit run.
+#: The two units above with every digit run required to be MAXIMAL.
+#:
+#: The box unit is maximalised only for symmetry with the fragment it mirrors: its run is
+#: delimited by `│` on both sides, so it can never be split and the predicate changes
+#: nothing it matches.
+_PEM_PREFIX_UNIT_MAX = _PEM_PREFIX_UNIT.replace(r"\d+", r"\d+(?!\d)")
+_PEM_PREFIX_BOX_UNIT_MAX = _PEM_PREFIX_BOX_UNIT.replace(r"\d+", r"\d+(?!\d)")
+
+#: The `-open` rule's prefix: maximal units, THEN AT MOST ONE RELEASED UNIT — and that
+#: trailing unit is what makes this spelling the released LANGUAGE rather than a subset
+#: of it (agent review R3-1 on #1427).
+#:
+#: WHY A UNIT MUST BE ALLOWED TO STOP MID-RUN. `\d+(?!\d)` on EVERY unit is not the same
+#: language, because the released grammar lets a unit's tail be epsilon — `\]?`, the
+#: whitespace and the separator are all optional — exactly when the next character is
+#: still a digit, and the BODY CONTENT may then consume the rest of that run. The witness
+#: is a body line of `[` followed by nine `1`s under an anchored header: `origin/main`
+#: parses it as the unit `[1` plus the content `11111111` and masks the line (span
+#: `(0, 54)`); a fully maximal spelling must eat all nine digits as the unit's run, leaves
+#: no eight-character content behind it, and PUBLISHES the line — measured `(0, 43)`, i.e.
+#: a released mask lost, which is the one direction this table may never move.
+#:
+#: WHY EXACTLY ONE, AND WHY LAST. Any split of a CONTIGUOUS run into several units is
+#: redundant — collapsing it into one unit does not move where the prefix ENDS — so the
+#: only split that can matter is the one that decides where the content begins, and that
+#: split is by definition in the LAST unit's run: the released parse's prefix end is
+#: either a maximal-run end (those are `*` above) or a position strictly inside the run
+#: that the content immediately follows (this trailing unit). Allowing the released unit
+#: ONCE, at the END, is therefore the whole difference — and it is what keeps the walk
+#: linear: per run the engine has one maximal unit to try, and the trailing unit adds a
+#: bounded walk of the FINAL run only, instead of a partition of every run.
+#:
+#: The full enumeration of both directions is pinned by
+#: `test_the_open_rule_restores_the_released_rules_bracket_family` (the witness class and
+#: its neighbours, against the independently rebuilt released rule) and by
+#: `test_the_open_rule_matches_its_released_spelling_on_every_fixture` (the corpus and a
+#: generated sweep, whose alphabet carries `[`).
+_PEM_DIGIT_MAX_PREFIX = (
+    r"[ \t]*(?:(?:"
+    + _PEM_PREFIX_UNIT_MAX
+    + r"|"
+    + _PEM_PREFIX_BOX_UNIT_MAX
+    + r")*(?:"
+    + _PEM_PREFIX_UNIT
+    + r")?)?"
+)
+_PEM_DIGIT_MAX_LINE_CONTENT = (
+    _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE.replace(LINE_PREFIX, _PEM_DIGIT_MAX_PREFIX)
+)
+#: NIT-2 (agent review round 3): UNREFERENCED AT RUNTIME — this is the pipe's pre-decider
+#: block spelling, and the deciders (`pem_body_line` / `pem_end_line` / `pem_header_line_end`)
+#: replaced every caller, so nothing reaches it. Kept rather than deleted, and recorded
+#: rather than left implicit: #1445 rewrites the `{1,7}` in its last line, so a deletion
+#: here is a merge surface for no gain. Deleting it is a follow-up once both land.
 _PEM_RUN = (
     r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
     r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]" + _PEM_FLOOR_SUB_RUN + r",?)?"
 )
 PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$", re.MULTILINE)
+#: The ARMOUR TAIL: what may follow the closing run of dashes on a BEGIN/END armour
+#: line. Trailing space or TAB (an editor's, a wiki's, a CRLF file's carriage return),
+#: then that line's own end — the carriage return of a CRLF or bare-CR terminator, the
+#: line feed, or the end of the text.
+#:
+#: ONE DEFINITION, READ BY BOTH THE PATTERN AND THE DECIDER — and that is not tidiness.
+#: `#1445` landed this tail on the pattern (`$` alone cannot match in front of a `\r`, so a
+#: CRLF, bare-CR or trailing-whitespace armour line was not a header at all); this branch
+#: owns the DECIDER, and while a decider models a tail by hand the two can answer the same
+#: question differently — which is exactly what happened when the pattern widened and the
+#: decider kept `$`: the pipe then PUBLISHED the block's body (measured on the previous
+#: head through the real filter: 3 of 3 body lines out, no marker, for an unterminated CRLF
+#: block and for a trailing-whitespace one). A documentary obligation ("keep the tail in
+#: step with the pattern's") is what failed there, so the decider DECODES its two halves
+#: from this text below rather than restating them, and
+#: `test_the_header_deciders_tail_is_the_patterns_tail` holds the composition together.
+_PEM_ARMOUR_TAIL_RUN_TEXT = r" \t"
+_PEM_ARMOUR_TAIL_TERMINATOR_TEXT = (r"\r", r"\n")
+_PEM_ARMOUR_TAIL = (
+    "[" + _PEM_ARMOUR_TAIL_RUN_TEXT + "]*(?=" + "|".join(_PEM_ARMOUR_TAIL_TERMINATOR_TEXT) + "|$)"
+)
+#: The same two halves as the CHARACTERS the linear decider scans for, decoded from the
+#: text above — so a decider that could disagree with the pattern is not something a reader
+#: has to notice, it is something they would have to construct.
+_PEM_ARMOUR_TAIL_RUN = codecs.decode(_PEM_ARMOUR_TAIL_RUN_TEXT, "unicode_escape")
+_PEM_ARMOUR_TAIL_TERMINATORS = "".join(
+    codecs.decode(spelling, "unicode_escape") for spelling in _PEM_ARMOUR_TAIL_TERMINATOR_TEXT
+)
+
 PEM_HEADER_LINE_RE = re.compile(
     r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
-    r"-{1,4}[\x27\x22]?-{1,4}[ \t]*(?=\r|\n|$)",
-    # The trailing ``[ \t]*(?=\r|\n|$)`` is the CRLF / CR / trailing-whitespace spelling
+    # The NAMED tail below is the CRLF / CR / trailing-whitespace spelling
     # of the armour line, and it is not cosmetic either: ``$`` alone cannot match in
     # front of a ``\r``, so ``...KEY-----\r\n`` — an ordinary key file written on
     # Windows, or quoted by a wiki, or left with a trailing space by an editor — was not
@@ -1852,6 +2020,7 @@ PEM_HEADER_LINE_RE = re.compile(
     # text changes its pipe output. The decision was still made in the mask-more
     # direction — a real key file with CRLF endings masks now, and it published its body
     # before.
+    r"-{1,4}[\x27\x22]?-{1,4}" + _PEM_ARMOUR_TAIL,
     # MULTILINE, and that is not cosmetic: the pipe layer SEARCHES a multi-line read for
     # this header, so without the flag it matched only when the read was exactly one
     # header line — which the release point's hold makes impossible — and the entire
@@ -1860,6 +2029,497 @@ PEM_HEADER_LINE_RE = re.compile(
     re.MULTILINE,
 )
 PEM_END_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}END ", re.MULTILINE)
+
+
+# --- the LINEAR decision procedures for the three patterns above -------------
+#
+# WHY THESE EXIST — and it is the one part of the pipe filter's cost that no
+# necessary-condition guard can reach. `LINE_PREFIX` is AMBIGUOUS BY
+# CONSTRUCTION: a unit's `\d+` may end in the middle of a digit run (`12` is one
+# unit or two, and every split is a live path), so a line with k digit runs
+# walks 2**k partitions, and `re` has no memoisation to cut them down. Measured
+# on this tree at the classifier call sites in `tools/builtin.py`: ONE
+# 65-character `%8d` table row (`%8d`-padded columns — a numpy row, a padded
+# column dump) costs 6.7 s in `PEM_BODY_LINE_RE.match` and 3.9 s in
+# `PEM_HEADER_LINE_RE.search`; a 3.3 KB read that merely QUOTES a banner costs
+# 1.86 s, of which 1814 ms is the body classifier; a 6.5 KB read runs past
+# 120 s. `tools/builtin.py` gates what it can, and the gates are what make
+# ordinary output free, but they cannot reach this: a read that carries the
+# literals OPENS the state, and the body classifier is then asked about lines it
+# genuinely MATCHES — `10000000 10000001` is a numbered body line — so no
+# cheaper test rejects the pathological line.
+#
+# WHAT THEY ARE. The same three languages, decided by an explicit mode-set
+# simulation of the prefix grammar — the modes are positions in the grammar, one
+# character moves the whole set on, and nothing is ever revisited — followed by
+# the rigid literal tail each pattern requires, whose candidate offsets are
+# ENUMERATED (the tail is at most nine characters, so there are at most a
+# handful) instead of searched. Cost is O(len) per call with a small constant,
+# for every input shape.
+#
+# THE EQUIVALENCE OBLIGATION, stated plainly because it is the whole risk of a
+# second spelling of a language that was already written once. A divergence has
+# two directions and only one of them survives review: a decider that ACCEPTS
+# where the pattern does not masks text the agent needed to read (a defect, per
+# the module docstring), while a decider that REJECTS where the pattern accepts
+# DROPS A BODY LINE — a published key, silently, because the line loop also
+# closes the state on it. So the deciders are pinned against the patterns
+# THEMSELVES rather than against hand-written expectations:
+# `tests/unit/secrets/test_credential_shapes.py` sweeps every character-KIND
+# sequence up to a bounded length (these languages are functions of the
+# character kind, which is what lets a bounded sweep stand for longer strings,
+# and one arm there pins that digit predicate against `\d` over the whole code
+# space) and then fuzzes the shapes a caller actually sees. `PEM_BODY_LINE_RE`,
+# `PEM_HEADER_LINE_RE` and `PEM_END_LINE_RE` REMAIN THE DEFINITION of the
+# language; the functions below are how the hot path decides it.
+
+_PFX_BETWEEN = 1 << 0  # between units: a unit may start, whitespace may run, the prefix may END
+_PFX_OPEN = 1 << 1  # after the `[` of a unit: a digit must follow
+_PFX_DIGITS = 1 << 2  # inside a unit's digit run
+_PFX_CLOSED = 1 << 3  # after digits + the closing `]`
+_PFX_DIGITS_WS = 1 << 4  # after digits (+ `]`) + whitespace
+_PFX_SEP = 1 << 5  # after a separator (and any whitespace that followed it)
+_PFX_SEP_DOT = 1 << 6  # after a `.` separator: `]` may extend it (the `.\]` spelling)
+_PFX_SEP_DASH = 1 << 7  # after a `-` separator: `>` may extend it (the `->` spelling)
+_PFX_BOX_OPEN = 1 << 8  # after the opening `│` of `│ 12 │`
+_PFX_BOX_WS = 1 << 9  # after `│` + whitespace
+_PFX_BOX_DIGITS = 1 << 10  # inside the box form's digit run
+_PFX_BOX_DIGITS_WS = 1 << 11  # after the box form's digits + whitespace
+_PFX_BOX_CLOSED = 1 << 12  # after the box form's closing `│`
+
+#: Modes in which a UNIT HAS JUST COMPLETED. From any of them the grammar allows
+#: the prefix to end, and it also allows a new unit to start on the very next
+#: character (`12` is two units as readily as one) — the epsilon edge that
+#: `_pem_prefix_end_flags` applies after every step, which is why the machine
+#: needs no separate "between units" transition per mode.
+_PFX_COMPLETE = (
+    _PFX_DIGITS
+    | _PFX_CLOSED
+    | _PFX_DIGITS_WS
+    | _PFX_SEP
+    | _PFX_SEP_DOT
+    | _PFX_SEP_DASH
+    | _PFX_BOX_CLOSED
+)
+
+#: THE MACHINE, as data: for each character kind, the `(mode, mode-after-it)`
+#: pairs. Written from the fragment rather than derived from it, and that is the
+#: point — a derivation would be the same expression rewritten, which is what
+#: the algebraic rewrites in this file's history were, and three of them were
+#: language-changing. `tools/builtin.py` does not use this machine; the patterns
+#: above stay the definition, and the test file pins the two together.
+_PFX_STEP_WS = (
+    (_PFX_BETWEEN, _PFX_BETWEEN),
+    (_PFX_DIGITS, _PFX_DIGITS_WS),
+    (_PFX_CLOSED, _PFX_DIGITS_WS),
+    (_PFX_DIGITS_WS, _PFX_DIGITS_WS),
+    (_PFX_SEP, _PFX_SEP),
+    (_PFX_SEP_DOT, _PFX_SEP),
+    (_PFX_SEP_DASH, _PFX_SEP),
+    (_PFX_BOX_OPEN, _PFX_BOX_WS),
+    (_PFX_BOX_WS, _PFX_BOX_WS),
+    (_PFX_BOX_DIGITS, _PFX_BOX_DIGITS_WS),
+    (_PFX_BOX_DIGITS_WS, _PFX_BOX_DIGITS_WS),
+    (_PFX_BOX_CLOSED, _PFX_BOX_CLOSED),
+)
+_PFX_STEP_DIGIT = (
+    (_PFX_BETWEEN, _PFX_DIGITS),
+    (_PFX_OPEN, _PFX_DIGITS),
+    (_PFX_DIGITS, _PFX_DIGITS),
+    (_PFX_BOX_OPEN, _PFX_BOX_DIGITS),
+    (_PFX_BOX_WS, _PFX_BOX_DIGITS),
+    (_PFX_BOX_DIGITS, _PFX_BOX_DIGITS),
+)
+_PFX_STEP_OPEN = ((_PFX_BETWEEN, _PFX_OPEN),)
+#: `]` is both the unit's closing bracket and one of the separators, so it lands
+#: in both (`1]2` is a bracketed unit then a new one, `1]` a unit whose separator
+#: is `]`), and it is the second half of the `.\]` spelling.
+_PFX_STEP_CLOSE = (
+    (_PFX_DIGITS, _PFX_CLOSED | _PFX_SEP),
+    (_PFX_CLOSED, _PFX_SEP),
+    (_PFX_DIGITS_WS, _PFX_SEP),
+    (_PFX_SEP_DOT, _PFX_SEP),
+)
+#: `.` and `-` carry their longer spelling as well as themselves: `1.]` and `1->2`
+#: are real, and the spelling that dropped them measured 146/1140 lost strings.
+_PFX_STEP_DOT = (
+    (_PFX_DIGITS, _PFX_SEP | _PFX_SEP_DOT),
+    (_PFX_CLOSED, _PFX_SEP | _PFX_SEP_DOT),
+    (_PFX_DIGITS_WS, _PFX_SEP | _PFX_SEP_DOT),
+)
+_PFX_STEP_DASH = (
+    (_PFX_DIGITS, _PFX_SEP | _PFX_SEP_DASH),
+    (_PFX_CLOSED, _PFX_SEP | _PFX_SEP_DASH),
+    (_PFX_DIGITS_WS, _PFX_SEP | _PFX_SEP_DASH),
+)
+#: `)`, `|` and `:` have no longer spelling; `>` has one, only after `-`.
+_PFX_STEP_SEP = (
+    (_PFX_DIGITS, _PFX_SEP),
+    (_PFX_CLOSED, _PFX_SEP),
+    (_PFX_DIGITS_WS, _PFX_SEP),
+)
+_PFX_STEP_GT = _PFX_STEP_SEP + ((_PFX_SEP_DASH, _PFX_SEP),)
+#: The box form has no separator and its digits are optional only in the sense
+#: that `│` may be followed by whitespace: `│ 12 │`, `│12│` and `│ 12│` all read.
+_PFX_STEP_BOX = (
+    (_PFX_BETWEEN, _PFX_BOX_OPEN),
+    (_PFX_BOX_DIGITS, _PFX_BOX_CLOSED),
+    (_PFX_BOX_DIGITS_WS, _PFX_BOX_CLOSED),
+)
+_PFX_WS = " \t"
+_PFX_SINGLE_SEP = ")|:"
+
+#: The two character classes the deciders check by name, spelled once here. They
+#: are the patterns' own classes (`[A-Za-z0-9+/=]` for a body token, `[A-Z0-9 ]`
+#: between a header's literals); a change to either pattern that this does not
+#: follow shows up as a divergence in the differential arms rather than as a
+#: quietly different answer on the hot path.
+_PEM_TOKEN_CLASS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+_PEM_HEADER_CLASS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+_PEM_BEGIN = "BEGIN "
+_PEM_KEY = "PRIVATE KEY"
+_PEM_END = "END "
+
+
+def _pem_prefix_end_flags(text: str) -> bytearray:
+    """`flags[i]` is 1 exactly when `text[:i]` is in the `LINE_PREFIX` language.
+
+    The whole decision in one left-to-right pass: `modes` is the set of grammar
+    positions the prefix could be in after `i` characters, and the prefix is in
+    the language exactly when `_PFX_BETWEEN` is in that set — nothing is pending,
+    so what was consumed is `[ \\t]*` followed by a complete `(unit)+`.
+
+    AN EMPTY MODE SET IS FINAL, which is what makes this cheap on ordinary text:
+    nothing in the fragment consumes a newline, a letter or a `#`, so a prose
+    line kills the set within a few characters and the loop stops — the flags
+    beyond that point are already zero. That is also why the flags array is
+    written by index instead of built positionally.
+    """
+    flags = bytearray(len(text) + 1)
+    modes = _PFX_BETWEEN
+    flags[0] = 1
+    for index, char in enumerate(text):
+        if char in _PFX_WS:
+            steps = _PFX_STEP_WS
+        elif char.isdecimal():
+            # `\d`, not `[0-9]`: the fragment's class is Unicode-decimal, and a
+            # hand-written ASCII class here would reject a body line the pattern
+            # accepts. `isdecimal()` is the same predicate `\d` uses (the test
+            # file checks the two against each other over the whole code space).
+            steps = _PFX_STEP_DIGIT
+        elif char == "]":
+            steps = _PFX_STEP_CLOSE
+        elif char == ".":
+            steps = _PFX_STEP_DOT
+        elif char == "-":
+            steps = _PFX_STEP_DASH
+        elif char == "\u2502":
+            steps = _PFX_STEP_BOX
+        elif char == ">":
+            steps = _PFX_STEP_GT
+        elif char == "[":
+            steps = _PFX_STEP_OPEN
+        elif char in _PFX_SINGLE_SEP:
+            steps = _PFX_STEP_SEP
+        else:
+            break
+        reached = 0
+        for mode, after in steps:
+            if modes & mode:
+                reached |= after
+        if reached & _PFX_COMPLETE:
+            reached |= _PFX_BETWEEN
+        modes = reached
+        if not modes:
+            break
+        if modes & _PFX_BETWEEN:
+            flags[index + 1] = 1
+    return flags
+
+
+def _pem_rigid_end_lengths(text: str, end: int) -> set[int]:
+    """Lengths 2..9 with which `-{1,4}['\\"]?-{1,4}` can END at `end`.
+
+    An enumeration rather than a scan, because the structure is a literal: four
+    dashes at most, an optional quote, four dashes at most, so every spelling is
+    nine characters or fewer and the candidate offsets of a header or END line
+    are a handful. `end` is exclusive and the structure must begin inside
+    `text`, so a caller passing a region that starts mid-string cannot be told
+    the region matched something in front of it.
+    """
+    lengths: set[int] = set()
+    dashes = 0
+    index = end - 1
+    while index >= 0 and dashes < 4 and text[index] == "-":
+        dashes += 1
+        index -= 1
+    for head in range(1, dashes + 1):
+        start = end - head
+        if start >= 1 and text[start - 1] in "\x27\x22":
+            quoted = 0
+            index = start - 2
+            while index >= 0 and quoted < 4 and text[index] == "-":
+                quoted += 1
+                index -= 1
+            lengths.update(head + 1 + tail for tail in range(1, quoted + 1) if head + 1 + tail <= 9)
+        closing = 0
+        index = start - 1
+        while index >= 0 and closing < 4 and text[index] == "-":
+            closing += 1
+            index -= 1
+        lengths.update(head + tail for tail in range(1, closing + 1) if head + tail <= 9)
+    return lengths
+
+
+def _pem_body_arm_span(piece: str, floor: int, ceiling: int | None) -> tuple[int, int] | None:
+    """Offsets a body line's base64 token may start at, as a low/high span.
+
+    The token is the piece's trailing run of `[A-Za-z0-9+/=]`, optionally
+    followed by one `,` and then whitespace to the piece end. Its width is a
+    RANGE rather than one number in both arms — the full arm is floored at
+    `PEM_BODY_FLOOR`, the short arm is a ceiling — and the PREFIX may enter the run as
+    well as start before
+    it, which is why this returns a span: `[112345678` is a prefix of `[1` with a
+    token of `12345678`. No span means no offset can work, and the common case —
+    `%8d` columns end in a short digit run, prose ends in a word — stops here
+    without touching the machine.
+
+    `floor` and `ceiling` are the width bounds of the arm being asked about;
+    `ceiling=None` is the full arm, whose token may take the whole run.
+    """
+    trimmed = piece.rstrip(" \t")
+    if trimmed.endswith(","):
+        trimmed = trimmed[:-1]
+    end = len(trimmed)
+    run = end - len(trimmed.rstrip(_PEM_TOKEN_CLASS))
+    if run < floor:
+        return None
+    low = max(0, end - (run if ceiling is None else min(run, ceiling)))
+    high = end - floor
+    if low > high:
+        return None
+    return low, high
+
+
+def _pem_prefix_leads_a_token(piece: str) -> bool:
+    """Is some prefix end in `piece` followed by eight body characters?
+
+    The short arm's lookahead, read the other way round: the separator is
+    consumed, a `LINE_PREFIX` follows it, and a full token must sit immediately
+    behind that prefix. Read this way the lookahead is an ordinary linear
+    question — every prefix end of the piece is already known from the flags, and
+    the eight characters behind each one are a slice.
+    """
+    flags = _pem_prefix_end_flags(piece)
+    for start in range(len(piece) - 7):
+        if flags[start] and all(char in _PEM_TOKEN_CLASS for char in piece[start : start + 8]):
+            return True
+    return False
+
+
+def pem_body_line(line: str) -> bool:
+    """`PEM_BODY_LINE_RE.match(line)`, in linear time, for any string.
+
+    `match` is ANCHORED AT POSITION 0, so the question is about the string's FIRST
+    line: neither the prefix nor a token can contain a newline, so no match can
+    start anywhere else, and the only thing the pattern reads past the first line
+    is the short arm's lookahead. That is why this asks the first piece, and the
+    second one only when the short arm is live — a run over every piece would
+    answer `search`'s question instead, which is a different question and is how
+    this decider first over-accepted a table row that follows a banner.
+
+    `$` under `MULTILINE` means "the end, or just before a newline", so each arm
+    ends at its piece's end: the full arm is a `PEM_BODY_FLOOR`-character token, and the
+    short arm is a sub-floor token (one to `PEM_BODY_FLOOR - 1` characters) followed by
+    a separator and then a full token behind a prefix. Both widths are read from
+    `PEM_BODY_FLOOR` and not restated, because this decider's floor and the pipe's own
+    hold are the same number on purpose — a decider a byte below the hold's floor
+    under-holds, and under-holding publishes (see the constant). The caller is the
+    pipe's line loop (`tools/builtin.py`),
+    which passes one line with its terminator stripped — where the short arm can
+    never fire — and this is exact for that input and for a whole multi-line read
+    alike, because the arms are the pattern's own rather than an in-domain
+    approximation of them.
+    """
+    pieces = line.split("\n", 1)
+    piece = pieces[0]
+    full = _pem_body_arm_span(piece, PEM_BODY_FLOOR, None)
+    short = _pem_body_arm_span(piece, 1, PEM_BODY_FLOOR - 1) if len(pieces) > 1 else None
+    if full is None and short is None:
+        return False
+    flags = _pem_prefix_end_flags(piece)
+    if full is not None and any(flags[full[0] : full[1] + 1]):
+        return True
+    return bool(
+        short is not None
+        and any(flags[short[0] : short[1] + 1])
+        and _pem_prefix_leads_a_token(pieces[1])
+    )
+
+
+def pem_end_line(line: str) -> bool:
+    """`PEM_END_LINE_RE.match(line)`, in linear time.
+
+    The pattern is not end-anchored: the line only has to START with the prefix
+    grammar and then `-{1,4}['\\"]?-{1,4}END `, so the decision is "is any
+    enumerated structure start also a prefix end". The enumeration is over the
+    occurrences of the literal `END `, which is a necessary condition of the
+    pattern itself, and this is exact for any string rather than only for a
+    single line: a separator or a newline outside the fragment's character set
+    empties the mode set, so a candidate after it can never be a prefix end.
+    """
+    if _PEM_END not in line:
+        return False
+    flags = _pem_prefix_end_flags(line)
+    offset = 0
+    while True:
+        at = line.find(_PEM_END, offset)
+        if at < 0:
+            return False
+        offset = at + 1
+        for length in _pem_rigid_end_lengths(line, at):
+            start = at - length
+            if start >= 0 and flags[start]:
+                return True
+
+
+def pem_header_line_end(text: str) -> int | None:
+    """Where `PEM_HEADER_LINE_RE.search(text)` ends, or None, in linear time.
+
+    Returns the offset the caller needs (`match.end()`) rather than a match:
+    the pipe uses it to split the read at the header's line end and re-enter the
+    body loop on the remainder, and that offset is what releases the output
+    ahead of the header.
+
+    The search is modelled as the pattern's own `MULTILINE` anchors: `^` matches
+    at the start of the text and after every `\\n`, `$` at the end and before
+    every `\\n` — so the text is cut at its `\\n`s and each piece is asked the
+    end-anchored question. A piece keeps any `\\r` of a CRLF terminator, and THAT is
+    where the tail matters rather than where it can be ignored: the pattern's tail is
+    `_PEM_ARMOUR_TAIL` (`[ \\t]*(?=\\r|\\n|$)`, read here as its two halves), so a
+    CRLF, bare-CR or trailing-whitespace header line matches BOTH the pattern and this
+    decider, and the offset returned is the position of that `\\r` — the same `end()`
+    the pattern's own lookahead gives. An earlier revision modelled the tail as `$`
+    alone and returned the piece's length, so it answered `None` for those spellings
+    while the widened pattern matched them — which on the pipe means the block's whole
+    body published.
+    `test_the_header_deciders_tail_is_the_patterns_tail` and the armour-spelling
+    differential beside it are what hold the two together now.
+
+    Both literals the tail needs are required before any of the work below, and
+    they are necessary conditions of the pattern (the fragment cannot consume a
+    letter, so the tail's own `BEGIN ` and `PRIVATE KEY` cannot be assembled out
+    of prefix characters).
+    """
+    offset = 0
+    for piece in text.split("\n"):
+        end = _pem_header_piece_end(piece)
+        if end is not None:
+            return offset + end
+        offset += len(piece) + 1
+    return None
+
+
+def _pem_armour_tail_stops(piece: str) -> list[tuple[int, set[int]]]:
+    """Every position the armour tail may end at, each with the rigid ends that reach it.
+
+    `_PEM_ARMOUR_TAIL` is `[ \\t]*(?=\\r|\\n|$)`: after the closing dashes there may be
+    trailing whitespace, and then that line's own end — a `\\r` (the CR of a CRLF file,
+    or a bare CR used as the terminator) or the end of the piece (the `\\n` was the
+    split). So a stop's rigid end is any position from which the tail's own run class,
+    `_PEM_ARMOUR_TAIL_RUN`, leads to that stop, and the terminators are read from
+    `_PEM_ARMOUR_TAIL_TERMINATORS` — both halves are the constants the PATTERN is built
+    from, so the pattern and this decider cannot drift apart (which is what #1445's
+    widening of the pattern did to the previous, `$`-only, model).
+
+    Ordered, and in the pattern's own order: the terminator stops by position, then the
+    piece's end. Bounded by the piece and allocation-free per candidate: a stop's run is
+    walked back over the run class only, so this is O(len(piece)).
+    """
+    stops = [index for index, char in enumerate(piece) if char in _PEM_ARMOUR_TAIL_TERMINATORS]
+    stops.append(len(piece))
+    out: list[tuple[int, set[int]]] = []
+    for stop in stops:
+        start = stop
+        while start > 0 and piece[start - 1] in _PEM_ARMOUR_TAIL_RUN:
+            start -= 1
+        out.append((stop, set(range(start, stop + 1))))
+    return out
+
+
+def _pem_header_piece_end(piece: str) -> int | None:
+    """One `^…$` line of `pem_header_line_end`: `LINE_PREFIX` + the whole tail.
+
+    Returns the offset the pattern's match would END at inside this piece, or None. The
+    tail is
+    `-{1,4}['\\"]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}['\\"]?-{1,4}` + the
+    armour tail, and every piece of it is local: a rigid structure, the `BEGIN `
+    literal, a run of `[A-Z0-9 ]`, the `PRIVATE KEY` literal, a rigid structure whose
+    end is pinned by the tail. So the candidates are enumerated from the literals and
+    each one is a constant-time question against the prefix machine's flags — no
+    search, and no partition to walk.
+
+    The answer is the EARLIEST stop an accepted structure can reach — the pattern's own
+    priority on the stops — and the scan below keeps that by taking the minimum over the
+    accepted candidates rather than returning from a loop. The tail's `[ \\t]*` is greedy,
+    so after the rigid structure it consumes the trailing whitespace and the lookahead
+    must hold THERE: the earliest reachable terminator, and the piece's end only when no
+    terminator precedes it. That is also why the returned offset is the stop and not the
+    piece's length: the pattern's lookahead does not consume its `\\r`.
+
+    The scan is hoisted out of the stop loop and the flags conjunct out of the per-key
+    test (`PR1427 D1`), because as written the two mechanisms MULTIPLIED: measured on this
+    box, a 40 KB line of `BEGIN ` literals cost 3.34 s of CPU and a 46 KB line of CR
+    terminators 2.71 s, against 2.1 ms and 6.3 ms after the correction. No answer moves:
+    the conjunct is independent of the key and a necessary condition of every acceptance
+    through its `at`, so asking it once per BEGIN only skips candidates that could not
+    have been accepted anyway.
+    """
+    if _PEM_BEGIN not in piece or _PEM_KEY not in piece:
+        return None
+    length = len(piece)
+    # (1) The endings map, built from the STOPS side: ONE O(len(piece)) walk, instead of a
+    # whole BEGIN/KEY scan per stop. A candidate's tail stop is the greedy run's own end,
+    # and where two stops could offer the same `key_end` the SMALLEST stop wins — that is
+    # what the ascending stop loop returned.
+    stop_of: dict[int, int] = {}
+    for stop, rigid_ends in _pem_armour_tail_stops(piece):
+        for end in rigid_ends:
+            for rigid in _pem_rigid_end_lengths(piece, end):
+                key_end = end - rigid
+                if key_end >= 0:
+                    previous = stop_of.get(key_end)
+                    if previous is None or stop < previous:
+                        stop_of[key_end] = stop
+    if not stop_of:
+        return None
+    flags = _pem_prefix_end_flags(piece)
+    best: int | None = None
+    at = piece.find(_PEM_BEGIN)
+    while at >= 0:
+        # (3) The flags conjunct is independent of the key and necessary for every
+        # acceptance through this `at`, so asking it here — before the run walk and the KEY
+        # window — cannot change an answer, and it keeps both off every BEGIN occurrence
+        # that cannot accept at all.
+        if any(
+            at - rigid >= 0 and flags[at - rigid] for rigid in _pem_rigid_end_lengths(piece, at)
+        ):
+            body = at + len(_PEM_BEGIN)
+            # The `[A-Z0-9 ]*` between the literals is a run, so its end bounds where
+            # `PRIVATE KEY` may begin — and a `PRIVATE KEY` that starts inside it and
+            # ends past it is still a match, which is why the search window is the
+            # run's end plus the literal's own length.
+            bound = body
+            while bound < length and piece[bound] in _PEM_HEADER_CLASS:
+                bound += 1
+            key = piece.find(_PEM_KEY, body, bound + len(_PEM_KEY))
+            while 0 <= key <= bound:
+                stop = stop_of.get(key + len(_PEM_KEY))
+                if stop is not None and (best is None or stop < best):
+                    best = stop
+                key = piece.find(_PEM_KEY, key + 1, bound + len(_PEM_KEY))
+        at = piece.find(_PEM_BEGIN, at + 1)
+    return best
 
 
 def _anchored_key_value_guard(match: Match[str]) -> bool:
@@ -1989,7 +2649,14 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # the SHORT-MID shape QA measured (`3| Qw9z` then `4| MIIE…`) — which also
             # keeps numbered prose safe: a prose line has no full body line after it, so
             # it can neither start nor continue the run.
-            r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")[ \t]*)+"
+            # THE DIGIT-MAXIMAL FRAGMENTS, not `LINE_PREFIX` / `_PEM_LINE_CONTENT`:
+            # this rule is the table's one unbounded walk over unshaped text, and the
+            # released fragment makes it exponential in the digits of a dense row (Q3
+            # on #1427). Both are substituted — the body unit AND the short arm's
+            # lookahead — because they carry the same ambiguity. Why that is the same
+            # language, why a restriction on the unit END is not, and what pins the
+            # equivalence: `_PEM_DIGIT_MAX_PREFIX` above.
+            r"(?:" + _PEM_DIGIT_MAX_PREFIX + r"(?:" + _PEM_DIGIT_MAX_LINE_CONTENT + r")[ \t]*)+"
             r"(?=" + LINE_SEP + r"|[\x27\x22]|$)"
             r")*)"
         ),
