@@ -2790,23 +2790,31 @@ class ServingSessionHandle(SessionHandle):
         lose (read ``session/goal_judge.py``'s module docstring for why that is
         the design rather than an implementation detail).
 
-        ``None`` when the session does not implement the judged-goal record —
-        the four mutators plus the status/judge/serial reads this bundle hands
-        over. The record is the OWNER's surface and is not on the shared viewer
-        protocol (see ``GoalRecordProtocol``), so a session that is only a
-        ``SessionProtocol`` cannot be judged at all. Refusing HERE, at the one
-        place the bundle is built, is what keeps an unguarded read off a
-        duck-typed binding from becoming an exception inside a task nobody
+        ``None`` when the session does not implement what this bundle READS —
+        the judged-goal record's judge half, which is narrower than the whole
+        record: the card's four mutators are not all reached from here, and a
+        host that judges does not have to be able to delete anything. Refusing
+        at the one place the bundle is built is what keeps an unguarded read off
+        a duck-typed binding from becoming an exception inside a task nobody
         awaits: measured on this fleet as
         ``AttributeError: 'Slow' object has no attribute 'goal_judge_state'``
         raised out of ``rearm_on_resume``, failing two ``test_exec_mode`` cells
         (QA round 1, Q3).
+
+        A PROBE on the two members rather than an ``isinstance`` against
+        ``GoalRecordProtocol``: the runtime half of the feature is driven by
+        doubles (``test_desktop_goal_judge``'s own is the example) that implement
+        exactly what the judge reads, and demanding the card's surface of them
+        would make the gate refuse a host that genuinely judges correctly. The
+        names are on the protocol, so neither can be renamed out from under this
+        without the guard in ``tests/unit/session/test_viewer_protocol.py``
+        saying so.
         """
         from local_operator.session.goal_judge import GoalJudge, goal_stalled_notice
-        from local_operator.session.protocol import GoalRecordProtocol
 
-        record = self._session if isinstance(self._session, GoalRecordProtocol) else None
-        if record is None:
+        if not callable(getattr(self._session, "note_goal_judge", None)):
+            return None
+        if getattr(self._session, "goal_judge_state", None) is None:
             return None
 
         if self._goal_judge is None:
