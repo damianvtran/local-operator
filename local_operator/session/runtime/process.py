@@ -860,6 +860,27 @@ def _keep_alive_candidates() -> list[tuple[float, int]]:
     return out
 
 
+#: HOW LONG AN EXIT REQUEST MAY ACT, in seconds (review round 2, R2-2/R2-5).
+#:
+#: The write and the withdrawal are not atomic with this reader, and the
+#: requester's bound is ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` = 2 s. So a file can
+#: be read here a moment BEFORE it is withdrawn — the runtime then leaves after
+#: the delete has already given up, which is a lost optimisation rather than a
+#: wrong exit — and a requester that dies between the two leaves its file behind
+#: for good. Both are bounded by age: past this window a request is a statement
+#: about an act that is over, and the NEXT runtime for that conversation ignores
+#: it. Sixty seconds is 30x the tolerance the requester needs (its own wait, plus
+#: a reaper tick) and short enough that a leftover stops mattering within one
+#: user-visible minute.
+_EXIT_REQUEST_FRESH_S = 60.0
+
+#: Clock tolerance for a request whose stamp reads slightly in the future. Same
+#: clock, so this only has to absorb microsecond jitter; anything beyond it is a
+#: junk stamp, and ``registry``'s own readers treat a future stamp as expired
+#: rather than immortal (``_unreadable_expired``, review round 3 MINOR 1).
+_EXIT_REQUEST_SKEW_S = 5.0
+
+
 def _exit_requested(runtime: object) -> bool:
     """Has an EXPLICIT DELETE asked THIS run to leave?
 
@@ -876,9 +897,13 @@ def _exit_requested(runtime: object) -> bool:
     signal it obeys — see ``registry.EXIT_REQUEST_NAME`` for what the signal
     alternatives cost.
 
-    ADDRESSED TO THIS RUN, like ``control``'s stop marker: a request naming
-    another pid or another conversation is not ours to honour, so a file left
-    behind by a failed attempt can never end the NEXT runtime for that session.
+    ADDRESSED TO THIS RUN **AND TO THIS MOMENT**, like ``control``'s stop marker:
+    a request naming another pid or another conversation is not ours to honour,
+    and one older than ``_EXIT_REQUEST_FRESH_S`` is a statement about an act that
+    is over — so neither a leftover from a failed attempt nor the 2 s race
+    between the requester's withdrawal and this read can end a runtime that has
+    no claim to it. A request with no readable stamp is ignored for the same
+    reason.
     A malformed or unreadable file reads as no request at all, because a failed
     read on a 250 ms tick must not be a decision.
     """
@@ -897,7 +922,13 @@ def _exit_requested(runtime: object) -> bool:
         return False
     if not isinstance(request, dict):
         return False
-    return request.get("session_id") == session_id and request.get("pid") == pid
+    if request.get("session_id") != session_id or request.get("pid") != pid:
+        return False
+    requested_at = request.get("requested_at")
+    if isinstance(requested_at, bool) or not isinstance(requested_at, (int, float)):
+        return False  # unattributable in time: not a request this reader acts on
+    age = time.time() - float(requested_at)
+    return -_EXIT_REQUEST_SKEW_S <= age <= _EXIT_REQUEST_FRESH_S
 
 
 def _keep_alive_victim(runtime: object, cap: int) -> bool:
@@ -1420,6 +1451,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
         drained = False
         preempted = False
+        requested = False
         idle_since = time.monotonic()
         #: The detach stamp this window was drawn from. A DIFFERENT one means a
         #: viewer attached and left again inside this drain, and the window then
@@ -1443,7 +1475,12 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
                     "session runtime: an explicit delete asked this runtime to leave; "
                     "exiting cleanly (idle-exit)"
                 )
-                drained = True
+                # NOT ``drained``: this drain did not run its window to the end,
+                # and the exit line below reports the SECONDS IT ACTUALLY IDLED —
+                # the same misstatement review round 1 (F4) caught on the LRU's
+                # path, which would otherwise print "idle for 300.0s" for a 0.15 s
+                # stay (review round 2, R2-4).
+                requested = True
                 break
             stamp = _detached_at(runtime)
             if stamp is not None and stamp != drawn_from:
@@ -1485,7 +1522,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
                     break
         else:
             drained = True
-        if not (drained or preempted):
+        if not (drained or preempted or requested):
             continue
         # The LAST instant before the exit, and the reason it is a latch rather
         # than another ``_should_exit`` sample: the grace loop's condition can
@@ -1529,6 +1566,10 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         logger.info(
             "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
             "exiting cleanly (%s)",
+            # WHAT WAS MEASURED for EVERY reason the drain can end early — the
+            # LRU giving the slot up and an explicit delete asking are both
+            # "stopped waiting", and only a drain that expired may claim its
+            # window (review round 1 F4, review round 2 R2-4).
             window_s if drained else time.monotonic() - idle_since,
             WARM_WINDOW_S,
             reason,

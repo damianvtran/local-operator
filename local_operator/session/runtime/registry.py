@@ -283,6 +283,13 @@ def read_stop_marker(conversation_dir: Path) -> dict[str, Any] | None:
 #: Deliberately NOT fsynced, exactly like the stop marker (see
 #: :func:`_staged_write`): this is a request between two processes on one host
 #: and the 0.25 s reaper tick it is read on is far longer than the write.
+#:
+#: ``requested_at`` IS LOAD-BEARING, not evidence: the reader acts on a request
+#: only while it is fresh (``process._EXIT_REQUEST_FRESH_S``, review round 2
+#: R2-2/R2-5). The write and the requester's withdrawal are not atomic with the
+#: runtime's read, so without an age bound a file could be honoured after the
+#: delete had given up, and a requester that died between the two would leave a
+#: request that ended the NEXT runtime for that conversation.
 EXIT_REQUEST_NAME = "runtime-exit-request.json"
 
 

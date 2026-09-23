@@ -665,29 +665,45 @@ def delete_session(
         # had just closed. The design note never considered this interaction —
         # this is where it is extended, and it is stated in the PR.
         #
-        # A REHEARSAL ASKS FOR NOTHING. ``dry_run`` reports what the real call
-        # would do, so it takes the same branch's ANSWER without the act: with
-        # the resident identified, the refusal is not the answer the real call
-        # gives, and a rehearsal that printed it would stop the user from ever
-        # reaching the confirmed call (the TUI's two-step shape prints a refusal
-        # and returns). What it does not do is promise the deletion: if the real
-        # call's request goes unanswered, the real call refuses — in the same
-        # sentence, on the same outcome field, and the TUI reports it.
+        # A REHEARSAL ASKS FOR NOTHING **AND TOUCHES NOTHING** (review round 2,
+        # R2-1; QA round 2, Q2-1). Two bugs lived in the one-line arm this used
+        # to be, and both were in the rehearsal:
+        #
+        #   * it WITHDREW a request it had not written. The withdrawal sits on
+        #     the asking arm — its condition is "we asked and the delete still
+        #     refuses" — and a rehearsal that asks nothing has nothing to take
+        #     back. Running it there removed the file of a REAL delete running
+        #     at that moment, so the runtime never saw the request and the real
+        #     delete refused after its whole bound: a rehearsal defeating the act
+        #     it was rehearsing.
+        #   * it REPORTED the refusal the real call does not give. Re-reading
+        #     ``_guard`` for the dry arm returns the lease sentence the real call
+        #     is about to clear, so a user who rehearsed first was told the
+        #     conversation could not be deleted and never reached the confirmed
+        #     call — the opposite of what this comment used to claim.
+        #
+        # So the dry arm reports the guards AS THEY WOULD STAND once the resident
+        # this policy is holding has left (``live_owner_gone``), which is the
+        # question the real call answers after its wait, and it writes nothing.
+        # What it does not do is promise the deletion: if the real call's request
+        # goes unanswered the real call refuses, in the same sentence, on the
+        # same outcome field, and every host reports it.
         resident = _keep_alive_resident(directory, config_dir)
-        if resident is not None and (
-            dry_run or _ask_keep_alive_to_leave(resident, directory, actor=actor)
-        ):
-            reason = _guard(directory, config_dir, clock)
-            if reason is not None:
-                # THE REQUEST BELONGED TO AN ACT THAT DID NOT HAPPEN. The lease
-                # is gone — the runtime left — but something else still refuses
-                # (a wake armed in the meantime, mail that arrived, a guard that
-                # stopped answering), and this act is over. Leaving the file
-                # behind would end the NEXT runtime for this conversation at its
-                # first idle drain: a lost optimisation rather than a wrong exit,
-                # and still not a thing to leave behind (see
-                # ``registry.EXIT_REQUEST_NAME``).
-                registry.remove_exit_request(directory)
+        if resident is not None:
+            if dry_run:
+                reason = _guard(directory, config_dir, clock, live_owner_gone=True)
+            elif _ask_keep_alive_to_leave(resident, directory, actor=actor):
+                reason = _guard(directory, config_dir, clock)
+                if reason is not None:
+                    # THE REQUEST BELONGED TO AN ACT THAT DID NOT HAPPEN. The
+                    # lease is gone — the runtime left — but something else still
+                    # refuses (a wake armed in the meantime, mail that arrived, a
+                    # guard that stopped answering), and this act is over.
+                    # Leaving the file behind would end the NEXT runtime for this
+                    # conversation at its first idle drain: bounded now by the
+                    # request's own freshness window, and still not a thing to
+                    # leave behind (see ``registry.EXIT_REQUEST_NAME``).
+                    registry.remove_exit_request(directory)
     if reason is not None:
         return DeleteOutcome(
             session_id=session_id,
@@ -967,7 +983,9 @@ def _has_spooled_mail(directory: Path) -> bool:
         return True
 
 
-def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
+def _guard(
+    directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+) -> str | None:
     """The hard guards, in one place. Returns the guard's name when the
     directory must be kept, ``None`` when the policy may consider it.
 
@@ -975,12 +993,21 @@ def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
     failures, and the outer ``except`` makes an exception NONE of them
     anticipated (a bug in ``_process_alive``, a ``MemoryError`` mid-read)
     also "keep", with the probe named so the refusal is diagnosable.
+
+    ``live_owner_gone`` SKIPS the two live-owner probes, and only a REHEARSAL
+    passes it (review round 2, R2-1). The question it asks is the one the real
+    call answers *after* its preempt wait, i.e. "with the resident this policy is
+    holding removed, what is left to refuse?" — every other guard is still
+    consulted, so a rehearsal cannot promise a deletion a wake or spooled mail
+    will refuse. The real path never passes it: there the lease is genuinely
+    gone, and the guards are read as they stand.
     """
     try:
-        if _claimed(directory, now):
-            return "claimed by a live process"
-        if _lease_runtime_alive(directory):
-            return "leased by a live process"
+        if not live_owner_gone:
+            if _claimed(directory, now):
+                return "claimed by a live process"
+            if _lease_runtime_alive(directory):
+                return "leased by a live process"
         if _has_armed_wake(config_dir, directory.name):
             return "has an armed wake"
         if _has_spooled_mail(directory):
