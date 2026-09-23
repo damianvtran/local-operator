@@ -13324,11 +13324,28 @@ async def _bridge_open(
     )
 
 
-#: await_access defaults and cap. The cap exists because each slice is a real
-#: RPC and the human may simply be away: 240 s is long enough for "walk back to
-#: the desk", short enough that the agent gets a turn to re-notify the user
-#: rather than sitting silent for the extension's whole 10-minute request TTL.
-BROWSER_AWAIT_ACCESS_DEFAULT_S = 120.0
+#: await_access defaults and cap.
+#:
+#: THE CAP DELIBERATELY DOES NOT MOVE WITH THE 15-MINUTE RECOMMENDATION (design
+#: §5.4). Three measured reasons, any one sufficient:
+#:
+#: 1. The ``browser`` tool is ``interruptible=False`` (see the tool builder
+#:    below): a call that sits for fifteen minutes cannot be cut by a steer, a
+#:    stop or an abort — the failure ``ask``'s builder documents. Raising the cap
+#:    without flipping that flag converts a bounded wait into a hang.
+#: 2. Each slice is a real RPC (``_BRIDGE_AWAIT_SLICE_MS``), so fifteen minutes
+#:    is ~45 round trips, and the extension's own request TTL is 10 minutes
+#:    (``extension/src/driver/access-queue.ts``, ``ACCESS_REQUEST_TTL_MS``): one
+#:    prompt cannot serve the wait anyway, so the extra cap would buy five
+#:    minutes of nothing at all.
+#: 3. ``wait`` is the tool built for holding a turn open and it *is*
+#:    interruptible. The 15-minute budget lives in the RESULT TEXT, which is
+#:    where a recommendation belongs: nothing consumes it but the sentence.
+#:
+#: The DEFAULT rises to the cap so an unsized call gets the longest wait this
+#: tool can honestly serve; the text tells the model the remainder is ``wait``'s
+#: job and that re-requesting is what pings the operator again.
+BROWSER_AWAIT_ACCESS_DEFAULT_S = 240.0
 BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 
 #: One extension-side wait slice (mirrors access.ts AWAIT_SLICE_MS). The tool
@@ -13339,6 +13356,34 @@ BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
+def _attached_here(context: ToolContext | None) -> bool:
+    """Whether an interface is attached to the session this call runs in.
+
+    Reads the declared ``ToolContext.attached_probe`` — a live view of
+    ``RuntimeServer.attached_surfaces`` through the session's goal state, so it
+    is re-read per call rather than snapshotted per turn (this flow asks AFTER
+    it has waited).
+
+    ``True`` when the context carries no probe (a bare tool test, a host that
+    never wired one), which is the pre-existing default AND the direction every
+    uncertain answer falls here: a wrong "attached" costs a wait that is
+    re-checked, while a wrong "unattached" tells the agent to give up on a
+    question the operator was ready to answer — the incident this flow exists to
+    prevent.
+
+    This is NOT ``has_ui`` and NOT evidence that anyone is looking right now: an
+    attached pane holds a prompt a person answers when they return. See
+    ``docs/design/attached-interface-signal.md`` §5.
+    """
+    probe = getattr(context, "attached_probe", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe())
+    except Exception:  # noqa: BLE001 — an unreadable probe must not fail the flow
+        return True
+
+
 def _access_result_text(
     state: str,
     origin: str,
@@ -13346,6 +13391,7 @@ def _access_result_text(
     position: int | None = None,
     pending_count: int | None = None,
     host: str = "",
+    attached: bool = True,
 ) -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation.
@@ -13356,6 +13402,11 @@ def _access_result_text(
     extension's popup and badge, or the desktop app's browser tab. Telling the
     user of the app to look in a browser toolbar sends them hunting for a window
     that is not there.
+
+    ``attached`` selects whether the model is told an interface can PRESENT the
+    prompt. It changes the ADVICE, never the notify-first instruction: an
+    unattached session must still tell the operator, because the request is what
+    makes the prompt visible when a surface does attach.
     """
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
@@ -13377,12 +13428,38 @@ def _access_result_text(
             else "in the Local Operator desktop app's browser tab — the prompt alone is not "
             "reliably seen"
         )
+        slots = f" ({position} of {pending_count})" if position and pending_count else ""
+        if attached:
+            return (
+                f"approval for {origin} is pending{slots}. The prompt is showing {where}.\n\n"
+                "An interface is attached to this session, so the operator can see and "
+                "answer it — make sure they are told (a short message, or `ask`).\n\n"
+                "- Then call action='await_access' with the same url, and wait UP TO 15 "
+                "MINUTES in total for the decision: a person may be away from the desk. "
+                "Use the `wait` tool for the remaining time (await_access itself waits at "
+                "most 240s per call).\n"
+                '- The prompt expires after about 10 minutes. If await_access returns "no '
+                "live access request\", call action='request_access' again with the same "
+                "url to re-raise it and ping the operator again, and keep doing that while "
+                "the origin is still needed.\n"
+                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report the origin as "
+                "unavailable while an interface is attached."
+            )
+        # UNATTACHED: the prompt is queued, so the 15-minute wait would be a wait
+        # on nobody. The notify instruction and the re-request stay — they are
+        # what pings the operator the moment a surface attaches.
         return (
-            f"approval for {origin} is pending"
-            + (f" ({position} of {pending_count})" if position and pending_count else "")
-            + ". FIRST notify the user (via the ask "
-            f"tool or a message) to approve it {where} — THEN "
-            "call action='await_access' with the same url to wait for the decision."
+            f"approval for {origin} is pending{slots}. The prompt is showing {where}.\n\n"
+            "No interface is attached to this session right now, so the prompt is queued "
+            "and nobody can act on it until a surface attaches. Notify the operator anyway "
+            "(a message, or `ask`) so the decision is waiting for them — then proceed with "
+            "what you have rather than blocking the turn on it.\n\n"
+            "- The prompt expires after about 10 minutes. Re-raise it with "
+            "action='request_access' (the same url) when the origin is next needed, so "
+            "the operator is pinged again rather than finding a dead prompt.\n"
+            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report the origin as "
+            "unavailable: an interface may attach later, and the request is what makes it "
+            "visible."
         )
     if state == "superseded":
         # A DIFFERENT session's request replaced this one's prompt slot (one
@@ -13429,6 +13506,10 @@ async def _bridge_access(
     host = _host_of_client(client)
     url = params.url.strip()
     identity = _browser_identity_params(context, tool_call_id)
+    # READ ONCE PER CALL, and pass it to every render below so a single call's
+    # request_access and await_access cannot disagree about whether anyone can be
+    # shown the prompt.
+    attached = _attached_here(context)
     if action == "request_access":
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
@@ -13447,6 +13528,7 @@ async def _bridge_access(
                 position=result.get("position"),
                 pending_count=result.get("pending_count"),
                 host=host,
+                attached=attached,
             ),
             details={
                 "origin": origin,
@@ -13495,9 +13577,11 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                f"still pending after {total_s:.0f}s: the user has not decided on {url} "
-                f"yet. Remind them to check {check}, then call "
-                "await_access again.",
+                f"still pending after {total_s:.0f}s: the operator has not decided on {url} "
+                f"yet. Remind them to check {check}, then either call await_access again "
+                "(the total recommended wait is 15 MINUTES) or — if the prompt has "
+                "expired — call action='request_access' with the same url to re-raise it "
+                "and ping them again. An unanswered prompt is not a refusal.",
                 details={"origin": url, "state": "pending"},
             )
         wire = {
@@ -13521,6 +13605,7 @@ async def _bridge_access(
                     position=result.get("position"),
                     pending_count=result.get("pending_count"),
                     host=host,
+                    attached=attached,
                 ),
                 details={
                     "origin": origin,
