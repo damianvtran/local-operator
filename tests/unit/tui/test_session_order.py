@@ -325,6 +325,15 @@ def test_mobile_uses_same_categories_birth_and_ties():
                 model_label="demo",
                 control_port=1,
                 control_key="test",
+                # THE RECORD'S OWN ``busy``, not only the projection's
+                # ``streaming``. The daemon ranks on the record's flag because
+                # that is what ``decorate_rows`` (and so the catalogue's key)
+                # reads — ``streaming`` is what a fold has SEEN, and the two can
+                # differ for a frame. A real busy runtime publishes
+                # ``busy=True`` (``RuntimeServer``), so a fixture that set only
+                # the projection was under-specifying what the daemon receives
+                # (caught by this test when the phone began using the shared key).
+                busy=e.row.live_state == "busy",
             )
         )
         entry.projection = SessionProjection(
