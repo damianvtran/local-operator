@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import threading
 import time
 from collections import deque, namedtuple
 from collections.abc import Mapping, Sequence
@@ -1882,3 +1883,277 @@ def test_the_published_catalogue_carries_a_rows_schedule() -> None:
     store.refresh_model_catalogue([plain])
     (row,) = store.state.model_catalogue
     assert row["time_of_use"] is None
+
+
+# ---------------------------------------------------------------------------
+# Off-loop subscribe: the ordering proof and the invariant it rests on
+# ---------------------------------------------------------------------------
+#
+# These two guard the seam a busy owner is served through
+# (``FrontendStateStore.subscribe_threadsafe`` ←
+# ``ServingSessionHandle.subscribe_frontend_nowait``). Registration used to be
+# atomic only because exactly one thread ever touched the store; the off-loop
+# path admits a subscriber from the runtime's thread while the owner's loop is
+# mid-turn, so the lock in the store is now the mechanism and these are what
+# hold it to its contract.
+
+
+#: How many deltas the ordering test publishes AFTER the last joiner is in.
+#: ``subscribe_threadsafe`` is only proven differential if a subscriber admitted
+#: at the very worst moment still receives a stream to check, so this is what
+#: makes the contiguity assertion non-vacuous.
+_TAIL_PUBLISHES = 25
+
+
+def test_off_loop_subscribers_see_every_delta_once_across_a_live_publisher() -> None:
+    """One publisher against 50 joiners racing it: no gap, no duplicate.
+
+    WHY THIS IS DIFFERENTIAL RATHER THAN A UNIT CHECK. A joiner runs against a
+    publisher that is already publishing and races its critical section. Exactly
+    two outcomes are legal: the joiner is in the list that publish snapshotted,
+    so it receives the sequence AFTER the one it captured; or it is not, so the
+    one it captured IS that sequence. Both leave the stream contiguous from the
+    joiner's own sequence, and anything else shows up here as a gap or a repeat
+    — which is what the client's exact-``+1`` check turns into a redial, so a
+    silent violation is a reconnect loop in production rather than a wrong
+    number.
+
+    The publisher is bounded by a COUNT, never by a clock: the assertion is about
+    ordering, and a time bound would make it a bet on this host's load.
+
+    WHAT THIS ONE IS NOT: the guard that reliably goes red. The split it looks
+    for is a couple of bytecodes wide at the default 5 ms switch interval —
+    measured, the pre-change shape produces one duplicate in six runs of this loop
+    — so this is the wide net over a REAL concurrent schedule, and the forced
+    schedule in the companion test below is what pins the mechanism. Both are
+    kept, because a wide net over real threads is the only thing here that runs
+    the schedule production actually has.
+    """
+    store = FrontendStateStore(_state())
+    subscribers = 50
+    joiners_ready = threading.Barrier(subscribers + 1)
+    all_joined = threading.Event()
+    outstanding = [subscribers]
+    outstanding_lock = threading.Lock()
+    stop = threading.Event()
+    deliveries: list[list[int]] = [[] for _ in range(subscribers)]
+    # Indexed by the thread's own slot rather than appended: threads finish in an
+    # arbitrary order, and a pair of append-order lists would zip a subscriber's
+    # sequence against another subscriber's deliveries.
+    bases: list[int] = [0] * subscribers
+
+    def subscribe_and_hold(index: int) -> None:
+        joiners_ready.wait()
+        seen = deliveries[index]
+
+        def on_update(update: FrontendUpdate) -> None:
+            # Called from the PUBLISHER's thread; ``seen`` is read only after
+            # that thread has been joined.
+            seen.append(update.sequence)
+
+        subscription = store.subscribe_threadsafe(on_update)
+        bases[index] = subscription.sync.sequence
+        with outstanding_lock:
+            outstanding[0] -= 1
+            if not outstanding[0]:
+                all_joined.set()
+        while not stop.is_set():
+            time.sleep(0.0005)
+
+    threads = [
+        threading.Thread(target=subscribe_and_hold, args=(index,)) for index in range(subscribers)
+    ]
+    for thread in threads:
+        thread.start()
+
+    def publish() -> None:
+        joiners_ready.wait()
+        n = 0
+        while not all_joined.is_set() and n < 4000:
+            if store.mutate(goal=f"goal-{n}") is not None:
+                n += 1
+        # EVERY JOINER IS IN (``all_joined`` is set only after the last one's
+        # subscribe returned), so publish a known number MORE. That is what makes
+        # the contiguity assertion non-vacuous: a subscriber admitted at the last
+        # possible instant still receives all of these, and none of them can be
+        # skipped by the publisher stopping at the same moment.
+        for extra in range(_TAIL_PUBLISHES):
+            store.mutate(goal=f"tail-{extra}")
+        stop.set()
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    publisher.join(timeout=60)
+    assert not publisher.is_alive(), "the publisher thread did not finish"
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive(), "a subscriber thread did not finish"
+
+    assert outstanding[0] == 0, "a joiner never completed its subscribe"
+    assert min(len(seen) for seen in deliveries) >= _TAIL_PUBLISHES, (
+        "a subscriber admitted before the publisher's tail received less than the "
+        "tail — the test is not differential"
+    )
+    for seen, base in zip(deliveries, bases, strict=True):
+        assert seen == list(
+            range(base + 1, base + 1 + len(seen))
+        ), f"subscriber at sequence {base} saw {seen[:8]}… — a gap or a duplicate"
+
+
+def test_canonical_state_is_replaced_never_mutated_in_place() -> None:
+    """The invariant the off-loop snapshot clone rests on.
+
+    ``subscribe_threadsafe`` deep-copies ``_state`` OUTSIDE the publish lock —
+    that is what keeps a publisher from ever waiting on a joiner's snapshot — and
+    it is only safe while no publisher EDITS the object a reader already holds.
+    A state mutated in place would let a concurrent clone observe a
+    half-applied update under a sequence number that says it did not happen, and
+    nothing downstream could detect it.
+
+    So this drives every publishing path and asserts the object captured before
+    each one is byte-identical afterwards AND that the store installed a
+    different object. Both halves are needed: identity alone would pass for an
+    in-place edit that happens to be followed by a copy, and content alone would
+    pass for a mutation that leaves the captured object equal.
+    """
+
+    def drive(store: FrontendStateStore, captured: list[tuple[str, Any, dict[str, Any]]]) -> None:
+        def capture(label: str) -> None:
+            ref = store._state
+            captured.append((label, ref, ref.model_dump(mode="json")))
+
+        capture("construction")
+        store.mutate(goal="through mutate")
+        capture("mutate")
+        store.replace(_state(goal="through replace"))
+        capture("replace")
+        store.replace_and_notify(_state(goal="through replace_and_notify"))
+        capture("replace_and_notify")
+        assert store.seed_job_trajectory(
+            "j1", [{"type": "message_update", "delta": "hi"}]
+        ), "the seed found no job to install into"
+        capture("seed_job_trajectory")
+        assert store.seed_job_todos(
+            "j1", [{"text": "wire it"}], epoch="owner-a", sequence=1, session_id=None
+        ), "the seed found no job to install into"
+        capture("seed_job_todos")
+
+    captured: list[tuple[str, Any, dict[str, Any]]] = []
+    store = FrontendStateStore(_state())
+    drive(store, captured)
+
+    # The applied-delta path too, since it is the one a VIEWER runs: its state
+    # is built from a validated candidate rather than from a snapshot payload.
+    follower = FrontendStateStore(_state())
+    delta = store.mutate(goal="from the producer")
+    assert delta is not None, "the producer published nothing to apply"
+    follower_ref = follower._state
+    follower_before = follower_ref.model_dump(mode="json")
+    follower.apply_update(copy.deepcopy(delta))
+    captured.append(("apply_update", follower_ref, follower_before))
+
+    for label, ref, snapshot in captured:
+        assert ref.model_dump(mode="json") == snapshot, (
+            f"the canonical state captured before {label} was edited in place — the "
+            "off-loop clone is only sound while publishes REPLACE it"
+        )
+    identities = [id(ref) for _label, ref, _snapshot in captured]
+    assert len(set(identities)) == len(
+        identities
+    ), "a publish reused the state object instead of installing a new one"
+
+    # And what the store HANDS OUT is a clone, not the object it publishes from:
+    # editing it must not reach canonical state.
+    public = store.state
+    public.goal = "edited by a caller"
+    assert store.state.goal != "edited by a caller"
+
+    # The RETAINED rows are frozen at the model level, which is the second half
+    # of the same invariant: a reader holding a job cannot edit the store's copy
+    # of it either.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        store._state.jobs[0].status = "edited by a caller"  # type: ignore[misc]
+
+
+class _AppendSwitchesThreads(list[Any]):
+    """A subscriber list whose ``append`` yields the GIL at the worst moment.
+
+    WHY A FORCED SCHEDULE RATHER THAN A RACED ONE. The property under test —
+    "registering a callback and capturing the sequence are ONE step as far as a
+    publisher is concerned" — is only observable if a publisher runs BETWEEN the
+    two, and at the default 5 ms switch interval that window is a couple of
+    bytecodes wide. Measured on the pre-change shape (append, then read the
+    state, no lock): one duplicate in six runs of the 50-subscriber loop above.
+    A guard that fires one time in six is not a guard.
+
+    ``append`` therefore blocks for a real switch interval. That is not a trick
+    played on a correct store: the appended callback is registered with
+    ``_publish_lock`` held, so a publisher cannot run during the sleep at all and
+    the delay is invisible in the outcome. It is only observable by a store that
+    appended WITHOUT the lock, which is exactly the shape this pins.
+    """
+
+    def __init__(self, values, *, switch_s: float = 0.02) -> None:  # noqa: ANN001
+        super().__init__(values)
+        self.switch_s = switch_s
+        self.sleeps = 0
+
+    def append(self, value) -> None:  # noqa: ANN001
+        super().append(value)
+        self.sleeps += 1
+        time.sleep(self.switch_s)
+
+
+def test_a_join_is_one_step_to_a_publisher_even_at_the_worst_instruction() -> None:
+    """The lock's contract, forced rather than raced.
+
+    The companion to the differential loop above, and the one that can actually
+    go red: it puts a publisher's whole publish (state install AND subscriber
+    list) inside the window a joiner opens between registering and capturing —
+    the schedule a loaded fleet produces and the 5 ms switch interval hides.
+
+    A correct store blocks that publisher on the lock, so the joiner captures the
+    OLD sequence and then receives exactly that publish; a store that registered
+    without the lock lets the publish through first, the joiner captures the NEW
+    sequence AND is in that publish's list, and it receives the sequence it
+    already holds as its own — a duplicate the client reads as a gap and
+    redials over. Both outcomes are asserted, so the test names the failure it
+    prevents rather than only the absence of one.
+    """
+    store = FrontendStateStore(_state())
+    assert store.mutate(goal="before the join") is not None
+    base_sequence = store.state.sequence
+    injected = _AppendSwitchesThreads(store._subscribers)
+    store._subscribers = injected
+
+    seen: list[int] = []
+    captured: list[int] = []
+
+    def join() -> None:
+        subscription = store.subscribe_threadsafe(lambda update: seen.append(update.sequence))
+        captured.append(subscription.sync.sequence)
+
+    joiner = threading.Thread(target=join)
+    joiner.start()
+    # Let the joiner reach the append (and the sleep inside it) before publishing
+    # from THIS thread: the publish has to arrive while the registration is in
+    # flight, which is the whole point of the injected switch.
+    deadline = time.monotonic() + 5.0
+    while injected.sleeps == 0 and time.monotonic() < deadline:
+        time.sleep(0.0005)
+    assert injected.sleeps == 1, "the joiner never reached its registration"
+    assert store.mutate(goal="while the join is in flight") is not None
+    joiner.join(timeout=10)
+    assert not joiner.is_alive(), "the joiner never returned"
+
+    assert captured == [base_sequence], (
+        f"the joiner captured sequence {captured} instead of {base_sequence} — its "
+        "registration did not take effect before the publisher's list was taken"
+    )
+    assert seen == [base_sequence + 1], (
+        f"the joiner saw {seen} — a publisher that ran between its registration and "
+        "its snapshot gives it the sequence it already holds, which the client's "
+        "exact-+1 check reads as a gap"
+    )
