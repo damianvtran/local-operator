@@ -3440,3 +3440,30 @@ def test_an_unattached_child_with_no_outcome_is_still_not_snapshotted() -> None:
         "an unattached child with no outcome was snapshot — a parked child must "
         "leave no durable record"
     )
+
+
+def test_resume_names_a_pre_attach_failure_rather_than_saying_never_started() -> None:
+    """QA round 2, Q-3: the last surface still mislabelling a child that DID run.
+
+    ``resume`` refused a settled pre-attach failure with "never started" — the
+    same wrong sentence the roster and peek were fixed off. The verdict is
+    right (there is no transcript to replay); the reason was not.
+    """
+    from local_operator.harness.comms import SubagentComms
+
+    comms = SubagentComms(FakeParent(FakeJobs()))  # type: ignore[arg-type]
+    comms.record_launch("dead", "remediate-ud1426-r2", agent_role="coder")
+    comms.record_outcome("dead", "failed", error_text="No package metadata was found")
+
+    result, reason = comms.resume("dead", "carry on")
+    assert result is None
+    assert reason is not None
+    assert "ended before it attached" in reason
+    assert "No package metadata was found" in reason
+    assert "never started" not in reason
+
+    # ...and a PARKED child still gets the original wording.
+    comms.record_launch("parked", "queued behind the gate")
+    result2, reason2 = comms.resume("parked", "carry on")
+    assert result2 is None
+    assert reason2 is not None and "never started" in reason2
