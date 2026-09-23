@@ -33956,7 +33956,7 @@ class OperatorApp(App[None]):
 
         session = self._session
         record = self._goal_record()
-        if session is None or not hasattr(session, "set_goal") or record is None:
+        if session is None or not hasattr(session, "set_goal"):
             # A rejected command changed nothing, so the conversation has not
             # started: `_system_notice` keeps the boot composition intact where
             # `notice` would collapse it for a typo.
@@ -33970,6 +33970,21 @@ class OperatorApp(App[None]):
         # with the same rule the `--clear` branch has always used: `/goal --done
         # the report` keeps its tail and stays an objective.
         form = goal_flag_form(request)
+        if form and record is None:
+            # Every FLAG form WRITES the judged-goal record, and the record is
+            # the session OWNER's (`_goal_record_for`): a follower reaches these
+            # by the ROUTED `/goal`, which runs them on the owner and comes back
+            # as the owner's own receipt. A viewer that cannot route — a cold
+            # one, which advertises no capabilities — has no record here to
+            # write, so it says where the act lives rather than reporting one it
+            # did not perform. ``form`` is "" for an OBJECTIVE (`goal_flag_form`),
+            # which is why the test is truthiness and not ``is not None``.
+            self._system_notice(
+                "the goal record belongs to the session's owner — "
+                "/goal --clear, --done and --dismiss run there",
+                "warning",
+            )
+            return
         if form == "clear":
             # Name what went. A standing goal is deliberately invisible in the UI
             # — the band does not carry it and the only echo is the one-time
@@ -34008,7 +34023,20 @@ class OperatorApp(App[None]):
         # `arm_goal` rather than `set_goal`: the same text write plus the record's
         # supersede/arm ordering, which is what makes `/goal B` non-destructive
         # to `/goal A` and what arms the judge.
-        stored = record.arm_goal(request)
+        #
+        # A session that is NOT the record's owner may still SET its goal locally,
+        # and must: `/loop` runs on THIS terminal for a cold capabilityless viewer,
+        # and its numeric branch iterates toward `session.goal`, so refusing the
+        # set refused the loop with it (pinned by
+        # `test_a_followers_loop_turn_holds_working_between_iterations`). The
+        # record's own `arm_goal` is used where this session IS the owner;
+        # otherwise the session's `arm_goal` where it holds one, else `set_goal`,
+        # which on an attached facade is the ROUTING setter rather than a local
+        # write (`AttachedSession.set_goal` asks the owner). What stays owner-only
+        # is the four FLAG forms above — those are acts on the OWNER's record.
+        holder = record if record is not None else session
+        arm = getattr(holder, "arm_goal", None)
+        stored = arm(request) if arm is not None else session.set_goal(request)
         # Only the standing objective is capped. The ordinary user message
         # retains the full request, and the normal submit path owns its ONE
         # transcript row, busy steering, compaction hold and attachment order.
