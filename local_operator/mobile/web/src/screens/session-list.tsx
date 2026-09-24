@@ -472,9 +472,12 @@ export function SessionListScreen() {
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
-	/* The refusal band's track, observed below so its height change can be
-	   handed to the scroller instead of to the rows. */
+	/* The refusal band, measured only to keep the pressed row clear of it. */
 	const pinErrorRef = useRef<HTMLDivElement>(null);
+	/* The row whose pin was just refused, read once by the effect that keeps it
+	   out from under the band. A ref, not state: it is a one-shot hand-off to
+	   that effect and must not cause a render of its own. */
+	const refusedRow = useRef<string | null>(null);
 	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 	const prevTops = useRef(new Map<string, number>());
 	const visible = sessions.filter((session) =>
@@ -509,6 +512,7 @@ export function SessionListScreen() {
 		} catch (e) {
 			/* Surface it rather than swallow: an unreachable daemon must not read as
 			   "the pin took". The next repaint corrects the row either way. */
+			refusedRow.current = sessionId;
 			setPinError(String((e as Error).message ?? e));
 		}
 	};
@@ -598,93 +602,28 @@ export function SessionListScreen() {
 		}
 		prevTops.current = nextTops;
 	});
-	/* THE ROWS DO NOT MOVE WHEN THE REFUSAL OPENS OR CLOSES (QA round 3, Q4;
-	   design round 6, D14; QA round 4, Q5). The band sits above the scroller, so
-	   every pixel it grows moves `<main>`'s top down, and every visible row with
-	   it (+42.8px at 100% root font, +120.4px at 200%, measured before any
-	   correction). CSS scroll anchoring cannot absorb this, because it corrects
-	   content that moves INSIDE a scroller, not a scroller that moves.
-
-	   THE PREVIOUS SCHEME WAS WRONG ON THE COLLAPSE, although its comment said
-	   the rows held still in both directions. It added each frame's change in
-	   band height to whatever `scrollTop` currently was. Near the bottom of the
-	   list that value had already moved: as the band collapses `<main>` grows,
-	   the browser clamps `scrollTop` into the smaller scroll range during
-	   layout, and that clamp alone pays some or all of the collapse. The carry
-	   then subtracted the whole delta again. QA measured the rows ending 34.2px
-	   lower at 100% and 103.1px at 200%, permanently, and 14.7px lower at 20px
-	   from the bottom.
-
-	   SO THE CORRECTION IS AN ANCHOR, NOT ARITHMETIC. What is held is the
-	   on-screen position of the list's content origin,
-	   `main.getBoundingClientRect().top - main.scrollTop`: each row's rendered
-	   top is that origin plus its fixed offset in the content, so holding the
-	   origin holds every row. It stands in for "the first row's rect" without
-	   being moved by the FLIP settle's transforms or by a pin lifting that row.
-	   On every resize of the band's track the origin is measured again and
-	   `scrollTop` moves by exactly the drift, read back from the page. A clamp
-	   the browser already applied shows up in that measurement, so it cannot be
-	   counted twice: if it put the rows back, the drift is zero and nothing is
-	   written. Every write is bounded by the scroller's own clamp, and whatever
-	   it (or whole-pixel rounding) refused to keep is still drift on the next
-	   frame, so the scheme corrects itself instead of carrying a remainder. On a
-	   list too short to scroll the clamp keeps `scrollTop` at 0 and the rows
-	   ride the band's own curve (the D8 shape).
-
-	   The held origin is re-read when something other than the band moves the
-	   list: the reader's scroll and the browser's scroll anchoring (both arrive
-	   as `scroll` events; this effect's own write is recognised and skipped, so
-	   a sub-pixel remainder is not locked in mid-transition), a viewport resize,
-	   and the end of the track's transition. An anchoring adjustment that lands
-	   in the same frame as a band frame is undone with it, which is what the
-	   list did with anchoring switched off, the state earlier rounds measured.
-
-	   A ResizeObserver rather than a hook on `pinError`, because the track
-	   animates over 200ms and a single correction at the change would leave the
-	   rows to drift for the rest of it. `transcript.tsx` uses the same guard for
-	   the same observer. */
-	useEffect(() => {
-		const band = pinErrorRef.current;
+	/* THE ONE DELIBERATE MOVE: a refusal that lands over the row the reader
+	   pressed would hide the very row the reason is about, so that row — and
+	   only that row — is scrolled just clear below the band. Anywhere else the
+	   scroll is left alone. Measured against the band's layout box
+	   (`offsetHeight`), not its rect, because its entrance transform is still
+	   running in this frame. Before paint (useLayoutEffect) so the reader never
+	   sees the row covered first. */
+	useLayoutEffect(() => {
+		const id = refusedRow.current;
+		refusedRow.current = null;
 		const main = mainRef.current;
-		if (!band || !main || typeof ResizeObserver === "undefined") return;
-		const origin = () => main.getBoundingClientRect().top - main.scrollTop;
-		let held = origin();
-		/* The `scrollTop` this effect last left behind, so the `scroll` event its
-		   own write raises does not re-read the origin as the reader's choice. */
-		let written = Number.NaN;
-		const hold = () => {
-			/* Positive drift: the rows sit lower than held, so the list scrolls down
-			   by that much to lift them back. */
-			const drift = origin() - held;
-			if (drift === 0) return;
-			main.scrollTop = main.scrollTop + drift;
-			written = main.scrollTop;
-		};
-		const reread = () => {
-			held = origin();
-			written = Number.NaN;
-		};
-		const scrolled = () => {
-			if (main.scrollTop !== written) reread();
-		};
-		const settled = (event: TransitionEvent) => {
-			/* transitionend BUBBLES, and only the track's own transition is ours. */
-			if (event.target !== band) return;
-			hold();
-			reread();
-		};
-		const ro = new ResizeObserver(hold);
-		ro.observe(band);
-		band.addEventListener("transitionend", settled);
-		main.addEventListener("scroll", scrolled, { passive: true });
-		window.addEventListener("resize", reread);
-		return () => {
-			ro.disconnect();
-			band.removeEventListener("transitionend", settled);
-			main.removeEventListener("scroll", scrolled);
-			window.removeEventListener("resize", reread);
-		};
-	}, []);
+		const band = pinErrorRef.current;
+		const row = id ? cardRefs.current.get(id) : undefined;
+		if (!pinErrorText || !main || !band || !row) return;
+		const top = main.getBoundingClientRect().top;
+		const bandBottom = top + band.offsetHeight;
+		const rect = row.getBoundingClientRect();
+		/* Under the band: the row's top is covered and some of it is on screen. */
+		if (rect.top < bandBottom && rect.bottom > top) {
+			main.scrollTop -= bandBottom - rect.top;
+		}
+	}, [pinErrorText]);
 	useEffect(() => {
 		getDirectories()
 			.then((d) => setHome(d.home))
@@ -706,164 +645,157 @@ export function SessionListScreen() {
 					local operator
 				</h1>
 			</header>
-			{/* THE REFUSAL IS REPORTED WHERE THE READER IS LOOKING (design rounds 5
-			    and 6, D12/D14; review round 8, R8-2; QA round 3, Q4). It is a sibling
-			    of the scroller, between the header and `<main>`, and it is never
-			    inside `<main>`, because a band inside the scroll content is on screen
-			    only at `scrollTop` 0. Its first fix put it above the first row, and a
-			    reader who had scrolled to the row they held (the normal case: a
-			    folder-less session is new and idle, so the shared key files it below
-			    every busy row) still saw the ★ lift and fall back with the reason
-			    about a screen ABOVE them, and the rows slid down under a band nobody
-			    could see. Here it is pinned to the top of the viewport at any scroll
-			    position and any list length, the way the session view renders its
-			    own refusal under its header.
+			{/* BROWSER SCROLL ANCHORING STAYS ON (QA round 4, Q6). An earlier round
+			    opted the list out (`overflow-anchor: none`), and with the opt-out every
+			    unrelated list change moved a scrolled reader's rows: a new live session
+			    +76px, a session resuming +51px, another client's pin below the fold
+			    +45.5px at 100% and +91px at 200%, all 0px with anchoring on.
 
-			    IT COLLAPSES RATHER THAN VANISHES, on the caption's `0fr`/`1fr` track
-			    and for the caption's D8 reason: opening it takes height from `<main>`,
-			    so every visible row moves down by the band's height, and an unanimated
-			    insert would snap the list at the moment the reader is watching the row
-			    they pressed. The observer on `pinErrorRef` holds the rows' rendered
-			    position by moving `scrollTop` instead, bounded by the scroller's own
-			    clamp; on a list too short to scroll they travel with the band's own
-			    curve, and the text that explains the move appears in that same frame. The
-			    list's FLIP settle measures from `<main>`'s own top, so moving `<main>`
-			    does not read to it as a reorder. The `<p>` stays mounted with empty
-			    text for the same reason a conditional child would not: the track would
-			    have nothing to measure, so the collapse would be an instant step.
+			    The wrapper exists only to position the refusal band over the top of
+			    the scroller; `min-h-0` lets `<main>` inside it stay the thing that
+			    scrolls. */}
+			<div className="relative flex min-h-0 flex-1 flex-col">
+				<main
+					ref={mainRef}
+					className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
+				>
+					<input
+						value={query}
+						onChange={(event) => setQuery(event.target.value)}
+						placeholder="Search conversations…"
+						className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					/>
+					{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
+					    round 1, D2). The session view's ☆ is one tap away and does the same
+					    thing, but a reader has to already be in a conversation to find it, so
+					    it cannot teach the list's own long-press.
 
-			    NO `aria-hidden`, unlike the caption. The band has no second state to
-			    express: when it is collapsed its text is empty, so there is nothing for
-			    assistive tech to read, and hanging the caption's predicate on it is
-			    exactly the confusion D12 names. The live region is present from the
-			    first render, which is the shape screen readers announce reliably, and
-			    the refusal is announced when its text arrives. `mx-3` lines its text up
-			    with the header and the search field (`<main>`'s `px-1` plus the field's
-			    `mx-2`). */}
-			<div
-				ref={pinErrorRef}
-				className={cn(
-					"grid shrink-0 transition-[grid-template-rows] duration-200 ease-out",
-					showPinError ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-				)}
-			>
-				<div className="overflow-hidden">
-					<p role="alert" className="mx-3 mb-2 text-meta text-danger">
+					    GATED ON WHAT IS ON SCREEN, not on the store — the whole point of the
+					    caption is that it names a row the reader can see. Keying on
+					    ``sessions`` (unfiltered) put "touch and hold a row to pin it" directly
+					    above "no matching conversations" for a query that matched nothing, and
+					    brought it back whenever a search hid the pinned rows (design round 2,
+					    D5/D6). ``visible.length > 0`` is the honest condition; the pinned test
+					    reads the STORE so a search that hides a pin does not re-show the hint.
+
+					    IT COLLAPSES RATHER THAN VANISHES, which is D8: removing the node
+					    outright snapped the whole list up ~23px at the exact moment the first
+					    pin landed. The wrapper is always mounted and animates its height to
+					    zero, so the list settles instead of jumping. `prefers-reduced-motion`
+					    caps it to instant for free (the global block), which is the right
+					    fallback — the point is not the motion, it is that nothing snaps.
+
+					    THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
+					    earlier version capped `max-height` at a fixed 2rem — sized for ONE
+					    line of this caption at the default type scale. A caption that WRAPS
+					    to two lines (a longer localized string, a narrower container) is then
+					    taller than the cap, and `overflow-hidden` clips the second line away:
+					    the discoverer silently disappears for exactly the readers who need
+					    the label most. (The cap itself scales with the root font, so a
+					    large-text one-liner still fits — the failure is the WRAP, not the
+					    zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
+					    caption is fully painted at any string length and collapses to zero
+					    with no magic number to keep in sync with the type scale. */}
+					<div
+						className={cn(
+							"grid transition-[grid-template-rows] duration-200 ease-out",
+							showPinHint ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+						)}
+						aria-hidden={showPinHint ? undefined : true}
+					>
+						<div className="overflow-hidden">
+							<p className="mx-2 mb-2 text-meta text-ink-dim">
+								touch and hold a row to pin it
+							</p>
+						</div>
+					</div>
+					{sessions.length === 0 ? (
+						<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+							<p className="text-body text-ink-muted">
+								{connected
+									? "no sessions running"
+									: "connecting…"}
+							</p>
+							<p className="text-body-sm text-ink-dim">
+								start one below, or from the TUI on your machine
+							</p>
+						</div>
+					) : (
+						<div className="flex flex-col gap-3">
+							{/* AN EMPTY SECTION COSTS NO HEADING — the sidebar's own rule
+							    (`_display_rows`: "An empty section contributes no header"), and the
+							    ★ Pinned section above already followed it while these two did not.
+							    Newly reachable because of pinning: a pin LIFTS a row out of its
+							    ranked section, so pinning every row (or a search that matches none)
+							    painted two bare headings with nothing under them (design round 1,
+							    D1). */}
+							{pinned.length > 0 ? (
+								<section>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">★ Pinned</h2>
+									{pinned.map(renderCard)}
+								</section>
+							) : null}
+							{active.length > 0 ? (
+								<section>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
+									{active.map(renderCard)}
+								</section>
+							) : null}
+							{previous.length > 0 ? (
+								<section>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
+									{previous.map(renderCard)}
+								</section>
+							) : null}
+							{/* The case where EVERY section is empty: a query that matched none, or
+							    every row pinned away — pinned rows are not empty, so this arm is the
+							    one where the screen would otherwise be a wordless void. */}
+							{pinned.length + active.length + previous.length === 0 ? (
+								<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
+									no matching conversations
+								</p>
+							) : null}
+						</div>
+					)}
+				</main>
+				{/* THE REFUSAL IS REPORTED WHERE THE READER IS LOOKING (design rounds 5
+				    and 6, D12/D14; review round 8, R8-2; QA round 3, Q4). It is never
+				    inside the scroll content, because a band there is on screen only at
+				    `scrollTop` 0 and a reader who scrolled to the row they held would see
+				    the ★ fall back with the reason about a screen ABOVE them. It is pinned
+				    to the top of the list at any scroll position, the way the session view
+				    renders its own refusal under its header.
+
+				    IT IS AN OVERLAY, AND LAYOUT-NEUTRAL (QA round 4). As a layout sibling
+				    between the header and `<main>` its height came out of the scroller, and
+				    the ResizeObserver that handed that height back through `scrollTop`
+				    fought the browser's own anchoring: the rollback left every row one row
+				    higher (−51.2px at 100% text, −101.6px at 200%). Painted over the list,
+				    showing or hiding it cannot change the scroller's client height, so the
+				    rows' geometry and the browser's anchoring are left alone and there is
+				    nothing to compensate. It slides and fades on transform/opacity only,
+				    which never reflow; the one deliberate scroll is the effect that keeps
+				    the pressed row clear of it.
+
+				    NO `aria-hidden`, unlike the caption. When hidden its text is empty, so
+				    there is nothing for assistive tech to read, and the live region is
+				    present from the first render, which is the shape screen readers
+				    announce reliably. `px-3` lines its text up with the header and the
+				    search field (`<main>`'s `px-1` plus the field's `mx-2`). */}
+				<div
+					ref={pinErrorRef}
+					className={cn(
+						"absolute inset-x-0 top-0 z-10 border-b border-hairline bg-canvas px-3 py-2 transition-[transform,opacity] duration-200 ease-out",
+						showPinError
+							? "translate-y-0 opacity-100"
+							: "pointer-events-none -translate-y-full opacity-0",
+					)}
+				>
+					<p role="alert" className="text-meta text-danger">
 						{pinErrorText}
 					</p>
 				</div>
 			</div>
-			{/* BROWSER SCROLL ANCHORING STAYS ON (QA round 4, Q6). An earlier round
-			    opted the list out (`overflow-anchor: none`) so the refusal band's
-			    arithmetic carry and the browser were not both correcting one offset.
-			    With the opt-out, every unrelated list change moved a scrolled reader's
-			    rows: a new live session +76px, a session resuming +51px, another
-			    client's pin below the fold +45.5px at 100% and +91px at 200%, all 0px
-			    with anchoring on. The band's observer now re-reads the rows' position
-			    after every scroll the browser makes, so the two no longer compete. */}
-			<main
-				ref={mainRef}
-				className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
-			>
-				<input
-					value={query}
-					onChange={(event) => setQuery(event.target.value)}
-					placeholder="Search conversations…"
-					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
-				/>
-				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
-				    round 1, D2). The session view's ☆ is one tap away and does the same
-				    thing, but a reader has to already be in a conversation to find it, so
-				    it cannot teach the list's own long-press.
-
-				    GATED ON WHAT IS ON SCREEN, not on the store — the whole point of the
-				    caption is that it names a row the reader can see. Keying on
-				    ``sessions`` (unfiltered) put "touch and hold a row to pin it" directly
-				    above "no matching conversations" for a query that matched nothing, and
-				    brought it back whenever a search hid the pinned rows (design round 2,
-				    D5/D6). ``visible.length > 0`` is the honest condition; the pinned test
-				    reads the STORE so a search that hides a pin does not re-show the hint.
-
-				    IT COLLAPSES RATHER THAN VANISHES, which is D8: removing the node
-				    outright snapped the whole list up ~23px at the exact moment the first
-				    pin landed. The wrapper is always mounted and animates its height to
-				    zero, so the list settles instead of jumping. `prefers-reduced-motion`
-				    caps it to instant for free (the global block), which is the right
-				    fallback — the point is not the motion, it is that nothing snaps.
-
-				    THE COLLAPSE IS CONTENT-AGNOSTIC, and that is not incidental. An
-				    earlier version capped `max-height` at a fixed 2rem — sized for ONE
-				    line of this caption at the default type scale. A caption that WRAPS
-				    to two lines (a longer localized string, a narrower container) is then
-				    taller than the cap, and `overflow-hidden` clips the second line away:
-				    the discoverer silently disappears for exactly the readers who need
-				    the label most. (The cap itself scales with the root font, so a
-				    large-text one-liner still fits — the failure is the WRAP, not the
-				    zoom.) The `0fr`/`1fr` grid trick measures the content itself, so the
-				    caption is fully painted at any string length and collapses to zero
-				    with no magic number to keep in sync with the type scale. */}
-				<div
-					className={cn(
-						"grid transition-[grid-template-rows] duration-200 ease-out",
-						showPinHint ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-					)}
-					aria-hidden={showPinHint ? undefined : true}
-				>
-					<div className="overflow-hidden">
-						<p className="mx-2 mb-2 text-meta text-ink-dim">
-							touch and hold a row to pin it
-						</p>
-					</div>
-				</div>
-				{sessions.length === 0 ? (
-					<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-						<p className="text-body text-ink-muted">
-							{connected
-								? "no sessions running"
-								: "connecting…"}
-						</p>
-						<p className="text-body-sm text-ink-dim">
-							start one below, or from the TUI on your machine
-						</p>
-					</div>
-				) : (
-					<div className="flex flex-col gap-3">
-						{/* AN EMPTY SECTION COSTS NO HEADING — the sidebar's own rule
-						    (`_display_rows`: "An empty section contributes no header"), and the
-						    ★ Pinned section above already followed it while these two did not.
-						    Newly reachable because of pinning: a pin LIFTS a row out of its
-						    ranked section, so pinning every row (or a search that matches none)
-						    painted two bare headings with nothing under them (design round 1,
-						    D1). */}
-						{pinned.length > 0 ? (
-							<section>
-								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">★ Pinned</h2>
-								{pinned.map(renderCard)}
-							</section>
-						) : null}
-						{active.length > 0 ? (
-							<section>
-								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
-								{active.map(renderCard)}
-							</section>
-						) : null}
-						{previous.length > 0 ? (
-							<section>
-								<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
-								{previous.map(renderCard)}
-							</section>
-						) : null}
-						{/* The case where EVERY section is empty: a query that matched none, or
-						    every row pinned away — pinned rows are not empty, so this arm is the
-						    one where the screen would otherwise be a wordless void. */}
-						{pinned.length + active.length + previous.length === 0 ? (
-							<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
-								no matching conversations
-							</p>
-						) : null}
-					</div>
-				)}
-			</main>
 			<footer className="flex items-center gap-2 border-t border-hairline px-3 py-2 pb-[max(env(safe-area-inset-bottom),0.5rem)]">
 				<button
 					type="button"
