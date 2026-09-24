@@ -100,17 +100,20 @@ function subscribe(l: () => void): () => void {
 export function useSessions(): {
 	sessions: SessionSummary[];
 	connected: boolean;
-	pinMarks: ReadonlyMap<string, boolean>;
 } {
 	const list = useSyncExternalStore(subscribe, () => sessions);
 	const connected = useSyncExternalStore(subscribe, () => sessionsConnected);
-	/* Read as well as the list, and for the same reason: a mark is a visible
-	   change (the ★ on the row) with no list frame behind it, so a subscriber
-	   that only read `sessions` would not repaint when one arrives. The Map is
-	   replaced rather than mutated so its identity is the change signal
-	   `useSyncExternalStore` compares. */
-	const marks = useSyncExternalStore(subscribe, () => pinMarks);
-	return { sessions: list, connected, pinMarks: marks };
+	return { sessions: list, connected };
+}
+
+/** The pins the user has asked for and the daemon has not confirmed yet, keyed
+    by session id. A selector of its own, like `useProjection`: it is a slice of
+    store state with its own change signal, and a caller that reads the list
+    alone (the sections' order) must not be made to re-render by a mark, nor to
+    miss one. The Map is replaced rather than mutated, so its identity is what
+    `useSyncExternalStore` compares. */
+export function usePinMarks(): ReadonlyMap<string, boolean> {
+	return useSyncExternalStore(subscribe, () => pinMarks);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {

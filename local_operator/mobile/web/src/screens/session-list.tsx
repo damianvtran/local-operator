@@ -35,6 +35,7 @@ import {
 	applySessionPin,
 	clearSessionPinMark,
 	retainSessionListStream,
+	usePinMarks,
 	useSessions,
 } from "../store";
 import { applyTheme, getTheme, THEMES } from "../theme";
@@ -471,7 +472,8 @@ function ThemePicker({
 }
 
 export function SessionListScreen() {
-	const { sessions, connected, pinMarks } = useSessions();
+	const { sessions, connected } = useSessions();
+	const pinMarks = usePinMarks();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
 	const [query, setQuery] = useState("");
