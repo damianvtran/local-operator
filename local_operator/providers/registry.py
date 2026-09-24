@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import inspect
 import os
 from collections.abc import Iterable
 from pathlib import Path
@@ -216,7 +217,15 @@ def _lazy_login(module: str, attr: str, *, requires_paste_prompt: bool = False) 
         **kwargs: Any,
     ) -> dict[str, Any]:
         fn = getattr(importlib.import_module(module), attr)
-        if attr in ("login_anthropic", "login_openai"):
+        # Forward the opener to EVERY login that takes one, decided by the
+        # callee's own signature rather than a name list. The list this replaced
+        # named only Anthropic and OpenAI, so Z.AI and Radient -- which accept
+        # ``open_browser`` too -- silently fell back to ``webbrowser.open``: the
+        # desktop passes a no-op opener because its renderer opens the URL, and
+        # a dropped opener made the BACKEND open a second browser tab (QA round
+        # 1, Q3). Device flows take no opener and no ``**kwargs``, so passing it
+        # unconditionally would be a TypeError there instead.
+        if "open_browser" in inspect.signature(fn).parameters:
             return await fn(callbacks, signal=signal, open_browser=open_browser, **kwargs)
         return await fn(callbacks, signal=signal, **kwargs)
 

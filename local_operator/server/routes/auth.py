@@ -309,11 +309,34 @@ async def operation(operation_id: str, host: DesktopAuth = Depends(get_desktop_a
 async def operation_input(
     operation_id: str, body: LoginInput, host: DesktopAuth = Depends(get_desktop_auth)
 ):
+    """Answer an operation's open prompt.
+
+    For a paste-an-API-key login (``login_kind == "api_key"``) the answer IS the
+    key, and this is the second route that stores one -- so it runs the same
+    ``key_check`` as ``PUT /v1/auth/providers/{id}/key`` before the flow sees it
+    (QA round 1, Q2). Validating here was chosen over refusing
+    ``POST /v1/auth/login`` for these providers: that start-then-paste shape is
+    an existing contract (the ``/login`` desktop command advertises it, and older
+    renderers may drive it), so closing it would break a client to fix a check.
+    A definite rejection answers 422 with the reason and leaves the prompt OPEN,
+    so the user re-pastes into the same flow; "could not check" lets the key
+    through, exactly as the PUT does.
+    """
     op = _operation(host, operation_id)
     pending = op.pending_input
     if pending is None or pending.done() or body.prompt_id != op.prompt_id:
         raise HTTPException(409, "This sign-in is not waiting for input.")
-    pending.set_result(_secret(body))
+    value = _secret(body)
+    definition = get_provider_definition(op.provider)
+    if definition is not None and definition.login_kind == "api_key":
+        verdict = await key_check.check_api_key(op.provider, value)
+        if verdict.valid is False:
+            raise HTTPException(422, verdict.reason or "The provider rejected this API key.")
+        # The check awaited: the flow may have been cancelled or superseded
+        # meanwhile, and a resolved future cannot take a second result.
+        if pending.done() or op.pending_input is not pending:
+            raise HTTPException(409, "This sign-in is not waiting for input.")
+    pending.set_result(value)
     return _reply(op.snapshot(), "Response submitted.")
 
 

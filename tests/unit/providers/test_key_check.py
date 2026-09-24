@@ -45,6 +45,23 @@ def _run(provider: str, handler, **kwargs) -> tuple[key_check.KeyCheck, list[htt
         (429, '{"error": "rate limited"}', None),
         (503, "upstream unavailable", None),
         (400, '{"error": "bad pageSize"}', None),
+        # Review round 1, #3: OpenAI answers a VALID restricted key (Models
+        # permission off) with 401 "insufficient permissions ... Missing scopes".
+        # That key chats fine, so it must save unverified, not be refused.
+        (
+            401,
+            '{"error": {"message": "You have insufficient permissions for this operation. '
+            'Missing scopes: api.model.read."}}',
+            None,
+        ),
+        (403, '{"error": "insufficient permissions: missing scope models.read"}', None),
+        # Review round 1, #6: entitlement and region wording is not a key verdict,
+        # even though it contains the "auth" stem the old matcher keyed on.
+        (403, '{"error": "You are not authorized to access this model in your region"}', None),
+        (403, '{"error": "unauthorized region"}', None),
+        # ...while a 403 that names the key or authentication still refuses.
+        (403, '{"error": "Invalid API key"}', False),
+        (403, '{"error": "unauthenticated: bad credentials"}', False),
     ],
 )
 def test_the_status_table(status: int, body: str, valid: bool | None) -> None:
@@ -132,3 +149,52 @@ def test_every_key_accepting_cloud_provider_has_a_check() -> None:
         if storage is None or storage.env_keys is None or storage.allows_missing_api_key:
             continue
         assert key_check._request(storage, SECRET) is not None, storage.id
+
+
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        SECRET + "\u200b",  # a zero-width space from a rich-text copy
+        SECRET[:10] + "\u2026",  # a typographic ellipsis from a truncated display
+        SECRET + "\x07",  # a control character
+        "sk-with space",  # an inner space is not a key either
+    ],
+)
+def test_a_key_with_impossible_characters_is_refused_before_any_request(pasted: str) -> None:
+    """Review round 1, #4: these used to raise ``UnicodeEncodeError`` out of
+    httpx's header encoding, which the save route turned into a 500."""
+    sent: list[httpx.Request] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={})
+
+    result, control = _run("deepseek", record)
+    assert result.valid is True  # control: the clean key is fine
+    assert len(control) == 1
+
+    async def go() -> key_check.KeyCheck:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(record)) as client:
+            return await key_check.check_api_key("deepseek", pasted, client=client)
+
+    sent.clear()
+    verdict = asyncio.run(go())
+    assert verdict == key_check.KeyCheck(False, key_check.INVALID_CHARACTERS_REASON)
+    assert "Re-copy" in (verdict.reason or "")
+    assert sent == [], "nothing is sent for a value that cannot be a key"
+
+
+def test_an_unexpected_failure_is_unknown_and_logs_only_its_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ "Never raises" is the route's contract: it has no guard of its own."""
+
+    def explode(_request: httpx.Request) -> httpx.Response:
+        raise RuntimeError(f"proxy exploded while sending {SECRET}")
+
+    with caplog.at_level("DEBUG", logger=key_check.__name__):
+        result, _ = _run("deepseek", explode)
+    assert result.valid is None
+    assert result.reason and SECRET not in result.reason
+    assert "RuntimeError" in caplog.text
+    assert SECRET not in caplog.text, "the message (which can carry the key) is never logged"

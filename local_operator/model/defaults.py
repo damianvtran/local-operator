@@ -70,13 +70,13 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # answers HTTP 400 "The supported API model names are deepseek-flash,
     # deepseek-v4-pro" to anything else (see ``configure``). The
     # ``deepseek-v4.1-flash`` spelling exists only as OpenRouter's namespaced id.
-    "deepseek": SuggestedModel("deepseek-flash", "DeepSeek V4.1 Flash"),
+    "deepseek": SuggestedModel("deepseek-flash", "DeepSeek Flash"),
     # models.dev's zai and zai-coding-plan catalogues: GLM-5.3 is the current
     # flagship, served under this id to the API key and to the OAuth-minted key.
     "zai": SuggestedModel("glm-5.3", "GLM-5.3"),
     # alibabacloud.com/help/en/model-studio/qwen3-8-max (Model Studio,
     # pay-as-you-go) and the Token Plan catalogue both serve ``qwen3.8-max``.
-    "alibaba": SuggestedModel("qwen3.8-max", "Qwen3.8 Max"),
+    "alibaba": SuggestedModel("qwen3.8-max", "Qwen3.8 Max (Model Studio)"),
     "alibaba-token-plan": SuggestedModel("qwen3.8-max", "Qwen3.8 Max"),
     # docs.x.ai/developers/models: "For everything else, including code, use
     # Grok 4.7. It is the most capable model we've built." Same id on the
@@ -90,7 +90,7 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # The API-key host (api.moonshot.cn) spells Kimi K3 ``kimi-k3`` (models.dev,
     # OpenRouter's moonshotai/kimi-k3). An OAuth sign-in reaches the coding-plan
     # host instead, which spells it ``k3`` -- see OAUTH_SUGGESTED_MODELS.
-    "kimi": SuggestedModel("kimi-k3", "Kimi K3"),
+    "kimi": SuggestedModel("kimi-k3", "Kimi K3 (Moonshot API)"),
     # docs.mistral.ai models overview: Mistral Medium 3.5 is "our frontier-class
     # multimodal model optimized for agentic and coding use cases", and it is the
     # named replacement for Magistral Medium and Medium 3 in the deprecation

@@ -950,7 +950,7 @@ async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
     assert result["defaults_applied"] == {
         "hosting": "deepseek",
         "model": "deepseek-flash",
-        "model_name": "DeepSeek V4.1 Flash",
+        "model_name": "DeepSeek Flash",
         "receipt": "Set default hosting to 'deepseek', model to 'deepseek-flash'.",
     }
     assert "sk-first-run-secret" not in response.text
@@ -1166,3 +1166,256 @@ async def test_oauth_success_applies_and_reports_the_suggested_default(desktop, 
     on_disk = ConfigManager(app.state.config_manager.config_dir)
     assert on_disk.get_config_value("hosting") == "anthropic"
     assert on_disk.get_config_value("model_name") == "claude-opus-5-5"
+
+
+async def test_concurrent_starts_leave_exactly_one_live_flow(desktop, monkeypatch):
+    """Review round 1, #2: superseding awaits the old flow's teardown, and two
+    starts interleaving across that await both created a flow. The teardown here
+    takes real time, like a loopback server closing, which is what opened the
+    window."""
+    client, app = desktop
+    live = 0
+    peak = 0
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)
+            live -= 1
+
+    _stub_login(monkeypatch, "radient", login)
+    # One start first, so both concurrent ones have an active op to supersede --
+    # the interleaving the reviewer measured.
+    await client.post("/v1/auth/login", json={"provider": "radient"})
+    replies = await asyncio.gather(
+        client.post("/v1/auth/login", json={"provider": "radient"}),
+        client.post("/v1/auth/login", json={"provider": "radient"}),
+        client.post("/v1/auth/login", json={"provider": "radient"}),
+    )
+    assert all(reply.status_code == 200 for reply in replies)
+    running = [
+        op for op in app.state.desktop_auth.operations.values() if op.task and not op.task.done()
+    ]
+    assert len(running) == 1
+    assert live == 1
+    assert peak == 1, "two flows were live at once"
+
+
+async def _real_callback_flow(callbacks, *, signal=None, timeout=300.0, open_browser=None):
+    """A REAL ``OAuthCallbackFlow`` (loopback server, paste race and all) whose
+    only fake is the token exchange -- so the paste prompt is cancelled exactly
+    as production cancels it, without being awaited."""
+    from local_operator.providers.oauth.callback_server import (
+        CallbackFlowOptions,
+        OAuthCallbackFlow,
+    )
+
+    class _Flow(OAuthCallbackFlow):
+        async def generate_auth_url(self, state: str, redirect_uri: str) -> str:
+            return f"https://claude.ai/oauth/authorize?state={state}&redirect_uri={redirect_uri}"
+
+        async def exchange_token(self, code, state, redirect_uri):
+            return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    # Port 0: an OS-assigned port, so this never fights the real 54545.
+    flow = _Flow(
+        CallbackFlowOptions(preferred_port=0, timeout_seconds=timeout),
+        callbacks,
+        open_browser=open_browser or (lambda _url: None),
+        signal=signal,
+    )
+    return await flow.run()
+
+
+@pytest.mark.parametrize(
+    ("ending", "terminal"),
+    [("timeout", "expired"), ("denied", "failed"), ("callback", "succeeded")],
+)
+async def test_an_optional_paste_sign_in_ends_in_its_terminal_state(
+    desktop, monkeypatch, ending, terminal
+):
+    """QA round 1, Q1: when the flow ended, it cancelled the paste prompt's task
+    without awaiting it, and that task's ``finally`` then reset the op to
+    ``waiting`` -- so an expired or failed Anthropic/Z.AI sign-in read as live
+    forever. Each ending must stay the terminal state it reached."""
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        timeout = 0.2 if ending == "timeout" else 30.0
+        return await _real_callback_flow(callbacks, signal=signal, timeout=timeout)
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    assert started["input_optional"] is True
+    # The prompt is open: this is the state whose `finally` used to clobber.
+    snapshot: dict[str, Any] = {}
+    for _ in range(500):
+        snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if snapshot["input_required"]:
+            break
+        await asyncio.sleep(0)
+    assert snapshot["input_required"] is True
+    if ending != "timeout":
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(started["auth_url"]).query)
+        redirect, state = query["redirect_uri"][0], query["state"][0]
+        params = (
+            {"error": "access_denied", "state": state}
+            if ending == "denied"
+            else {"code": "c0de", "state": state}
+        )
+        async with AsyncClient() as loopback:
+            await loopback.get(redirect, params=params)
+    done = None
+    for _ in range(400):
+        done = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if done["state"] in ("expired", "failed", "succeeded", "cancelled"):
+            break
+        await asyncio.sleep(0.01)
+    assert done is not None and done["state"] == terminal, done
+    # Let every cancelled prompt task run its `finally`, then look again: the
+    # regression was a LATE overwrite, so the first terminal read proves nothing.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    after = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+    assert after["state"] == terminal
+    assert after["input_required"] is False
+
+
+async def test_the_desktop_never_opens_a_system_browser_for_any_provider(desktop, monkeypatch):
+    """QA round 1, Q3: the registry forwarded the desktop's no-op opener to
+    Anthropic and OpenAI only, so Z.AI and Radient fell back to
+    ``webbrowser.open`` and the BACKEND opened a second tab beside the
+    renderer's. Every callback provider, through the real registry thunk and the
+    real flow constructor; only ``run`` is replaced, so no network is used."""
+    import webbrowser
+
+    from local_operator.providers.oauth import callback_server
+
+    system_opens: list[str] = []
+    monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: system_opens.append(url))
+
+    async def run(self):
+        # What the real `run` does with the opener, minus the network.
+        self._open_browser("https://provider.invalid/authorize")
+        return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    monkeypatch.setattr(callback_server.OAuthCallbackFlow, "run", run)
+    client, _ = desktop
+    browser_providers = [
+        p.id for p in registry.PROVIDER_REGISTRY if p.login is not None and p.callback_port
+    ]
+    assert {"anthropic", "openai", "zai-oauth", "radient"} <= set(browser_providers)
+    for provider in browser_providers:
+        started = (await client.post("/v1/auth/login", json={"provider": provider})).json()[
+            "result"
+        ]
+        done = await wait_for_state(client, started["id"], "succeeded", "failed")
+        assert done["state"] == "succeeded", (provider, done)
+    assert system_opens == []
+
+
+async def test_every_browser_login_forwards_the_callers_opener():
+    """The same seam from the other side: the opener a host passes is the one
+    the flow calls, for every callback provider (a name list dropped two)."""
+    from local_operator.providers.oauth import callback_server
+    from local_operator.providers.oauth.callback_server import LoginCallbacks
+
+    original = callback_server.OAuthCallbackFlow.run
+
+    async def run(self):
+        self._open_browser("https://provider.invalid/authorize")
+        return {}
+
+    callback_server.OAuthCallbackFlow.run = run  # type: ignore[method-assign]
+    try:
+        for provider in registry.PROVIDER_REGISTRY:
+            if provider.login is None or not provider.callback_port:
+                continue
+            opened: list[str] = []
+            await provider.login(LoginCallbacks(), signal=None, open_browser=opened.append)
+            assert opened == ["https://provider.invalid/authorize"], provider.id
+    finally:
+        callback_server.OAuthCallbackFlow.run = original  # type: ignore[method-assign]
+
+
+async def test_a_pasted_key_in_a_login_operation_is_checked_like_a_saved_one(desktop, monkeypatch):
+    """QA round 1, Q2: ``POST /v1/auth/login`` + ``/input`` stored a fake key
+    unchecked. It now runs the same check as ``PUT .../key``; a rejection is a
+    422 that leaves the prompt open for a corrected paste."""
+    from local_operator.providers import key_check
+
+    verdicts = {"sk-bad": key_check.KeyCheck(False, "OpenRouter rejected this API key.")}
+    checked: list[str] = []
+
+    async def check(provider, key, **_kwargs):
+        checked.append(provider)
+        return verdicts.get(key, key_check.KeyCheck(True, None))
+
+    monkeypatch.setattr(key_check, "check_api_key", check)
+    client, app = desktop
+    operation_id = (await client.post("/v1/auth/login", json={"provider": "openrouter"})).json()[
+        "result"
+    ]["id"]
+    awaiting = await wait_for_state(client, operation_id, "input_required")
+    refused = await client.post(
+        f"/v1/auth/operations/{operation_id}/input",
+        json={"value": "sk-bad", "prompt_id": awaiting["prompt_id"]},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == "OpenRouter rejected this API key."
+    assert "sk-bad" not in refused.text
+    assert not app.state.desktop_auth.store.list_credentials("openrouter")
+    still = (await client.get(f"/v1/auth/operations/{operation_id}")).json()["result"]
+    assert still["state"] == "input_required" and still["prompt_id"] == awaiting["prompt_id"]
+    accepted = await client.post(
+        f"/v1/auth/operations/{operation_id}/input",
+        json={"value": "sk-good", "prompt_id": awaiting["prompt_id"]},
+    )
+    assert accepted.status_code == 200
+    await wait_for_state(client, operation_id, "succeeded")
+    assert app.state.desktop_auth.store.list_credentials("openrouter")[0].data["key"] == "sk-good"
+    assert checked == ["openrouter", "openrouter"]
+
+
+async def test_an_oauth_paste_is_not_sent_to_the_key_check(desktop, monkeypatch):
+    """The check is for KEYS: an authorization code pasted into Anthropic's
+    fallback box is not an API key and must never be sent to a provider as one."""
+    from local_operator.providers import key_check
+
+    checked: list[str] = []
+
+    async def check(provider, key, **_kwargs):
+        checked.append(provider)
+        return key_check.KeyCheck(False, "should not run")
+
+    monkeypatch.setattr(key_check, "check_api_key", check)
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        pasted = await callbacks.on_manual_code_input()
+        assert pasted == "code#state"
+        return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    _stub_login(monkeypatch, "anthropic", login)
+    client, _ = desktop
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    snapshot: dict[str, Any] = {}
+    for _ in range(200):
+        snapshot = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if snapshot["input_required"]:
+            break
+        await asyncio.sleep(0)
+    reply = await client.post(
+        f"/v1/auth/operations/{started['id']}/input",
+        json={"value": "code#state", "prompt_id": snapshot["prompt_id"]},
+    )
+    assert reply.status_code == 200
+    await wait_for_state(client, started["id"], "succeeded")
+    assert checked == []

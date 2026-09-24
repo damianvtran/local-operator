@@ -482,6 +482,26 @@ def test_every_suggestion_names_a_model_the_registry_describes() -> None:
         assert (info.context_window or 0) > 0, (hosting, suggestion.id)
 
 
+def test_every_suggestion_is_named_as_the_model_picker_names_it() -> None:
+    """The desktop says "Default model set to <name>" and the model picker then
+    shows the registry row's name for the same selection. Two names for one
+    model read as two models (review round 1, #7), so wherever a shipped row
+    exists the suggestion carries that row's name verbatim. Rows without one
+    (OpenRouter's namespaced id, Radient's router) name themselves.
+    """
+    from local_operator.model.defaults import OAUTH_SUGGESTED_MODELS, SUGGESTED_MODELS
+    from local_operator.model.registry import static_models
+
+    rows = list(SUGGESTED_MODELS.items()) + list(OAUTH_SUGGESTED_MODELS.items())
+    mismatched = [
+        (hosting, suggestion.id, suggestion.name, row.name)
+        for hosting, suggestion in rows
+        if (row := static_models(hosting).get(suggestion.id)) is not None
+        and row.name != suggestion.name
+    ]
+    assert mismatched == []
+
+
 def test_every_hosted_cloud_provider_has_a_suggestion() -> None:
     """The desktop shows "Suggested: ..." on every cloud provider card; a gap is a
     blank card and a first sign-in that leaves the model empty."""
@@ -515,6 +535,60 @@ def test_the_route_decides_the_kimi_spelling() -> None:
     assert plan_login_defaults("xai-oauth", "", None).model_name == "grok-4.7"
     assert plan_login_defaults("zai-oauth", "", None).model_name == "glm-5.3"
     assert plan_login_defaults("anthropic", "", None).model_name == "claude-opus-5-5"
+
+
+def test_the_cli_plans_with_the_flavour_that_ran_not_the_storage_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``radient-key`` stores under ``radient``, whose own login is OAuth, so a
+    storage-id derivation planned a pasted key as an OAuth grant (review round
+    1, #5). Kimi is where the flavour changes the model id, so it is the probe:
+    the CLI must hand the planner what the login actually returned.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers import auth_cli
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    auth_cli._apply_login_defaults("kimi", oauth=False)
+    assert ConfigManager(tmp_path).get_config_value("model_name") == "kimi-k3"
+
+    other = tmp_path / "oauth"
+    other.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(other))
+    auth_cli._apply_login_defaults("kimi", oauth=True)
+    assert ConfigManager(other).get_config_value("model_name") == "k3"
+
+
+@pytest.mark.parametrize(
+    ("result", "oauth"),
+    [("sk-pasted-key", False), ({"type": "oauth", "access": "a", "refresh": "r"}, True)],
+)
+def test_run_login_passes_the_result_shape_as_the_flavour(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, result: object, oauth: bool
+) -> None:
+    """``run_login`` decides the flavour from what the login RETURNED (a key
+    string or an OAuth dict), not from the storage id's own definition."""
+    import dataclasses
+
+    from local_operator.providers import auth_cli, registry
+    from local_operator.providers.auth_store import AuthStore
+
+    async def login(_callbacks, **_kwargs):
+        return result
+
+    definition = registry.get_provider_definition("radient")
+    assert definition is not None
+    monkeypatch.setitem(registry._BY_ID, "radient", dataclasses.replace(definition, login=login))
+    seen: list[tuple[str, bool | None]] = []
+    monkeypatch.setattr(
+        auth_cli, "_apply_login_defaults", lambda pid, *, oauth=None: seen.append((pid, oauth))
+    )
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        assert auth_cli.run_login("radient", tmp_path, store) == 0
+    finally:
+        store.close()
+    assert seen == [("radient", oauth)]
 
 
 def test_an_empty_model_beside_the_same_provider_is_filled() -> None:

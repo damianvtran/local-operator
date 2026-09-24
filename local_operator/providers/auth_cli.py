@@ -400,7 +400,9 @@ def run_login(
             _invalidate_cached_listing(storage_provider)
             _invalidate_cached_usage(storage_provider, auth_store)
             print(f"Stored API key for '{storage_provider}'.")
-            _apply_login_defaults(storage_provider)
+            # A pasted KEY, even under a provider whose own login is OAuth
+            # (``radient-key``): the key's host decides the model's spelling.
+            _apply_login_defaults(storage_provider, oauth=False)
         return 0
 
     # OAuth credentials dict; stamp authorized_at if missing.
@@ -413,7 +415,7 @@ def run_login(
     print(f"Logged in to '{storage_provider}'{suffix}.")
     if result.get("grant_note"):
         print(f"Note: {result['grant_note']}")
-    _apply_login_defaults(storage_provider)
+    _apply_login_defaults(storage_provider, oauth=True)
     _ = row
     return 0
 
@@ -504,7 +506,7 @@ def _invalidate_cached_usage(provider_id: str, auth_store: "AuthStore") -> None:
         logger.debug("usage-cache invalidation failed for %s", provider_id, exc_info=True)
 
 
-def _apply_login_defaults(provider_id: str) -> None:
+def _apply_login_defaults(provider_id: str, *, oauth: bool | None = None) -> None:
     """Make a fresh login usable: adopt it as hosting when none is set.
 
     Before this, ``login <provider>`` stored the credential but never touched
@@ -531,6 +533,15 @@ def _apply_login_defaults(provider_id: str) -> None:
     Imported lazily and guarded: this is a convenience on top of a login that
     already succeeded, so a config write failure (read-only dir) must not turn a
     successful login into a failure.
+
+    ``oauth`` states what the login that RAN produced (a dict of OAuth tokens or
+    a pasted key string). Callers pass it because ``provider_id`` here is the
+    STORAGE id, and deriving it from that id's definition reads the wrong
+    flavour: ``radient-key`` stores under ``radient``, whose own login is the
+    browser flow, so a pasted key was planned as an OAuth grant. The suggested
+    model's spelling is per route (Kimi names K3 ``k3`` on its OAuth host and
+    ``kimi-k3`` on its key host), so the flavour matters. ``None`` keeps the
+    planner's own derivation for callers that do not know.
     """
     try:
         from local_operator.config import ConfigManager
@@ -545,6 +556,7 @@ def _apply_login_defaults(provider_id: str) -> None:
             provider_id,
             manager.get_config_value("hosting"),
             manager.get_config_value("model_name"),
+            oauth=oauth,
         )
         # The write is shared too (``apply_login_defaults``): a plan may set only
         # the model, which a hosting-gated write here used to drop.

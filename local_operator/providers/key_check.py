@@ -103,21 +103,63 @@ def _mentions_key(body: str) -> bool:
     return "api key" in lowered or "api_key" in lowered or "apikey" in lowered
 
 
+#: Wording that says the KEY is fine but lacks the permission to read the route we
+#: probe. OpenAI answers a valid restricted key ("Model capabilities: Request"
+#: only, Models permission off) with 401 "You have insufficient permissions for
+#: this operation. Missing scopes: api.model.read" -- a key that chats fine. A
+#: status code alone cannot tell it from a revoked key, so the body decides, and
+#: this check runs BEFORE the 401 rule: refusing a good key is the worse error.
+_PERMISSION_MARKERS = ("insufficient permissions", "missing scope", "insufficient_scope")
+
+#: What a 403 must say to count as a verdict on the key itself. Deliberately not
+#: the bare ``auth`` stem: "not authorized to access this model" and "unauthorized
+#: region" are entitlement/region blocks, which say nothing about the key.
+_AUTHENTICATION_MARKERS = ("authentication", "unauthenticated", "invalid api key", "credential")
+
+#: A key is printable ASCII: every provider issues base64/hex-ish tokens, and an
+#: HTTP header cannot carry anything else (httpx raises ``UnicodeEncodeError``).
+#: What actually arrives here outside that range is paste debris -- a zero-width
+#: space, a typographic ellipsis from a truncated display -- so it is named as a
+#: re-copy problem before any request is attempted.
+_KEY_CHARACTERS = frozenset(chr(code) for code in range(0x21, 0x7F))
+
+
+def has_invalid_characters(key: str) -> bool:
+    """Whether ``key`` holds anything but printable, non-space ASCII."""
+    return any(character not in _KEY_CHARACTERS for character in key)
+
+
+#: The sentence for :func:`has_invalid_characters`; shared so every refusal of a
+#: pasted key says the same thing.
+INVALID_CHARACTERS_REASON = (
+    "This key contains characters an API key cannot have. Re-copy it and try again."
+)
+
+
 def classify(definition: ProviderDefinition, status: int, body: str) -> KeyCheck:
     """The verdict for one response. Split out so it is testable without a socket."""
     label = _label(definition)
     rejected = KeyCheck(False, f"{label} rejected this API key. Check it and try again.")
     if 200 <= status < 300:
         return KeyCheck(True, None)
+    lowered = body.casefold()
+    if status in (401, 403) and any(marker in lowered for marker in _PERMISSION_MARKERS):
+        # Authenticated, just not allowed to list models: a verdict of "unknown".
+        return _unverified(label, status)
     if status == 401:
         return rejected
-    lowered = body.casefold()
-    if status == 403 and (_mentions_key(body) or "auth" in lowered or "credential" in lowered):
+    if status == 403 and (
+        _mentions_key(body) or any(marker in lowered for marker in _AUTHENTICATION_MARKERS)
+    ):
         return rejected
     if status == 400 and _mentions_key(body):
         return rejected
     # Anything else -- a region block, a rate limit, an outage, a route this
     # account cannot read -- says nothing definite about the key.
+    return _unverified(label, status)
+
+
+def _unverified(label: str, status: int) -> KeyCheck:
     return KeyCheck(
         None,
         f"{label} could not check this key right now (HTTP {status}). "
@@ -137,6 +179,10 @@ async def check_api_key(
     ``client`` is injectable for tests (an ``httpx.MockTransport``); production
     builds one per call, which is fine for a user-initiated save.
     """
+    if has_invalid_characters(key):
+        # Before anything else, including the provider lookup: this is a definite
+        # "not a key" for every provider, and sending it would raise in httpx.
+        return KeyCheck(False, INVALID_CHARACTERS_REASON)
     definition = get_provider_definition(credential_provider_id(provider_id))
     if definition is None or definition.allows_missing_api_key:
         return KeyCheck(None, None)
@@ -150,9 +196,12 @@ async def check_api_key(
     try:
         response = await http.get(url, headers=headers, timeout=timeout)
         return classify(definition, response.status_code, response.text[:2048])
-    except httpx.HTTPError as error:
-        # The exception TYPE only: an httpx error's message can carry the URL,
-        # and for no provider does it carry the key, but logging less is free.
+    except Exception as error:  # noqa: BLE001 -- "never raises" is the route's contract
+        # Broad on purpose: the save route has no guard of its own, and an
+        # unexpected failure here (an encoding error, a proxy misconfiguration)
+        # must degrade to "saved unverified", not a 500. The exception TYPE only:
+        # an error's message can carry the URL or header material, and logging
+        # less is free.
         logger.debug("API key check for %s could not complete: %s", definition.id, type(error))
         return KeyCheck(
             None,

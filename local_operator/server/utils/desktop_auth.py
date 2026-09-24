@@ -192,6 +192,15 @@ class DesktopAuth:
         #: rather than inventing a second manager on a possibly different root.
         self.config_manager = config_manager
         self.operations: dict[str, LoginOperation] = {}
+        # Serialises ``start``'s cancel-then-create. Superseding AWAITS the old
+        # flow's teardown (so its loopback port is free before the new flow
+        # binds), and that await is a yield point: without the lock, two starts
+        # that interleave (a double-click, two windows, a retry fired inside the
+        # route's ready wait) both cancel the same old op and both create a flow
+        # -- two live flows on one fixed port, the exact state ``start`` exists
+        # to prevent. Constructing it outside a running loop is safe: an
+        # ``asyncio.Lock`` binds to a loop on first contended use, not at init.
+        self._start_lock = asyncio.Lock()
 
     def controller(self) -> ProviderController:
         from local_operator.providers.controller import ProviderController
@@ -215,19 +224,22 @@ class DesktopAuth:
         # the new flow binds) and reads ``cancelled`` / "Replaced by a new
         # sign-in." to anyone still polling it. Nothing depended on the 409: the
         # renderer surfaced it as an error string and offered no other path.
-        for active in [op for op in self.operations.values() if op.task and not op.task.done()]:
-            await self.cancel(active)
-            active.message = "Replaced by a new sign-in."
-        while len(self.operations) >= MAX_OPERATIONS:
-            del self.operations[next(iter(self.operations))]
-        op = LoginOperation(
-            id=str(uuid.uuid4()),
-            provider=definition.id,
-            input_optional=definition.paste_code_flow and not definition.paste_prompt_required,
-        )
-        self.operations[op.id] = op
-        op.task = asyncio.create_task(self._run(op, definition))
-        return op
+        async with self._start_lock:
+            for active in [op for op in self.operations.values() if op.task and not op.task.done()]:
+                await self.cancel(active)
+                active.message = "Replaced by a new sign-in."
+            while len(self.operations) >= MAX_OPERATIONS:
+                del self.operations[next(iter(self.operations))]
+            op = LoginOperation(
+                id=str(uuid.uuid4()),
+                provider=definition.id,
+                input_optional=definition.paste_code_flow and not definition.paste_prompt_required,
+            )
+            self.operations[op.id] = op
+            # Created INSIDE the lock, so the next start (queued on it) sees this
+            # task as the active op and supersedes it rather than racing it.
+            op.task = asyncio.create_task(self._run(op, definition))
+            return op
 
     async def _run(self, op: LoginOperation, definition: ProviderDefinition) -> None:
         def on_url(url: str, instructions: str | None = None) -> None:
@@ -289,7 +301,14 @@ class DesktopAuth:
             finally:
                 op.pending_input = None
                 op.prompt_id = None
-                op.state = "waiting"
+                # Only a PROMPT state goes back to ``waiting``. A flow that ends
+                # (timeout, denied callback, success) cancels this prompt task
+                # without awaiting it, so this ``finally`` can run AFTER ``_run``
+                # has already written the terminal state -- and an unconditional
+                # reset turned "expired"/"failed" into a live-looking
+                # ``waiting`` the renderer kept polling (QA round 1, Q1).
+                if op.state == "input_required":
+                    op.state = "waiting"
 
         callbacks = LoginCallbacks(
             on_auth_url=on_url,
