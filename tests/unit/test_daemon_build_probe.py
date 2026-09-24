@@ -176,9 +176,9 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
         # again, the row `ps` actually returned is in the failure, rather than a
         # second round spent guessing which branch produced the `None`.
         raw = update_mod._process_argv(child.pid)
-        assert update_mod.generation_of_process(child.pid) == root / "generations" / generation, (
-            f"argv0={argv0!r} COLUMNS={os.environ.get('COLUMNS')!r} ps said {raw!r}"
-        )
+        assert (
+            update_mod.generation_of_process(child.pid) == root / "generations" / generation
+        ), f"argv0={argv0!r} COLUMNS={os.environ.get('COLUMNS')!r} ps said {raw!r}"
     finally:
         os.close(read_fd)
         os.close(write_fd)
