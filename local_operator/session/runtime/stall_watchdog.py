@@ -3494,6 +3494,52 @@ def dump_is_current(path: Path | None, started_at: float) -> bool:
         return False
 
 
+def rearmed_after_dump(dump: Path | None) -> bool:
+    """Has this runtime RE-ARMED its bound since the fire ``dump`` records?
+
+    THE FENCE THE HELD STATE WAS MISSING. :func:`held_fire` answers "does this life's
+    dump carry a fire over work in flight", which is a fact about an EPISODE and not
+    about the runtime in front of the reader: a runtime that fired once, was reported
+    as stalled with work in flight, then recovered and went on beating carries that
+    marker for the rest of its life. A listing reading the marker alone therefore
+    paints a healthy, continuously re-arming runtime as one that needs a person
+    (``bound held; lop stop``) — the same class of false claim the liveness and
+    recycled-pid fences above exist to stop, and the one a peer session observed on
+    two healthy sessions whose deadline siblings had been rewritten one second before
+    it read them (2026-09-24).
+
+    THE EVIDENCE IS THE SIBLING, not a second artifact and not a second clock:
+    :func:`deadline_path` is rewritten by every beat THAT RE-ARMED, so its mtime is
+    this module's own "last successful re-arm" (see
+    :data:`HOW_TO_READ_THE_FIRED_VALUE`), and a sibling later than the dump that
+    carries the fire says a re-arm landed after that fire. The two files are the arms
+    of one episode — ``arm`` truncates the dump and unlinks the sibling together — so
+    the comparison needs no new number and no store of its own.
+
+    IT TAKES THE PATH THE CALLER'S SEARCH ALREADY RESOLVED, rather than a pid, and
+    that is what makes it correct for a fire in ANOTHER store: the sibling is composed
+    from the found dump (``<log dir>/runtime-stall-<pid>.deadline`` beside
+    ``…-<pid>.log``), so the pair a reader compares is always one directory's pair.
+
+    WHAT IT DOES NOT PROVE, since the direction matters and the module never reports a
+    verdict it cannot support: a re-arm is the runtime REPORTING, and reporting is a
+    weaker fact than working — a plane that ticks while its work stands still is
+    outside this bound by design (see the module docstring). ``False`` is therefore
+    the quiet direction for a runtime that is not reporting, which is exactly the
+    runtime the held state is FOR.
+
+    ``False`` for no dump, and for a stat that raises. The caller must still be able
+    to report a held state it can see and cannot qualify: an unreadable pair is not
+    evidence of a re-arm.
+    """
+    if dump is None:
+        return False
+    try:
+        return dump.with_suffix(DEADLINE_SUFFIX).stat().st_mtime > dump.stat().st_mtime
+    except OSError:
+        return False
+
+
 def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     """Is this pid's LIVE state "stalled with work in flight"? The third state.
 

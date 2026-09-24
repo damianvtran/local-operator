@@ -344,7 +344,18 @@ def collect_sessions(
         dump = fired_dumps.get(rec.pid)
         if not stall_watchdog.dump_is_current(dump, rec.started_at):
             dump = None
-        held = stall_watchdog.dump_is_current(held_dumps.get(rec.pid), rec.started_at)
+        # A RE-ARM AFTER THE FIRE RETIRES THE HELD READING (2026-09-24), and it is the
+        # third fence on this one fact rather than a fourth field: ``held_dumps`` reads
+        # an EPISODE (a marker in the file), while the row is about the runtime NOW, and
+        # a runtime that recovered and went on beating carries the marker for the rest
+        # of its life. The sibling's mtime is the module's own "last successful re-arm"
+        # (see ``rearmed_after_dump``), so a healthy re-arming session stops claiming
+        # "bound held; lop stop" — the phrase whose whole meaning is that a person is
+        # needed — while a runtime that fired and is NOT re-arming keeps it.
+        held_dump = held_dumps.get(rec.pid)
+        held = stall_watchdog.dump_is_current(
+            held_dump, rec.started_at
+        ) and not stall_watchdog.rearmed_after_dump(held_dump)
         use = measured.get(rec.pid)
         lines.append(
             SessionLine(
@@ -404,6 +415,11 @@ def collect_sessions(
                 # heartbeat) into ``bound held; lop stop`` on the real CLI table. The
                 # artifact's mtime against this record's own start is what separates the
                 # two.
+                # ...AND FENCED ON THE RE-ARM (2026-09-24): the same false claim reached
+                # a runtime that was simply WORKING again — the marker is about an
+                # episode, and nothing here asked whether the bound had been re-armed
+                # since it. ``held`` above carries that third fence; the artifact itself
+                # stays published either way, because the fire is still the evidence.
                 stall_held=held and state != "stale",
                 # THE FILE, NOT A COMPOSED PATH — see the maps above (MAJOR-1 / Q-1).
                 stall_dump=str(dump) if dump is not None else None,
