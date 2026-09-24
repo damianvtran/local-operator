@@ -282,25 +282,44 @@ def test_the_guard_is_per_link_and_per_thread() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_shipped_slices_route_their_ops_through_the_hook_with_the_same_refusal(
-    root: Path,
-) -> None:
+def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None:
+    """The hook carries every slice's ops, with the SLICE's own deadline.
+
+    WHAT CHANGED WITH SLICE M: the mobility ops no longer answer the by-name
+    refusal, because that slice has landed. ``net_broker`` still does — the
+    credentials slice is a separate piece of work — so it is the one that keeps this
+    test's original assertion, and the other three are asserted to be SERVED (the
+    refusal that names only a document is gone). The deadlines are the mechanism
+    P0 pinned, so they are asserted for all four.
+    """
     server = _unstarted(root)
     try:
         assert set(server._slow_ops) == {  # noqa: SLF001
             "net_session_move",
             "net_sync",
             "net_broker",
+            "net_session_lifecycle",
         }
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
-        for op in ("net_session_move", "net_sync", "net_broker"):
-            handler = server._handlers[op]  # noqa: SLF001
-            with pytest.raises(types.MeshRefusal) as excinfo:
-                handler(None, {"req": 1})  # type: ignore[arg-type]
-            assert excinfo.value.code == "not_implemented"
-            assert f"{op} is not implemented in this build yet (" in excinfo.value.sentence
-            assert ".md" in excinfo.value.sentence
+        assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_session_lifecycle") == mobility.LIFECYCLE_OP_DEADLINE_S
+        # The unlanded slice keeps its by-name refusal...
+        with pytest.raises(types.MeshRefusal) as excinfo:
+            broker = server._handlers["net_broker"]  # noqa: SLF001
+            broker(None, {"req": 1})  # type: ignore[arg-type]
+        assert excinfo.value.code == "not_implemented"
+        assert "net_broker is not implemented in this build yet (" in excinfo.value.sentence
+        assert ".md" in excinfo.value.sentence
+        # ...and the landed ones answer AS THE SLICE: a frame with no conversation id
+        # is refused by the handler in the family's own shape (a MeshRefusal the relay
+        # shapes into a refusal frame), not by the name of a document.
+        for op in ("net_session_move", "net_sync", "net_session_lifecycle"):
+            with pytest.raises(types.MeshRefusal) as landed:
+                landed_handler = server._handlers[op]  # noqa: SLF001
+                landed_handler(None, {"req": 1})  # type: ignore[arg-type]
+            assert landed.value.code == "bad_request", op
+            assert "not implemented in this build" not in landed.value.sentence, op
     finally:
         server.stop()
 
@@ -363,12 +382,25 @@ def test_a_slice_that_fails_to_install_is_reported_not_fatal(
 
 
 def test_an_unregistered_local_slice_verb_says_which_slice_owns_it(root: Path) -> None:
+    """A verb no slice has claimed refuses by NAME, with the document that owns it.
+
+    THE CREDENTIALS VERBS ARE THE REMAINING CASE: slice M registers ``session_move``,
+    ``session_sync`` and ``session_lifecycle`` at construction, so those dispatch to
+    their handlers (asserted below), while the broker's leg-1 verbs still have no
+    slice behind them.
+    """
     server = _unstarted(root)
     try:
-        for op in ("session_sync", "credential_grant"):
+        for op in ("credential_grant", "credential_report", "credential_placement"):
             reply = server.control_dispatch(op, {"req": 3})
             assert reply["code"] == "not_implemented", reply
             assert ".md" in reply["message"] and "owns that slice" in reply["message"]
+        # A REGISTERED verb never takes that path: it is served, and its own handler
+        # decides (here: that it was given no conversation id).
+        reply = server.control_dispatch("session_sync", {"req": 4})
+        assert reply["op"] == "ack", reply
+        assert reply["detail"]["ok"] is False
+        assert reply["detail"]["code"] == "bad_request"
     finally:
         server.stop()
 
@@ -378,13 +410,26 @@ def test_an_unregistered_local_slice_verb_says_which_slice_owns_it(root: Path) -
 # ---------------------------------------------------------------------------
 
 
-def test_the_seams_raise_not_implemented_with_the_owning_slice() -> None:
-    with pytest.raises(NotImplementedError, match="mobility slice"):
-        mobility.request_move("s1", to="build-box")
-    with pytest.raises(NotImplementedError, match="mobility slice"):
-        mobility.lifecycle("s1", action="delete", peer="build-box")
-    with pytest.raises(NotImplementedError, match="mobility slice"):
-        sync.request_sync("s1")
+def test_the_seams_are_served_by_the_slice_and_refuse_without_a_relay(root: Path) -> None:
+    """The frozen seams now ANSWER, and their no-relay answer is a REFUSAL.
+
+    Every one of these verbs is a mesh operation, so the only process that can carry
+    it out is this device's relay. With none running the answer is the family's
+    documented refusal — ``relay_unavailable`` with a sentence naming the remedy —
+    never a ``None`` collapsed into a confident-looking result and never a raise into
+    whatever the caller's own stack happens to be.
+    """
+    move = mobility.request_move("s1", to="build-box", root=root)
+    assert move["ok"] is False
+    assert move["code"] == "relay_unavailable"
+    assert move["changed"] is False and move["phase_reached"] is None
+    assert "relay" in str(move["message"]).lower()
+
+    deleted = mobility.lifecycle("s1", action="delete", peer="build-box", root=root)
+    assert deleted["ok"] is False and deleted["code"] == "relay_unavailable"
+
+    pulled = sync.request_sync("s1", root=root)
+    assert pulled["ok"] is False and pulled["code"] == "relay_unavailable"
 
 
 def test_the_session_move_contract_is_frozen() -> None:

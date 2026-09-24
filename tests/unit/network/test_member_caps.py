@@ -270,7 +270,9 @@ def test_a_grant_opens_the_move_op_on_an_already_open_link(
 ) -> None:
     """Finding 3 end to end: a ``drive`` peer is refused ``net_session_move`` by the
     chokepoint; after ``member grant … move`` on the owner the SAME link passes the
-    capability check (and reaches the slice's not-implemented refusal instead)."""
+    capability check and the op reaches MOBILITY, whose own refusal for a frame with
+    no conversation id is what comes back (the capability, not the op, was what
+    blocked it before)."""
     server_a, server_b, host, port = devices
     record, _host, _port = _pair(devices, monkeypatch, role="drive")
     link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
@@ -294,7 +296,8 @@ def test_a_grant_opens_the_move_op_on_an_already_open_link(
 
         after = link.request({**frame, "req": 72})
         assert after is not None and after["op"] == "error"
-        assert "net_session_move is not implemented in this build yet" in after["message"]
+        assert "a move needs a conversation id" in after["message"]
+        assert "not implemented" not in after["message"]
     finally:
         link.close("test")
 

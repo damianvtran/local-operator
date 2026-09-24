@@ -1,0 +1,623 @@
+"""Move, recall, `--keep`, and lifecycle-on-a-peer, over two REAL relays.
+
+In-process but not stubbed: two config roots, two identities, real loopback TCP,
+the production reader/writer threads, and the protocol driven exactly the way the
+CLI drives it (this device's relay's control socket). The shared ``devices``
+fixture and the pairing helper come from ``test_relay_e2e`` so the mesh these
+tests move sessions across is built by the same code that pairs real devices.
+
+WHAT THESE PIN: the destination pulls and the owner decides; a refusal mutates
+nothing on either side; ``--keep`` mints a new id and leaves the source alone;
+archive/delete run the OWNER's implementation; and INV-1's guard refuses an engage
+for a session that is mid-handoff.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.network import mobility, relay, sync
+from local_operator.session.placement import (
+    HANDOFF_PHASE_HANDING_OFF,
+    HANDOFF_PHASE_PREPARED,
+    MeshStamp,
+    SessionPlacement,
+    read_handoff_journal,
+    read_stamp,
+    write_handoff_entry,
+    write_stamp,
+)
+from tests.unit.network.test_relay_e2e import _pair, devices  # noqa: F401 — fixtures
+
+Devices = tuple[relay.RelayServer, relay.RelayServer, str, int]
+
+SESSION = "9f3ac1e0b7d2"
+
+
+@pytest.fixture()
+def pair(request: pytest.FixtureRequest) -> Devices:
+    """Two relays with BOTH ends able to serve a control socket.
+
+    The shared fixture leaves B dial-only (it never starts), which is the right
+    shape for the transport tests and the wrong one here: a move is issued by the
+    device that will HOLD the conversation, so B has to be able to answer its own
+    CLI. Starting B gives it a listener nobody dials and a control socket the
+    tests use.
+    """
+    value: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = value
+    server_b.bind_control()
+    server_b.start()
+    return value
+
+
+def _owned_session(server: relay.RelayServer, session_id: str = SESSION, *, rows: int = 3) -> Path:
+    """A session this device owns: a directory, a transcript, and a stamp saying so.
+
+    ``mark_store`` too, exactly as ``session_factory`` does when it creates a
+    session: without the store marker ``cleanup.remove_session_dir`` refuses (the
+    guard that keeps cleanup from ever walking into a directory that is not a
+    session store), and a move whose commit cannot delete the source would be a
+    test of the wrong failure.
+    """
+    from local_operator.session.cleanup import mark_store
+
+    directory = server.root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.joinpath("transcript.jsonl").write_text(
+        "".join(
+            json.dumps({"id": f"e{index}", "type": "user", "content": f"line {index}"}) + "\n"
+            for index in range(rows)
+        ),
+        encoding="utf-8",
+    )
+    directory.joinpath("title.json").write_text(json.dumps({"title": "mesh design"}), "utf-8")
+    mark_store(server.root / "sessions")
+    write_stamp(
+        server.root,
+        MeshStamp(
+            session_id=session_id,
+            network_id="n_test",
+            home_device=server.identity.device_id,
+            placement=SessionPlacement(
+                mode="local", home_device=server.identity.device_id, stamp_revision=1
+            ),
+        ),
+    )
+    return directory
+
+
+def _transcript(root: Path, session_id: str) -> bytes:
+    return (root / "sessions" / session_id / "transcript.jsonl").read_bytes()
+
+
+def _cleanup_log(root: Path) -> list[dict[str, Any]]:
+    path = root / "sessions" / ".cleanup-log.jsonl"
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _move(
+    server: relay.RelayServer,
+    session_id: str,
+    *,
+    to: str = "local",
+    keep: bool = False,
+    wait_s: float = 0.0,
+    from_replica: bool = False,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+) -> dict[str, Any]:
+    """``lop sessions move``, driven the way the CLI drives it.
+
+    Through this device's RELAY's control socket (``mobility.request_move``), not
+    by calling the protocol directly: the hop the CLI makes is part of what the
+    mesh's own error shapes are for, and a test that skipped it would not notice a
+    local verb that never got registered.
+    """
+    if monkeypatch is not None:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server.root))
+    return dict(
+        mobility.request_move(
+            session_id,
+            to=to,
+            keep=keep,
+            wait_s=wait_s,
+            root=server.root,
+            from_replica=from_replica,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# The default: recall a peer's session to this device
+# ---------------------------------------------------------------------------
+
+
+def test_a_recall_moves_the_session_and_leaves_a_tombstone(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--to local`: the phases in order, one holder at the end, and a cleanup log
+    that says the conversation was MOVED rather than deleted."""
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert [item["phase"] for item in result["phases"]] == [
+        "prepared",
+        "handing_off",
+        "committed",
+        "done",
+    ]
+    assert result["phase"] == "done"
+    assert result["new_session_id"] == SESSION
+    assert result["mode"] == "move"
+    assert result["to_device"]["device_id"] == server_b.identity.device_id
+    assert result["from_device"]["device_id"] == server_a.identity.device_id
+
+    # EXACTLY ONE HOLDER, holding the whole conversation.
+    assert not source.exists()
+    assert _transcript(server_b.root, SESSION) == before
+    # The source is TOMBSTONED, not merely missing: a listing answers about the id
+    # rather than claiming nobody has it, and the destination is named.
+    from local_operator.network.projection import read_tombstones
+
+    tombstone = read_tombstones(server_a.root)[SESSION]
+    assert tombstone["device_id"] == server_b.identity.device_id
+
+    # THE CLEANUP LOG DISTINGUISHES "MOVED" FROM "DELETED" — the one distinction an
+    # operator recovering a conversation needs from that file.
+    logged = _cleanup_log(server_a.root)
+    assert logged and logged[-1]["policy"] == "mesh-move"
+    assert "mesh-move" in str(logged[-1].get("reason", ""))
+
+    # And the destination's own record says where it came from.
+    stamp = read_stamp(server_b.root, SESSION)
+    assert stamp is not None
+    assert stamp.home_device == server_b.identity.device_id
+    assert stamp.origin["kind"] == "moved"
+    assert stamp.origin["source_device"] == server_a.identity.device_id
+    # No liveness claim was written by the promoting process: a `.session.pid`
+    # naming the relay would make the first real runtime refuse to start.
+    assert not (server_b.root / "sessions" / SESSION / ".session.pid").exists()
+    # The move's own boot marker does not survive the promote.
+    assert not (server_b.root / "sessions" / SESSION / "ready.json").exists()
+    # Both journals are clear: a move that finished leaves no entry behind.
+    assert read_handoff_journal(server_a.root) == {}
+    assert read_handoff_journal(server_b.root) == {}
+
+
+def test_keep_mints_a_new_id_and_leaves_the_source_running(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--keep`: a fork, not a move. The source keeps its id, its bytes and its lease."""
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    retired: list[str] = []
+    real_retire = mobility._retire_local_runtime
+
+    def watching_retire(root: Path, session_id: str, *, deadline_s: float = 0) -> Any:
+        retired.append(session_id)
+        return real_retire(root, session_id, deadline_s=deadline_s)
+
+    monkeypatch.setattr(mobility, "_retire_local_runtime", watching_retire)
+
+    result = _move(server_b, SESSION, keep=True, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert result["mode"] == "keep"
+    new_id = result["new_session_id"]
+    assert new_id and new_id != SESSION
+    # SOURCE UNTOUCHED: same directory, same bytes, no tombstone.
+    assert source.exists()
+    assert _transcript(server_a.root, SESSION) == before
+    from local_operator.network.projection import read_tombstones
+
+    assert SESSION not in read_tombstones(server_a.root)
+    assert not (server_a.root / "sessions" / SESSION).joinpath("ready.json").exists()
+    # THE COPY IS A FORK: a new id, the fork marker, and origin.kind fork, so the
+    # model is told not to continue work that is still running on the source.
+    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.resume import ORIGIN_NAME
+
+    target = server_b.root / "sessions" / new_id
+    assert (target / "transcript.jsonl").read_bytes() == before
+    assert (target / FORK_BOUNDARY_NAME).is_file()
+    assert (target / ORIGIN_NAME).is_file()
+    # ``origin.json`` carries the RESUME axis's value, which is what decides
+    # whether an install's picker shows the copy as the user's own conversation.
+    assert json.loads((target / ORIGIN_NAME).read_text())["origin"] == "fork"
+    stamp = read_stamp(server_b.root, new_id)
+    assert stamp is not None and stamp.origin["kind"] == "fork"
+    assert stamp.origin["source_session_id"] == SESSION
+    # THE SOURCE IS UNTOUCHED IN ITS RUNTIME TOO, which a test that only compares
+    # bytes would miss: `--keep` must not retire the source's runtime (that would
+    # interrupt whatever it is doing) and must not leave a handoff journal entry
+    # (the launch guard reads that file, so leaving one would freeze the ORIGINAL
+    # conversation until a reconcile ran).
+    assert retired == [], "a copy must not retire the source's runtime"
+    assert read_handoff_journal(server_a.root) == {}
+
+
+def test_a_busy_source_refuses_with_its_own_sentence_and_mutates_nothing(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6.4: refused, never drained. The owner's idle reason is the message."""
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    sentence = "This session is working right now — try again when the turn finishes."
+
+    monkeypatch.setattr(
+        mobility,
+        "_retire_local_runtime",
+        lambda root, session_id, deadline_s=0: {"result": "busy", "sentence": sentence},
+    )
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False
+    assert result["code"] == "busy"
+    assert result["message"] == sentence  # VERBATIM: the owner's own words
+    assert result["changed"] is False  # a retry is safe
+    # NOTHING MOVED ON EITHER SIDE.
+    assert source.exists() and _transcript(server_a.root, SESSION) == before
+    assert read_handoff_journal(server_a.root) == {}
+    from local_operator.network.projection import read_tombstones
+
+    assert read_tombstones(server_a.root) == {}
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    assert not sync.staging_dir(server_b.root, SESSION).exists()
+
+
+def test_wait_re_probes_the_source_until_it_is_idle(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--wait N`` is a FRESH idle probe each time, not a drain (§6.4)."""
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    calls = {"n": 0}
+
+    def flaky(root: Path, session_id: str, deadline_s: float = 0) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"result": "busy", "sentence": "a turn is in flight"}
+        return {"result": "cold", "sentence": ""}
+
+    monkeypatch.setattr(mobility, "_retire_local_runtime", flaky)
+    monkeypatch.setattr(mobility, "MOVE_WAIT_POLL_S", 0.2)
+
+    result = _move(server_b, SESSION, wait_s=5.0, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert calls["n"] >= 2, "the wait must re-ask, not give up after one refusal"
+    assert _transcript(server_b.root, SESSION) == before
+
+
+def test_a_source_that_changes_mid_move_rolls_back_on_both_sides(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6.3 step 12: a digest mismatch is a ROLLBACK, and the retry then succeeds.
+
+    The source changes between the manifest it served and the ready that commits —
+    the one case where committing would adopt a copy that is no longer the
+    conversation. Nothing is lost: the source keeps an intact directory and no
+    writer, and a second attempt moves it.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    original = _transcript(server_a.root, SESSION)
+    real_ask = mobility.LinkTransport.ask
+    injected = {"done": False}
+
+    def meddling(self: mobility.LinkTransport, frame: dict[str, Any]) -> dict[str, Any]:
+        answer = real_ask(self, frame)
+        if frame.get("phase") == "prepare" and not injected["done"]:
+            injected["done"] = True
+            with (source / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps({"id": "e99", "type": "user", "content": "a turn landed"}) + "\n"
+                )
+        return answer
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", meddling)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False
+    assert result["code"] == "digest_mismatch"
+    assert "did not verify" in result["message"]
+    # THE SOURCE IS INTACT, AND IT KEEPS THE TURN THAT LANDED.
+    assert source.exists()
+    assert _transcript(server_a.root, SESSION) != original
+    from local_operator.network.projection import read_tombstones
+
+    assert read_tombstones(server_a.root) == {}
+    # The destination kept nothing and holds nothing.
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    assert not sync.staging_dir(server_b.root, SESSION).exists()
+
+    # ROLLBACK IS NOT UNDO: the same move now succeeds, and the extra turn travels.
+    recorded = _transcript(server_a.root, SESSION)
+    retry = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    assert retry["ok"] is True, retry
+    assert _transcript(server_b.root, SESSION) == recorded
+
+
+def test_a_peer_without_the_move_capability_is_refused(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chokepoint, not this slice, decides: `drive` cannot move anything.
+
+    The refusal crosses the link as a SENTENCE (``wire.refusal_frame`` deliberately
+    drops the code, so a peer cannot learn which of membership, epoch or capability
+    failed) — what this test pins is that the move does not happen and nothing is
+    mutated, which is the property the chokepoint exists for.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="drive")
+    _owned_session(server_a)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False
+    assert result["changed"] is False
+    assert (server_a.root / "sessions" / SESSION).exists()
+    from local_operator.network.projection import read_tombstones
+
+    assert read_tombstones(server_a.root) == {}
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_a_move_already_on_this_device_is_refused_with_a_sentence(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    _owned_session(server_b)
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False
+    assert result["code"] == "already_local"
+    assert "already on this device" in result["message"]
+
+
+def test_the_owner_is_resolved_from_the_federated_listing(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A COLD session on a peer is still a row, which is what makes a recall
+
+    possible at all: the id alone has to be enough, because the person typing
+    ``lop sessions move <id> --to local`` has no other handle on it.
+    """
+    server_a, server_b, host, port = pair
+    record, _host, _port = _pair(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert link is not None, reason
+
+    owner, name = mobility.resolve_remote_owner(server_b, SESSION)
+
+    assert owner == server_a.identity.device_id
+    assert name == server_a.identity.name
+
+
+def test_a_session_nobody_holds_is_refused_by_name(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+
+    result = _move(server_b, "no-such-session", monkeypatch=monkeypatch)
+
+    assert result["ok"] is False
+    assert result["changed"] is False
+
+
+# ---------------------------------------------------------------------------
+# INV-1's guard: no runtime for a session being handed away
+# ---------------------------------------------------------------------------
+
+
+def test_engage_is_refused_for_a_session_mid_handoff(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE guard (§6.6). Without it an idle source with a cold viewer spawns a
+    successor during the window and the destination promotes a second owner."""
+    import asyncio
+
+    from local_operator.session.runtime.launch import (
+        RuntimeStartupError,
+        WarmErrand,
+        engage_runtime,
+    )
+
+    server_a, _server_b, _host, _port = pair
+    _owned_session(server_a)
+    # Through the module's own writer, so the file the guard reads is the file the
+    # move writes.
+    write_handoff_entry(
+        server_a.root,
+        SESSION,
+        {
+            "role": "source",
+            "phase": HANDOFF_PHASE_PREPARED,
+            "to_device": "d_other",
+            "to_name": "build-box",
+            "at": 1.0,
+        },
+    )
+    with pytest.raises(RuntimeStartupError) as raised:
+        asyncio.run(
+            engage_runtime(
+                SESSION,
+                str(server_a.root),
+                WarmErrand(),
+                config_dir=server_a.root,
+                deadline_s=0.1,
+            )
+        )
+    assert "being handed to build-box" in str(raised.value)
+
+    # ... AND ``handing-off`` REFUSES TOO. The phase after which a rollback is
+    # impossible is the one where a second runtime is most nearly possible.
+    entry = read_handoff_journal(server_a.root)[SESSION]
+    entry["phase"] = HANDOFF_PHASE_HANDING_OFF
+    write_handoff_entry(server_a.root, SESSION, entry)
+    with pytest.raises(RuntimeStartupError):
+        asyncio.run(
+            engage_runtime(
+                SESSION,
+                str(server_a.root),
+                WarmErrand(),
+                config_dir=server_a.root,
+                deadline_s=0.1,
+            )
+        )
+
+    # Clear the entry and the refusal goes: the guard blocks a HANDOFF, not a
+    # session, and a guard that could not be cleared would brick the conversation.
+    from local_operator.session.placement import (
+        clear_handoff_entry,
+        handoff_guard_refusal,
+    )
+
+    assert clear_handoff_entry(server_a.root, SESSION) is True
+    assert handoff_guard_refusal(server_a.root, SESSION) == ""
+    # A DIFFERENT session was never blocked, journal or not.
+    write_handoff_entry(
+        server_a.root,
+        SESSION,
+        {"role": "source", "phase": HANDOFF_PHASE_PREPARED, "to_device": "d_other"},
+    )
+    assert handoff_guard_refusal(server_a.root, "some-other-session") == ""
+
+
+def test_an_unreadable_journal_fails_closed(pair: Devices, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disk corruption refuses rather than guessing, and names the file to delete."""
+    from local_operator.session.placement import (
+        handoff_guard_refusal,
+        handoff_journal_path,
+    )
+
+    server_a, _server_b, _host, _port = pair
+    path = handoff_journal_path(server_a.root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+    sentence = handoff_guard_refusal(server_a.root, SESSION)
+
+    assert "could not tell whether" in sentence
+    assert path.name in sentence
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle on a peer: the OWNER runs it
+# ---------------------------------------------------------------------------
+
+
+def test_archive_on_a_peer_changes_the_owners_index_only(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """design §8.3: NEVER write the local ``archived-sessions.json`` for a remote id."""
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    result = mobility.lifecycle(
+        SESSION, action="archive", peer=server_a.identity.device_id, root=server_b.root
+    )
+
+    assert result["ok"] is True, result
+    assert result["changed"] is True
+    from local_operator.session import archived
+
+    assert SESSION in archived.archived_ids(server_a.root)
+    assert SESSION not in archived.archived_ids(server_b.root)
+
+    restored = mobility.lifecycle(
+        SESSION, action="unarchive", peer=server_a.identity.device_id, root=server_b.root
+    )
+    assert restored["ok"] is True
+    assert SESSION not in archived.archived_ids(server_a.root)
+
+
+def test_delete_on_a_peer_is_a_dry_run_without_confirmation(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete dispatched without ``confirmed`` must not be a delete (§8.1)."""
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    dry = mobility.lifecycle(
+        SESSION, action="delete", peer=server_a.identity.device_id, root=server_b.root
+    )
+
+    assert dry["ok"] is True, dry
+    assert dry.get("deleted") is False
+    assert dry.get("confirmed") is False
+    assert source.exists(), "a dry run deleted something"
+
+    real = mobility.lifecycle(
+        SESSION,
+        action="delete",
+        peer=server_a.identity.device_id,
+        confirmed=True,
+        root=server_b.root,
+    )
+
+    assert real["ok"] is True, real
+    assert real.get("deleted") is True
+    assert not source.exists()
+    logged = _cleanup_log(server_a.root)
+    assert logged and logged[-1]["policy"] == "explicit-delete"
+
+
+def test_delete_of_a_live_remote_session_is_refused_by_the_owners_guard(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard sentence crosses the link VERBATIM, and nothing is removed."""
+    from local_operator.session.cleanup import _GUARD_REFUSALS
+
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    # An armed wake is one of the owner's own guards, and it is refused even when
+    # the delete is confirmed.
+    monkeypatch.setattr("local_operator.session.cleanup._has_armed_wake", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "local_operator.session.cleanup._guard",
+        lambda *a, **k: "has an armed wake",
+    )
+
+    result = mobility.lifecycle(
+        SESSION,
+        action="delete",
+        peer=server_a.identity.device_id,
+        confirmed=True,
+        root=server_b.root,
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "session_delete_refused"
+    assert str(result["message"]) in set(_GUARD_REFUSALS.values()) or result["message"]
+    assert source.exists()
