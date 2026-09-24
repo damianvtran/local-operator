@@ -253,12 +253,28 @@ class UserMessageStart(SessionEvent):
     those by text swallowed the foreign row. Defaults to empty for reduced
     event producers and synthetic tests, where the app falls back to its
     historical text match.
+
+    ``injected`` is the STRUCTURAL provenance signal — the announced message
+    carried ``provider_payload["harness_injected"]``, so the harness minted this
+    row and no person typed it. It is carried alongside the text recogniser
+    rather than instead of it, because the two answer the same question by
+    different means: the stamp is exact where it exists, and the recogniser
+    covers rows written by a build that predates the stamp (the same "either
+    signal" tolerance ``harness.rows.is_harness_injection`` documents).
     """
 
-    def __init__(self, prompt: str, images: list[ImageContent] | int, message_id: str = "") -> None:
+    def __init__(
+        self,
+        prompt: str,
+        images: list[ImageContent] | int,
+        message_id: str = "",
+        *,
+        injected: bool = False,
+    ) -> None:
         super().__init__()
         self.prompt = prompt
         self.message_id = message_id
+        self.injected = injected
         # Integer remains accepted for older synthetic tests and reduced event
         # producers. Production carries immutable blocks; only that path can
         # render thumbnails, while the compatibility path preserves its receipt.
@@ -893,7 +909,23 @@ class EventController:
             # app registered the same id when it painted the row optimistically,
             # so an event whose id it does not recognise is a genuinely new
             # message and must be painted even when the words repeat (#228).
-            self._post(UserMessageStart(message.text, images, message.id))
+            #
+            # The provenance stamp rides along too, read through the shared
+            # decision rather than by poking `provider_payload` here: whether a
+            # row was minted by the harness is ONE question (`harness.rows`
+            # answers it for the folds, the subagent panel and this bridge), and
+            # a second reader of the raw key is the drift that function exists
+            # to stop.
+            from local_operator.harness.rows import is_harness_injection
+
+            self._post(
+                UserMessageStart(
+                    message.text,
+                    images,
+                    message.id,
+                    injected=is_harness_injection(message),
+                )
+            )
             return
         # A new model call: its reasoning is a NEW block, so the buffer starts
         # empty and the app is told the previous phase is over (it may have

@@ -380,6 +380,50 @@ command is refused rather than stored (`/goal --stop` used to become the standin
 objective), which is the one deliberate behaviour change: a goal whose text is a
 single `--word` is no longer accepted.
 
+### The judged goal: what ships
+
+This is the shipped behaviour of the judged-goal record, stated here because the
+design notes it was built from are not in this repository and parts of them were
+superseded during review. The code is the authority. The strings below are
+constants in `session/goal.py` and `session/goal_judge.py`.
+
+* **Bare `/goal` has two shapes, one per kind of host.** A terminal that OWNS the
+  session opens the goal card (`tui/widgets/goal_panel.py`) and prints nothing. The
+  card shows the objective, the judge line (`judge: <state> · run <n>/12`) and the
+  settled list. Its two keys are `d` (done) and `c` (clear, which takes two presses
+  because there is no undo). A follower, the runtime and the desktop print
+  `goal_report`'s one line instead: `goal: <text> — active`,
+  `goal: <text> — done; /goal --dismiss clears it`, or
+  `no goal set — /goal <text> to set one`. An attached terminal's card draws its
+  status, judge and history from the frame, and hides the two keys, because they
+  write the owner's record.
+* **The flag forms** are `--done` (settle it and record it), `--dismiss` (clear the
+  text of a goal that is already done; the history keeps it), `--history` (the
+  settled list, newest first) and `--clear` (delete it and record nothing). A flag
+  must be the WHOLE argument. None of them starts a turn. A host that neither owns
+  the record nor can route the command says
+  `the goal record belongs to the session's owner — /goal --clear, --done, --dismiss and --history run there`.
+* **Setting a goal starts a new life for it.** `/goal <text>`, `lop --goal` and the
+  mobile relay all mark the goal `active`, give it a fresh judge token, and record a
+  still-active predecessor as `superseded`. A goal that was already done stays in
+  history. A goal set over a settled one is therefore judged and injected again,
+  and it is not shown as done.
+* **The `<goal>` prompt block is withheld once the goal is `done`.** The text stays
+  for the surfaces to show, but it is not presented to the model as work to pursue.
+* **A stall is announced once, on entry to `stalled`**, as a transcript notice on
+  every host that runs the judge. There is one sentence for each bound:
+
+  | bound | notice |
+  |---|---|
+  | three consecutive unreadable verdicts | `goal stalled: judge could not decide — send a message to continue` |
+  | 12 continuations in one streak | `goal stalled: stopped after 12 continuations — send a message to continue` |
+  | a reason this build cannot name | `goal stalled: auto-continuation stopped — send a message to continue` |
+
+  The cap's wording is the canonical one. The judge publishes it as the record's
+  `reason` (`STALLED_CAP_REASON`), so it is part of the wire contract, and every
+  surface prints the same sentence. The earlier design draft's
+  `reached the continuation limit` wording was not shipped.
+
 The terminal's argument picker offers `--clear` on an empty `/goal `
 argument while a goal is set, and `--stop` on an empty `/loop ` argument while that
 terminal is running a loop. Both rows are `alert` rows, so one Enter FILLS the buffer

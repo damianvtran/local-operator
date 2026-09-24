@@ -1049,6 +1049,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "temp FILE -> attachment.json",
     ),
     (
+        "local_operator/resume.py::write_goal_record",
+        "<path>.replace",
+        "temp FILE -> goal.json",
+    ),
+    (
         "local_operator/resume.py::write_session_title",
         "<path>.replace",
         "temp FILE -> title.json in a session",
@@ -1712,6 +1717,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
     {
         "local_operator/resume.py::write_session_title",  # tmp -> title.json
         "local_operator/resume.py::write_session_attachment",  # tmp -> attachment.json
+        "local_operator/resume.py::write_goal_record",  # tmp -> goal.json
         "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
