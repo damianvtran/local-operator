@@ -378,6 +378,23 @@ class MeshCredentialClient:
         )
         self._save_state()
 
+    def _bounded(self, grant: Grant) -> Grant:
+        """``grant`` with its expiry capped at THIS device's ``now + grant_ttl_s``.
+
+        The revoke receipt promises "a grant already lent is dropped within
+        ``grant_ttl_s``", and until now only the OWNER enforced it (``min(token_exp,
+        now + ttl)`` in ``owner.py``) — so an owner clock far ahead, or an owner that
+        simply sent ``10**18``, got a bearer cached as live for years (review round 4,
+        R4-m1). The borrower enforces its own half. Capping at the borrower's clock
+        can only make a grant END EARLIER, which costs one re-ask, never a longer life.
+        """
+        from local_operator.network.credentials import grant_ttl_s
+
+        ceiling_ms = int(time.time() * 1000) + int(grant_ttl_s(self.root) * 1000)
+        if grant.grant_expires_at_ms > ceiling_ms:
+            grant.grant_expires_at_ms = ceiling_ms
+        return grant
+
     def _remember_grant(self, key: str, grant: Grant) -> None:
         self.state.note_grant(key, grant.grant_id, owner_device=grant.credential_ref.owner_device)
         self._save_state()
@@ -660,6 +677,9 @@ class MeshCredentialClient:
         from local_operator.network.types import MeshRefusal
 
         changed: list[str] = []
+        #: ``{device, reason}`` for every member whose document was NOT merged, so a
+        #: skipped member is named in the reply rather than silently missing.
+        skipped: list[dict[str, str]] = []
         asked = 0
         for device in self._other_active_members():
             asked += 1
@@ -698,13 +718,30 @@ class MeshCredentialClient:
                     # member's document unmerged (review round 2, m3). Skipping the
                     # member is the honest outcome: its document is merged on the next
                     # pull, and nothing was written for it this time.
+                    skipped.append({"device": device, "reason": "busy"})
                     continue
-        return {
+                except Exception:  # noqa: BLE001 — one member's bytes must not stop the rest
+                    # ONE MEMBER'S DOCUMENT IS THAT MEMBER'S PROBLEM (review round 4,
+                    # R4-M1). The document is a PAIRED peer's bytes, and a field this
+                    # build could not read (a 309-digit ``doc_rev`` raised
+                    # ``OverflowError`` before the boundary helper was total) escaped
+                    # the loop — so any invited device could stop every borrower from
+                    # merging anyone else's document with one bad field. The boundary
+                    # helper no longer raises; this is the loop's OWN guarantee, so the
+                    # next unforeseen shape refuses that one document by name instead
+                    # of silently skipping every member after it. The merge writes
+                    # under the lock and only after parsing, so nothing was written.
+                    skipped.append({"device": device, "reason": "malformed_document"})
+                    continue
+        result: dict[str, Any] = {
             "kind": "ack",
             "key": "",
             "changed": sorted(set(changed)),
             "owners": asked,
         }
+        if skipped:
+            result["skipped"] = skipped
+        return result
 
     def _other_active_members(self) -> list[str]:
         try:
@@ -779,7 +816,7 @@ class MeshCredentialClient:
                 label,
             )
         if detail.get("kind") == "grant":
-            grant = Grant.from_detail(detail)
+            grant = self._bounded(Grant.from_detail(detail))
             self.grants.put(key, session_id, grant)
             self._remember_grant(key, grant)
             return grant

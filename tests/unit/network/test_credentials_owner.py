@@ -556,6 +556,44 @@ def test_the_owner_side_refresh_a_report_can_provoke_is_rate_limited(
     assert posts_after_first == 1
 
 
+def test_two_reports_racing_one_window_refresh_once_and_say_so(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """R4-n2: two reports inside one window answered ``refreshed`` twice for ONE POST.
+
+    The read-then-stamp of the refresh window was two steps, so a second report could
+    read "never refreshed" between the first one's read and its stamp. The barrier
+    below holds the first reader inside ``get`` for up to 1 s: without the lock both
+    readers meet there and both see nothing; with it the second waits for the stamp.
+    """
+    import threading
+
+    barrier = threading.Barrier(2, timeout=1.0)
+
+    class _Held(dict[int, float]):
+        def get(self, key: Any, default: Any = None) -> Any:  # type: ignore[override]
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
+            return super().get(key, default)
+
+    owner.broker._report_refreshed = _Held()  # noqa: SLF001
+    actions: list[str] = []
+    workers = [
+        threading.Thread(
+            target=lambda: actions.append(_report(owner, BORROWER_DEVICE, "invalid")["action"])
+        )
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=30)
+    assert sorted(actions) == ["coalesced", "refreshed"], actions
+    assert len(idp.posts) == 1
+
+
 @pytest.fixture()
 def young_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """The owner module's ``monotonic`` as it reads 5 s after boot.

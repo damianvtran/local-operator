@@ -140,8 +140,15 @@ def device_bound_refusal(provider: str) -> str:
 MAX_PEER_RETRY_AFTER_MS = 300_000
 
 
+#: The largest number a peer may send for ANY field (``2**53``): the biggest integer a
+#: JSON number keeps exactly in every implementation, and far above any real value
+#: here (a millisecond timestamp is ~1.8e12). A value above it is not one this
+#: protocol produces, so it is treated as over the cap rather than trusted.
+PEER_NUMBER_CEILING = 2**53
+
+
 def peer_number(value: Any, *, default: float = 0, maximum: float | None = None) -> float:
-    """A number a PEER sent, or ``default`` — never an exception, never out of range.
+    """A number a PEER sent, or ``default`` — TOTAL: no input raises, none is out of range.
 
     WHY THIS EXISTS (QA round 2, and review round 2 m1 before it): every numeric field
     on a broker frame, a grant, a refusal or a pulled placement document was read with
@@ -151,30 +158,53 @@ def peer_number(value: Any, *, default: float = 0, maximum: float | None = None)
     where a value stops being the peer's claim and becomes this device's input, so it
     is validated HERE, once, for every field.
 
-    Accepted: a finite ``int``/``float`` or a numeric string, ``>= 0``. A ``bool``, a
-    container, ``NaN``, an infinity, a negative number or anything unparseable yields
-    ``default``; a value above ``maximum`` is clamped to it.
+    AN ``int`` NEVER GOES THROUGH ``float`` (review round 4, R4-M1 and R4-n1).
+    ``json.loads`` turns a 309-digit number into an ``int``, and ``float()`` of that
+    raises ``OverflowError`` — which is not ``ValueError``, so it escaped every caller
+    and brought the ``null`` reply back. Comparing ints as ints also keeps them exact:
+    the float round-trip turned ``2**53 + 1`` into ``2**53``.
+
+    Accepted: a finite ``int``/``float`` or a numeric string in ``[0, 2**53]``. A
+    ``bool``, a container, ``NaN``, an infinity, a negative number or anything
+    unparseable yields ``default``. A value over ``maximum`` — or over
+    :data:`PEER_NUMBER_CEILING` — yields ``maximum`` when the field has one (a clamp,
+    so an over-long retry becomes the LONGEST allowed, never the shorter default) and
+    ``default`` when it has none (every such field's default is its fail-safe: an
+    expired grant, the floor revision, epoch 0).
     """
     if isinstance(value, bool) or value is None:
         return default
+    number: int | float
     if isinstance(value, (int, float)):
-        number = float(value)
+        number = value
     elif isinstance(value, str):
+        text = value.strip()
         try:
-            number = float(value.strip())
+            # An integer string parses as an int, exactly; only a non-integer string
+            # takes the float path (where "1e400" is ``inf`` and refused below).
+            number = int(text)
         except ValueError:
-            return default
+            try:
+                number = float(text)
+            except ValueError:
+                return default
     else:
         return default
-    if not math.isfinite(number) or number < 0:
+    if isinstance(number, float) and not math.isfinite(number):
         return default
-    if maximum is not None and number > maximum:
-        return maximum
+    if number < 0:
+        return default
+    if number > PEER_NUMBER_CEILING or (maximum is not None and number > maximum):
+        return maximum if maximum is not None else default
     return number
 
 
 def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int:
-    """:func:`peer_number` for a field the protocol defines as an integer."""
+    """:func:`peer_number` for a field the protocol defines as an integer.
+
+    ``int()`` of the result cannot overflow: :func:`peer_number` returns nothing above
+    :data:`PEER_NUMBER_CEILING`, and it is already finite.
+    """
     return int(peer_number(value, default=default, maximum=maximum))
 
 

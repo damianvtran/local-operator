@@ -369,7 +369,8 @@ def test_a_report_with_a_garbled_retry_value_is_answered_not_crashed(mesh: Any) 
     _pull(mesh)
     found = store.find_own_relay(mesh.b.root)
     assert found is not None
-    for value in ("abc", -5, 10**18, "nan", [1], _MISSING):
+    # ``10**400`` travels as a 401-digit JSON integer (review round 4, R4-M1).
+    for value in ("abc", -5, 10**18, 10**400, "nan", [1], _MISSING):
         extra = {} if value is _MISSING else {"retry_after_ms": value}
         reply = relay.control_request(
             found,
@@ -383,3 +384,38 @@ def test_a_report_with_a_garbled_retry_value_is_answered_not_crashed(mesh: Any) 
         assert isinstance(reply, dict), (value, reply)
         detail = reply.get("detail")
         assert isinstance(detail, dict) and detail.get("action") == "noted", (value, reply)
+
+
+def test_a_pull_of_a_document_with_a_401_digit_field_still_merges(
+    mesh: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-M1 over a socket: the owner's document carries 401-digit numbers on the WIRE.
+
+    The owner's own serialiser would never write one (its loader passes every number
+    through the boundary helper), so the reply is widened where a lying or skewed peer
+    would widen it — after the document is built, before it is framed. B's relay must
+    decode it off the real TCP link, merge it with the fields read as their fail-safe
+    floor, and answer; before the helper was total the merge raised ``OverflowError``.
+    """
+    from local_operator.network.credentials import owner as owner_mod
+
+    _share(mesh)
+    original = owner_mod.MeshCredentialBroker.placement_frame
+
+    def _widened(self: Any, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        detail = original(self, link, frame)
+        document = detail.get("document")
+        if isinstance(document, dict):
+            document["epoch"] = 10**400
+            for row in document.get("credentials") or []:
+                row["doc_rev"] = 10**400
+                row["declared_at"] = 10**400
+        return detail
+
+    monkeypatch.setattr(owner_mod.MeshCredentialBroker, "placement_frame", _widened)
+    detail = _pull(mesh)
+    assert detail.get("changed") == [STUB_PROVIDER], detail
+    assert "skipped" not in detail, detail
+    assert isinstance(
+        _borrower_client(mesh).request_grant_sync(STUB_PROVIDER, session_id="s-w"), Grant
+    )
