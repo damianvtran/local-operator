@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -189,3 +190,77 @@ def test_a_session_this_device_holds_never_resolves_as_remote(tmp_path: Path) ->
     (tmp_path / "sessions" / "0123456789ab").mkdir(parents=True)
     assert remote_row_for("0123456789ab", tmp_path) is None
     assert remote_row_for("feedfacecafe", tmp_path) is None
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_bridge_reads_and_prompts_a_peers_session(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DESKTOP's own read path over a real pair: snapshot, history, a prompt.
+
+    Slice V proved the viewer over real relays for the TUI. What this cell adds
+    is the half the desktop reaches through a different door: ``DesktopSessions``
+    resolves the peer's id, builds the SAME viewer through
+    ``remote_open.open_remote_viewer``, and serves the transcript out of the
+    WIRE — the read that has no local journal behind it. Three things are
+    asserted, and each is a requirement rather than a detail:
+
+    * the snapshot carries the peer's rows (so a click paints a conversation
+      rather than an empty panel claiming the conversation starts here);
+    * nothing is written on the VIEWING device — no session directory for an id
+      it does not own (INV-1's two-writer case, from the desktop's side);
+    * a prompt sent through the desktop's own control envelope lands in the
+      PEER's transcript, read from the owner's journal rather than from what the
+      viewer believes it sent.
+    """
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+    from local_operator.session.peer_rows import clear_cache
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="desktop-open",
+        prompt="hello from the peer",
+    )
+    try:
+        # The projection cache is 20 s and the pool reads it cache-first, so the
+        # row has to come from a REAL fan-out for this test to mean anything: the
+        # clear makes the pool pay that read, exactly as a machine whose sidebar
+        # has not polled yet does.
+        await asyncio.to_thread(clear_cache)
+        pool = DesktopSessions(created.server_a.root)
+        try:
+            async with pool.session(created.session_id, read=True) as bridge:
+                assert bridge.remote_row is not None, "the desktop did not resolve the peer's row"
+                assert bridge.remote_row.owner_device == created.server_b.identity.device_id
+
+                snapshot = await bridge.snapshot()
+                entries = snapshot["payload"]["history"]["entries"]
+                assert entries, snapshot["payload"]["history"]
+                assert "hello from the peer" in json.dumps(entries), entries
+                # NOTHING IS WRITTEN HERE: a conversation another device owns has no
+                # directory on this disk, and the wire is the only source.
+                assert not (created.server_a.root / "sessions" / created.session_id).exists()
+
+                page = await bridge.history(limit=50)
+                assert "hello from the peer" in json.dumps(page["entries"]), page
+
+            # A PROMPT THROUGH THE DESKTOP'S CONTROL ENVELOPE EXECUTES ON THE PEER.
+            async with pool.session(created.session_id) as bridge:
+                assert bridge.remote is not None
+                # A REAL command id: the owner validates it as the canonical form
+                # of a UUID, because it is the durable reservation key for one
+                # admitted turn rather than any opaque label.
+                detail, _duplicate = await bridge.remote.admit_prompt(
+                    "sent from the desktop", command_id=str(uuid.uuid4()), images=[]
+                )
+                assert detail, "the peer did not admit the desktop's prompt"
+            assert await _wait(
+                lambda: any("sent from the desktop" in text for text in _user_texts(created))
+            ), _user_texts(created)
+            await asyncio.to_thread(created.owner.wait_for_turn)
+        finally:
+            await pool.close()
+    finally:
+        await asyncio.to_thread(created.stop)
