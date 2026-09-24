@@ -62,6 +62,14 @@ NET_ONE = "n_" + "1" * 24
 NET_TWO = "n_" + "2" * 24
 REQUEST_ID = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
 
+# THE GATE'S PLACEHOLDER TOKEN. This backend only checks that the bearer matches
+# what the env capability names, so the value is arbitrary; it is spelled as a
+# WORD, the way the neighbouring desktop suites spell it
+# (``test_desktop_attention.py``), so nothing has to guess whether a test fixture
+# is a credential — and this suite never reads a real token from the environment
+# or from this machine's store.
+DESKTOP_TOKEN = "synthetic-desktop-token"
+
 _MISSING = object()
 
 
@@ -103,7 +111,7 @@ async def mesh_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             monkeypatch.delenv(name)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "test-token")
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", DESKTOP_TOKEN)
     mark_store(tmp_path / "sessions")
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
@@ -114,7 +122,7 @@ async def mesh_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://localhost",
-        headers={"Authorization": "Bearer test-token"},
+        headers={"Authorization": f"Bearer {DESKTOP_TOKEN}"},
     ) as client:
         yield client, tmp_path.resolve()
 
@@ -190,7 +198,7 @@ def _seed_session(root: Path, session_id: str, name: str = "local chat") -> None
 
 
 def test_the_two_mesh_keys_are_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "test-token")
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", DESKTOP_TOKEN)
     # ``cast`` rather than a subscript on the union the endpoint returns: the answer's
     # shape is pinned by the response model, and pyright reads ``result`` as optional.
     answer = cast(dict[str, Any], asyncio.run(capabilities_endpoint()).result)
@@ -970,6 +978,41 @@ async def test_delete_on_a_peer_removes_it_there_and_forgets_it_here(
     assert response.status_code == 200, response.text
     assert response.json()["result"] == {"session_id": OTHER, "deleted": True}
     assert (root / "sessions" / OTHER).is_dir(), "the OWNER deletes it; this device does not"
+
+
+@pytest.mark.asyncio
+async def test_opening_a_peers_conversation_says_where_it_lives(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A visible remote row must not answer "not found" about the user's own chat.
+
+    The desktop cannot open a peer's conversation until the viewer is wired to its
+    bridge; what it must NOT do meanwhile is answer the shared 404 with a sentence
+    that is false. The refusal names the device and both ways to work with it, and
+    the device is looked for only when no local directory holds the id.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    _join(monkeypatch)
+    monkeypatch.setattr(
+        # THE SEAM THE LOOKUP ITSELF USES (``remote_open.remote_row_for``), not the
+        # rows producer: the decision "is this id a peer's row" is that function's,
+        # and a stub one layer down would leave the cache unfilled and the answer
+        # come from the ordinary miss path instead.
+        "local_operator.session.remote_open.remote_row_for",
+        # ONLY the peer's id is a peer's row: the second half of this test asserts
+        # that an id nobody holds is still the ordinary 404.
+        lambda session_id, root=None: _peer_row(id=session_id) if session_id == OTHER else None,
+    )
+    response = await client.get(f"/v1/desktop/sessions/{OTHER}")
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "session_is_remote"
+    assert "build-box" in detail["message"], detail
+    assert "--to local" in detail["message"], detail
+    # AND A LOCAL ID IS UNTOUCHED: the ordinary miss is still the ordinary 404.
+    missing = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
+    assert missing.status_code == 404, missing.text
 
 
 @pytest.mark.asyncio

@@ -1997,8 +1997,60 @@ async def snapshot(session_id: str, request: Request):
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
     # ``cold_reason``; the previous envelope answered 503 "Session owner is
     # unavailable" after ~17 s for a runtime whose loop was merely busy.
+    #
+    # A PEER'S CONVERSATION IS ANSWERED IN WORDS, NOT AS UNKNOWN (see
+    # :func:`_remote_open_refusal`): this is the read a click on a row reaches
+    # first, and until the remote viewer is wired to the desktop's bridge the row
+    # a user can SEE must not answer "Requested session … not found" about their
+    # own conversation. Deferred deliberately — the viewer is its own slice, and a
+    # half-wired one that answered 200 with nothing to drive would be worse.
+    await _remote_open_refusal(request, session_id)
     async with errors(request), host(request).session(session_id, read=True) as bridge:
         return reply(await bridge.snapshot())
+
+
+async def _remote_open_refusal(request: Request, session_id: str) -> None:
+    """Refuse a peer's id IN WORDS when the desktop cannot open it, else do nothing.
+
+    THE ROW A USER CAN SEE MUST NOT READ AS UNKNOWN. With ``include_peers`` a
+    sidebar row can name a conversation another device holds, and a click reaches
+    this route first; without this, the answer was the shared 404 ("Requested
+    session, profile, team or subscription not found") about the user's own
+    conversation — a dead affordance whose sentence is also false. So the id is
+    looked up in the peer projection (cache-only on a hit, one cached read on a
+    miss, and NO relay work at all on a machine in no network) and answered as a
+    409 whose ``message`` names the device and the two ways to work with the
+    conversation today.
+
+    409 RATHER THAN 404, by the rule the delete route states for its own refusals:
+    the conversation exists and the user can see it, so "not found" would be a lie
+    about their own work. The ``code`` is what a renderer branches on; the sentence
+    is what a person reads, and it is written in the same register as the TUI's own
+    remote-session notice (that surface names the device and the way in).
+
+    THE COST ON THE ORDINARY PATH IS ONE CACHE LOOKUP, and this is the important
+    half: every local session answers from the projection's own directory check,
+    which is why this can sit in front of the hottest read on this plane.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_owner
+
+    owner = await asyncio.to_thread(remote_owner, host(request).root, session_id)
+    if owner is None:
+        return
+    device_id, device_name = owner
+    label = device_name or device_id
+    raise HTTPException(
+        409,
+        {
+            "code": "session_is_remote",
+            "message": (
+                f"{session_id} lives on {label}, and this desktop cannot open a "
+                "conversation on another device yet. Move it home with "
+                f"`lop sessions move {session_id} --to local`, or pilot it from the "
+                f"terminal with `/network sessions --peer {label} --engage {session_id}`."
+            ),
+        },
+    )
 
 
 @router.get("/v1/desktop/sessions/{session_id}/history", response_model=CRUDResponse[HistoryPage])
