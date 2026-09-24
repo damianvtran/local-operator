@@ -93,6 +93,7 @@ from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendModelSpec,
+    FrontendRevision,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -7643,7 +7644,7 @@ class AttachedSession:
         """
         return self._read_state_field("epoch")
 
-    def frontend_revision(self) -> tuple[int, ...]:
+    def frontend_revision(self) -> FrontendRevision:
         """A token that moves whenever the roster, todos or wakes move.
 
         For per-frame readers that re-derive a view from those collections and

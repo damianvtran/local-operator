@@ -902,6 +902,64 @@ _SUBAGENT_DOCK_ROWS = 10
 #: number.
 _BAND_SETTLE_PASSES = 3
 
+#: Canonical-state paint spacing (``OperatorApp._on_frontend_update``): the
+#: floor between two paints, the share of the UI loop they may take, and the
+#: longest a non-urgent field may wait. The same shape and numbers #1528 gave the
+#: runtime's own roster tick (``session._frontend_jobs_delay``), for the same
+#: reason one process over: this loop is the one that turns Enter into a bubble.
+_FRONTEND_APPLY_FLOOR_S = 0.05
+_FRONTEND_APPLY_MAX_SHARE = 0.25
+_FRONTEND_APPLY_CEILING_S = 1.0
+
+#: Canonical fields whose change is painted on the NEXT loop turn, never spaced.
+#: Each is something the user is waiting on or must act on: the working signal,
+#: an approval or ask card, and the completion receipt. A child starting,
+#: settling or leaving is the fourth exemption and is read off the store's
+#: ``lifecycle`` revision rather than a field name, because it rides ``jobs``
+#: beside the per-token progress churn that IS worth spacing.
+#: ``test_frontend_apply_spacing.py`` pins each entry with its own test.
+_URGENT_FRONTEND_FIELDS = frozenset({"streaming", "pending_gate", "attention"})
+
+
+def _frontend_apply_delay(last_cost_s: float) -> float:
+    """How long after a canonical paint the next non-urgent one may start.
+
+    WHY IT ADAPTS. Every canonical delta used to schedule a paint on the next
+    loop turn, and on a viewer of a loaded parent (12 stepping lanes, 240
+    settled children) one paint cost 40-60 ms of CPU -- status band, roster
+    projection, three panel passes -- so a stream of deltas held this loop most
+    of the time and an Enter waited 2-4 s p50 to be handled at all. Spacing the
+    next paint by ``cost / share`` caps this work at
+    ``_FRONTEND_APPLY_MAX_SHARE`` of the loop whatever the roster's size; a
+    cheap paint keeps the 50 ms floor, i.e. at most 20 paints a second.
+
+    NOTHING GOES STALE BY THIS: the paint reads the session's live state when it
+    fires, so it shows everything the skipped ones would have; only the number
+    of intermediate frames drops.
+    """
+    if last_cost_s <= 0.0:
+        return _FRONTEND_APPLY_FLOOR_S
+    return min(
+        _FRONTEND_APPLY_CEILING_S,
+        max(_FRONTEND_APPLY_FLOOR_S, last_cost_s / _FRONTEND_APPLY_MAX_SHARE - last_cost_s),
+    )
+
+
+def _frontend_revision(session: Any) -> Any:
+    """The session's canonical collection revision, or ``None`` if it has none.
+
+    ``None`` is every host that cannot say (the in-process owner, the test
+    fakes), and callers treat it as "assume everything moved" -- the behaviour
+    those hosts had before the revision existed.
+    """
+    reader = getattr(session, "frontend_revision", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader()
+    except Exception:  # noqa: BLE001 -- not synchronized yet reads as "unknown"
+        return None
+
 #: Background-completion banners one observer tick may SPAWN. Everything past
 #: the cap is still claimed — the arbitration is unchanged — and collapsed into
 #: a single "N sessions finished" digest carrying the tick's ABSOLUTE total.
@@ -10555,6 +10613,33 @@ class OperatorApp(App[None]):
         # The old callback remains queued in Textual, but it carries the retired
         # generation and returns without clearing a newer session's scheduled bit.
         self._frontend_apply_scheduled = False
+        self._cancel_frontend_apply_timer()
+
+    def _cancel_frontend_apply_timer(self) -> None:
+        timer = getattr(self, "_frontend_apply_timer", None)
+        self._frontend_apply_timer = None
+        if timer is not None:
+            timer.stop()
+
+    def _frontend_update_is_urgent(self, session: Any, update: Any) -> bool:
+        """Whether this delta must be painted now rather than on the spaced cadence.
+
+        Anything this cannot classify is urgent, so a caller that hands in no
+        typed update keeps the paint-next-turn behaviour every caller had.
+        """
+        changes = getattr(update, "changes", None)
+        if not isinstance(changes, Mapping):
+            return True
+        if not _URGENT_FRONTEND_FIELDS.isdisjoint(changes):
+            return True
+        if "jobs" in changes:
+            revision = _frontend_revision(session)
+            if revision is None:
+                return True
+            return (session, revision.epoch, revision.lifecycle) != getattr(
+                self, "_frontend_painted_lifecycle", None
+            )
+        return False
 
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
@@ -10567,10 +10652,29 @@ class OperatorApp(App[None]):
         # child row shells; reading it before the scheduled-bit guard repeated
         # that O(children) work for EVERY update in a coalesced burst.
         self._pending_frontend_session = session
+        urgent = self._frontend_update_is_urgent(session, update)
         if getattr(self, "_frontend_apply_scheduled", False):
+            # Already owed. An urgent delta behind a SPACED paint pulls it
+            # forward: an approval card must not wait out a roster's spacing.
+            if urgent and getattr(self, "_frontend_apply_timer", None) is not None:
+                self._cancel_frontend_apply_timer()
+                self.call_later(self._apply_pending_frontend_state, generation)
             return
         self._frontend_apply_scheduled = True
-        self.call_later(self._apply_pending_frontend_state, generation)
+        done_at = getattr(self, "_frontend_painted_at", None)
+        wait = (
+            0.0
+            if urgent or done_at is None
+            else done_at
+            + _frontend_apply_delay(getattr(self, "_frontend_paint_cost_s", 0.0))
+            - time.perf_counter()
+        )
+        if wait <= 0.0:
+            self.call_later(self._apply_pending_frontend_state, generation)
+        else:
+            self._frontend_apply_timer = self.set_timer(
+                wait, partial(self._apply_pending_frontend_state, generation)
+            )
 
     def _apply_pending_frontend_state(self, generation: int) -> None:
         if self._restart_plan is not None:
@@ -10578,8 +10682,25 @@ class OperatorApp(App[None]):
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
+        self._frontend_apply_timer = None
         session = getattr(self, "_pending_frontend_session", None)
         self._pending_frontend_session = None
+        # Wall, not CPU, as #1528's runtime tick measures it: what the loop could
+        # not do while this ran -- handle a key -- is wall time.
+        started = time.perf_counter()
+        try:
+            self._paint_frontend_session(session)
+        finally:
+            finished = time.perf_counter()
+            self._frontend_paint_cost_s = finished - started
+            self._frontend_painted_at = finished
+
+    def _paint_frontend_session(self, session: Any) -> None:
+        revision = _frontend_revision(session)
+        if revision is not None:
+            # Read BEFORE the paint: a delta landing during it is a later
+            # revision and must still be judged against this one.
+            self._frontend_painted_lifecycle = (session, revision.epoch, revision.lifecycle)
         state = getattr(session, "frontend_state", None) if session is not None else None
         # ONLY on an ordered update, never on the adoption snapshot painted by
         # `_adopt_session`. That snapshot is taken BEFORE the remembered choice
@@ -10746,7 +10867,17 @@ class OperatorApp(App[None]):
             active_seconds=float(getattr(state, "active_duration_s", 0.0) or 0.0),
             activity_started_at=getattr(state, "activity_started_at", None),
         )
-        self._refresh_band()
+        # The band is painted from the roster, todos and wakes alone, so a delta
+        # that moved none of them (a token count, a phase, a title) has nothing
+        # to show there -- and on a 252-child roster the band cost 35-50 ms a
+        # pass. Its time-driven and viewport-driven changes have their own
+        # callers (the 1 Hz poll, resize, density), which are not gated.
+        session = self._session
+        revision = _frontend_revision(session)
+        painted = getattr(self, "_band_painted_revision", None)
+        if revision is None or painted is None or painted[0] is not session or painted[1] != revision:
+            self._band_painted_revision = (session, revision)
+            self._refresh_band()
 
     def _on_watched_session_stopped(self, source: SessionInteraction | None = None) -> None:
         """A viewer's session was ended deliberately by whoever owns it.
