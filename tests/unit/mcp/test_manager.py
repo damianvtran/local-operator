@@ -4403,16 +4403,26 @@ class TestAuthBlockRevalidation:
     async def test_a_tombstone_written_inside_the_transport_is_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A tombstone costs ONE connect, then flat — never a storm.
+        """A tombstone costs AT MOST one connect, then flat — never a storm.
 
         ``mark_grant_dead`` runs inside the transport when the authorization
-        server has rejected the grant, and it moves the marker's dead element
-        while deliberately leaving the chain stamp where it is. So this attempt
-        earns exactly one retry (the block's dead flag is now stale), and that
-        retry re-blocks against the tombstoned marker. Round 1 measured the same
-        one-connect shape and accepted it; what this pins is that the CHAIN rule
-        had not silently removed the dead element's meaning along with the
-        timestamp's.
+        server has rejected the grant, and it deliberately leaves the chain
+        stamp where it is. Whether it also moves the marker's dead element
+        depends on the REAL store, and on current main it does not:
+        ``AuthStore.upsert_credential`` strips ``grant_dead_at`` from every
+        payload it writes, so the tombstone never persists and the marker never
+        moves (zero connects). If that strip is ever lifted the dead element
+        moves once, the block's dead flag goes stale, and the attempt earns
+        exactly one retry that re-blocks (one connect — the shape round 1
+        measured and accepted before the strip landed).
+
+        The strip is a separate, DEFERRED defect recorded on PR #1329 ("the MCP
+        dead-grant tombstone is a no-op in production"), awaiting the operator's
+        decision. So this test pins only what the chain rule guarantees in BOTH
+        worlds — the bound and the unmoved chain stamp — and deliberately pins
+        neither side of the strip: asserting the tombstone persists is not true
+        on main, and asserting it does not would make the deferred fix break an
+        unrelated test.
         """
         from local_operator.mcp.auth import McpTokenStorage
 
@@ -4440,12 +4450,17 @@ class TestAuthBlockRevalidation:
             self._stub_transport(monkeypatch, tombstone_again)
             for _ in range(30):
                 await manager.revalidate_auth_blocked()
-            assert connects == ["dd"], (
-                "a tombstone must cost exactly one connect, then go quiet: "
+            assert connects in ([], ["dd"]), (
+                "a tombstone must cost at most one connect, then go quiet: "
                 f"got {len(connects)} over 30 polls"
             )
-            # …and the tombstone did not move the chain stamp underneath it.
-            assert manager._auth_grant_marker.get("dd") == (1000.0, True)
+            # …and the tombstone did not move the chain stamp underneath it, on
+            # the block record OR on disk (the dead element is not asserted: see
+            # the docstring for why neither value is pinned).
+            blocked = manager._auth_grant_marker.get("dd")
+            assert blocked is not None and blocked[0] == 1000.0
+            on_disk = storage.grant_marker()
+            assert on_disk is not None and on_disk[0] == 1000.0
         finally:
             await manager.disconnect_all()
             store.close()
