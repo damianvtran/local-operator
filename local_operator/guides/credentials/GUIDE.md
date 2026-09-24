@@ -143,9 +143,22 @@ it would change little if it could — anything running as the user can read the
 master key beside the store and decrypt it directly. So do not treat
 `--reveal` as a wall, and do not read a `reveal` row as proof that a person was
 present. What the announcement does give you is the half that matters: the value
-is fetched through the same seam as `$(lop secret get NAME)`, so the owning
-session is told to redact it *before* any byte exists, and a session that will
-not acknowledge that gets no value at all.
+is fetched through the same seam as `$(lop secret get NAME)`, so where a broker
+and the owning session are reachable the session is told to redact it *before*
+any byte exists, and a session that will not acknowledge that gets no value at
+all.
+
+**The announcement is not unconditional, so do not read its absence as
+impossibility.** Where no broker or session is reachable, and in the default
+keyfile tier wherever a live broker refuses the caller — which includes this
+user's own plain terminal, since it has no `lop` session among its ancestors —
+the seam degrades to the **unannounced local read**, exactly as
+`$(lop secret get NAME)` does: same bytes, no notice to any session. The broker
+is the audit trail and the redaction notice in that tier, not a boundary,
+because the master key sits on disk beside the store and a refused caller can
+read it directly anyway. In the hardened passphrase tier the refusal stands and
+there is no local read to fall back to. "What is recorded" below is how you tell
+the two apart afterwards.
 
 If you are an agent wondering whether you need this: you almost certainly need
 `describe --length --fingerprint` above, or one of the forms in "From bash" that
@@ -266,8 +279,15 @@ reveal leaves two rows and they say different things: the retrieval that fed it
 (`get`, carrying the session id when the broker announced the value) and
 `reveal` — `tty` when bytes went to a terminal, `refused` when nobody could be
 asked, `cancelled` when the human declined. Read together they answer "was a
-value fetched?" and "was one printed?" separately, and the retrieval's session
-id is also how you tell an announced reveal from an unannounced one. An identity
+value fetched?" and "was one printed?" separately. **To tell an announced
+reveal from an unannounced one, read the pids, not the session id**:
+`LOCAL_OPERATOR_SESSION_ID` is supplied by the caller and nothing verifies it,
+so an unannounced local read carries whatever session id its caller asked for.
+The announced case's retrieval row is written by the **broker**, so its pid is
+the daemon's and differs from the `reveal` row's; the unannounced case's is
+written by the `reveal` process itself — the same pid as its `reveal` row — and,
+when a broker was reachable enough to refuse it, is preceded by that broker's
+`deny:retrieve` and `deny:key` rows, attributed to that same pid. An identity
 check that reads the value (`describe --length`/`--fingerprint`) is recorded as
 `describe` with the fields it was asked for (`length`, `fingerprint`, or both);
 a plain `describe` reads no value and writes no row. `lop secret audit --verify`
