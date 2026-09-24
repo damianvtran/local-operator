@@ -107,6 +107,31 @@ class TestTheSpecCarriesIt:
         assert spec.reasoning_effort == "high"
         assert spec.reasoning_efforts == ("low", "medium", "high", "xhigh", "max")
 
+    @pytest.mark.parametrize(
+        ("hosting", "model_id"),
+        [("anthropic", "claude-opus-5-5"), ("openrouter", "anthropic/claude-opus-5.5")],
+    )
+    def test_opus_5_5_boots_on_medium_its_documented_default(
+        self, hosting: str, model_id: str
+    ) -> None:
+        """The doc: "defaults to `high` (`medium` on Claude Opus 5.5)". The seed is
+        SENT as `output_config.effort`, so the forward-reading 5+ arm's `high`
+        would run every turn on the suggested default model one rung too high."""
+        assert default_effort(model_id) == "medium"
+        assert supported_efforts(model_id) == ("low", "medium", "high", "xhigh", "max")
+        spec = build_model_spec(hosting, model_id)
+        # The direct route seeds the table default; an aggregator route seeds
+        # nothing by design (see `build_model_spec`), so it must not gain `high`.
+        assert spec.reasoning_effort == ("medium" if hosting == "anthropic" else None)
+        # Its neighbours keep `high`: the arm is exact, not a 5.x widening.
+        assert default_effort("claude-opus-5") == "high"
+        assert default_effort("claude-opus-5-55") != "medium"
+        # Review round 2, NIT 3, decided: a punctuated suffix after 5.5 is the
+        # same model generation (a snapshot, a point release), so it inherits
+        # 5.5's documented default rather than falling through to the 5+ arm.
+        assert default_effort("claude-opus-5-5-1") == "medium"
+        assert default_effort("claude-opus-5.5-20260901") == "medium"
+
     def test_openai_boots_with_no_level_claimed(self) -> None:
         """OpenAI's default is per snapshot — `none` on gpt-5.4, `medium` on
         gpt-5.5 — so seeding either would put a level on the band that half the
@@ -261,6 +286,9 @@ class TestTheCycleOrder:
 #: which is the whole point: the table is an interpretation of this list, and a
 #: test that re-derived it could only ever agree with itself.
 _DOC_SUPPORTED = {
+    # Added from the same page read 2026-09-24: "Claude Opus 5.5 supports all
+    # five effort levels, and `medium` is the default".
+    "claude-opus-5-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",
