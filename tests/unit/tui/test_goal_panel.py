@@ -556,3 +556,91 @@ async def test_the_card_never_covers_the_docked_composer(size: tuple[int, int]) 
         # ...and it is the SQUEEZE that bought that, not a card that simply
         # refused to paint its own content.
         assert panel.has_class("-squeezed")
+
+
+async def _adopted(pilot, app: OperatorApp, session: object) -> None:  # noqa: ANN001
+    """Wait until the app has ADOPTED ``session``, not merely booted.
+
+    One ``pause()`` is not enough under load: a card opened before adoption is
+    drawn from no session at all, and an assertion over it passes or skips for
+    a reason that has nothing to do with the card.
+    """
+    for _ in range(60):
+        await pilot.pause()
+        if app._session is session:
+            return
+    raise AssertionError("the app never adopted the session")
+
+
+@pytest.mark.asyncio
+async def test_a_viewers_card_reads_the_record_off_the_wire() -> None:
+    """Agent review round 2, MINOR-6: a viewer's card was drawn from nothing.
+
+    `_goal_record_for` is ``None`` on anything that does not own the session (the
+    record's WRITES are the owner's), and the card read status, judge and history
+    off that ``None`` — so every attached viewer painted `judge: —` and `settled
+    none yet` beside a record its own frame carried. The frame here holds a judge
+    mid-run and one settled goal that the fake's own record does NOT, so a card
+    that still read the record would show neither.
+    """
+    from types import SimpleNamespace
+
+    session = _armed()
+    session.runtime_locality = "this-machine"  # type: ignore[misc]
+    session.frontend_state = SimpleNamespace(  # type: ignore[attr-defined]
+        goal_status="active",
+        goal_judge={"state": "continuing", "run": 2},
+        goal_history=[_entry("ship the wire-only objective")],
+        goal_history_truncated=False,
+    )
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _adopted(pilot, app, session)
+        app._open_goal_panel()
+        await pilot.pause()
+        body = _card_text(app.query_one(GoalPanel))
+    assert f"judge: continuing · run 2/{MAX_GOAL_CONTINUATIONS}" in body
+    assert "ship the wire-only objective" in body
+    assert "none yet" not in body
+    # ...and it is still a READ-ONLY card: the source moved, the ownership did not.
+    assert body.rstrip().endswith("q close")
+    assert "d done" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", range(16, 26))
+async def test_the_hint_row_is_painted_whatever_the_record_drops(height: int) -> None:
+    """Agent review round 2, MINOR-9, measured inside the painted box.
+
+    Two lines rode OUTSIDE the row budget the card is pinned to: the wire's
+    clipped-record note (MINOR-9 as reported) and the goal row itself, which
+    `_CHROME_ROWS` never counted — and a record longer than `MAX_HISTORY_ROWS`
+    printed its `… N more settled` line on a tall terminal with no row reserved
+    for it either. Each surplus line cost the body's LAST one, the key hint:
+    before the fix this cell failed at every height here. From 16 rows up the
+    ground holds the chrome, so every height must paint the whole body.
+    """
+    from types import SimpleNamespace
+
+    session = _armed()
+    for index in range(MAX_HISTORY_ROWS + 3):
+        session.arm_goal(f"objective number {index}")
+        session.mark_goal_done()
+    session.arm_goal(GOAL)
+    session.frontend_state = SimpleNamespace(  # type: ignore[attr-defined]
+        goal_history_truncated=True
+    )
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, height)) as pilot:
+        await _adopted(pilot, app, session)
+        app._cmd_goal("", lambda body, kind="info": None)
+        await pilot.pause()
+        panel = app.query_one(GoalPanel)
+        lines = _card_text(panel).split("\n")
+        painted = panel.content_region.height
+    assert len(lines) <= painted, f"{height}: body {len(lines)} rows, box paints {painted}"
+    assert lines[-1].endswith("q close"), "the hint is the body's last line"
+    assert "older settled goals were dropped" in "\n".join(lines)
+    assert "more settled" in "\n".join(lines)

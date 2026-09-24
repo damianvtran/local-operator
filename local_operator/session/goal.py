@@ -230,6 +230,21 @@ def goal_flag_form(arg: str) -> str:
     return ""
 
 
+#: What a host with no judged-goal record of its own says when asked to act on
+#: one. The record is the session OWNER's (``tui/app.py::_goal_record_for``), so
+#: a viewer that cannot route ``/goal`` has nothing local to write — and it must
+#: say where the act lives rather than "session is still starting…", which is
+#: false long after the session started (agent review round 2, MINOR-7). ONE
+#: string for both TUI handlers, because the two disagreeing about the same
+#: condition is the class the shared vocabularies in this module exist to
+#: remove; it names all FOUR flag forms ``goal_flag_form`` recognises, since the
+#: refusal guards every one of them (NIT-1).
+GOAL_RECORD_OWNER_REFUSAL = (
+    "the goal record belongs to the session's owner — "
+    "/goal --clear, --done, --dismiss and --history run there"
+)
+
+
 def goal_report(text: str, status: str) -> str:
     """The bare ``/goal`` report: the objective plus the state it is in.
 

@@ -92,9 +92,14 @@ _HISTORY_CLIPPED_NOTE = "… older settled goals were dropped from this record"
 #: reflected on the next repaint.
 _STALLED_TOKEN = "warning"
 
-#: Rows the card spends on chrome, i.e. everything that is not a goal or a
-#: history row: title, rule, judge line, blank, history heading, hint.
-_CHROME_ROWS = 6
+#: Rows the card spends on chrome, i.e. everything that is not a settled history
+#: row: title, rule, the standing-goal row (or its `no goal set` line — one row
+#: either way, the goal is clipped to fit), judge line, blank, history heading,
+#: hint. It was 6, omitting the goal row, so whenever the history overflowed the
+#: budget painted one line more than the pin it is clamped to and the line the
+#: pin cut was the LAST one — the key hint (found measuring agent review round 2's
+#: MINOR-9, which is the same undercount for the clipped-record note).
+_CHROME_ROWS = 7
 
 #: Rows above the dock below which the card spends its gutter rather than cover
 #: the docked prompt. Defined AFTER ``_CHROME_ROWS`` because it is a sum of the
@@ -311,7 +316,11 @@ def build_goal_body(
 
 
 def clamp_history_rows(
-    rows: int, available_rows: int, *, gutter_rows: int = PANEL_PADDING_ROWS
+    rows: int,
+    available_rows: int,
+    *,
+    gutter_rows: int = PANEL_PADDING_ROWS,
+    history_truncated: bool = False,
 ) -> int:
     """How many settled rows fit the ground the card may use.
 
@@ -332,10 +341,20 @@ def clamp_history_rows(
     notice is the ONLY part of the list that fits — which is exactly where the
     card used to paint `settled none yet` against a record full of them (design
     D1 / UX U1).
+
+    ``history_truncated`` charges the SAME budget for :data:`_HISTORY_CLIPPED_NOTE`,
+    the second line the body appends whenever the wire dropped settled goals.
+    Left out, a record exactly at the budget painted one line more than the pin
+    it is clamped to, and the line the clamp cut was the bottom one — the key
+    hint, behind the notice (agent review round 2, MINOR-9).
     """
     wanted = min(rows, MAX_HISTORY_ROWS)
-    budget = max(0, available_rows - _CHROME_ROWS - gutter_rows)
-    if wanted <= budget:
+    budget = max(0, available_rows - _CHROME_ROWS - gutter_rows - int(history_truncated))
+    # Nothing is dropped only when EVERY row is shown: a record longer than
+    # MAX_HISTORY_ROWS drops rows even on a tall terminal, and its `… N more
+    # settled` line needs the reserved row as much as a short terminal's does.
+    # Testing `wanted` alone let that line ride unbudgeted and cut the hint.
+    if rows <= MAX_HISTORY_ROWS and wanted <= budget:
         return wanted
     return max(0, min(wanted, budget - 1))
 
@@ -485,7 +504,16 @@ class GoalPanel(Static):
         # the only part of the card that carries no information, and spending it
         # is what keeps the card off the docked prompt (design D3 / UX U5).
         gutter = PANEL_PADDING_ROWS if rows >= _SQUEEZE_ROWS else 0
-        return rows, gutter, clamp_history_rows(len(self._history), rows, gutter_rows=gutter)
+        return (
+            rows,
+            gutter,
+            clamp_history_rows(
+                len(self._history),
+                rows,
+                gutter_rows=gutter,
+                history_truncated=self._history_truncated,
+            ),
+        )
 
     @staticmethod
     def _rendered_rows(body: Text, width: int) -> int:
