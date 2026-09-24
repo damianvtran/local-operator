@@ -177,6 +177,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
+    SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     primary_slash_name,
     slash_command_for,
@@ -36987,7 +36988,27 @@ class OperatorApp(App[None]):
         )
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
-        """Read only this session's ledger; never interpret arguments as a prompt."""
+        """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
+
+        if arg.strip() == SESSION_COPY_FLAG:
+            # The ID onto the clipboard and nothing else (decision D2). No
+            # SessionScreen and no ledger read: the pushed screen would take focus
+            # from the composer the user is about to paste into. The write goes
+            # through `_put_on_clipboard` so this gesture cannot drift from the
+            # others, and its courtesy toast stays. "sent to", because OSC 52 is
+            # unacknowledged; the ID is printed so a terminal that ignored the
+            # write still leaves something selectable in the transcript.
+            session = self._session
+            session_id = session.session_id if session is not None else ""
+            if not session_id:
+                # Not "not ready yet": `_session is None` is also the state after
+                # a failed start, and this branch cannot tell the two apart. A
+                # failed start has its own error notice above (design DR2).
+                self._system_notice("no session ID to copy", "warning")
+                return
+            self._put_on_clipboard(session_id)
+            self._system_notice(f"session ID {session_id} sent to the clipboard", "info")
+            return
 
         from local_operator.tui.widgets.session_panel import (
             SessionDiagnostics,
@@ -36995,9 +37016,9 @@ class OperatorApp(App[None]):
         )
 
         if arg.strip():
-            self._system_notice(
-                "/session takes no arguments; it reports the current session", "warning"
-            )
+            # Names the one exception and leaves what it does to the description,
+            # so the sentence does not contradict itself (design DR1).
+            self._system_notice(f"/session takes no text except {SESSION_COPY_FLAG}", "warning")
             return
         session = self._session
         if session is None:

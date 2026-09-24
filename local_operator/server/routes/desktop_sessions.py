@@ -94,6 +94,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
+    SESSION_COPY_FLAG,
     command_argument_refusal,
     slash_command_for,
     whole_draft_command,
@@ -2217,6 +2218,16 @@ async def command(session_id: str, body: Command, request: Request):
         # every draft as `send`.
         raise HTTPException(
             422, "Enter credentials in the masked credential form, not command text"
+        )
+    if spec.name == "session" and body.args.strip() == SESSION_COPY_FLAG:
+        # Beside `/credential` because it is the same kind of refusal: a sentence
+        # naming where the gesture works, not a shape check. Forwarding it would
+        # open the view and silently drop `--copy` (`native_action` has no
+        # `session` branch), the `/compact hello` class. The copy is a terminal
+        # gesture (decision D3); any other `/session` text forwards as before.
+        raise HTTPException(
+            422,
+            f"{SESSION_COPY_FLAG} works only in the terminal; the /session view shows the ID",
         )
     refusal = command_argument_refusal(spec, body.args)
     if refusal is not None:
