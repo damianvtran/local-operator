@@ -2567,6 +2567,61 @@ def test_a_cut_inside_a_crlf_pair_does_not_close_an_open_key_block(value_length:
     assert published.decode().endswith("after\r\n"), "the stream's tail was not released"
 
 
+#: The RFC 1421 header lines a legacy-encrypted PEM carries between its armour and
+#: its body (``ssh-keygen -m PEM -N …``, ``openssl rsa -traditional -des3``). Each is
+#: PROSE to the body grammar, and that is the point: they close the open-block state.
+_LEGACY_PEM_HEADERS = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D4E5F6071\n\n"
+
+
+@pytest.mark.parametrize(
+    "block_headers", [_LEGACY_PEM_HEADERS, "\n"], ids=["legacy-encrypted", "blank-separator"]
+)
+def test_the_window_floor_does_not_split_a_whole_block_under_the_cap(block_headers: str) -> None:
+    """Round-3 review R3-1 / QA round-2 Q2-1: the floor must not cut INTO a complete
+    block that fits the cap, because main holds that block whole.
+
+    Once END is in the buffer the floor (``len(text) - hold``) lands inside the
+    block, the first release carries the header and a non-body line that closes the
+    open-block state, and the held tail (body lines + END, with no header in front
+    of it for the table to match) goes out raw. Read BEFORE end of stream, because
+    that is the live card and the ``jobs(op='peek')`` tail — the surface the loop's
+    output hook never repairs; the settled result was clean on every tree. On the
+    head before the fix: 2 body lines at 7- and 4,096-byte reads and at every
+    two-chunk split offset that leaves the block whole in the second read, for this
+    26-character UNRELATED value; 0 with no value and 0 on main.
+    """
+    _pem_grammar_is_live()
+    # Output AFTER the block, longer than the hold, so the held tail is pushed out by
+    # an ordinary release while the command still runs — with only a short trailing
+    # line it would ride the final release instead, and a live-only assertion would
+    # pass on the unfixed head.
+    trailer = "".join(f"post line {index:02d} of ordinary output\n" for index in range(8))
+    stream = ("pre\n" + _PEM_HEADER + block_headers + _body_lines(26) + _PEM_END + trailer).encode()
+    assert len(stream) < builtin._PIPE_DEFERRAL_LIMIT, "the block must fit the cap"
+
+    def published_after(parts: list[bytes]) -> tuple[str, str]:
+        redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+        assert redactor.hold > 0, "no window is held, so this proves nothing"
+        assert redactor.hold < len(trailer), "the trailer must push the held tail out live"
+        live = b"".join(redactor.feed(part) for part in parts)
+        settled = live + redactor.feed(b"", final=True)
+        assert settled.decode().endswith(trailer), "the stream's tail was not released"
+        return live.decode(), settled.decode()
+
+    for chunk in (7, 4096):
+        parts = [stream[i : i + chunk] for i in range(0, len(stream), chunk)]
+        live, settled = published_after(parts)
+        leaked = _published_body_lines(live)
+        assert leaked == [], f"{len(leaked)} body lines published live at {chunk}-byte reads"
+        assert _published_body_lines(settled) == [], f"body lines in the tail at {chunk}"
+    leaking = [
+        split
+        for split in range(1, len(stream))
+        if _published_body_lines(published_after([stream[:split], stream[split:]])[0])
+    ]
+    assert leaking == [], f"{len(leaking)} of {len(stream) - 1} split offsets published body lines"
+
+
 # --- the store: containment, and the incident path ---------------------------
 
 

@@ -2907,10 +2907,14 @@ class _PipeRedactor:
         # with the child's output. So a line longer than the cap keeps its mid-line cut
         # here, and the START-side fragment rule in the fixed point below is what
         # stops that cut from closing an open block (round-2 review, R2-1).
+        #
+        # AND IT NEVER CUTS INTO A WHOLE BLOCK THAT FITS THE CAP (round-3 review R3-1 /
+        # QA Q2-1) — see `_cut_before_a_whole_block`.
         floor = max(len(text) - self.hold, 0)
         if floor < cut:
             line_start = max(text.rfind("\n", 0, floor), text.rfind("\r", 0, floor)) + 1
             cut = line_start if floor - line_start <= _PIPE_DEFERRAL_LIMIT else floor
+            cut = self._cut_before_a_whole_block(text, cut)
         # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
         # for a shape can put it inside a value, a value move can put it inside a line,
         # and the line hold can expose a value — so each is re-checked against the
@@ -2973,6 +2977,55 @@ class _PipeRedactor:
             if cut == previous_cut:
                 break
         return cut
+
+    @staticmethod
+    def _cut_before_a_whole_block(text: str, cut: int) -> int:
+        """Move a floor cut that lands inside a complete, cap-sized key block to its BEGIN.
+
+        WHY: the hold above treats a block as one unit — it is deferred until its
+        END arrives and then released whole, which is the unit the shape table's
+        ``pem-private-key`` masks (it spans BEGIN to END). The window floor is an
+        offset counted back from the buffer's end, so once END is in hand it lands
+        INSIDE that unit and splits it into two releases. The first carries the
+        header, which opens `_mask_open_key_block`'s line state; any non-body line in
+        the block then CLOSES that state by the prose rule — a legacy-encrypted PEM's
+        ``Proc-Type:``/``DEK-Info:`` lines and blank separator (``ssh-keygen -m PEM
+        -N …``, ``openssl … -traditional``), or a body line carrying a ``-`` value —
+        and the second release (the held tail: body lines + END, no header in front of
+        it for the table to match) goes out raw on the live card and the peek tail,
+        which nothing re-reads. Measured on the head before this rule: a 26-line
+        legacy-encrypted block published 1/2/5 body lines for a 14/26/88-char
+        unrelated registered value at every read size, at 1,839 of 1,839 two-chunk
+        split offsets, and 17 of 26 through a real background ``cat``; main published
+        0, because without the floor it never cut there.
+
+        WHY THE CUT AND NOT THE BLOCK RULE: main's "prose closes the block" rule is
+        the over-mask guard for a stray header, and changing it needs its own round of
+        over-mask evidence. Restoring main's unit is the smaller fix, and it only moves
+        the cut further LEFT, so the floor's guarantee (the last ``hold`` characters
+        are never published) still holds.
+
+        BOUNDED BY THE CAP: only a block whose BEGIN-to-END-line span fits
+        :data:`_PIPE_DEFERRAL_LIMIT` is treated as a unit — that is the size main can
+        hold whole, and a larger one is split by the cap on main too, where the open
+        block's line state is what masks it. The extra hold is therefore at most one
+        cap. The same raw ``-----BEGIN``/``-----END`` literals as the hold above, so
+        the two rules cannot disagree about where a block starts.
+        """
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin < 0:
+            return cut
+        end = text.find("-----END", begin)
+        if end < 0:
+            # No END yet: the hold above (or the cap) already decided this cut.
+            return cut
+        break_match = _PEM_LINE_BREAK.search(text, end)
+        block_end = break_match.end() if break_match else len(text)
+        if block_end <= cut or block_end - begin > _PIPE_DEFERRAL_LIMIT:
+            # The block, END line included, is released whole before the cut; or it
+            # is larger than main could ever hold whole.
+            return cut
+        return begin
 
     @staticmethod
     def _short_line_start(text: str, cut: int, line_start: int) -> int:
