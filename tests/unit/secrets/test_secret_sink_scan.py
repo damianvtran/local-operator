@@ -1379,3 +1379,163 @@ async def test_r3_1_the_run_consumer_still_delivers_the_value(
     assert marker.exists()
     assert "authorized" in text, text
     assert _SYNTHETIC not in text
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the `run`/`file` consumer shares the wrapper grammar (R4-1), reads
+# more inline languages and `xargs` (R4-2), and walks `file`'s shell program
+# with the path variable bound (R4-3). Every row below ran unrefused on
+# `bcdec7c49` and put a spelling of the value in the tool result.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R4-1: the unwrapped spelling of each was already refused.
+        "lop secret run --secret NAME=TOK -- command printenv TOK | rev",
+        "lop secret run --secret NAME=TOK -- env printenv TOK | rev",
+        "lop secret run --secret NAME=TOK -- timeout 5 printenv TOK | rev",
+        "lop secret run --secret NAME=TOK -- nice printenv TOK | rev",
+        "lop secret run --secret NAME=TOK -- stdbuf -oL printenv TOK | rev",
+        "lop secret run --secret NAME=TOK -- env sh -c 'echo $TOK' | rev",
+        "lop secret run --secret NAME=TOK -- timeout 5 python3 -c "
+        "'import os;print(os.environ[\"TOK\"][::-1])'",
+        "lop secret run --secret NAME=TOK -- timeout -s KILL 5 nice -n 3 printenv TOK",
+        "lop secret run --secret NAME=TOK -- env -u HOME printenv TOK",
+        # R4-2: other interpreters, and `xargs` in front of the consumer.
+        "lop secret run --secret NAME=TOK -- perl -e 'print scalar reverse $ENV{TOK}'",
+        "lop secret run --secret NAME=TOK -- ruby -e 'puts ENV[\"TOK\"].reverse'",
+        "lop secret run --secret NAME=TOK -- node -e "
+        '\'console.log(process.env.TOK.split("").reverse().join(""))\'',
+        "lop secret run --secret NAME=TOK -- node -p 'process.env.TOK'",
+        "lop secret run --secret NAME=TOK -- awk 'BEGIN{print ENVIRON[\"TOK\"]}' | rev",
+        "lop secret run --secret NAME=TOK -- python3.12 -c 'import os;print(os.environ[\"TOK\"])'",
+        "lop secret run --secret NAME=TOK -- bash -lc 'echo \"$TOK\" | rev'",
+        "echo x | lop secret run --secret NAME=TOK -- xargs printenv TOK | rev",
+        # R4-3: `file`'s inline shell program, with the default and a named
+        # `--env-var`, and the same through a wrapper and in Python/Perl.
+        "lop secret file NAME -- sh -c 'rev \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
+        "lop secret file NAME -- timeout 5 sh -c 'rev \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
+        "lop secret file NAME --env-var KF -- sh -c 'rev \"$KF\"'",
+        "lop secret file NAME -- python3 -c "
+        "'import os;print(open(os.environ[\"GOOGLE_APPLICATION_CREDENTIALS\"]).read()[::-1])'",
+        "lop secret file NAME -- perl -e "
+        "'open(F,$ENV{GOOGLE_APPLICATION_CREDENTIALS}); print reverse <F>'",
+    ],
+)
+def test_r4_the_verbs_consumer_is_found_through_wrappers_and_interpreters(command: str) -> None:
+    """R4-1/R4-2/R4-3: the consumer check sees the command that really runs."""
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+    assert "shell.secret-verb-emitting-consumer" in result.labels
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo NAME | xargs lop secret get | rev",
+        "xargs lop secret get <<< NAME | rev",
+        "echo NAME | xargs lop secret get",
+    ],
+)
+def test_r4_2_xargs_in_front_of_the_source_is_the_source(command: str) -> None:
+    """The NAME is on `xargs`'s stdin, but the fetch — and its stdout — are the same."""
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The wrapped consumer that NEEDS the value is still the sanctioned form.
+        "lop secret run --secret NAME=TOK -- timeout 5 curl -sS "
+        '-H "Authorization: Bearer $TOK" http://127.0.0.1:9/',
+        "lop secret run --secret NAME=TOK -- nice python3 client.py",
+        # `env -i` starts the child empty: nothing `run` exported survives.
+        "lop secret run --secret NAME=TOK -- env -i printenv",
+        # A program in a FILE is the stated residual, not a refusal.
+        "lop secret run --secret NAME=TOK -- perl script.pl",
+        "lop secret run --secret NAME=TOK -- node app.js",
+        # An interpreter that never reads the environment.
+        "lop secret run --secret NAME=TOK -- awk '{print $1}' /etc/hosts",
+        "lop secret run --secret NAME=TOK -- ruby -e 'puts 1'",
+        # `file`'s program that reads a FACT about the path, or hands it on.
+        "lop secret file NAME -- sh -c 'wc -c < \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
+        "lop secret file NAME -- sh -c 'gcloud auth activate-service-account "
+        '--key-file "$GOOGLE_APPLICATION_CREDENTIALS"\'',
+        "lop secret file NAME -- python3 -c "
+        "'import os;print(os.path.getsize(os.environ[\"GOOGLE_APPLICATION_CREDENTIALS\"]))'",
+        # `xargs` outside a verb keeps its own branch.
+        "find . -name '*.py' | xargs grep -l TODO",
+        "echo a b | xargs -n1 echo",
+    ],
+)
+def test_r4_the_wider_consumer_reach_does_not_refuse_the_sanctioned_forms(command: str) -> None:
+    result = scan_command(command)
+    assert not result.refused, (command, result)
+
+
+def test_r4_3_the_default_file_variable_matches_the_cli() -> None:
+    """The scanner mirrors `lop secret file`'s default rather than importing the CLI."""
+    from local_operator.harness import secret_sinks
+    from local_operator.secrets.cli import DEFAULT_FILE_ENV_VAR
+
+    assert secret_sinks._DEFAULT_FILE_ENV_VAR == DEFAULT_FILE_ENV_VAR
+
+
+@pytest.mark.asyncio
+async def test_r4_wrapped_and_interpreted_consumers_are_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """R4-1/R4-2/R4-3 through the REAL tool: each of these leaked on `bcdec7c49`."""
+    commands = [
+        f"lop secret run --secret {stored_secret}=TOK -- timeout 5 printenv TOK | rev",
+        f"lop secret run --secret {stored_secret}=TOK -- env sh -c 'echo $TOK' | rev",
+        f"lop secret run --secret {stored_secret}=TOK -- timeout 5 python3 -c "
+        "'import os;print(os.environ[\"TOK\"][::-1])'",
+        f"lop secret run --secret {stored_secret}=TOK -- "
+        "awk 'BEGIN{print ENVIRON[\"TOK\"]}' | rev",
+        f"echo {stored_secret} | xargs lop secret get | rev",
+        f"lop secret file {stored_secret} -- sh -c 'rev \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
+    ]
+    for command in commands:
+        marker = tmp_path / "ran"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r4",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        text = _result_text(result)
+        assert result.is_error, (command, text)
+        assert not marker.exists(), f"the child ran anyway: {command}"
+        assert _SYNTHETIC not in text
+        assert _SYNTHETIC[::-1] not in text
+
+
+@pytest.mark.asyncio
+async def test_r4_1_a_wrapped_run_consumer_still_delivers_the_value(
+    tmp_path: Path,
+    config_root: Path,
+    local_authorizer: str,
+    stored_secret: str,
+    shimmed_path: None,
+) -> None:
+    """The reviewer's named counterexample: `run -- timeout 5 curl …` still works."""
+    marker = tmp_path / "ran"
+    command = (
+        f"lop secret run --secret {stored_secret}=TOK -- timeout 5 sh -c "
+        f"'curl -sS -H \"Authorization: Bearer $TOK\" {local_authorizer}'; touch {marker}"
+    )
+    result = await builtin.execute_bash(
+        "bash-r4-ok", {"command": command}, AbortSignal(), None, _context(tmp_path)
+    )
+    text = _result_text(result)
+    assert not result.is_error, text
+    assert marker.exists()
+    assert "authorized" in text and "unauthorized" not in text, text
+    assert _SYNTHETIC not in text
