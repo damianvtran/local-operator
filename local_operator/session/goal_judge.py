@@ -200,6 +200,19 @@ def _never() -> bool:
     return False
 
 
+def _always() -> bool:
+    return True
+
+
+#: How long a HEADLESS run (``lop exec``) waits at teardown for a verdict already
+#: in flight (see :meth:`GoalJudge.settle`). The judge call has no timeout of its
+#: own; it is one provider request under that provider's own request bounds. So
+#: this is exec's ceiling on how long an exit may be held for a verdict the run
+#: has already paid for. Past it the run exits as it did before, and the record
+#: keeps `judging`, which the next resume re-arms (RULINGS R3).
+HEADLESS_JUDGE_SETTLE_S = 120.0
+
+
 def owns_the_session(session: Any) -> bool:
     """Whether the loop that runs this session's turns is on THIS event loop.
 
@@ -249,6 +262,7 @@ class GoalJudge:
         serial: Callable[[], int],
         judge_state: Callable[[], GoalJudgeState],
         loop_running: Callable[[], bool] = _never,
+        continuations: Callable[[], bool] = _always,
     ) -> None:
         self.judge = judge
         #: Admits ONE continuation turn and AWAITS it, so this driver never has
@@ -273,6 +287,14 @@ class GoalJudge:
         #: a loop that ends re-enables the goal judge with no bookkeeping
         #: anywhere.
         self.loop_running = loop_running
+        #: Whether this host may still ADMIT a continuation turn. Checked at the
+        #: moment one would be admitted, never cached, like ``loop_running``. Open
+        #: by default: the TUI and a long-lived runtime keep the full chain. A
+        #: headless ``lop exec`` closes it before its first turn, because its
+        #: continuation mechanism is ``--loop``. So in exec a CONTINUE verdict is
+        #: recorded as `waiting` and not turned into up to
+        #: MAX_GOAL_CONTINUATIONS paid turns nobody asked the command for.
+        self.continuations = continuations
         self._in_flight = False
         self._task: asyncio.Task[None] | None = None
         self._mirror: dict[str, Any] = {}
@@ -378,12 +400,41 @@ class GoalJudge:
         """
         if not self._claim():
             return
+        # Recorded so :meth:`settle` can wait out a resume's re-armed verdict the
+        # same way it waits out a turn end's.
+        self._task = asyncio.current_task()
         try:
             if not self.needs_rearm():
                 return
             await self._drive(error=False, aborted=False, reset_streak=False)
         finally:
             self._release()
+
+    async def settle(self, timeout: float = HEADLESS_JUDGE_SETTLE_S) -> None:
+        """Wait, bounded, for the judge run in flight to reach a verdict.
+
+        For a HEADLESS host's teardown (``lop exec``). The judge is scheduled at
+        the run's last turn end and exec used to dispose right after that turn,
+        so the verdict was often still in the air. Its provider call was paid
+        for, the record was left at `judging`, and the next ``--resume`` bought
+        the same verdict again. A headless host has closed :attr:`continuations`
+        by the time it calls this, so the wait covers the verdict only. It never covers a new
+        chain of turns: ACHIEVED settles the goal, CONTINUE is recorded as
+        `waiting`.
+
+        Shielded, so a timeout ends the WAIT and not the judge: the run is left
+        exactly as it was before this existed, and the record's `judging` is
+        what the next resume re-arms. A no-op when nothing is in flight.
+        """
+        task = self._task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("goal judge still deciding after %.0fs; leaving it to resume", timeout)
+        except Exception:  # noqa: BLE001 — the task logs its own failure
+            pass
 
     # -- the policy ------------------------------------------------------------
 
@@ -534,6 +585,15 @@ class GoalJudge:
                 # finished on its final continuation is marked done rather than
                 # stalled.
                 self._publish(state="stalled", reason=STALLED_CAP_REASON)
+                return
+            if not self.continuations():
+                # A headless run has ended (see `continuations`). The verdict is
+                # RECORDED — a readable CONTINUE keeps its reason — but no turn
+                # is admitted: the goal waits for the next turn end.
+                if verdict is False:
+                    self._publish(state="waiting", verdict="continue", reason=reason)
+                else:
+                    self._publish(state="waiting")
                 return
             run = int(self._mirror["run"]) + 1
             if verdict is False:

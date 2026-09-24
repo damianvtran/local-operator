@@ -537,6 +537,9 @@ class ServingSessionHandle(SessionHandle):
         #: driver's module is imported lazily so this module stays importable
         #: without the session goal machinery.
         self._goal_judge: Any = None
+        #: Whether the goal judge may still admit continuation turns. Only a
+        #: headless run closes it (:meth:`close_goal_continuations`).
+        self._goal_continuations_open = True
         self._active_prompt_command_id: str | None = None
         self._desktop_mcp: Any = None
         self._desktop_cwd = cwd
@@ -2948,6 +2951,7 @@ class ServingSessionHandle(SessionHandle):
                 serial=lambda: self._session.goal_turn_serial,
                 judge_state=lambda: self._session.goal_judge_state,
                 loop_running=self._loop_owns_the_verdict,
+                continuations=lambda: self._goal_continuations_open,
             )
         return self._goal_judge
 
@@ -3095,6 +3099,43 @@ class ServingSessionHandle(SessionHandle):
         if driver.state.get("status") == "cancelled":
             raise asyncio.CancelledError
         return driver.state.get("status") in {"completed", "achieved"}
+
+    @_on_session_loop
+    async def close_goal_continuations(self) -> None:
+        """Make this runtime's goal judge verdict-only: it admits no continuation.
+
+        For a HEADLESS run (``lop exec``), called before its first turn. The
+        judge fires at every turn end, including the run's own, so a gate closed
+        only at teardown lost the race whenever the verdict came back first. The
+        judge then admitted a continuation, and a CONTINUE chain could spend up
+        to ``MAX_GOAL_CONTINUATIONS`` turns the command never asked for. exec's
+        explicit continuation mechanism is ``--loop``, and the judge already
+        defers to a running loop, so in exec the judge only RECORDS verdicts.
+        A long-lived runtime never calls this and keeps the full chain.
+        """
+        self._goal_continuations_open = False
+
+    @_on_session_loop
+    async def settle_goal_judge_headless(self) -> None:
+        """A headless run's end: let the judge in flight finish its verdict.
+
+        ``lop exec --goal`` schedules the judge at its last turn end and then
+        tears down. Without this the verdict was usually still in flight at
+        dispose: a paid provider call whose answer was dropped, a record left at
+        `judging`, and the same verdict bought again on the next ``--resume``.
+
+        The exec contract, with :meth:`close_goal_continuations`: the run WAITS
+        for that one verdict (bounded by ``HEADLESS_JUDGE_SETTLE_S``) and admits
+        no continuation. ACHIEVED marks the goal done. CONTINUE is recorded as
+        `waiting` with its reason, and the goal is pursued the next time the
+        session runs a turn. The gate is closed here as well, so a host that
+        skipped the start-of-run call still cannot start a turn behind the
+        teardown.
+        """
+        self._goal_continuations_open = False
+        driver = self._goal_judge
+        if driver is not None:
+            await driver.settle()
 
     @_on_session_loop
     async def cancel_headless_loop(self) -> None:

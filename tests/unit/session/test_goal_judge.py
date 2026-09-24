@@ -60,8 +60,10 @@ class Harness:
         serial: int = 0,
         answers: list[str] | None = None,
         loop_running: bool = False,
+        continuations: bool = True,
     ) -> None:
         self.goal_text = goal
+        self.continuations_open = continuations
         self.status_value = status
         self.token_value = token
         self.state = judge_state or GoalJudgeState(state="waiting")
@@ -95,6 +97,7 @@ class Harness:
             serial=lambda: self.serial_value,
             judge_state=lambda: self.state,
             loop_running=lambda: self.loop,
+            continuations=lambda: self.continuations_open,
         )
 
     # -- collaborators ---------------------------------------------------------
@@ -563,3 +566,61 @@ async def test_rearm_on_resume_continues_the_streak_rather_than_resetting_it():
     # last thing the judge may admit, and an achieved verdict still settles.
     assert {"run": 0} not in h.changed
     assert h.state.state == "done"
+
+
+# --- a headless host's end (`lop exec`) ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_closed_host_records_a_continue_as_waiting_and_admits_nothing():
+    """exec's contract: the verdict is recorded, and no turn follows the run's end."""
+    h = Harness(answers=[CONTINUE], continuations=False)
+    await _judge_all(h)
+    assert h.prompts == [], "no continuation after a headless run's work is over"
+    assert h.settled == []
+    assert h.state.state == "waiting"
+    assert h.state.verdict == "continue"
+    assert h.state.reason == "There is more to do"
+    assert h.state.run == 0, "nothing was admitted, so nothing was counted"
+
+
+@pytest.mark.asyncio
+async def test_a_closed_host_still_settles_an_achieved_goal():
+    h = Harness(answers=[ACHIEVED], continuations=False)
+    await _judge_all(h)
+    assert h.settled == ["All the work is done"]
+    assert h.state.state == "done"
+
+
+@pytest.mark.asyncio
+async def test_settle_waits_for_the_verdict_in_flight():
+    """The race exec lost: the judge started at the last turn end, dispose came first."""
+    h = Harness(answers=[ACHIEVED])
+    driver = h.build()
+    driver.start_turn_end(error=False, aborted=False, serial=0)
+    await h.judge_started.wait()
+    asyncio.get_running_loop().call_later(0.05, h.release_judge.set)
+    await driver.settle(timeout=5)
+    assert h.settled == ["All the work is done"], "the paid verdict was recorded"
+    assert not driver.in_flight
+
+
+@pytest.mark.asyncio
+async def test_settle_is_bounded_and_leaves_the_judge_running():
+    """A timeout ends the WAIT, not the judge: the record keeps `judging` for resume."""
+    h = Harness(answers=[ACHIEVED])
+    driver = h.build()
+    driver.start_turn_end(error=False, aborted=False, serial=0)
+    await h.judge_started.wait()
+    await driver.settle(timeout=0.05)
+    assert driver.in_flight, "the shielded judge was not cancelled by the bound"
+    assert h.state.state == "judging"
+    h.release_judge.set()
+    await asyncio.sleep(0.05)
+    assert h.settled == ["All the work is done"]
+
+
+@pytest.mark.asyncio
+async def test_settle_with_nothing_in_flight_returns_at_once():
+    driver = Harness().build()
+    await asyncio.wait_for(driver.settle(timeout=30), 1)

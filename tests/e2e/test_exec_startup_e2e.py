@@ -118,6 +118,10 @@ def exec_server(tmp_path, monkeypatch):
                     ],
                 }
                 finish_reason = "tool_calls"
+            elif "You are judging" in wire and "CONTINUE_FIXTURE" in wire:
+                # A goal that names this marker is judged NOT achieved, so the
+                # CONTINUE path of a headless run can be driven end to end.
+                delta = {"role": "assistant", "content": "VERDICT: CONTINUE\nMore to do"}
             elif "You are judging" in wire:
                 delta = {"role": "assistant", "content": "VERDICT: ACHIEVED\nFixture verified"}
             self.send_response(200)
@@ -357,6 +361,43 @@ def test_exec_goal_over_a_settled_goal_is_judged_again(exec_server):
     ]
     attachment = json.loads((directory / "attachment.json").read_text())
     assert attachment["goal"] == "Land the new billing migration"
+
+
+def test_exec_goal_continue_verdict_is_recorded_and_admits_no_turn(exec_server):
+    """A headless run waits for its judge's verdict but starts no new turn.
+
+    `lop exec --goal` used to dispose while the judge was still deciding the
+    run's only turn: the verdict was paid for, dropped, and bought again on the
+    next resume (goal.json read `judging`). exec now waits for the verdict and
+    closes continuations first. So a CONTINUE is RECORDED, as `waiting` with its
+    reason, and turns into no extra paid turns. The ACHIEVED half is the cell
+    above, whose `status == "done"` assertion is only deterministic because of
+    the same wait.
+    """
+    run, requests, root = exec_server
+    result = run(
+        "exec",
+        "Start the work",
+        "--goal",
+        "CONTINUE_FIXTURE ship it",
+        # Named so the title call does not ride the census as a user turn.
+        "--name",
+        "Continue fixture",
+        "--json",
+        stdin="",
+    )
+    assert result.returncode == 0
+    kinds = provider_call_kinds(requests, goal="CONTINUE_FIXTURE ship it")
+    assert user_turns(kinds) == 1, kinds
+    assert kinds.count("judge") == 1, "the verdict was asked for exactly once"
+    assert kinds.count("continuation") == 0, "a finished headless run admits no continuation"
+    session_id = result.stderr.split("session_id=", 1)[1].split()[0]
+    record = json.loads((root / "sessions" / session_id / "goal.json").read_text())
+    assert record["status"] == "active", "CONTINUE does not settle the goal"
+    assert record["judge"]["state"] == "waiting", record["judge"]
+    assert record["judge"]["verdict"] == "continue"
+    assert record["judge"]["reason"] == "More to do"
+    assert record["judge"]["run"] == 0, "no continuation was counted"
 
 
 def test_exec_unknown_and_goal_only_do_not_call_provider(exec_server):

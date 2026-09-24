@@ -87,6 +87,11 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
                 asyncio.get_running_loop().call_soon(lifetime.cancel)
 
         control.handle.on_stop_requested = stop
+        # A standing goal is JUDGED in exec but not auto-continued: `--loop` is
+        # exec's continuation mechanism. Closed before the first turn because the
+        # judge fires at every turn end, so a gate closed at teardown would lose
+        # the race to a fast verdict (see `close_goal_continuations`).
+        await control.handle.close_goal_continuations()
         if getattr(args, "effort", None):
             await control.handle.set_effort(args.effort)
         job_id = getattr(args, "job_id", None)
@@ -131,6 +136,11 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
 
     async def close(failed: bool = False) -> None:
         await control.handle.cancel_headless_loop()
+        # The standing goal's judge may still be deciding the run's last turn.
+        # Wait for that verdict (bounded) so it is recorded rather than dropped
+        # and re-bought on resume. A CONTINUE leaves the goal `waiting`, because
+        # continuations were closed at the start of the run.
+        await control.handle.settle_goal_judge_headless()
         if failed and outcome["terminal"] == "succeeded":
             outcome["terminal"] = "failed"
         # Asked HERE, at the end, rather than when the declaration was applied:
