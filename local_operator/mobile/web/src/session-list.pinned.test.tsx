@@ -225,9 +225,9 @@ describe("the list teaches its own pin gesture (design round 1, D2)", () => {
 	   max-height cap, which clipped a WRAPPED caption, with the 0fr/1fr track
 	   trick). So the tests read the wrapper's row class and its `aria-hidden`,
 	   which is the same signal a sighted reader and assistive tech get. */
-		function hintBox(): HTMLElement {
+	function hintBox(): HTMLElement {
 		/* The grid wrapper: <div grid> > <div overflow-hidden> > <p>. The inner
-			  overflow-hidden child is asserted, not just walked past: without it a
+		   overflow-hidden child is asserted, not just walked past: without it a
 		   `1fr` track paints at full height and the collapse silently stops
 		   reaching zero (review round 4, MINOR 1). */
 		const wrapper = screen.getByText("touch and hold a row to pin it")
