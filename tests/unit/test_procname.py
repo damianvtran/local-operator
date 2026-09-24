@@ -1482,6 +1482,9 @@ class TestCrossTreeSpawnSites:
             "local_operator.cli",
             "update",
             "--refresh-daemons",
+            # The caller owns the mobile half (review round 2, MINOR-2): this child
+            # must not bounce the phone relay its parent is about to bounce.
+            "--services-only",
         ]
         assert os.access(str(executable), os.X_OK)
 
