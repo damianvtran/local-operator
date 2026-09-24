@@ -96,7 +96,10 @@ def _executor_hops(source: str) -> list[tuple[int, str]]:
         elif isinstance(node, ast.Name):
             name = node.id
         if name in _EXECUTOR_HOP_NAMES:
-            found.append((node.lineno, lines[node.lineno - 1].strip()))
+            # ``ast.walk`` yields bare ``AST`` nodes; only the located ones carry a
+            # line, and every node this loop matches is one of those.
+            line = getattr(node, "lineno", 0)
+            found.append((line, lines[line - 1].strip()))
     return found
 
 

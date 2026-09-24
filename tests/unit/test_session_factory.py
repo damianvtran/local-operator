@@ -3681,7 +3681,9 @@ def test_the_origin_sweep_without_a_predicate_finishes_even_while_a_runtime_leav
     """
     sessions = _seed_user_sessions(tmp_path, ["mine0000", "mine0001", "mine0002"])
     monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_STOP", threading.Event())
-    session_factory._STORE_MAINTENANCE_STOP.set()
+    stop_event = session_factory._STORE_MAINTENANCE_STOP
+    assert stop_event is not None
+    stop_event.set()
 
     assert resume_mod.backfill_session_origins(tmp_path) == 0
     assert len(_answered_origins(sessions)) == 3
@@ -4795,7 +4797,9 @@ async def test_the_stop_request_reaches_the_dispatched_walk(tmp_path: Path, monk
     monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
     session_factory.reset_store_maintenance_for_tests()
     try:
-        session_factory._start_store_maintenance(SimpleNamespace(), tmp_path, None)
+        session_factory._start_store_maintenance(
+            cast("ConfigManager", FakeConfigManager()), tmp_path, None
+        )
         assert session_factory.request_store_maintenance_stop() is True
         assert session_factory._STORE_MAINTENANCE_STOP is not None
         assert session_factory._STORE_MAINTENANCE_STOP.is_set()

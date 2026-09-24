@@ -208,5 +208,7 @@ def test_the_real_join_bound_is_strictly_below_the_real_stall_bound(
     """The shipped default, not a patched function: 150 s against a 300 s fire."""
     monkeypatch.delenv(stall_watchdog.ENV_SECONDS, raising=False)
     bound = stall_watchdog.bound_seconds()
-    assert bound == 300.0
+    # Narrowed for the comparison below: ``bound_seconds`` returns ``None`` when
+    # the watchdog is switched off, and the assertion is about the armed case.
+    assert bound is not None and bound == 300.0
     assert process_module._teardown_executor_join_bound_s() < bound

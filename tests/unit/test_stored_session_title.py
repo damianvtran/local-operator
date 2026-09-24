@@ -474,6 +474,10 @@ def test_the_title_sweep_without_a_predicate_finishes_even_while_a_runtime_leave
     for index in range(3):
         _seed_named_session(tmp_path, f"sess{index}", "A Name")
     monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_STOP", threading.Event())
-    session_factory._STORE_MAINTENANCE_STOP.set()
+    # Read back through the module, so the type is the module's own Optional
+    # rather than a local: a departure request is exactly what sets this.
+    stop_event = session_factory._STORE_MAINTENANCE_STOP
+    assert stop_event is not None
+    stop_event.set()
 
     assert backfill_session_titles(tmp_path) == 3
