@@ -5281,12 +5281,13 @@ class FrontendStateStore:
         #: Per roster position, either the canonical row kept by identity or the
         #: index of its body in ``rebuilt`` (the part pydantic validates).
         plan: list[JobState | int] = []
+        #: The windows of the rows that go through validation, aligned with it.
+        rebuilt_windows: list[_FrozenSequence] = []
         bodies: dict[str, dict[str, Any]] = {}
         if "jobs" in update.changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
             rebuilt = []
-            rebuilt_windows: list[_FrozenSequence] = []
             for received in update.changes["jobs"]:
                 job_id = str(received.get("id", "")) if isinstance(received, Mapping) else ""
                 prior = previous.get(job_id)
@@ -5296,7 +5297,7 @@ class FrontendStateStore:
                     windows.append(cast(_FrozenSequence, kept.trajectory))
                     bodies[job_id] = self._follower_job_bodies[job_id][0]
                     continue
-                raw = copy.deepcopy(received)
+                raw = cast(dict[str, Any], copy.deepcopy(received))
                 if isinstance(raw, dict) and job_id:
                     # Recorded BEFORE the reducer rewrites the body below, so the
                     # next delta compares like with like: what the runtime sent.
