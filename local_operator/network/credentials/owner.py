@@ -20,6 +20,26 @@ rotating refresh token, and the loser's token is dead. The loop is created once
 here and every request is submitted to it with
 :meth:`_BrokerLoop.submit`.
 
+WHO IS ASKING IS THE TRANSPORT'S ANSWER, NEVER THE FRAME'S (review round 1, F1).
+A ``PeerLink`` exists only after a handshake that proved the far end holds the
+private key its member row names, so ``link.device_id`` is authenticated; every
+field inside a frame is whatever the sender chose to write. The first version took
+``frame["from_device"]`` as the caller, and a stranger that named the owner's own
+id was served, allowed a forced refresh, and rewrote the owner's holder list on
+disk. So :meth:`MeshCredentialBroker._caller` reads the link, treats
+``from_device`` as an ASSERTION that must agree with it, and refuses a mismatch as
+``identity_mismatch``. The same rule covers the credential itself: the login
+served is the one the OWNER'S placement entry names, never the frame's
+``provider`` field, or a holder of one key could be served another.
+
+THE SHARING LIST IS READ FROM DISK ON EVERY REQUEST (F2). The CLI's ``revoke`` runs
+in another process, so a copy loaded at relay start kept serving a revoked device
+until the relay restarted, and saving that copy later wrote the revoked device
+back. The broker holds no document; :meth:`MeshCredentialBroker._document` loads
+one per request, and a peer's document reaches disk only through
+``placement.merge_from_peer`` (load, merge and save under the lock). Revocation
+latency is therefore the life of a grant ALREADY lent, bounded by ``grant_ttl_s``.
+
 WHAT A REPORT FROM A PEER MAY DO — and what it must never do (finding 8). A peer's
 401 arrives as ``credential_report``, and the tempting implementation is to run
 the owner's ``rotate_sibling`` on it. That would be a catastrophic default:
@@ -28,16 +48,18 @@ on an invalidated-token error, so ONE bad 401 observed by ONE borrower would
 soft-delete the operator's login on EVERY device — exactly the failure the
 requirement exists to prevent. So a report may, at most:
 
-* record a model-scoped quota block for a ``quota`` failure, which is the owner's
-  own call through its own ``block_credential``;
+* record a MODEL-FAMILY-scoped quota block for a ``quota`` failure, through the
+  owner's own ``block_credential`` — never account-wide, never longer than
+  ``REMOTE_QUOTA_BLOCK_MAX_MS`` whatever the peer claims, and at most once per
+  holder per credential per ``REPORT_BLOCK_MIN_INTERVAL_S`` (F3: one account-wide
+  report with a huge retry time locked the owner out of its own login for an hour);
 * provoke AT MOST ONE coalesced owner-side refresh per credential per
   ``REPORT_REFRESH_MIN_INTERVAL_S``, through ``_ensure_oauth_fresh``, so a stale
   borrower can ask the owner to try — and the owner decides;
 * and nothing else. ``rotate_sibling``, ``disable_credential`` and
   ``delete_credential`` are never reachable from this module, and
-  ``tests/unit/network/test_credentials_owner.py`` proves it by feeding a 401, an
-  ``invalid_grant`` and a 429 and asserting every owner row still has
-  ``disabled_cause IS NULL``.
+  ``tests/unit/network/test_credentials_owner.py`` proves it with a fixture in which
+  a ``rotate_sibling`` WOULD find and disable the row.
 """
 
 from __future__ import annotations
@@ -51,6 +73,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.placement import PlacementDocument
@@ -87,6 +110,20 @@ HANDLER_WAIT_MARGIN_S = 20.0
 #: the owner spend a POST, so it is the one path that needs its own rate limit
 #: rather than relying on the token's freshness.
 REPORT_REFRESH_MIN_INTERVAL_S = 300.0
+
+#: The longest block a PEER'S quota report may write on the owner's row, whatever
+#: ``retry_after_ms`` it claims. The owner's own default backoff for a rate limit
+#: (``auth_store.DEFAULT_BLOCK_MS``, restated so this module stays light): a remote
+#: report is second-hand evidence, so it buys the shortest block the owner would
+#: have written on its own evidence, and the owner's own usage probe decides anything
+#: longer. Pinned against the store's constant by a test.
+REMOTE_QUOTA_BLOCK_MAX_MS = 60_000
+
+#: At most one block per holder per credential per this window. With the cap above
+#: this bounds what a hostile or broken holder can do to one model family on the
+#: owner to 60 s in every 300 s, rather than "blocked for as long as it keeps
+#: reporting".
+REPORT_BLOCK_MIN_INTERVAL_S = 300.0
 
 #: The number of worker threads the broker's loop uses for blocking sections.
 #: Small: the only blocking work is the file-lock acquire inside the MCP refresh.
@@ -174,17 +211,17 @@ class MeshCredentialBroker:
         self_device: str = "",
         self_device_name: str = "",
         network_id: str = "",
-        placement: PlacementDocument | None = None,
         audit: Any = None,
         auth_store: Any = None,
         client: MeshCredentialClient | None = None,
         identity: Any = None,
     ) -> None:
+        # NO ``placement`` ATTRIBUTE, on purpose (F2): a document held here is a copy
+        # that a revoke in the CLI process never reaches. See :meth:`_document`.
         self.root = root
         self.self_device = self_device
         self.self_device_name = self_device_name
         self.network_id = network_id
-        self.placement = placement
         self.audit = audit
         self.identity = identity
         self._auth_store = auth_store
@@ -192,9 +229,43 @@ class MeshCredentialBroker:
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
         self._inflight: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
         self._report_refreshed: dict[int, float] = {}
+        self._report_blocked: dict[tuple[str, int], float] = {}
         self._op_deadline_s = _broker_deadline_s()
 
     # -- construction -------------------------------------------------------
+
+    @classmethod
+    def relay_handler(cls, server: Any) -> Any:
+        """The ``net_broker`` handler a relay registers: builds the broker ON DEMAND.
+
+        WHY NOT BUILD IT AT RELAY START, which the first version did: a relay started
+        before this device's first ``credential share`` found nothing to lend, got no
+        broker, and refused every borrow until it was restarted (review round 1, F2).
+        So the decision "do I own anything to lend" is taken PER REQUEST, from the
+        document on disk; while the answer is no, the refusal is the same by-name
+        ``not_implemented`` sentence a relay with no broker always gave, so the 0-peer
+        behaviour is unchanged. The broker (and its one event loop) is built the first
+        time the answer is yes, and kept.
+        """
+        import threading
+
+        from local_operator.network.relay import not_implemented_peer_op
+
+        refuse = not_implemented_peer_op("net_broker")
+        built: list[MeshCredentialBroker] = []
+        guard = threading.Lock()
+
+        def _handle(link: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+            with guard:
+                if not built:
+                    broker = cls.for_relay(server)
+                    if broker is not None:
+                        built.append(broker)
+            if not built:
+                return refuse(link, frame)
+            return built[0].on_broker(link, frame)
+
+        return _handle
 
     @classmethod
     def for_relay(cls, server: Any) -> MeshCredentialBroker | None:
@@ -219,7 +290,6 @@ class MeshCredentialBroker:
             self_device=self_device,
             self_device_name=str(getattr(identity, "name", "")),
             network_id=placement.network_id,
-            placement=placement,
             audit=getattr(server, "audit", None),
             identity=identity,
             client=MeshCredentialClient.for_relay(server),
@@ -255,16 +325,21 @@ class MeshCredentialBroker:
     def grant(self, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
         """Authorise, coalesce, resolve, audit, reply — in that order (§3.6c)."""
         key = str(frame.get("key") or "")
-        by = str(frame.get("from_device") or getattr(link, "device_id", ""))
+        # A LABEL until the entry is read: the credential served is the one the
+        # owner's own placement entry names (step 1), never this field.
         provider = str(frame.get("provider") or key)
         for_session = str(frame.get("for_session") or "")
         model_id = str(frame.get("model_id") or "")
         force = bool(frame.get("force_refresh"))
         started = time.monotonic()
+        by, refused = self._caller(link, frame, key, provider)
+        if refused is not None:
+            return refused
 
         # 0. A device-bound provider is refused BY NAME before anything else: the
         #    answer does not depend on placement, and refusing it late would mean a
-        #    document written before this rule could still broker it.
+        #    document written before this rule could still broker it. (Checked again
+        #    against the entry's own provider below, which is the one served.)
         if provider in DEVICE_BOUND_PROVIDERS or key in DEVICE_BOUND_PROVIDERS:
             return self._refuse(
                 link, key, provider, by, "device_bound", device_bound_refusal(provider)
@@ -286,6 +361,14 @@ class MeshCredentialBroker:
                 f"{self.self_device_name or self.self_device} does not hold {provider!r}; "
                 "ask the device that signed in to it",
             )
+        # The OWNER'S word for which login this key is. Resolving the frame's
+        # ``provider`` instead let a holder of one key name another of the owner's
+        # logins and be served it (found auditing F1's class).
+        provider = entry.provider or provider
+        if provider in DEVICE_BOUND_PROVIDERS:
+            return self._refuse(
+                link, key, provider, by, "device_bound", device_bound_refusal(provider)
+            )
         if not entry.is_holder(by):
             return self._refuse(
                 link,
@@ -294,7 +377,7 @@ class MeshCredentialBroker:
                 by,
                 "not_a_holder",
                 f"{self.self_device_name or self.self_device} does not share {provider!r} "
-                f"with {str(frame.get('from_device_name') or by)!r}",
+                f"with {by!r}",
             )
 
         # 2. Forced refreshes are refused for anyone but an admin of THIS network.
@@ -526,6 +609,18 @@ class MeshCredentialBroker:
             )
         store = self._auth_store_instance()
         storage = McpTokenStorage(url, store)
+        # The ROW's integer id. ``storage.credential_id`` is NOT one: it is the logical
+        # string ``mcp_oauth:<url>``, and ``int()`` of it made every MCP grant answer
+        # ``internal ValueError`` (review round 1, F4).
+        row_id = self._mcp_row_id(url)
+        if row_id is None:
+            return BrokerError(
+                code="no_local_credential",
+                key=key,
+                owner_device=self.self_device,
+                owner_device_name=self.self_device_name,
+                message=f"nothing is signed in to {url!r} on this device",
+            )
         try:
             await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
         except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
@@ -570,7 +665,7 @@ class MeshCredentialBroker:
             key=key,
             provider=provider,
             token=token,
-            credential_id=int(storage.credential_id),
+            credential_id=row_id,
             kind="mcp-oauth",
             token_exp_ms=int(expiry * 1000) if expiry else 0,
             refreshed=False,
@@ -638,10 +733,10 @@ class MeshCredentialBroker:
         out of every device.
         """
         key = str(frame.get("key") or "")
-        by = str(frame.get("from_device") or getattr(link, "device_id", ""))
         failure = str(frame.get("failure") or "")
-        model_id = str(frame.get("model_id") or "")
-        retry_after_ms = int(frame.get("retry_after_ms") or 0)
+        by, refused = self._caller(link, frame, key, key)
+        if refused is not None:
+            return refused
         self._audit(
             "credential.report",
             actor=self.self_device,
@@ -658,25 +753,65 @@ class MeshCredentialBroker:
         if entry is None or entry.owner_device != self.self_device or not entry.is_holder(by):
             return {"kind": "error", "code": "not_a_holder", "key": key}
         if failure == "quota":
-            # A 429 is evidence about a WINDOW, not about the credential, and the
-            # block is scoped to the model family the borrower actually ran for the
-            # same reason `rotate_sibling` scopes its own: an account-wide block
-            # written from a family verdict strands spendable quota.
-            credential_id = self._credential_id_for(key)
-            if credential_id is not None:
-                try:
-                    self._auth_store_instance().block_credential(
-                        credential_id,
-                        entry.provider,
-                        block_scope=f"model:{model_id}" if model_id else "",
-                        block_ms=max(retry_after_ms, 60_000),
-                    )
-                except Exception:  # noqa: BLE001 — a failed block is not a failed turn
-                    pass
-            return {"kind": "ack", "key": key, "action": "blocked"}
+            return self._remote_quota_block(key, entry, by, frame)
         if failure in ("invalid", "unauthorized"):
             return self._one_owner_refresh(key, entry, by, reason=failure)
+        # Anything else — ``unavailable`` (a provider 5xx/529 overload), ``failed`` —
+        # is audited above and changes nothing: a provider-side fault is not evidence
+        # against the credential, and the owner's own rotation only DEPRIORITISES on
+        # it, which is routing state a peer must not move (§2.1).
         return {"kind": "ack", "key": key, "action": "noted"}
+
+    def _remote_quota_block(
+        self, key: str, entry: CredentialPlacementEntry, by: str, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A peer's 429 as AT MOST a short, family-scoped, rate-limited block (F3).
+
+        Each bound closes a reproduced lock-out:
+
+        * **Never account-wide.** An account-wide block is what took the owner's OWN
+          session off its login for an hour on one report with no model. A report
+          whose scope cannot be carried faithfully — no model, or a family this
+          device's registry does not know — is NOTED, never widened: the block READ
+          matches a scope by substring (``is_blocked_for_model``), so an unknown or
+          short slug could stop far more than the family it names.
+        * **The owner's duration, not the peer's.** ``retry_after_ms`` is capped at
+          :data:`REMOTE_QUOTA_BLOCK_MAX_MS`.
+        * **Once per holder per window.** :data:`REPORT_BLOCK_MIN_INTERVAL_S`.
+        """
+        if is_mcp_key(key):
+            return {"kind": "ack", "key": key, "action": "noted", "reason": "unscoped"}
+        scope = remote_block_scope(
+            str(frame.get("block_scope") or ""), str(frame.get("model_id") or "")
+        )
+        if not scope:
+            return {"kind": "ack", "key": key, "action": "noted", "reason": "unscoped"}
+        credential_id = self._credential_id_for(key)
+        if credential_id is None:
+            return {"kind": "ack", "key": key, "action": "noted"}
+        now = time.monotonic()
+        slot = (by, credential_id)
+        last = self._report_blocked.get(slot)
+        if last is not None and now - last < REPORT_BLOCK_MIN_INTERVAL_S:
+            return {"kind": "ack", "key": key, "action": "coalesced"}
+        self._report_blocked[slot] = now
+        claimed = int(frame.get("retry_after_ms") or 0)
+        block_ms = (
+            min(claimed, REMOTE_QUOTA_BLOCK_MAX_MS) if claimed > 0 else REMOTE_QUOTA_BLOCK_MAX_MS
+        )
+        try:
+            self._auth_store_instance().block_credential(
+                credential_id, entry.provider, block_scope=scope, block_ms=block_ms
+            )
+        except Exception:  # noqa: BLE001 — a failed block is not a failed turn
+            return {"kind": "ack", "key": key, "action": "noted"}
+        return {
+            "kind": "ack",
+            "key": key,
+            "action": "blocked",
+            "scope": scope,
+            "block_ms": block_ms,
+        }
 
     def _one_owner_refresh(
         self, key: str, entry: CredentialPlacementEntry, by: str, *, reason: str
@@ -698,7 +833,7 @@ class MeshCredentialBroker:
         self._report_refreshed[credential_id] = now
         try:
             self._loop.submit(
-                self._auth_store_instance().ensure_oauth_fresh(credential_id),
+                self._owner_refresh(key, credential_id),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
         except Exception:  # noqa: BLE001 — a probe is a read; its failure is not an event
@@ -716,33 +851,117 @@ class MeshCredentialBroker:
         )
         return {"kind": "ack", "key": key, "action": "refreshed"}
 
+    async def _owner_refresh(self, key: str, credential_id: int) -> Any:
+        """The owner's OWN refresh for ``key``: the provider store's, or MCP's.
+
+        MCP rows are not provider rows — ``AuthStore.ensure_oauth_fresh`` has no
+        provider definition for ``mcp-oauth`` — so an MCP report runs the same
+        ``ensure_mcp_oauth_fresh`` a grant does, under its cross-process lock.
+        """
+        if is_mcp_key(key):
+            from local_operator.mcp.auth import ensure_mcp_oauth_fresh
+            from local_operator.mcp.config import MCPHttpServerConfig
+
+            url = mcp_url_from_key(key)
+            return await ensure_mcp_oauth_fresh(
+                url, MCPHttpServerConfig(url=url), self._auth_store_instance()
+            )
+        return await self._auth_store_instance().ensure_oauth_fresh(credential_id)
+
     # -- placement ----------------------------------------------------------
 
     def placement_frame(self, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
         """Push or pull the placement document on ONE op, ``kind: placement``.
 
-        A ``document`` in the frame is merged (the sender's own rows only —
-        ``PlacementDocument.merge`` enforces that). ``want: "pull"`` answers with
-        THIS device's document. The pull direction is what makes a share reach a
-        running peer without a proactive fan-out the relay would have to own, and
-        it costs one bounded round trip on a path that was about to refuse anyway.
+        A ``document`` in the frame is merged INTO THE FILE under its lock
+        (``placement.merge_from_peer``), attributed to the device the TRANSPORT
+        authenticated — a push that names another device in ``from_device`` is
+        refused before the merge (F1), and ``merge`` itself refuses anything that
+        claims to come from this device. ``want: "pull"`` answers with THIS device's
+        document as it is on disk now. The pull direction is what makes a share
+        reach a running peer without a proactive fan-out the relay would have to
+        own, and it costs one bounded round trip on a path that was about to refuse
+        anyway.
         """
-        by = str(frame.get("from_device") or getattr(link, "device_id", ""))
+        by, refused = self._caller(link, frame, "", "the placement document")
+        if refused is not None:
+            return refused
         document = frame.get("document")
-        if isinstance(document, dict) and self.placement is not None:
-            if self.placement.merge(document, from_device=by):
-                with suppress(OSError):
-                    self.placement.save()
+        if isinstance(document, dict):
+            with suppress(OSError):
+                placement_mod.merge_from_peer(
+                    self.network_id,
+                    document,
+                    from_device=by,
+                    self_device=self.self_device,
+                    root=self.root,
+                )
         if str(frame.get("want") or "") != "pull":
             return {"kind": "ack", "key": ""}
-        if self.placement is None:
-            return {"kind": "error", "code": "not_owner", "message": "no placement here"}
-        return {"kind": "placement", "document": self.placement.to_json()}
+        return {"kind": "placement", "document": self._document().to_json()}
 
     # -- helpers ------------------------------------------------------------
 
+    def _caller(
+        self, link: Any, frame: dict[str, Any], key: str, label: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """``(device, refusal)``: WHO is asking, from the transport, never the frame.
+
+        ``link.device_id`` is the device whose key the handshake verified; the
+        frame's ``from_device`` is only what the sender wrote. It is kept as an
+        ASSERTION — an honest client always sends its own id, so a mismatch is a
+        forgery or a build bug and is refused as ``identity_mismatch`` with nothing
+        lent or changed. A link with no device id at all is refused the same way:
+        there is no caller to authorise.
+        """
+        authenticated = str(getattr(link, "device_id", "") or "")
+        claimed = str(frame.get("from_device") or "")
+        if not authenticated:
+            return "", self._refuse(
+                link,
+                key,
+                label,
+                claimed,
+                "identity_mismatch",
+                "this request arrived on a link with no authenticated device; nothing was "
+                "lent or changed",
+            )
+        if claimed and claimed != authenticated:
+            return authenticated, self._refuse(
+                link,
+                key,
+                label,
+                authenticated,
+                "identity_mismatch",
+                f"this request named {claimed} as its sender but arrived from "
+                f"{authenticated}; nothing was lent or changed",
+            )
+        return authenticated, None
+
+    def _document(self) -> PlacementDocument:
+        """The sharing list AS IT IS ON DISK NOW. Read per request, never cached (F2).
+
+        One small JSON read per broker request. A cached copy is what let a revoke
+        made by the CLI — another process — go unnoticed until the relay restarted.
+        """
+        return PlacementDocument.load(self.network_id, self.root, self_device=self.self_device)
+
     def _entry(self, key: str) -> CredentialPlacementEntry | None:
-        return self.placement.entry(key) if self.placement is not None else None
+        return self._document().entry(key)
+
+    def _mcp_row_id(self, url: str) -> int | None:
+        """The owner's ``mcp-oauth`` ROW id for ``url``, the same row ``McpTokenStorage``
+        reads (matched on ``identity_key == url``), or ``None``."""
+        from local_operator.mcp.auth import MCP_OAUTH_PROVIDER
+
+        try:
+            rows = self._auth_store_instance().list_credentials(MCP_OAUTH_PROVIDER)
+        except Exception:  # noqa: BLE001 — an unreadable store holds nothing to lend
+            return None
+        for row in rows:
+            if row.identity_key == url:
+                return int(row.id)
+        return None
 
     def _auth_store_instance(self) -> Any:
         """The owner's own ``AuthStore``, built on first use.
@@ -762,9 +981,7 @@ class MeshCredentialBroker:
     def _credential_id_for(self, key: str) -> int | None:
         """The owner's row id for ``key``, or ``None``. For the report arm only."""
         if is_mcp_key(key):
-            from local_operator.mcp.auth import mcp_oauth_credential_id
-
-            return int(mcp_oauth_credential_id(mcp_url_from_key(key)))
+            return self._mcp_row_id(mcp_url_from_key(key))
         entry = self._entry(key)
         if entry is None:
             return None
@@ -909,6 +1126,37 @@ class MeshCredentialBroker:
     def close(self) -> None:
         """Stop the broker's loop. For tests and for a relay shutting down."""
         self._loop.close()
+
+
+def remote_block_scope(claimed: str, model_id: str) -> str:
+    """The ``model:<family>`` scope a peer's quota report may write, or ``""``.
+
+    ``""`` means "this report cannot be scoped faithfully", and the caller then
+    writes NOTHING rather than an account-wide block. Only a family this device's
+    own registry parses out of a known model is accepted, because the block READ
+    (``AuthStore.is_blocked_for_model``) matches by substring: a slug like ``a`` or
+    ``""`` would stop every model on the account, which is the over-block a scoped
+    report exists to avoid. The borrower's own scope (``configure._write_quota_block``
+    writes ``model:fable``) wins when it is one of those families; otherwise the
+    family is derived from the model the borrower ran, as ``rotate_sibling`` does.
+    """
+    families = _known_model_families()
+    if claimed:
+        slug = claimed.removeprefix("model:") if claimed.startswith("model:") else ""
+        return f"model:{slug}" if slug in families else ""
+    if not model_id:
+        return ""
+    from local_operator.model.registry import model_family
+
+    family = model_family(model_id)
+    return f"model:{family}" if family in families else ""
+
+
+def _known_model_families() -> frozenset[str]:
+    """Every non-empty family the shipped registry's Anthropic models parse to."""
+    from local_operator.model.registry import anthropic_models, model_family
+
+    return frozenset(filter(None, (model_family(model_id) for model_id in anthropic_models)))
 
 
 def _broker_deadline_s() -> float:

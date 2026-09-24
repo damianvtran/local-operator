@@ -2843,14 +2843,15 @@ class McpManager:
 
         * the ``OAuthClientProvider`` built below — the local case, byte-identical to
           the path before credential brokering existed; and
-        * :class:`_BrokeredBearerAuth` — a server whose grant lives on ANOTHER device
-          this one is a holder for, when this device has no local row at all.
+        * ``network.credentials.mcp_bearer.BrokeredBearerAuth`` — a server whose grant
+          lives on ANOTHER device this one is a holder for, when this device has no
+          local row at all.
 
         THE BROKERED BRANCH IS NOT IN THE REFRESH, and the design's hook point was
         wrong here (build plan §0 finding 6): ``ensure_mcp_oauth_fresh`` returns
         ENDPOINTS, not tokens, and tokens reach the wire through the SDK
         ``OAuthClientProvider`` built here. So a brokered MCP credential is a
-        DIFFERENT ``httpx.Auth`` injected at this seam — it never builds a provider,
+        DIFFERENT ``httpx2.Auth`` injected at this seam — it never builds a provider,
         never touches ``McpTokenStorage``, and never binds the loopback callback port
         the local flow needs.
 
@@ -2941,7 +2942,7 @@ class McpManager:
         except Exception:  # noqa: BLE001 — an unreadable store must not invent a borrow
             return None
         # Imported HERE, not at module scope: this module keeps a lazy-SDK property
-        # (see _TRANSPORT_EXC_DETAIL), and the brokered auth subclasses ``httpx.Auth``.
+        # (see _TRANSPORT_EXC_DETAIL), and the brokered auth subclasses ``httpx2.Auth``.
         # Reaching this line requires a mesh client, so the dependency arrives only on
         # a device that actually borrows.
         from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth

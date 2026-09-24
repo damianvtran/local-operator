@@ -135,6 +135,12 @@ def render_broker_error(
             f"{owner} refused this request: this device is not allowed to ask for '{label}'. "
             "Nothing was changed on either device."
         )
+    if error.code == "identity_mismatch":
+        return (
+            f"{owner} refused this request because it named a different sending device than "
+            "the one it arrived from. Nothing was lent or changed on either device; if this "
+            "repeats, update both devices to the same build."
+        )
     if error.code == "unsupported":
         return (
             f"{owner} runs a build that cannot lend credentials, so '{label}' cannot be "

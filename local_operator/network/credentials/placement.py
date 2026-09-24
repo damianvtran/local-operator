@@ -96,10 +96,70 @@ _FORBIDDEN_PLACEMENT_KEYS: frozenset[str] = frozenset(
 #: of the two updates; two registries for one file would serialise nothing, so
 #: :func:`_write_lock` — an RLock, keyed by path — is reused for the whole
 #: read-modify-write rather than only for the write. See :func:`mutate`.
-def _document_lock(target: Path) -> Any:
+#:
+#: THE THREAD LOCK IS NOT ENOUGH, and the gap was reproduced (review round 1, F2):
+#: ``lop network credential revoke`` runs in the CLI PROCESS while the relay that
+#: serves the broker is another process, so an in-process lock serialises nothing
+#: between them. A relay that loaded the document, then saved it after a CLI revoke
+#: landed, wrote the revoked holder straight back. :func:`_document_lock` therefore
+#: also takes an ``flock`` on a lock file beside the document, for the whole
+#: read-modify-write.
+@contextmanager
+def _document_lock(target: Path) -> Iterator[None]:
     from local_operator.network import store
 
-    return store._write_lock(target)
+    with store._write_lock(target):
+        with _cross_process_lock(target.parent / PLACEMENT_LOCK_FILENAME):
+            yield
+
+
+#: The lock file beside each document. Dotted, never unlinked while it may be
+#: contended (unlinking would split two waiters across two inodes, the hazard
+#: ``wakes/lock.py`` documents), and removed only with its directory by
+#: :func:`forget_network`.
+PLACEMENT_LOCK_FILENAME = ".placement.lock"
+
+#: How long a placement writer waits for another PROCESS's writer before refusing.
+#: The hold is one small JSON read and write, so seconds of contention mean a writer
+#: is wedged; refusing (nothing written) is safe, and waiting forever is not.
+PLACEMENT_LOCK_WAIT_S = 10.0
+
+
+@contextmanager
+def _cross_process_lock(path: Path) -> Iterator[None]:
+    """An exclusive ``flock`` on ``path``, bounded, that REFUSES rather than degrades.
+
+    The non-blocking primitive is ``wakes.lock``'s (``session_factory`` shares it the
+    same way), so the platform branches live in one place. Retried to a deadline
+    rather than a blocking ``flock``: a thread parked inside ``flock()`` on macOS
+    blocks a sibling's ``close()`` of the same descriptor. Running UNLOCKED on a
+    timeout would be the lost-revoke this lock exists to close, so a timeout raises.
+    """
+    from local_operator.network.types import MeshRefusal
+    from local_operator.procstate import O_BINARY
+    from local_operator.wakes.lock import _try_lock, _unlock
+
+    _ensure_private_dir(path.parent)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | O_BINARY, FILE_MODE)
+    try:
+        deadline = time.monotonic() + PLACEMENT_LOCK_WAIT_S
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise MeshRefusal(
+                    "busy",
+                    "another writer is changing who may borrow a credential on this device; "
+                    "nothing was changed, try again in a moment",
+                )
+            time.sleep(0.02)
+        try:
+            yield
+        finally:
+            try:
+                _unlock(fd)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -453,11 +513,22 @@ class PlacementDocument:
         entry.doc_rev += 1
         return entry
 
-    def merge(self, incoming: dict[str, Any], *, from_device: str) -> list[str]:
+    def merge(
+        self, incoming: dict[str, Any], *, from_device: str, self_device: str = ""
+    ) -> list[str]:
         """Merge a peer's document. Returns the keys that changed.
 
+        ``from_device`` MUST be the device the TRANSPORT authenticated, never a field
+        of the frame the document arrived in: a frame field is the sender's claim, and
+        taking it as fact let a stranger claim to be this device and rewrite its own
+        holder list (review round 1, F1). ``self_device`` is this device's id, and a
+        document that claims to come from it is refused outright.
+
         THE OWNER-WRITE RULE IS ENFORCED HERE, and this is the only place a
-        document that did not originate locally enters memory. Three refusals:
+        document that did not originate locally enters memory. Four refusals:
+
+        * anything at all "from" this device — no peer is this device, so such a
+          document is a forgery by construction;
 
         * an entry whose ``owner_device`` is not the SENDING device is dropped — a
           peer may only tell us about the credentials IT owns, so a relayed claim
@@ -469,11 +540,17 @@ class PlacementDocument:
           replayed frame cannot revert a newer revoke.
         """
         changed: list[str] = []
+        if not from_device or (self_device and from_device == self_device):
+            return changed
         for keyword in incoming.get("credentials") or []:
             if not isinstance(keyword, dict) or not keyword.get("key"):
                 continue
             candidate = CredentialPlacementEntry.from_json(keyword)
             if candidate.owner_device != from_device:
+                continue
+            # Belt and braces for the rule above: a row naming THIS device as its
+            # owner is only ever written here, by the local owner's own verb.
+            if self_device and candidate.owner_device == self_device:
                 continue
             local = self.entries.get(candidate.key)
             if local is not None and local.owner_device != candidate.owner_device:
@@ -649,3 +726,29 @@ def mutate(
         document = PlacementDocument.load(network_id, root, self_device=self_device)
         yield document
         document.save()
+
+
+def merge_from_peer(
+    network_id: str,
+    incoming: dict[str, Any],
+    *,
+    from_device: str,
+    self_device: str,
+    root: Path | None = None,
+) -> list[str]:
+    """Merge a peer's document INTO THE FILE, under the lock. Returns changed keys.
+
+    THE ONLY WAY A PEER'S DOCUMENT REACHES DISK, and it replaced two writers that
+    each saved an in-memory copy loaded at relay start (the broker's and the relay
+    client's). Saving such a copy wrote back whatever it held, so a CLI revoke made
+    after the relay started was reverted by the next merge (review round 1, F2).
+    Loading INSIDE the lock means the document merged into is the one on disk now,
+    and nothing is written when nothing changed.
+    """
+    path = placement_path(network_id, root)
+    with _document_lock(path):
+        document = PlacementDocument.load(network_id, root, self_device=self_device)
+        changed = document.merge(incoming, from_device=from_device, self_device=self_device)
+        if changed:
+            document.save()
+        return changed
