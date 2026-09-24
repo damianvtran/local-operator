@@ -282,6 +282,40 @@ class TestTheWalkIsTotalAndUnique:
         assert last.next_cursor is None
         assert [entry.id for entry in last.entries] == ["chat00002", "chat00001", "chat00000"]
 
+    def test_the_pinned_extras_ride_the_first_page_only(self, tmp_path: Path) -> None:
+        """A pinned row is an EXTRA on one page of a walk, never on every page.
+
+        ``pinned_off_page`` answers "which pinned conversations is this page
+        missing" so a client holding ONE page can still draw the Pinned section --
+        a promise about the page it paints first. Appended from ``ranked[limit:]``,
+        the same row was re-appended on every page of a walk that still had it
+        below (QA measured one pinned id twice over a seven-page walk), so a
+        walk's surplus grew with the pin's distance down the listing. The row's
+        OWN later position stays as it is: the row union is id-keyed and the
+        design says a pinned row "may additionally be in the head".
+        """
+        for index in range(4):
+            _session(tmp_path, f"lop{index:05d}", team="lopdev", created=5_000.0 + index)
+        older = "oldpin00001"
+        _session(tmp_path, older, team="lopdev", created=1_000.0)
+
+        first = catalogue_page(tmp_path, limit=2, pinned_off_page=[older])
+
+        assert [entry.id for entry in first.entries] == ["lop00003", "lop00002", older]
+        assert first.next_cursor is not None
+
+        surpluses: list[list[str]] = []
+        cursor: str | None = first.next_cursor
+        while cursor is not None:
+            page = catalogue_page(tmp_path, cursor=cursor, limit=2, pinned_off_page=[older])
+            surpluses.append([entry.id for entry in page.entries[2:]])
+            cursor = page.next_cursor
+
+        # The pin ranks last, so the first page's surplus is the one extra there
+        # is; every page after it is the scope's own continuation and nothing
+        # else, however far down the pin is.
+        assert surpluses == [[], []], surpluses
+
 
 class TestAnUnusableCursorIsNotAnError:
     """Bad input is answered with the scope's first page and a flag, never a 4xx."""

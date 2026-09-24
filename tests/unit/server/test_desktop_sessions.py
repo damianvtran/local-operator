@@ -7378,10 +7378,11 @@ async def test_a_request_without_the_paging_parameters_is_answered_as_before(dra
 
     assert answer.status_code == 200, answer.text
     result = answer.json()["result"]
-    # The KEY SET and its order, because "byte-identical" is a claim about the
-    # document: the four additions are the only difference, and they are all at
-    # their defaults here.
-    assert list(result) == [
+    # The KEY SET, not its order: the four additions are the only difference and
+    # they are all at their defaults, but no client may rely on the ORDER of a
+    # JSON object -- asserting it would fail the first time a field is moved for
+    # an unrelated reason, and the compatibility claim here is about fields.
+    assert set(result) == {
         "sessions",
         "truncated",
         "limit",
@@ -7390,7 +7391,7 @@ async def test_a_request_without_the_paging_parameters_is_answered_as_before(dra
         "cursor_missing",
         "scope",
         "counts",
-    ]
+    }
     assert result["next_cursor"] is None
     assert result["cursor_missing"] is False
     assert result["scope"] is None
@@ -7682,6 +7683,45 @@ async def test_with_counts_reports_the_groups_and_the_unbound_population(draft_a
     # The PAGE is still the scope's two newest, and the counts describe the whole
     # listing rather than the page.
     assert _ids(answer) == ["lop0000002", "lop0000001"]
+
+
+@pytest.mark.asyncio
+async def test_the_census_counts_only_the_rows_the_panel_can_draw(draft_api) -> None:
+    """``counts`` describes the population a default list shows: not archived rows.
+
+    The defect this whole change answers was a NUMBER that disagreed with the rows
+    beside it, and an archived row is one no default list draws -- the sidebar
+    filters them out of every list it renders -- so a badge that counted them
+    would invite a person into a group whose every row is hidden. The rows
+    themselves still obey the request: ``include_archived=true`` carries them, and
+    the counts do not move.
+    """
+    from local_operator.session.archived import set_archived
+
+    client, root = draft_api
+    _bound_session(root, "live0000001", team="lopdev", created=1_000.0)
+    _bound_session(root, "gone0000001", team="lopdev", created=2_000.0)
+    _bound_session(root, "gone0000002", team="lopdev", created=3_000.0)
+    _bound_session(root, "unbound00001", created=4_000.0)
+    assert set_archived(root, "gone0000001", True) is True
+    assert set_archived(root, "gone0000002", True) is True
+
+    answer = await client.get(f"{_scoped(page=10)}&include_archived=true&with_counts=true")
+
+    assert answer.status_code == 200, answer.text
+    result = answer.json()["result"]
+    # The ROWS are what the request asked for: the group's live row and its two
+    # archived ones, which are exactly what ``include_archived`` governs.
+    assert sorted(_ids(answer)) == ["gone0000001", "gone0000002", "live0000001"]
+    # The CENSUS is the population the panel can draw: the live row of the group
+    # plus the one live unbound row. ``active`` rides the same filtered loop, so a
+    # population change cannot move one number and leave the other behind.
+    counts = result["counts"]
+    assert counts["total"] == 2
+    assert counts["unbound"] == 1
+    assert counts["scopes"] == [
+        {"kind": "team", "name": "lopdev", "total": 1, "active": 0},
+    ]
 
 
 @pytest.mark.asyncio
