@@ -1,12 +1,26 @@
 """Ordering fixture with a DURABLE-ONLY unread session — the divergent case.
 
-Same shape as ``scripts/session_order_mobile.py`` plus two conversations that
-have a transcript on disk and NO live runtime: one carrying an unread completion
-and one read. That pair is the case the phone's re-derived key got wrong (the
-unread one is ACTIVE on the terminal and the desktop, Previous on the phone),
-and it is the case the shared-key fix makes agree.
+WHAT IT IS FOR. The phone's session list used to re-derive its own order key,
+and the shape that exposed it is a conversation with a transcript on disk and
+NO live runtime that carries an unread completion: the terminal and the desktop
+rank it Active, the phone filed it under Previous. This serves the REAL mobile
+bundle and API (``MobileDaemon`` + ``build_app``, observer mode, no registrant
+sockets) over synthetic sessions that include that pair (one unread, one read),
+so the list can be looked at and screenshotted before and after a change to the
+ordering or the pin sections. It is ``scripts/session_order_mobile.py`` plus
+those two durable-only rows; keep the two in step.
 
-Run: PYTHONPATH=. .venv/bin/python THIS PORT
+HOW TO RUN IT, from a worktree with its own venv and a built bundle
+(``pnpm build`` in ``local_operator/mobile/web``)::
+
+    PYTHONPATH=. .venv/bin/python scripts/session_order_mobile_durable.py 4200
+
+then log in at http://127.0.0.1:4200 with the synthetic password
+``ordering-demo``. ``POST /fixture/tick`` republishes heartbeats and returns the
+order and sections, so repeated ticks show whether the order is stable.
+``scripts.probe_isolation`` re-homes ``HOME`` and the config dir before any app
+import, so it never reads or writes the operator's real store. Restart it to
+reset.
 """
 
 from __future__ import annotations
