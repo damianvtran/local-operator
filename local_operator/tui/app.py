@@ -2849,14 +2849,31 @@ class _AttachBehindAttempt:
             f"{ATTACH_BEHIND_BOUND_S:g}\u00a0s in total"
         )
 
+    def _bound_elsewhere(self) -> bool:
+        """The facade bound on a path that is not one of this attempt's carriers.
+
+        The sidebar's own connect (a switch back) binds through ``bind_runtime``
+        and never reports here, so a timer firing after it must end the wait as
+        a landing rather than narrate or judge an owner that IS answering (UX
+        round 5, U15).
+        """
+        if getattr(self.session, "is_cold", True):
+            return False
+        self.landed()
+        return True
+
     def _narrate(self) -> None:
-        if not self._alive() or self.phase != "pending":
+        if not self._alive() or self.phase != "pending" or self._bound_elsewhere():
             return
         self.phase = "narrated"
         self._account.say(self._narration(), "warning")
 
     def _judge(self) -> None:
-        if not self._alive() or self.phase not in ("pending", "narrated"):
+        if (
+            not self._alive()
+            or self.phase not in ("pending", "narrated")
+            or self._bound_elsewhere()
+        ):
             return
         # `not answering`, never `no runtime yet`: an owner exists, holds a live
         # record and was dialled (UX round 1, U2); "session" is the user's word
@@ -2950,16 +2967,7 @@ class _AttachBehindAttempt:
         if not self._alive() or self.phase == "landed":
             return
         self.phase = "landed"
-        account = self._account
-        if account.outcome:
-            # Restated rather than removed: the reader may have read the verdict,
-            # and a row that silently vanished leaves them unsure which statement
-            # was the true one (UX round 1, U3). The account goes on saying it
-            # after this attempt is gone, so a view swapped in later re-shows it.
-            account.say(ATTACH_BEHIND_RECOVERED.format(session_id=self._session_id), "info")
-        else:
-            # Only narration was said, and a bind makes it false: nothing is owed.
-            account.retire()
+        self._account.settle()
         # Always closed: the row no longer needs the attempt to outlive the bind
         # in order to be re-posted, so nothing lingers in the table (round 4, m-1).
         self.close()
@@ -2994,7 +3002,12 @@ class _AttachBehindAccount:
     def __init__(self, app: "OperatorApp", source: SessionInteraction) -> None:
         self._app = app
         self.source = source
+        self.session_id = str(getattr(source.session, "session_id", "") or "")
         self.row: NoticeBlock | None = None
+        #: The transcript ``row`` was mounted into. Kept beside the row because
+        #: a row's own ancestry is no answer once it is detached, and "take it
+        #: down" must still find it there (QA round 5, Q-2).
+        self._row_view: TranscriptView | None = None
         #: What the row says now, so a view that replaced the one holding it can
         #: be given the same one row.
         self.said: tuple[str, NoticeKind] | None = None
@@ -3022,8 +3035,38 @@ class _AttachBehindAccount:
             return
         self.row = None
         if self._app._is_current(self.source):
-            self.row = self._app._system_notice_block(text, kind)
+            self._paint(text, kind)
         # Otherwise OWED: `said` is kept and `resurface` paints it on return.
+
+    def _paint(self, text: str, kind: NoticeKind) -> None:
+        self._row_view = self._app._transcript_view()
+        self.row = self._app._system_notice_block(text, kind)
+
+    def settle(self) -> None:
+        """A bind LANDED, on whatever path bound it: the wait is over.
+
+        The ONE place the account learns the owner answered, and deliberately
+        not gated on an attempt being alive: the attempt's death is exactly the
+        case that needs it (UX round 5, U15; QA round 5, Q-1). A bind carried
+        by the attempt's own engage or a message's own send reaches here through
+        ``landed``; the sidebar's connect on a switch back and a message that
+        went out over an already-bound facade reach it through
+        ``OperatorApp._settle_attach_behind``. Before this, only the first kind
+        did, so an owner answering after a switch back left "did not answer —
+        send it again" standing above the reply the resend produced.
+
+        An OUTCOME is restated as recovered, never removed — the reader may have
+        read it (UX round 1, U3). Narration alone was never an outcome, and a
+        bind makes it false, so nothing is owed and it comes down. Idempotent.
+        """
+        if self.said is None:
+            return
+        if not self.outcome:
+            self.retire()
+            return
+        recovered = (ATTACH_BEHIND_RECOVERED.format(session_id=self.session_id), "info")
+        if self.said != recovered:
+            self.say(*recovered)
 
     def resurface(self) -> None:
         """The conversation is in front again: make sure the view in front says it.
@@ -3044,16 +3087,23 @@ class _AttachBehindAccount:
             return
         if row is not None and stale is not None:
             stale.remove_block(row)
-        self.row = self._app._system_notice_block(*said)
+        self._paint(*said)
 
     def retire(self) -> None:
-        """Nothing is owed any more: take the row down from ITS transcript."""
+        """Nothing is owed any more: take the row down from ITS transcript.
+
+        From the view it was painted into as well as from its current ancestry:
+        a row whose ancestry no longer answers was otherwise left painted on a
+        view the conversation had stopped owning (QA round 5, Q-2).
+        """
         row, self.row = self.row, None
+        painted_into, self._row_view = self._row_view, None
         self.said = None
         self.outcome = False
-        view = _owning_transcript(row)
-        if row is not None and view is not None:
-            view.remove_block(row)
+        if row is not None:
+            for view in {_owning_transcript(row), painted_into}:
+                if view is not None and row in view.blocks():
+                    view.remove_block(row)
         if self.source.attach_behind_account is self:
             self.source.attach_behind_account = None
 
@@ -19601,9 +19651,37 @@ class OperatorApp(App[None]):
         over (a carrier bound it) while its row is still owed (review round 4,
         F-1 / U14).
         """
+        self._settle_attach_behind(source)
         account = source.attach_behind_account
         if isinstance(account, _AttachBehindAccount):
             account.resurface()
+        self._push_starting_band()
+
+    def _settle_attach_behind(self, source: SessionInteraction) -> None:
+        """Settle ``source``'s account when its facade is bound, whoever bound it.
+
+        The attempt's carriers report their own binds (``landed``); this is for
+        the binds that are NOT carriers — the sidebar's connect worker, which
+        binds through ``bind_runtime`` and re-commits the conversation (so this
+        runs from the adopt, via ``_resurface_attach_behind``), and a message
+        delivered over a facade that was already bound, which is never an
+        ``_AttachBehindSend`` (UX round 5, U15 and its item 4; QA round 5, Q-1).
+        Keyed on the SOURCE's own facade, never the one on screen.
+        """
+        account = source.attach_behind_account
+        session = source.session
+        if not isinstance(account, _AttachBehindAccount) or session is None:
+            return
+        if getattr(session, "is_cold", True):
+            return
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None:
+            # Ends the schedule too, so no timer judges an owner that answered.
+            attempt.landed()
+            attempt.close()
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            account.settle()
         self._push_starting_band()
 
     def _retire_attach_behind(self, source: SessionInteraction) -> None:
@@ -19616,6 +19694,11 @@ class OperatorApp(App[None]):
         attempt = self._attach_behind_attempts.get(source.token)
         if attempt is not None:
             attempt.close()
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            # Taken down, not just forgotten: dropping the reference left the
+            # row painted with nothing left to remove it (QA round 5, Q-2).
+            account.retire()
         source.attach_behind_account = None
 
     def _report_start_engage_failure(
@@ -26196,6 +26279,10 @@ class OperatorApp(App[None]):
                 # is now false (UX round 1, U3).
                 if attach_send is not None:
                     attach_send.landed()
+                # DELIVERED, so the owner answered whether or not this send was
+                # a carrier: a "did not answer — send it again" row must not
+                # stand above the message it asked for (UX round 5, item 4).
+                self._settle_attach_behind(source)
                 if awaiting_bind is not None:
                     self._prompts_awaiting_bind.pop(awaiting_bind, None)
                     self._push_starting_band()
