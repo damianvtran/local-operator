@@ -169,7 +169,7 @@ async def test_achieved_marks_done_once_and_admits_nothing():
         "answer ACHIEVED only if the goal is fully and verifiably met, not merely "
         "in progress. If unsure, answer CONTINUE. Answer in text only and do not "
         "call any tool: this is a verdict on the conversation above, and a tool "
-        "call here is discarded unread."
+        "or function call here is rejected and returned to you as an error."
     )
     assert h.state.state == "done"
     assert h.state.verdict == "achieved"
