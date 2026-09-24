@@ -194,6 +194,10 @@ async def test_nested_child_detail_events_refresh_after_warm(monkeypatch) -> Non
         def roster(self):  # noqa: ANN201
             return []
 
+        def lifecycles(self):  # noqa: ANN201
+            # The per-event read ``set_subagent_details`` makes.
+            return {}
+
         def nodes(self):  # noqa: ANN201
             return [self.child]
 

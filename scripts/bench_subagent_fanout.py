@@ -61,6 +61,7 @@ import os
 import pstats
 import resource
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
@@ -75,6 +76,7 @@ if not os.environ.get("LOCAL_OPERATOR_CONFIG_DIR"):
         "refusing to run un-isolated: set HOME and LOCAL_OPERATOR_CONFIG_DIR (see docstring)"
     )
 
+import local_operator  # noqa: E402
 from local_operator.harness.types import (  # noqa: E402
     ChatRequest,
     Message,
@@ -182,6 +184,28 @@ async def _heartbeat(stop: asyncio.Event, lags: list[float], period: float = 0.0
         due = loop.time() + period
         await asyncio.sleep(period)
         lags.append(max(0.0, loop.time() - due))
+
+
+def _revision() -> dict[str, Any]:
+    """``git rev-parse HEAD`` of the tree this script runs from, plus dirtiness."""
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(REPO), "status", "--porcelain", "--untracked-files=no"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {"sha": None, "dirty": None}
+    return {"sha": sha, "dirty": dirty}
 
 
 def _pct(xs: list[float], p: float) -> float:
@@ -461,6 +485,13 @@ async def main() -> None:
     out = {
         "label": args.label,
         "source": str(REPO),
+        # Self-attesting arm identity: an A/B arm is whichever tree this script
+        # file sits in (``sys.path.insert(0, REPO)`` beats the venv's editable
+        # finder), and a worktree path stops identifying a commit the moment
+        # the worktree is deleted. The SHA, a dirty flag and the module path
+        # actually imported make every result file provable on its own.
+        "revision": _revision(),
+        "imported_from": str(Path(local_operator.__file__).resolve().parent),
         "params": {k: v for k, v in vars(args).items() if k not in {"output", "profile"}},
         "solo": solo,
         "fanout": rows,
