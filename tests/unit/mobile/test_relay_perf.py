@@ -1336,3 +1336,96 @@ def test_pin_route_wakes_the_list_stream(tmp_path, monkeypatch) -> None:
     client.post("/login", data={"password": "pw123"})
     assert client.post("/api/sessions/durable-1/pin", json={"pinned": True}).status_code == 200
     assert not queue.empty(), "the pin route must wake the list SSE stream"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_pin_wakes_an_open_phone_list(tmp_path, monkeypatch) -> None:
+    """A pin written by ANOTHER surface reaches an open phone list on its own (QA Q1).
+
+    The terminal's ``F10`` and the desktop app write ``sidebar-pins.json``
+    directly, never through this daemon's route, so nothing used to ring the list
+    stream for them: the phone showed the pin only after some unrelated event
+    repainted the list (QA measured nothing after 40 s and 110 s). The daemon's
+    own periodic pass now fingerprints the file, so this writes it with the
+    TERMINAL's own writers and waits for the list subscriber to be woken by the
+    real ``scan_loop`` -- on the event, bounded only as a failure ceiling -- then
+    reads the row the phone would be sent. Both directions, because an unpin
+    that never reached the phone is the same defect.
+    """
+    from local_operator.mobile import daemon as daemon_module
+    from local_operator.tui.sidebar_pins import set_pin, toggle_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+    # The pass's cadence is not what is under test; a short interval keeps the
+    # wait short without the test depending on how short it is.
+    monkeypatch.setattr(daemon_module, "SCAN_INTERVAL_S", 0.05)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    # The boot sweep is its own path; production reaches this pass on every tick
+    # after the first, which is what pre-marking lands on (as test_attention does).
+    daemon._attention_bootstrapped = True
+    # One pass to SEED: the first tick observes the attention revision and the
+    # pin file for the first time, and the attention half wakes the stream then.
+    await daemon._scan_once()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    async def pinned_after_wake() -> bool:
+        await asyncio.wait_for(queue.get(), timeout=30)
+        rows = await daemon.table.summaries()
+        return next(r["pinned"] for r in rows if r["session_id"] == "durable-1")
+
+    loop_task = asyncio.create_task(daemon.scan_loop())
+    try:
+        # Written OUTSIDE the daemon's pin route, by the terminal's own verb.
+        assert toggle_pin(cfg, "durable-1") is True
+        assert await pinned_after_wake() is True
+        # And the other direction, through the desired-state verb the desktop
+        # route uses: the unpin has to reach the phone just the same.
+        assert set_pin(cfg, "durable-1", False) is False
+        assert await pinned_after_wake() is False
+    finally:
+        loop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await loop_task
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_pin_file_does_not_repaint_the_list(tmp_path, monkeypatch) -> None:
+    """The pin fingerprint must not turn every scan tick into a list repaint.
+
+    The check rides the daemon's 2 s pass, so a comparison that always fired
+    would repaint every open phone list every tick. Two passes over an untouched
+    file (present, then absent) must leave the subscriber queue empty.
+    """
+    from local_operator.tui.sidebar_pins import PINS_FILE, set_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+    set_pin(cfg, "durable-1", True)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+    assert daemon.table.pins == ("durable-1",), "the first pass seeds the table's pins"
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    await daemon._scan_once()
+    await daemon._scan_once()
+    assert queue.empty(), "an untouched pin file must not wake the list"
+
+    # A file that disappears while its ids were pinned IS a change.
+    (cfg / PINS_FILE).unlink()
+    await daemon._scan_once()
+    assert not queue.empty()
+    assert daemon.table.pins == ()

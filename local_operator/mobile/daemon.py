@@ -71,7 +71,7 @@ from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import reported_subagent_count
-from local_operator.tui.sidebar_pins import read_pins, set_pin
+from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,11 @@ logger = logging.getLogger(__name__)
 #: session starts or dies); the scan is cheap, and 2 s makes a new terminal
 #: session appear on the phone before the user reaches for it.
 SCAN_INTERVAL_S = 2.0
+
+#: The pin-file fingerprint before the first scan has looked. Distinct from
+#: ``None`` ("no file"), which is a real observation the first tick must still
+#: compare against -- see ``MobileDaemon._refresh_pins_if_changed``.
+_PINS_UNREAD = object()
 
 #: Backoff before re-dialing a refused control socket. A registrant whose
 #: record is fresh but whose socket refuses is mid-restart; hammering it
@@ -2131,6 +2136,7 @@ class MobileDaemon:
             self._attention_bootstrapped = True
         from local_operator.session.attention import AttentionStore
 
+        await self._refresh_pins_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
             self._attention_revision = revision
@@ -2302,6 +2308,66 @@ class MobileDaemon:
             # durable listing itself may have moved.
             self.table.invalidate_summaries_cache()
             self.table.notify_list_changed()
+
+    async def _refresh_pins_if_changed(self) -> None:
+        """Wake the list stream when ANOTHER surface changed the shared pins.
+
+        The pin store is shared with the terminal's ``F10`` and the desktop app
+        (``local_operator.tui.sidebar_pins``), but the table's copy of it was
+        refreshed only inside ``_refresh_durable_rows`` -- which runs only when
+        something asks for the listing, and the list stream asks only after
+        ``notify_list_changed``. Nothing rang that bell for a pin written
+        outside this daemon's own route, so a terminal pin stayed invisible on
+        an open phone until some unrelated event (a session registering, a
+        completion) happened to repaint the list: QA round 1 measured no frame
+        after 40 s and 110 s on an idle fleet (Q1).
+
+        ONE ``stat`` PER SCAN TICK, riding the pass that already runs every
+        ``SCAN_INTERVAL_S`` rather than a watcher or a poll of its own, so a
+        terminal pin reaches the phone within one interval at the price of a
+        single syscall. The file is re-read only when its fingerprint moves.
+        The fingerprint is ``(st_ino, st_size, st_mtime_ns)`` -- the desktop
+        feed's ``_fingerprint`` for this same file -- and the inode is the field
+        that cannot miss: every write is a same-directory ``os.replace``, which
+        lands a new inode even when two writes share an mtime tick and a size.
+        ``None`` (no file) is a fingerprint too, so the file appearing or being
+        removed is a change like any other.
+
+        Re-reads through ``read_pins`` (the one reader, with its store prune)
+        and drops only the MERGED summaries cache, not the durable rows: a pin
+        is membership in a display section, recomputed from ``self.table.pins``
+        by the merge, so re-walking a hundred session directories for it would
+        be waste. The first tick always reads, which also seeds the table's
+        pins for a daemon no one has listed yet.
+        """
+        from local_operator.paths import config_dir
+
+        directory = config_dir()
+
+        def fingerprint() -> tuple[int, int, int] | None:
+            try:
+                stat = (directory / PINS_FILE).stat()
+            except OSError:
+                return None
+            return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+        # Off the loop like every other filesystem touch in this pass: a stat on
+        # a wedged or network-backed home must not stall every SSE stream.
+        current = await asyncio.to_thread(fingerprint)
+        if getattr(self, "_pins_fingerprint", _PINS_UNREAD) == current:
+            return
+        self._pins_fingerprint = current
+        pins = tuple(await asyncio.to_thread(read_pins, directory))
+        if pins == self.table.pins:
+            # The file moved but the pinned SET did not (our own route's write,
+            # which already woke the stream, or a rewrite of the same list):
+            # nothing on the phone would change, so no repaint is owed.
+            return
+        self.table.pins = pins
+        self.table._summaries_cache = None
+        self.table._summaries_at = 0.0
+        # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
+        self.table.notify_list_changed()
 
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""

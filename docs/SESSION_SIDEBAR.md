@@ -32,7 +32,9 @@ its place. Two known, deliberate asymmetries:
   equivalent window and so no equivalent tier.
 
 A pin made on the phone — the list's long-press or the session view's ☆/★ header
-control — is written to this same store below.
+control — is written to this same store below, and a pin made here reaches an
+open phone list within one mobile-daemon discovery pass (about 2 s), because
+that pass fingerprints the pin file on every tick.
 
 ### Pins
 
