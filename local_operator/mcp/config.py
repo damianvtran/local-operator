@@ -24,6 +24,8 @@ import re
 import tomllib
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Literal
 
@@ -391,6 +393,24 @@ def validate_server_config(name: str, cfg: MCPServerConfig | dict[str, Any] | No
     return errors
 
 
+def tool_enabled_by_config(cfg: Any, tool_name: str) -> bool:
+    """Whether ``cfg``'s allow/deny lists expose ``tool_name``.
+
+    ``disabledTools`` wins; a non-empty ``enabledTools`` is an allowlist; both
+    accept exact names or glob patterns. Lives here, beside the config models it
+    reads, so the manager (live tools) and the desktop catalog (last-seen counts
+    from the tool cache) apply ONE filter: a count that ignored the deny list
+    would advertise tools the session can never call.
+    """
+    if cfg is None:
+        return True
+    denied = getattr(cfg, "disabled_tools", []) or []
+    if any(fnmatchcase(tool_name, pattern) for pattern in denied):
+        return False
+    allowed = getattr(cfg, "enabled_tools", []) or []
+    return not allowed or any(fnmatchcase(tool_name, pattern) for pattern in allowed)
+
+
 def load_all_mcp_configs(
     cwd: str | os.PathLike[str],
 ) -> tuple[dict[str, MCPServerConfig], dict[str, str]]:
@@ -502,13 +522,33 @@ def _write_json_atomic(path: Path, doc: dict[str, Any]) -> None:
     Temp file in the target directory + ``os.replace``: readers never see a
     half-written mcp.json (a crash mid-write used to truncate the config).
     """
+    _write_bytes_atomic(path, _json_payload(doc))
+
+
+def _json_payload(doc: dict[str, Any]) -> bytes:
+    """The exact bytes :func:`_write_json_atomic` puts on disk for ``doc``."""
+    return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Temp file + ``os.replace``, for a payload that is already final bytes.
+
+    Split out of :func:`_write_json_atomic` so a rollback can put a file's
+    ORIGINAL bytes back rather than a re-serialisation of them. It is a second
+    destructive call site in this module for exactly that reason, and its
+    callers are the two ``add_key`` config writes below: both are the scope file
+    :func:`_scope_path` resolved for a server this module owns, and
+    ``os.replace`` here lands on that FILE — the temp is its sibling and the
+    target was just read — so no path through this function removes, renames or
+    replaces a session DIRECTORY (``tests/unit/session/test_no_session_deletion.py``
+    carries the allow-list row and this reason).
+    """
     import tempfile
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
         os.replace(tmp_name, path)
     except BaseException:
@@ -572,6 +612,28 @@ def _scope_path(cwd: str | os.PathLike[str] | None, scope: str) -> Path:
     return config_dir() / "mcp.json"
 
 
+def project_scope_available(cwd: str | os.PathLike[str] | None) -> bool:
+    """Whether ``cwd`` has a project scope DISTINCT from the global one.
+
+    False when ``<cwd>/.local-operator/mcp.json`` is the very file
+    ``config_dir()/mcp.json`` names — which is the DEFAULT case, not an exotic
+    one: the desktop app's default conversation folder is ``~``, and
+    ``~/.local-operator/mcp.json`` is both. Before this existed the settings
+    page offered "This project" there, wrote the global file under that
+    label, and then listed every global server as a project one.
+
+    Compared on resolved paths for the reasons :func:`owned_scope_for_source`
+    gives (symlinked homes, ``/private/var``). An unresolvable path answers
+    ``False``: "no separate project scope" is the answer that cannot write a
+    file the user did not mean.
+    """
+    try:
+        project = _scope_path(cwd, "project").expanduser().resolve()
+        return project != _scope_path(cwd, "global").expanduser().resolve()
+    except OSError:
+        return False
+
+
 class MCPConfigWriteError(Exception):
     """One refused config write, carrying every reason it was refused.
 
@@ -588,9 +650,15 @@ class MCPConfigWriteError(Exception):
     read. ``str(exc)`` joins them for callers (the TUI) that render one line.
     """
 
-    def __init__(self, errors: list[str]) -> None:
+    def __init__(self, errors: list[str], code: str = "write_failed") -> None:
         super().__init__("; ".join(errors))
         self.errors = list(errors)
+        #: A bounded refusal category for machine callers (the desktop routes).
+        #: The ``errors`` text can quote paths and config values, so a caller
+        #: that crosses a process or HTTP boundary sends THIS, never the text.
+        #: One of ``write_failed`` | ``exists`` | ``invalid_config`` |
+        #: ``unknown_server`` | ``project_scope_unavailable``.
+        self.code = code
 
 
 def owned_scope_for_source(
@@ -616,7 +684,12 @@ def owned_scope_for_source(
         return None
     try:
         resolved = Path(source).expanduser().resolve()
-        for scope in ("project", "global"):
+        # When the two scopes name ONE file (cwd == home, the desktop default),
+        # that file is the global one: asking "project" first there reported
+        # every global server as a project server and routed a remove through
+        # the wrong label. See :func:`project_scope_available`.
+        order = ("project", "global") if project_scope_available(cwd) else ("global",)
+        for scope in order:
             if _scope_path(cwd, scope).expanduser().resolve() == resolved:
                 return scope
     except OSError:
@@ -624,6 +697,23 @@ def owned_scope_for_source(
         # safe answer for a question that gates a delete.
         return None
     return None
+
+
+def _refuse_collapsed_project_scope(scope: str, cwd: str | os.PathLike[str] | None) -> None:
+    """Refuse a PROJECT write where the project file is the global file.
+
+    Silently writing the global file under a "project" label is how a user
+    who chose "only this folder" got a server in every conversation. The
+    refusal names the fact; the caller decides whether to offer global.
+    """
+    if scope == "project" and not project_scope_available(cwd):
+        raise MCPConfigWriteError(
+            [
+                f"{cwd} has no separate project scope: its project mcp.json is the "
+                "global one; use the global scope"
+            ],
+            "project_scope_unavailable",
+        )
 
 
 def add_server(
@@ -673,7 +763,8 @@ def add_server(
     cfg = _coerce_server_config(raw)
     errors = validate_server_config(name, cfg)
     if errors:
-        raise MCPConfigWriteError(errors)
+        raise MCPConfigWriteError(errors, "invalid_config")
+    _refuse_collapsed_project_scope(scope, cwd)
 
     path = _scope_path(cwd, scope)
     doc = _read_json(path) or {}
@@ -682,7 +773,7 @@ def add_server(
         servers = {}
         doc["mcpServers"] = servers
     if name in servers:
-        raise MCPConfigWriteError([f"server {name!r} already exists in {path}"])
+        raise MCPConfigWriteError([f"server {name!r} already exists in {path}"], "exists")
     servers[name] = raw
     try:
         _write_json_atomic(path, doc)
@@ -733,6 +824,175 @@ def set_http_oauth_server(
     return 0
 
 
+#: A header name a key may be bound into: an RFC 9110 token. Bounded so the
+#: name cannot smuggle a second header or a value into the config.
+HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$")
+
+#: The ``${ID}`` form the resolver publishes (``secret_refs._NAME_RE``). An id
+#: outside it would be stored but never published as a reference, leaving the
+#: row asking for a key it already holds.
+SECRET_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+#: Headers the transport owns. A key bound here would either be overwritten by
+#: the transport or break the protocol, so the write is refused instead.
+TRANSPORT_OWNED_HEADERS = frozenset(
+    {
+        "accept",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "transfer-encoding",
+    }
+)
+
+
+@dataclass(frozen=True)
+class HeaderBinding:
+    """What :func:`bind_header_secret` changed, so it can be put back EXACTLY.
+
+    ``before_bytes`` is the file's bytes before the bind and ``after_bytes`` the bytes
+    the bind wrote. A rollback that re-serialised the parsed document instead
+    left a refused ``add_key`` reindenting a hand-formatted file and adding a
+    final newline it never had (QA round 3, Q-2); holding both lets the undo
+    restore the original bytes, and only while the file is still what we wrote.
+
+    The edit's IDENTITY travels with it — ``name`` and ``header`` — rather than
+    being handed to the undo beside the binding: the pair already is the edit,
+    and a caller that paired one binding with another server's name would have
+    the fallback branch in :func:`unbind_header_secret` remove a header this bind
+    never wrote (review round 4, R4-n1).
+    """
+
+    name: str
+    header: str
+    scope: str
+    path: Path
+    before_bytes: bytes
+    after_bytes: bytes
+
+
+def bind_header_secret(
+    name: str,
+    header: str,
+    secret_id: str,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+) -> HeaderBinding:
+    """Bind ``headers[header] = "${secret_id}"`` on a remote server we own.
+
+    The config half of the desktop's ``add_key`` action: a remote server that
+    answered 401 with no OAuth discovery, and declares no ``${ID}``, has no
+    reference for a key to fill, so one is added here and the value goes to the
+    encrypted store separately (only a reference ever enters config). Writes
+    ONLY the scope file that already defines the effective server, and never
+    replaces an existing header: a header the user wrote is theirs, and the way
+    to change a referenced value is ``set_key``. Returns the
+    :class:`HeaderBinding` a rollback needs. Raises
+    :class:`MCPConfigWriteError` (``unknown_server``, ``not_owned``,
+    ``invalid_config`` or ``write_failed``).
+
+    Whether the server is one ``add_key`` applies to at all is the CALLER's
+    question (``catalog.offers_add_key``): it needs the grant store and the
+    challenge ledger, which this config layer does not read.
+    """
+    root = cwd if cwd is not None else "."
+    if not HEADER_NAME_RE.match(header) or header.lower() in TRANSPORT_OWNED_HEADERS:
+        raise MCPConfigWriteError([f"header {header!r} cannot carry a key"], "invalid_config")
+    if not SECRET_ID_RE.match(secret_id):
+        raise MCPConfigWriteError(
+            [f"key id {secret_id!r} is not a reference name"], "invalid_config"
+        )
+    configs, sources = load_all_mcp_configs(root)
+    cfg = configs.get(name)
+    if cfg is None:
+        raise MCPConfigWriteError([f"server {name!r} not found"], "unknown_server")
+    if not getattr(cfg, "url", None):
+        raise MCPConfigWriteError([f"server {name!r} has no headers"], "invalid_config")
+    scope = owned_scope_for_source(sources.get(name), root)
+    if scope is None:
+        raise MCPConfigWriteError([f"server {name!r} is not ours to edit"], "not_owned")
+    path = _scope_path(root, scope)
+    # ONE read, as bytes: the same bytes are parsed here and kept for the
+    # rollback, so the undo restores exactly what this edit replaced.
+    original = b""
+    try:
+        original = path.read_bytes()
+        loaded = json.loads(original.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        # Unreadable or unparseable: every branch below refuses, so the empty
+        # placeholder never reaches a binding (it only keeps the name bound for
+        # the type checker).
+        loaded = None
+    doc = loaded if isinstance(loaded, dict) else None
+    servers = doc.get("mcpServers") if doc is not None else None
+    raw = servers.get(name) if isinstance(servers, dict) else None
+    if doc is None or not isinstance(raw, dict):
+        raise MCPConfigWriteError([f"server {name!r} not found in {path}"], "unknown_server")
+    headers = raw.get("headers")
+    if headers is None:
+        headers = {}
+    if not isinstance(headers, dict) or any(str(key).lower() == header.lower() for key in headers):
+        raise MCPConfigWriteError([f"server {name!r} already sets {header!r}"], "invalid_config")
+    headers[header] = f"${{{secret_id}}}"
+    raw["headers"] = headers
+    written = _json_payload(doc)
+    try:
+        _write_bytes_atomic(path, written)
+    except OSError as exc:
+        raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+    return HeaderBinding(
+        name=name, header=header, scope=scope, path=path, before_bytes=original, after_bytes=written
+    )
+
+
+def unbind_header_secret(binding: HeaderBinding) -> None:
+    """Undo :func:`bind_header_secret` when the value could not be stored.
+
+    While the file is still byte-for-byte what the bind wrote, its ORIGINAL
+    bytes go back, so a refused ``add_key`` leaves the file identical. If
+    anything else edited it in between, only our header is removed, and only
+    while it still holds a bare ``${ID}`` reference, so a concurrent hand edit
+    is never thrown away.
+
+    The name and header come from ``binding`` and not from the caller: the
+    binding is the record of what was written, and the two cannot disagree
+    (review round 4, R4-n1).
+    """
+    name, header = binding.name, binding.header
+    path = binding.path
+    try:
+        current = path.read_bytes()
+    except OSError:
+        current = None
+    if current == binding.after_bytes:
+        try:
+            _write_bytes_atomic(path, binding.before_bytes)
+        except OSError as exc:
+            raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+        return
+    doc = _read_json(path)
+    servers = doc.get("mcpServers") if doc is not None else None
+    raw = servers.get(name) if isinstance(servers, dict) else None
+    if doc is None or not isinstance(raw, dict):
+        return
+    headers = raw.get("headers")
+    value = headers.get(header) if isinstance(headers, dict) else None
+    if not isinstance(headers, dict) or not isinstance(value, str):
+        return
+    if not re.fullmatch(r"\$\{[^}]+\}", value):
+        return
+    del headers[header]
+    if not headers:
+        del raw["headers"]
+    try:
+        _write_json_atomic(path, doc)
+    except OSError as exc:
+        raise MCPConfigWriteError([f"could not write {path}: {exc}"]) from exc
+
+
 def remove_server(
     name: str,
     *,
@@ -746,11 +1006,12 @@ def remove_server(
     define the same name). Raises :class:`MCPConfigWriteError` when the name is
     not present in that scope, or when the write fails.
     """
+    _refuse_collapsed_project_scope(scope, cwd)
     path = _scope_path(cwd, scope)
     doc = _read_json(path)
     servers = doc.get("mcpServers") if doc is not None else None
     if doc is None or not isinstance(servers, dict) or name not in servers:
-        raise MCPConfigWriteError([f"server {name!r} not found in {path}"])
+        raise MCPConfigWriteError([f"server {name!r} not found in {path}"], "unknown_server")
     del servers[name]
     try:
         _write_json_atomic(path, doc)
