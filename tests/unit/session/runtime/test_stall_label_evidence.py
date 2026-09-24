@@ -30,15 +30,18 @@ import pytest
 from local_operator.paths import config_dir
 from local_operator.session.runtime import control, registry, stall_watchdog
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, LEAVING_FOR_BUILD
-from tests.unit.session.runtime.test_control import (  # noqa: F401 — the fixture is imported by name so pytest can find it
-    no_signals,
-)
+from tests.unit.session.runtime import test_control
 from tests.unit.session.runtime.test_control import (
     _bare_record,
     _record_for,
     _serve,
     _StoppingHandle,
 )
+
+#: The kill-switch cells' fixture, re-bound here by name so pytest collects it for this
+#: module: it keeps the ladder from signalling the test runner and makes liveness follow
+#: the fake handle, which every ladder cell below depends on.
+no_signals = test_control.no_signals
 
 # ---------------------------------------------------------------------------------------
 # Bug 2 — the held predicate
@@ -242,7 +245,7 @@ def test_the_predicate_reads_the_writers_own_stamp() -> None:
 
 @pytest.mark.asyncio
 async def test_a_wedged_draining_runtime_is_stopped_not_skipped(
-    no_signals,  # noqa: F811 — the fixture, by name
+    no_signals,
 ) -> None:
     """Pids 42983/43911: ``leaving`` set, heartbeat hours stale, `lop sessions` wedged.
 
@@ -276,7 +279,7 @@ async def test_a_wedged_draining_runtime_is_stopped_not_skipped(
 
 @pytest.mark.asyncio
 async def test_a_fresh_draining_runtime_is_still_skipped(
-    no_signals,  # noqa: F811 — the fixture, by name
+    no_signals,
 ) -> None:
     """The drain skip itself is unchanged for a runtime that is still reporting.
 
@@ -298,7 +301,7 @@ async def test_a_fresh_draining_runtime_is_still_skipped(
 
 @pytest.mark.asyncio
 async def test_a_held_draining_runtime_is_stopped_not_skipped(
-    no_signals,  # noqa: F811 — the fixture, by name
+    no_signals,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fresh heartbeat but a current, un-superseded held fire: the drain is not moving.
