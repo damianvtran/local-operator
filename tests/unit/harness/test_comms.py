@@ -3090,6 +3090,92 @@ def test_status_counts_counts_the_same_population_nodes_reports(tmp_path) -> Non
     assert counts["completed"] == 5
 
 
+def test_node_status_is_describes_status_for_every_arm(tmp_path) -> None:
+    """``node().status`` reads ``_lifecycle`` directly and must equal ``describe``'s.
+
+    ``RosterPass.node`` used to build a whole ``ChildInfo`` -- resumable verdict,
+    transcript ``stat()`` and all -- only to read its ``status``. It now reads the
+    status straight from ``_lifecycle``, which is sound ONLY while ``describe``
+    passes that status through unchanged on every arm. One record per arm of the
+    ladder, so a future ``describe`` that rewrites a status fails here rather
+    than silently splitting the roster from the nodes.
+    """
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    arms: dict[str, Callable[[Any], None]] = {}
+
+    def running(record: Any) -> None:
+        record.child = FakeChild()
+
+    def queued(record: Any) -> None:
+        jobs.get(record.job_id).queued = True
+
+    def pausing(record: Any) -> None:
+        record.paused = True
+
+    def paused(record: Any) -> None:
+        record.paused = True
+        jobs.get(record.job_id).status = "cancelled"
+
+    def completed(record: Any) -> None:
+        record.outcome = "completed"
+        jobs.get(record.job_id).status = "completed"
+
+    def swept(record: Any) -> None:
+        record.settled = True
+        del jobs.jobs[record.job_id]
+
+    arms.update(
+        running=running,
+        queued=queued,
+        pausing=pausing,
+        paused=paused,
+        completed=completed,
+        swept=swept,
+    )
+    for name, arm in arms.items():
+        jobs.add(name, status="running")
+        comms.record_launch(name, name)
+        session_dir = tmp_path / name
+        session_dir.mkdir()
+        (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+        comms._records[name].session_dir = session_dir
+        arm(comms._records[name])
+
+    read = comms.roster_pass()
+    described = {record.job_id: read.describe(record).status for record in read.records}
+    noded = {node.job_id: node.status for node in read.nodes()}
+    assert noded == described
+    # The fixture must actually reach distinct arms, or equality is vacuous.
+    assert len(set(described.values())) >= 5, described
+
+
+def test_nodes_make_no_filesystem_probe(tmp_path, monkeypatch) -> None:
+    """``nodes()`` answers from memory; the transcript probe belongs to ``roster()``.
+
+    ``nodes()`` runs on the runtime host's per-event projection and on every
+    roster tick, so a ``stat()`` per record there is a per-event syscall per
+    child the parent ever launched (up to ``MAX_RECORDS``). Structural rather
+    than timed: the probe is counted, and ``nodes()`` must make none of them.
+    """
+    comms = _settled_roster(16, tmp_path)
+    from pathlib import Path
+
+    probes: list[Path] = []
+    original = Path.exists
+
+    def counting_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        probes.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting_exists)
+    nodes = comms.roster_pass().nodes()
+    assert len(nodes) == 16
+    assert probes == [], f"nodes() probed the filesystem {len(probes)} times"
+    comms.roster_pass().roster()
+    assert probes, "the probe moved: roster() must still check the transcript is on disk"
+
+
 def test_the_roster_touches_each_record_a_constant_number_of_times(tmp_path) -> None:
     """``roster()`` is linear: one touch per record plus a constant.
 
