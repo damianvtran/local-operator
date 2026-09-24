@@ -755,6 +755,37 @@ async def engage_runtime(
     """
     from local_operator.mobile.attach_client import find_runtime_record
 
+    # -----------------------------------------------------------------
+    # INV-1, GUARD 1: A SESSION BEING HANDED AWAY MUST NOT GET A RUNTIME.
+    # -----------------------------------------------------------------
+    # If this id has a move in flight, a runtime started here is the second writer
+    # the whole mobility design exists to make impossible: the destination is about
+    # to own the transcript, and a successor here would append to the same
+    # conversation from a directory that is about to be deleted — two trajectories,
+    # neither aware of the other. This is the SINGLE entry point every engage path
+    # uses (a local viewer's first message, the phone daemon, a scheduled wake,
+    # `lop exec`, and the relay's own `net_session_engage`), so one guard here
+    # covers all of them, and a second guard at any one caller would be a guard
+    # that the others do not have.
+    #
+    # The check is a read of one small JSON file, and it is a READ-ONLY dependency
+    # on a stdlib-only leaf (`session/placement.py`) so it costs nothing on the
+    # boot path. It FAILS CLOSED: a journal that exists but cannot be parsed
+    # refuses, because the two candidate answers are not symmetric — refusing costs
+    # a sentence and a file deletion, while proceeding can spawn a second runtime
+    # for a session mid-handoff.
+    #
+    # A session with NO journal reads as "not in transit", so the ordinary case is
+    # one `stat` — which is why this is a plain call and not `asyncio.to_thread`.
+    # The hand-off is off, the file is absent, and a thread hand-off to answer it
+    # costs more than the answer: this is on the path of every engage, including
+    # every message a user sends to a cold session.
+    from local_operator.session.placement import handoff_guard_refusal
+
+    handed_off = handoff_guard_refusal(config_dir, session_id)
+    if handed_off:
+        raise RuntimeStartupError(handed_off)
+
     if not getattr(work, "command_id", ""):
         # Identity is what makes a retry safe. A caller that did not supply one
         # gets one here rather than being silently non-idempotent.
