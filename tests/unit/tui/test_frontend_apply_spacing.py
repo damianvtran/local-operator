@@ -337,9 +337,7 @@ async def test_a_session_switch_does_not_space_the_new_sessions_first_paint() ->
         assert app._band_painted_revision is None
         assert app._frontend_painted_lifecycle is None
         recorder = _Recorder(app)
-        app._on_frontend_update(
-            viewer.push(jobs=[_job("a", latest_details={"progress": "later"})])
-        )
+        app._on_frontend_update(viewer.push(jobs=[_job("a", latest_details={"progress": "later"})]))
         assert len(recorder.now) == 1, "the first paint after a switch is not spaced"
         assert recorder.spaced == []
 
