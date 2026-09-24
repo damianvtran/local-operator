@@ -1247,44 +1247,23 @@ def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple
     return True, index, is_a_type_name
 
 
-def _has_a_bare_primitive_argument(value: str) -> bool:
-    """Whether a generic argument is a BARE primitive word rather than a type name.
-
-    ``Vec<u8>`` and ``Map<string, string>`` have one; ``Option<Vec<u8>>`` does not
-    (its argument is the nested application ``Vec<u8>``), which is what keeps a real
-    annotation over a primitive released while ``Pass<int>`` is refused.
-    """
-    start = value.find("<")
-    if start < 0:
-        return False
-    depth = 0
-    arguments: list[list[str]] = [[]]
-    for char in value[start + 1 :]:
-        if char == "<":
-            depth += 1
-        elif char == ">":
-            if depth == 0:
-                break
-            depth -= 1
-        elif char == "," and depth == 0:
-            arguments.append([])
-            continue
-        arguments[-1].append(char)
-    # Only a TOP-LEVEL argument counts. ``Option<Vec<u8>>`` has one argument — the
-    # nested application ``Vec<u8>`` — which is not a bare primitive, whereas
-    # ``Vec<u8>`` has the argument ``u8`` and ``Pass<int>`` the argument ``int``.
-    return any("".join(argument).strip() in _TYPE_PRIMITIVES for argument in arguments)
-
-
 def _base_is_a_credential_stem(base: str) -> bool:
     """Whether a type application's BASE is spelled like a credential word.
 
-    Used for one decision only: whether a bare PRIMITIVE argument may be read as
-    proof of a type. ``Vec<u8>`` and ``Map<string, string>`` keep that reading; a
-    base a person reaches for when they choose a password — ``Pass``, ``Passwd``,
-    ``Secret``, ``Token``, ``Auth``, ``Login``, ``ApiKey`` — does not, because
-    ``Pass<int>`` is far more likely to be a chosen passphrase than an annotation,
-    and a credential released is worse than a type masked (agent review R1-2).
+    It decides the release on the BASE alone, whatever the argument is (agent
+    review R1-2, R2-1). ``Vec<u8>``, ``Map<string, string>`` and ``Arc<Mutex<str>>``
+    keep their release because a type's own base is a type name; a base a person
+    reaches for when they choose a password — ``Pass``, ``Passphrase``, ``Passkey``,
+    ``Passwd``, ``Secret``, ``Token``, ``Auth``, ``Login``, ``ApiKey`` — does not,
+    because a passphrase over such a base is a chosen value far more often than it
+    is an annotation, and a credential released is worse than a type masked.
+
+    **The test is on the BASE and not the argument, and that is the lesson of two
+    review rounds.** R1-2 gated this on a bare primitive argument and so released
+    ``Pass<int>``; R2-1 then shipped the same inversion one spelling over and
+    released ``Pass<Phrase>``, ``Auth<Token>`` and ``Pass<Vec<u8>>`` whole, with no
+    hit. Any later widening of the ARGUMENT grammar must not be able to re-open this
+    class, which is what putting the refusal on the base buys.
 
     A stem match is deliberately blunt: it only ever REFUSES a release, so the cost
     of a false hit is a masked type, which is the direction this clause trades in.
@@ -1369,13 +1348,18 @@ def _is_type_expression(value: str) -> bool:
     if _carries_a_non_primitive_digit(value):
         return False
     base = value.split("<", 1)[0]
-    if _base_is_a_credential_stem(base) and _has_a_bare_primitive_argument(value):
-        # ``Pass<int>``, ``Secret<str>``, ``Token<void>``: a credential-stem base
-        # whose argument is a bare ordinary word. The positional primitive allowance
-        # would release it, and the argument being English rather than a type name is
-        # the only difference between this spelling and ``Vec<u8>`` (agent review
-        # R1-2). A nested application as the argument (``Option<Vec<u8>>``) is not a
-        # bare primitive and is unaffected.
+    if _base_is_a_credential_stem(base):
+        # A credential-stem base refuses the release WHATEVER the argument is
+        # (agent review R2-1). Qualifying this with a bare-primitive-argument test
+        # read the discriminating fact in the wrong place, and it is the same
+        # mistake R1-2 made one spelling over: the BASE is what says a person chose
+        # this value, and an argument that is a CamelCase name (``Pass<Phrase>``) or
+        # a nested application (``Pass<Vec<u8>>``) is no more proof of a type than
+        # ``int`` was — yet every such spelling was released whole, with no hit,
+        # while the qualifier stood. A type's own base is never a credential stem,
+        # so ``Vec<u8>``, ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their
+        # release: the refusal sits on the BASE and is silent about the argument,
+        # which is the direction that cannot trade containment back.
         return False
     if is_credential_name(value.split(chr(60), 1)[0]):
         # The BASE is a credential WORD, whatever the arguments are (agent review
