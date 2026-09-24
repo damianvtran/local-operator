@@ -42,6 +42,20 @@ def _document(root: Path) -> placement_mod.PlacementDocument:
     return placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
 
 
+def _entry(document: placement_mod.PlacementDocument, key: str) -> Any:
+    """``document.entry(key)`` with the absence asserted, once.
+
+    ``entry`` returns ``None`` for a key the document does not carry, and a test that
+    dereferenced the result directly would be asserting through a ``None`` that a
+    checker cannot rule out. Narrowing here keeps every call site readable and means a
+    typo in the key fails as ``AssertionError: deepseek`` rather than as
+    ``AttributeError: 'NoneType'``.
+    """
+    entry = document.entry(key)
+    assert entry is not None, key
+    return entry
+
+
 def _declared(root: Path) -> placement_mod.PlacementDocument:
     document = _document(root)
     document.declare(
@@ -75,7 +89,7 @@ def test_only_the_owner_may_change_who_borrows(tmp_path: Path) -> None:
     assert refusal.value.code == "not_owner"
     with pytest.raises(MeshRefusal):
         document.revoke("openai", OTHER, by=OTHER)
-    assert document.entry("openai").holders == [] or document.is_holder("openai", OWNER)
+    assert _entry(document, "openai").holders == [] or document.is_holder("openai", OWNER)
 
 
 def test_the_owner_is_always_its_own_holder(tmp_path: Path) -> None:
@@ -83,7 +97,8 @@ def test_the_owner_is_always_its_own_holder(tmp_path: Path) -> None:
     entry = _declared(tmp_path).entry("openai")
     assert entry is not None
     assert entry.is_holder(OWNER)
-    assert entry.holder(OWNER).scope == "device"
+    own_holder = entry.holder(OWNER)
+    assert own_holder is not None and own_holder.scope == "device"
 
 
 def test_the_owner_cannot_revoke_itself(tmp_path: Path) -> None:
@@ -110,9 +125,11 @@ def test_a_regrant_widens_and_never_narrows(tmp_path: Path) -> None:
     working peer's scope on a typo would break a device that is mid-turn."""
     document = _declared(tmp_path)
     document.grant("openai", OTHER, scope="device", by=OWNER)
-    assert document.entry("openai").holder(OTHER).scope == "device"
+    granted = _entry(document, "openai").holder(OTHER)
+    assert granted is not None and granted.scope == "device"
     document.grant("openai", OTHER, scope="session", by=OWNER)
-    assert document.entry("openai").holder(OTHER).scope == "device"
+    still = _entry(document, "openai").holder(OTHER)
+    assert still is not None and still.scope == "device"
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +228,7 @@ def test_a_document_round_trips_through_disk(tmp_path: Path) -> None:
     reloaded = placement_mod.PlacementDocument.load(NETWORK, tmp_path)
     assert reloaded.owner_of("openai") == OWNER
     assert reloaded.is_holder("openai", OTHER)
-    assert reloaded.entry("openai").identity_label == "damian@example.test"
+    assert _entry(reloaded, "openai").identity_label == "damian@example.test"
 
 
 def test_the_document_is_written_privately(tmp_path: Path) -> None:
@@ -280,7 +297,9 @@ def test_an_observation_expires_on_its_ttl(tmp_path: Path) -> None:
 def test_an_observation_with_no_ttl_gets_the_default(tmp_path: Path) -> None:
     state = PlacementState(NETWORK, root=tmp_path)
     state.observe("openai", "not_a_holder")
-    assert state.observation("openai")["retry_after_ms"] == DEFAULT_OBSERVATION_TTL_MS
+    observed = state.observation("openai")
+    assert observed is not None
+    assert observed["retry_after_ms"] == DEFAULT_OBSERVATION_TTL_MS
 
 
 def test_a_successful_borrow_clears_a_standing_refusal(tmp_path: Path) -> None:

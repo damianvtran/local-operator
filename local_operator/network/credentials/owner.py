@@ -301,6 +301,7 @@ class MeshCredentialBroker:
         #    They are the cheap way to provoke an IdP's refresh-token reuse
         #    detection, which revokes the whole family — the exact loss the design
         #    exists to prevent (cut line unsafe item 3).
+        holder = entry.holder(by)
         if force and not self._is_admin(by):
             return self._refuse(
                 link,
@@ -320,7 +321,7 @@ class MeshCredentialBroker:
                     for_session=for_session,
                     model_id=model_id,
                     force=force,
-                    holder_scope=entry.holder(by).scope if entry.holder(by) else "session",
+                    holder_scope=holder.scope if holder is not None else "session",
                     by=by,
                 ),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
@@ -798,7 +799,11 @@ class MeshCredentialBroker:
         """
         from local_operator.providers.auth_store import CredentialInvalidError
 
-        common = {
+        # ``Any`` because the dict is unpacked with ``**``: typed as ``dict[str, str]``
+        # pyright reads every key as a ``str``, including ``retry_after_ms``, and
+        # reports the explicit int argument as a conflict. The same spelling this
+        # package's CLI already uses for its ``**fields``.
+        common: dict[str, Any] = {
             "key": key,
             "owner_device": self.self_device,
             "owner_device_name": self.self_device_name,
