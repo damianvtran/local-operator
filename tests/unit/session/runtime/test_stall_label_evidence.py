@@ -530,7 +530,10 @@ async def test_a_held_draining_runtime_is_stopped_not_skipped(
             target, timeout_s=3.0, _root=config_dir(), on_wait=said.append
         )
         assert outcome.method == "socket", outcome.line
-        assert said and "stall bound fired" in said[0], said
+        # The reason in the ``bound held`` cell's own words, not the timer's (D5).
+        assert said and "its stall bound is held (it fired with work in flight)" in said[0], said
+        assert "re-armed" not in said[0], said
+        assert "not left to finish" in said[0], said
         # Q-2: the line names the decision, and cannot contradict a later refusal.
         assert "trying the ordinary stop" in said[0], said
         assert "stopping it rather than" not in said[0], said
@@ -665,9 +668,18 @@ async def test_an_old_format_held_drain_with_a_fresh_beat_is_still_skipped(
     )
     try:
         assert control._drain_stalled(target) == "", "an unproven held reading cut a drain"
+        # The label this operator followed says ``bound held; lop stop``.
+        assert stall_watchdog.held_now(target.pid, target.started_at) is True
         outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
         assert outcome.method == "draining", outcome.line
         assert handle.stops == []
+        # D3 / m-C / Q-6: the skip says why it contradicts that label and names only
+        # ``--force``, rather than "nothing to do".
+        assert (
+            '"bound held" reading comes from an older build and cannot be confirmed' in outcome.line
+        ), outcome.line
+        assert "nothing to do" not in outcome.line, outcome.line
+        assert outcome.line.endswith("(--force to stop it anyway)"), outcome.line
     finally:
         server.close()
         dump.unlink(missing_ok=True)
@@ -744,6 +756,111 @@ async def test_the_drain_check_runs_off_the_event_loop(
     finally:
         server.close()
     assert seen and seen[0] is not threading.main_thread(), seen
+
+
+def test_held_reading_opens_each_file_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """N-2: the sibling is opened once and the dump never, since the caller holds its text.
+
+    ``held_pids`` runs this for every dump in a listing, and two sibling reads leave a
+    window for a re-arm's replace to land between the fence and the fields. Counted on
+    the three readings (proven, unproven, recovered) so no path re-reads.
+    """
+    logs = tmp_path / "logs"
+    cases = [
+        _held_dump(logs, 4201, fired_mono=10_000.0, deadline_mono=10_001.0),
+        _held_dump(logs, 4202, fired_mono=10_000.0, deadline_mono=10_000.0 + 3600),
+        _main_format_held_dump(logs, 4203, sibling_epoch=time.time() + 290),
+    ]
+    texts = {dump: dump.read_text(encoding="utf-8") for dump in cases}
+    opened: list[str] = []
+    real_open, real_read_text = Path.open, Path.read_text
+
+    def counting_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        opened.append(self.name)
+        return real_open(self, *args, **kwargs)
+
+    def counting_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        opened.append(self.name)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    readings = []
+    for dump in cases:
+        opened.clear()
+        readings.append(stall_watchdog.held_reading(dump, texts[dump]))
+        sibling = dump.with_suffix(stall_watchdog.DEADLINE_SUFFIX).name
+        assert opened.count(dump.name) == 0, (dump.name, opened)
+        assert opened.count(sibling) <= 1, (dump.name, opened)
+    assert readings == [
+        stall_watchdog.HELD_PROVEN,
+        stall_watchdog.NOT_HELD,
+        stall_watchdog.HELD_UNPROVEN,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["old-format", "current-no-sibling"])
+async def test_the_skip_line_names_an_older_build_only_when_the_marker_is_one(
+    no_signals, marker: str
+) -> None:
+    """Agent review round 1 on #1541, m1: the stated cause must be the artifact's.
+
+    Both runtimes are leaving with a fresh beat and an UNPROVEN held reading, so both
+    are skipped. An old-format marker (no monotonic stamp) is from an older build and
+    the line may say so. A CURRENT-build marker whose sibling is missing — reachable,
+    since ``_record_held_fire`` re-arms without writing one — gets cause-neutral words.
+    REPRODUCTION: a1a5de647 told the current-build runtime its reading came from an
+    older build.
+    """
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(
+        record,
+        busy=True,
+        leaving=LEAVING_FOR_BUILD,
+        heartbeat_at=time.time() - 5,
+        started_at=time.time() - 7 * 3600,
+    )
+    logs = stall_watchdog.dump_path(target.pid).parent
+    if marker == "old-format":
+        dump = _main_format_held_dump(logs, target.pid, sibling_epoch=time.time() + 290)
+    else:
+        dump = _held_dump(logs, target.pid, fired_mono=10_000.0, deadline_mono=None)
+    try:
+        assert stall_watchdog.held_reading(dump, dump.read_text("utf-8")) == (
+            stall_watchdog.HELD_UNPROVEN
+        )
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert handle.stops == []
+        if marker == "old-format":
+            assert (
+                '"bound held" reading comes from an older build and cannot be confirmed'
+                in outcome.line
+            ), outcome.line
+        else:
+            assert "older build" not in outcome.line, outcome.line
+            assert (
+                '"bound held" reading cannot be confirmed from its evidence' in outcome.line
+            ), outcome.line
+        assert "nothing to do" not in outcome.line, outcome.line
+        assert outcome.line.endswith("(--force to stop it anyway)"), outcome.line
+    finally:
+        server.close()
+        dump.unlink(missing_ok=True)
+        dump.with_suffix(stall_watchdog.DEADLINE_SUFFIX).unlink(missing_ok=True)
+
+
+def test_the_row_tag_names_the_reason_the_other_surfaces_show() -> None:
+    """D1: the ``/stop all`` tag uses what ``lop sessions`` and ``lop stop`` say.
+
+    The heartbeat arm reads as HB_AGE does, the held arm as the STALLED cell does; any
+    other reason keeps the held wording (the only other arm) rather than inventing one.
+    """
+    assert control.stall_tag("it has not reported for 5h") == "leaving, not reporting for 5h"
+    assert control.stall_tag(control.STALL_HELD_REASON) == "leaving, bound held"
 
 
 def test_the_stalled_probe_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:

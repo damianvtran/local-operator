@@ -3591,8 +3591,8 @@ def _held_fired_mono(text: str) -> float | None:
         return None
 
 
-def _rearmed_since(dump: Path, fired_mono: float) -> bool:
-    """Has EVERY plane reported since the fire, per this dump's deadline sibling?
+def _rearmed_since(fields: list[str] | None, fired_mono: float) -> bool:
+    """Has EVERY plane reported since the fire, per this dump's deadline sibling's fields?
 
     THE SIBLING'S CONTENT, NOT ITS MTIME, and the difference is the whole predicate. The
     mtime moves on every successful re-arm, and a runtime whose WORKLOAD loop is parked
@@ -3624,21 +3624,37 @@ def _rearmed_since(dump: Path, fired_mono: float) -> bool:
 
     Unreadable, absent, malformed or OLD-FORMAT (two-field) siblings answer ``False`` —
     the evidence of a recovery is missing, so the held reading the dump states stands.
-    So does a sibling OLDER THAN THE DUMP, which is :func:`_sibling_path`'s fence.
+    So does a sibling OLDER THAN THE DUMP, which :func:`_sibling_fields` fences out.
     """
-    sibling = _sibling_path(dump)
-    if sibling is None:
-        return False
-    try:
-        raw = sibling.read_text(encoding="utf-8").split()
-        deadline_mono = float(raw[2])
-    except (OSError, ValueError, IndexError):
+    deadline_mono = _deadline_mono(fields)
+    if deadline_mono is None:
         return False
     return deadline_mono - fired_mono >= min_bound_seconds() / 2
 
 
-def _sibling_path(dump: Path) -> Path | None:
-    """This dump's deadline sibling, or ``None`` when it cannot belong to the dump's life.
+def _deadline_mono(fields: list[str] | None) -> float | None:
+    """The sibling's third field — the pinned deadline on ``time.monotonic()`` — or ``None``.
+
+    ``None`` for an absent or fenced-out sibling, a two-field (pre-monotonic) one and a
+    torn or malformed one alike: each is "no evidence on the one clock".
+    """
+    if fields is None:
+        return None
+    try:
+        return float(fields[2])
+    except (ValueError, IndexError):
+        return None
+
+
+def _sibling_fields(dump: Path, text: str) -> list[str] | None:
+    """This dump's deadline sibling, split, or ``None`` when it cannot be this life's.
+
+    ONE READ OF EACH FILE (agent review round 3, N-2): ``text`` is the dump text the
+    caller already holds, so the arm header comes from it rather than from a second
+    read, and the sibling is opened once and its mtime taken from the SAME open file
+    (``fstat``) — so the fence and the fields describe one inode, with no window for a
+    re-arm's atomic replace to land between two reads. ``held_pids`` calls this once per
+    dump in a listing.
 
     THE PID FENCE, APPLIED TO THE SIBLING (agent review round 2, m-A). :func:`arm`
     truncates the dump and unlinks the sibling for each new life, but the unlink is
@@ -3652,21 +3668,27 @@ def _sibling_path(dump: Path) -> Path | None:
     re-arms, so a sibling whose mtime is OLDER than its dump's arm header cannot have
     been written by this life. The header's epoch (:func:`armed_at`) is the arm moment,
     and every dump :func:`arm` writes carries it — builds before this fence included — so
-    a dump without a readable header, or an unstat-able sibling, answers "cannot tell"
+    a dump without a readable header, or an unreadable sibling, answers "cannot tell"
     (``None``), the held direction. The one-second slack is ``armed_at``'s resolution
-    (``{time.time():.0f}``). Both sides are WALL time, and that is safe here in a way it
-    was not for supersession: a step or sleep can only make the sibling look OLDER than
-    the arm (held), never make a foreign sibling look younger than a fresh life's arm.
+    (``{time.time():.0f}``).
+
+    BOTH SIDES ARE WALL TIME, and what that leaves open is stated rather than denied
+    (agent review round 3, N-1): a forward step or a sleep only makes a foreign sibling
+    look OLDER than the arm (held). It reads as this life's only if the wall clock
+    REGRESSED across the reboot — the new life's arm stamped behind the old life's last
+    sibling write, as a backward correction or a board with no RTC can do. That residue
+    needs m-A's failed unlink AND a held fire before this life's first re-arm on top.
     """
-    sibling = dump.with_suffix(DEADLINE_SUFFIX)
-    arm = armed_at(_dump_text(dump))
+    arm = armed_at(text)
     if arm is None:
         return None
     try:
-        written = sibling.stat().st_mtime
-    except OSError:
+        with dump.with_suffix(DEADLINE_SUFFIX).open(encoding="utf-8") as handle:
+            written = os.fstat(handle.fileno()).st_mtime
+            fields = handle.read().split()
+    except (OSError, ValueError):
         return None
-    return sibling if written >= arm - 1.0 else None
+    return fields if written >= arm - 1.0 else None
 
 
 #: What :func:`held_reading` answers. ``HELD_PROVEN`` — a new-format held fire whose
@@ -3738,19 +3760,13 @@ def held_reading(dump: Path, text: str) -> str:
     fired_mono = _held_fired_mono(text)
     if fired_mono is None:
         return HELD_UNPROVEN
-    if _rearmed_since(dump, fired_mono):
+    fields = _sibling_fields(dump, text)
+    if _rearmed_since(fields, fired_mono):
         return NOT_HELD
     # Proven only when the sibling that failed to show a re-arm is this life's and
     # carries the monotonic field: an absent, foreign or old-format sibling answered
     # "no re-arm" for want of evidence, not because of it.
-    sibling = _sibling_path(dump)
-    if sibling is None:
-        return HELD_UNPROVEN
-    try:
-        float(sibling.read_text(encoding="utf-8").split()[2])
-    except (OSError, ValueError, IndexError):
-        return HELD_UNPROVEN
-    return HELD_PROVEN
+    return HELD_PROVEN if _deadline_mono(fields) is not None else HELD_UNPROVEN
 
 
 def held_now(
@@ -3771,6 +3787,33 @@ def held_now(
         return False
     reading = held_reading(*evidence)
     return reading == HELD_PROVEN if proven else reading != NOT_HELD
+
+
+#: What :func:`unproven_cause` answers for an UNPROVEN held reading: the marker itself
+#: predates the monotonic stamp (a build before #1527), or it is a current-build marker
+#: whose deadline sibling is missing, foreign or torn.
+UNPROVEN_OLD_BUILD = "older build"
+UNPROVEN_EVIDENCE = "evidence"
+
+
+def unproven_cause(pid: int, started_at: float, directory: Path | None = None) -> str:
+    """Why THIS life's held reading is unproven, or ``""`` when it is not unproven.
+
+    FOR THE WORDS, NOT THE DECISION (agent review round 1 on #1541, m1): the ladder's
+    skip line explains why a ``bound held`` label did not stop the runtime, and "comes
+    from an older build" is true only when the marker carries no monotonic stamp. A
+    current build can leave an unproven reading too — ``_record_held_fire`` re-arms
+    without writing the sibling, so a fire before the next beat has none — and that
+    runtime must not be told its evidence is from another build. The same fence and the
+    same :func:`held_reading` as :func:`held_now`, so the line and the label agree about
+    which runtime is unproven.
+    """
+    evidence = dump_evidence(pid, directory)
+    if evidence is None or not dump_is_current(evidence[0], started_at):
+        return ""
+    if held_reading(*evidence) != HELD_UNPROVEN:
+        return ""
+    return UNPROVEN_OLD_BUILD if _held_fired_mono(evidence[1]) is None else UNPROVEN_EVIDENCE
 
 
 def fire_outcome(pid: int | None = None, directory: Path | None = None) -> str:
