@@ -89,11 +89,17 @@ def _judge_over(session: Session) -> tuple[GoalJudge, list[str]]:
     async def prompt(text: str) -> None:
         raise AssertionError("an ACHIEVED verdict admits no continuation")
 
+    def settled(reason: str) -> None:
+        # A statement, not a lambda: `settled` is typed `Callable[[str], None]`
+        # and `mark_goal_done` returns the entry it recorded, which the driver
+        # has no use for (the serving handle's own `settled` drops it the same way).
+        session.mark_goal_done(reason)
+
     driver = GoalJudge(
         judge=judge,
         prompt=prompt,
         changed=lambda fields: session.note_goal_judge(**fields),
-        settled=lambda reason: session.mark_goal_done(reason),
+        settled=settled,
         goal=lambda: session.goal,
         status=lambda: session.goal_status,
         token=lambda: session.goal_token,
