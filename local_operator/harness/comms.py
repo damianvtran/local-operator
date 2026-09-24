@@ -1265,6 +1265,67 @@ class SubagentComms:
         )
         return sessions
 
+    def descendant_ids(self, job_id: str) -> set[str]:
+        """Every record strictly BELOW ``job_id`` in the launch graph.
+
+        WHY THIS EXISTS. This registry is ONE instance shared by the root and
+        every child it (transitively) launches, so a reader that asks it for
+        "the roster" gets the WHOLE fan-out. That is right for the root, and it
+        was quietly wrong for a child: each child ``Session`` owns a frontend
+        store whose ``_jobs`` projection read ``job_rows()`` and ``nodes()``
+        unscoped, so every child re-froze every SIBLING's retained trajectory
+        (up to ``TRAJECTORY_CAP`` rows each) at each of its own message, tool
+        and turn boundaries. N children therefore paid O(N) per boundary — O(N²)
+        across the fan-out, all on the one event loop they share with the
+        parent. Measured with ``scripts/bench_subagent_fanout.py``: at 16
+        children those refreshes were the majority of process CPU and drove
+        loop lag past two seconds, which is what an operator sees as slow
+        children and a parent that stops answering while it waits on them.
+
+        A child's own roster is its own subtree, exactly what a viewer of that
+        child can navigate to, so the child projects that and nothing else.
+
+        Both ends are resolved through the attempt aliases, so a resumed
+        attempt (new job id, same durable record) keeps its descendants and a
+        grandchild launched under a superseded attempt id still counts. Linear
+        in the registry, with a per-call memo, and cycle-safe for the malformed
+        legacy snapshots ``ancestors`` already defends against.
+        """
+        root = self._aliases.get(job_id, job_id)
+        parent_of = {
+            key: (
+                self._aliases.get(record.parent_job_id, record.parent_job_id)
+                if record.parent_job_id
+                else None
+            )
+            for key, record in self._records.items()
+        }
+        verdict: dict[str, bool] = {}
+
+        def below(key: str) -> bool:
+            path: list[str] = []
+            seen: set[str] = set()
+            current: str | None = key
+            answer = False
+            while current is not None:
+                if current in verdict:
+                    answer = verdict[current]
+                    break
+                if current in seen:
+                    break
+                seen.add(current)
+                path.append(current)
+                parent = parent_of.get(current)
+                if parent == root:
+                    answer = True
+                    break
+                current = parent
+            for item in path:
+                verdict[item] = answer
+            return answer
+
+        return {key for key in self._records if key != root and below(key)}
+
     def job_rows(self) -> list[Any]:
         """Snapshot the shared graph's ledgers once, without moving execution."""
         rows: dict[str, Any] = {}
