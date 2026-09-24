@@ -134,6 +134,15 @@ class CompactionOutcome:
 #: axis ``is_remote`` named.
 RuntimeLocality = Literal["this-process", "this-machine", "unknown"]
 
+#: Where an accepted-but-undelivered gate reply goes, for a host with a surface
+#: for it: the gate's KIND and its IDENTITY, ``(kind, request_id,
+#: question_index)`` — the tuple the viewer ladder keys bridges on (see
+#: :meth:`ViewerSessionProtocol.set_gate_undelivered_handler`). Named rather than
+#: spelled out because the identity half is what lets a host retract the receipt
+#: THAT card wrote, and an unnamed tuple in a callback type is how that half gets
+#: dropped from a signature by the next person.
+GateUndeliveredHandler = Callable[[str, tuple[str, str, int] | None], None]
+
 
 @runtime_checkable
 class SessionProtocol(Protocol):
@@ -617,7 +626,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 127 public members and a POSITIVE
+    than stylistic. This protocol carries 128 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -651,7 +660,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     pane that pressed APPROVE, 126 once the operator-prompt notice gave that pane
     the sentence naming what a signature is about to authorise, 127 once a
     paint-first open needed ``attach_behind`` to narrate the attach behind its
-    paint), so recompute it rather
+    paint, 128 once an answer that was accepted at the pane and never reached its
+    owner needed a surface to say so (``set_gate_undelivered_handler``)), so
+    recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1404,6 +1415,28 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         undeclared duck-typed member is what
         ``tests/unit/session/test_viewer_protocol.py`` exists to catch, and it
         did catch this one (agent review round 3, Q5 — the head was red).
+        """
+        ...
+
+    def set_gate_undelivered_handler(self, handler: GateUndeliveredHandler | None) -> None:
+        """Install the surface that reports a gate reply the owner never RECEIVED.
+
+        Viewer-only for the same reason as the refusal hook above, and the reason
+        is worth stating in its own words because the two are easy to conflate:
+        an owner ``Session`` answers its own gates in-process, so an answer given
+        here has no wire to cross and cannot fail to arrive. On a facade the
+        answer is POSTED to an owner after the host's handler has returned, and
+        that post can find the owner gone — a stop landing under a live card is
+        the reachable shape (UX review round 1, U1). ``handler`` receives the
+        gate's kind, ``"ask"`` or ``"approval"``, and the gate's identity,
+        ``(kind, request_id, question_index)`` or ``None`` — the host needs the
+        second to retract the receipt THAT card wrote rather than whichever
+        receipt happens to be retained (agent review round 3, A12).
+
+        Declared here rather than probed with ``getattr`` like the two optional
+        siblings on this class because the TUI calls it on every attached
+        session, which is the same test the refusal hook failed before it was
+        declared (``tests/unit/session/test_viewer_protocol.py``).
         """
         ...
 
