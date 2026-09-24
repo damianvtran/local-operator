@@ -760,6 +760,17 @@ the two therefore agreed, which is precisely why nothing caught it. When you
 isolate a run, verify where its writes actually go, not merely that its reads
 are redirected.
 
+**A standby runtime is a CHILD of the host that warmed it, so an isolated run
+cannot leave one behind — but a run that fails to exit can.** Every interface
+host (a TUI, `lop serve`) may fork one pre-imported spare runtime per config
+root (`session/runtime/standby.py`); it holds an inherited socketpair and no path
+on disk, exits the instant the host's end of that channel closes, and is reaped
+on idle (900 s) or when its root disappears. The practical rule for a rig is the
+same as for every other process it starts: end the host process, not just its
+config root. A rig that keeps the host alive and deletes the root is cleaned up
+within one staleness check (30 s); a rig that leaves the host running and the
+root in place keeps a ~130 MB idle interpreter for at most the idle window.
+
 **`lop browser install` used not to be isolated by `HOME` at all, and the
 reason is worth keeping even though the hazard is now fixed.** `browser_bridge/
 install.py` hardcoded `LABEL = "com.local-operator.browser"` and derived only
