@@ -2133,19 +2133,22 @@ class ProviderController:
         update`` and the desktop Settings / onboarding flows write — which the
         first cannot see at all.
 
-        ``None`` means UNKNOWABLE, and only ONE reader can say it:
-        ``usable_providers`` answers ``None`` when the AuthStore cannot be read,
-        and that alone makes this answer ``None``. The secret-store reader never
-        answers ``None`` — a store it cannot read yields an EMPTY SET (it swallows
-        the sqlite family and a malformed row; see
+        ``None`` means UNKNOWABLE, and only ONE STORE can suppress this answer:
+        the AuthStore. ``usable_providers`` answers ``None`` when it cannot be
+        read, and the guard below (``usable is None or persisted is None``) is live
+        on BOTH names rather than one — ``persisted_providers`` reads that same
+        AuthStore through its own call, so a transient failure between the two
+        makes ``persisted`` the reader that answered ``None``. The SECRET-store
+        reader can never suppress the union: a store it cannot read yields an
+        EMPTY SET (it swallows the sqlite family and a malformed row; see
         ``registry.stored_provider_env_keys``), so an unreadable secret store
-        contributes nothing to the union rather than suppressing it. Either way an
-        unknown is not an unengaged: the caller narrows on nothing it cannot
-        know.
+        contributes nothing rather than hiding the answer. Either way an unknown
+        is not an unengaged: the caller narrows on nothing it cannot know.
 
         COST, and it is on the event-loop thread: exactly one ``open_store()`` per
         call — measured ~8.6-20.4 ms with a secret store on disk against ~0.018 ms
-        for ``usable_providers()`` alone (~0.09 ms with no store) — which is
+        for ``usable_providers()`` alone (~0.09 ms with no store), medians of 25
+        calls on the fleet host in an isolated root — which is
         bounded and immaterial beside the live fetch fan-out this feeds (up to 2 s
         per provider of network budget), but it is real synchronous store I/O where
         the route otherwise documents what it runs there. On a host whose store
@@ -2155,9 +2158,10 @@ class ProviderController:
         Deliberately NOT memoised on the instance: the answer depends on a store
         other processes can change between the two calls in a single request, and
         a stale engagement is precisely the bug this method exists to stop. Its
-        callers match that: :meth:`live_catalogue` computes it only when it will
-        read it (R3-2), so the ``providers=`` path pays nothing for a value it
-        discards.
+        callers match that: :meth:`live_catalogue` does not COMPUTE the view when
+        it will not read it (R3-2) — a saving on that call, not on the request,
+        which reaches the same store a line earlier through the caller's own
+        ``persisted_providers()``.
         """
         usable = self.usable_providers()
         persisted = self.persisted_providers()
@@ -2311,9 +2315,11 @@ class ProviderController:
         # named as failing by `catalogue_failures` on every read — with its key on
         # disk. See `_engaged_providers`. Computed HERE, and only when it is read:
         # with an explicit ``providers`` set (the mobile daemon's admission path,
-        # itself a GET) the value below is never consulted, so buying it would be
-        # one ``open_store()`` and a possible broker spawn for a discarded answer
-        # (R3-2).
+        # itself a GET) the value below is never consulted, so this CALL does not
+        # buy an ``open_store()`` and a possible broker spawn for a discarded
+        # answer (R3-2). The saving is the CALL's, not the request's — that request
+        # opens the same store a line earlier through its own
+        # ``persisted_providers()``.
         engaged = self._engaged_providers() if providers is None else None
         # ``_chat_providers()`` filters FIRST, so an explicit ``providers`` set
         # naming a decision-only provider is honoured as "this catalogue request
