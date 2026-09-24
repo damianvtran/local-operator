@@ -278,7 +278,15 @@ _COMMITTED = {
 async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Finding 9: detach → commit → reopen attached-remote, in that order."""
+    """Finding 9: detach → commit → reopen attached-remote, in that order.
+
+    ``_leave_for_move`` is stubbed so the ORDER is observable. The REOPEN is not:
+    it runs the app's own ``_select_sidebar_session`` → ``SessionNavigation``, and
+    the observable is that navigation's own ``committed_id``, plus the source the
+    prepare obtained for the id. Round 1 pinned this over a stub of both ends
+    (MINOR 2), which asserted the order of calls the test itself made: a reopen
+    naming the wrong id, or none at all, would have passed.
+    """
     order: list[str] = []
 
     def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
@@ -294,20 +302,79 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
         async def leave() -> None:
             order.append("leave")
 
-        def reopen(session_id: str) -> None:
-            order.append(f"reopen {session_id}")
-
         app._leave_for_move = leave  # type: ignore[method-assign]
-        app._select_sidebar_session = reopen  # type: ignore[method-assign]
         app._run_slash_command("/move --to pixel-8")
         for _ in range(30):
             await pilot.pause()
-            if "reopen sess1" in order:
+            if app._sidebar_navigation.committed_id == "sess1":
                 break
-        assert order == ["leave", "move sess1 pixel-8 keep=False", "reopen sess1"], order
+        assert order == ["leave", "move sess1 pixel-8 keep=False"], order
+        # THE REOPEN, THROUGH THE APP'S OWN NAVIGATION.
+        assert app._sidebar_navigation.committed_id == "sess1"
         shown = " ".join(_notices(app))
         assert "✓ prepared  ✓ handing off  ✓ committed  ✓ done" in shown, shown
         assert "Moved sess1 to pixel-8. It runs there now." in shown, shown
+
+
+@pytest.mark.asyncio
+async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V3: leaving first is right; a refusal after it owes the user a way back.
+
+    The ordered pair is genuinely required — an attached viewer blocks the owner's
+    exclusive retire — so the CURRENT session is left before the CLI runs. Then
+    every refusal the CLI can produce (``busy``, ``digest_mismatch``,
+    ``relay_unavailable``, ``session_unreachable``, and the ``deadline_exceeded``
+    one built with ``changed=True``) returned without reopening it, because
+    ``_publish_move_result`` reopened only on success. Measured against the real
+    app on round 1's head: ``order == ['leave', 'move …']``, ``reopened == []``,
+    the app sitting on the fresh local replacement — while the receipt said
+    "Nothing changed", which is false about a screen the user can see. The
+    committed refusal test used a NON-current id, so ``leaving`` was False and
+    this branch had no coverage at all.
+
+    Nothing on either side of the sequence is stubbed: the real ``_leave_for_move``
+    does the detaching and the real ``_select_sidebar_session`` is the way back, so
+    the assertion is on the app's own navigation completing on the id it was on
+    (``committed_id``), not on calls this test made itself.
+    """
+
+    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "busy",
+            "message": "This session is working right now — try again when the turn finishes",
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        app._run_slash_command("/move --to pixel-8")
+        for _ in range(40):
+            await pilot.pause()
+            if any("Could not move" in notice for notice in _notices(app)):
+                break
+        for _ in range(40):
+            await pilot.pause()
+            if app._sidebar_navigation.committed_id == "sess1":
+                break
+        shown = " ".join(_notices(app))
+        # THE WAY BACK: the app's own navigation completed on the session the user
+        # was in, so the refusal did not leave them on the fresh local
+        # replacement. Before the fix this id was never reached — the refusal
+        # branch returned before the reopen, which only the success path had.
+        assert app._sidebar_navigation.committed_id == "sess1"
+        assert "sess1" in app._sidebar_sources, list(app._sidebar_sources)
+        # AND THE SENTENCE IS TRUE ABOUT IT. "Nothing changed" is false here:
+        # locally the TUI did leave, and the refusal did not put it back.
+        assert "You are back on sess1" in shown, shown
+        assert "Nothing changed." not in shown, shown
 
 
 @pytest.mark.asyncio
@@ -429,8 +496,23 @@ async def test_remote_archive_and_delete_run_on_the_peer_and_print_its_words(
 ) -> None:
     scratch = tmp_path_factory.mktemp("viewer-root")
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(scratch))
+    # ``archive_change``'s peer-side branch is reached only when the LOCAL lane is
+    # NOT taken, so the assertion below is worth something only if the local lane
+    # could have run: a transcript for this session is what
+    # ``_resumable_session_id`` gates on, and without one the local lane would
+    # return early and "the writer was never called" would be vacuously true.
+    (scratch / "sessions" / "sess").mkdir(parents=True)
+    (scratch / "sessions" / "sess" / "transcript.jsonl").write_text("", encoding="utf-8")
     calls: list[tuple[str, str, bool]] = []
+    local_writes: list[tuple[Any, ...]] = []
     refusal = "this conversation is open in a running session (pid 4242); stop it first"
+
+    # The LOCAL writer, spied rather than inferred from its absence: a remote id
+    # must never reach it (§8.3; round 1, MINOR 3).
+    monkeypatch.setattr(
+        "local_operator.session.archived.archive_change",
+        lambda *args, **kwargs: local_writes.append((args, kwargs)) or (False, []),
+    )
 
     def fake_lifecycle(
         session_id: str, *, action: str, peer: str, confirmed: bool = False, root: Any = None
@@ -461,5 +543,53 @@ async def test_remote_archive_and_delete_run_on_the_peer_and_print_its_words(
         assert "Nothing was deleted. /delete yes deletes it on pixel-8." in shown, shown
         # THE OWNER'S REFUSAL, VERBATIM.
         assert f"pixel-8 refused: {refusal}" in shown, shown
-    # AND THIS DEVICE'S ARCHIVE INDEX WAS NEVER WRITTEN for a remote id (§8.3).
-    assert not (scratch / "archived-sessions.json").exists()
+    # AND THIS DEVICE RAN NO LOCAL ARCHIVE WRITE for a remote id (§8.3). The
+    # writer is asserted, not a file's absence: a file-absence check cannot tell
+    # "the local writer was never called" from "the local writer was called and
+    # wrote nothing", which is the failure §8.3 names (round 1, MINOR 3).
+    assert local_writes == [], local_writes
+
+
+@pytest.mark.asyncio
+async def test_a_relayed_connection_without_delete_cannot_archive_through_this_apps_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V2, the TUI-HOSTED twin of the runtime's gate.
+
+    A session is owned either by a detached runtime or by this app, and BOTH
+    route a follower's slash command through ``run_slash_authoritative`` →
+    ``_slash_result``. A gate in one host only moves the escalation to whichever
+    host the operator happens to be running, so this pins the app's own dispatch
+    against a real connection's resolved set — and pins the negative too, since a
+    gate that refused the VERB rather than the CAPABILITY would take away the
+    archive from a connection that legitimately may do it.
+    """
+    writes: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "local_operator.session.archived.archive_change",
+        lambda *args, **kwargs: writes.append((args, kwargs)) or (False, []),
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        # A ``drive`` role's resolved set, from the vocabulary itself.
+        drive = frozenset({"list", "view", "prompt", "steer", "stop", "slash"})
+        for command in ("archive", "unarchive", "delete"):
+            refused = await app.run_slash_authoritative(
+                command, "yes", locality="remote", capabilities=drive
+            )
+            assert refused["kind"] == "notice", refused
+            assert refused["style"] == "warning", refused
+            assert command in refused["text"], refused
+            assert "delete" in refused["text"], refused
+        assert writes == [], writes
+
+        # THE NEGATIVE CONTROL: the same command from a connection that DID
+        # resolve ``delete`` reaches the handler. (The fake session has no
+        # transcript, so the handler's own answer here is "nothing saved yet" —
+        # what this asserts is that the GATE let it through.)
+        allowed = await app.run_slash_authoritative(
+            "archive", "", locality="remote", capabilities=drive | {"delete"}
+        )
+        assert allowed["kind"] == "notice", allowed
+        assert "capability" not in allowed["text"], allowed

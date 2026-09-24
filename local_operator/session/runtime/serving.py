@@ -3532,12 +3532,25 @@ class ServingSessionHandle(SessionHandle):
         return f"effort: {effort}"
 
     @_on_session_loop
-    async def slash(self, command: str, args: str) -> str:
+    async def slash(
+        self,
+        command: str,
+        args: str,
+        *,
+        locality: str = "local",
+        capabilities: frozenset[str] | None = None,
+    ) -> str:
         """Session-level slash commands — the ones with meaning off-terminal.
         TUI chrome (/help tables, /usage panels) is the phone UI's own job."""
         self._check_loop_thread()
         if command == "goal":
-            return await self.slash_images(command, args)
+            # The authority travels even though ``/goal`` is not delete-scoped:
+            # this method is the runtime's second door onto the dispatcher, and a
+            # door that drops the connection's authority is how a gate ends up
+            # covering one route only (round 1's V2).
+            return await self.slash_images(
+                command, args, None, locality=locality, capabilities=capabilities
+            )
         if command == "compact":
             asyncio.ensure_future(self._session.compact_now())
             return "compacting context"
@@ -4432,6 +4445,9 @@ class ServingSessionHandle(SessionHandle):
         command: str,
         args: str,
         images: list[dict[str, str]] | None = None,
+        *,
+        locality: str = "local",
+        capabilities: frozenset[str] | None = None,
     ) -> str:
         """Run a slash command that carries image attachments.
 
@@ -4445,8 +4461,20 @@ class ServingSessionHandle(SessionHandle):
         the owner completes them through normal admission, including images.
         This must share the authoritative path or `/goal` would set metadata
         without starting work only when invoked from the phone.
+
+        ``locality``/``capabilities`` are FORWARDED, not read here: this method
+        renders a notice as a receipt, so the decision has to happen in the
+        dispatcher below — and a helper that dropped the connection's authority on
+        the way in would let a relayed frame reach the verbs by a route no gate
+        covers. That is not hypothetical: round 1's V2 gate sat on
+        ``slash_result``, and the ``slash`` op reached the same dispatcher through
+        this method with a default ``locality="local"``, so a ``drive`` member's
+        ``/archive`` — with one image attached — archived the owner's session and
+        wrote the owner's index over two real relays (measured).
         """
-        result = await self.run_slash_authoritative(command, args, images)
+        result = await self.run_slash_authoritative(
+            command, args, images, locality=locality, capabilities=capabilities
+        )
         return str(result.get("text") or f"ran /{command}")
 
     @_on_session_loop
@@ -4589,6 +4617,15 @@ class ServingSessionHandle(SessionHandle):
         #: fail closed rather than be told a route it cannot walk (agent review
         #: round 4, R4-3).
         may_loosen: bool | None = None,
+        #: The capabilities the CONNECTION resolved, supplied by the relay that
+        #: dialled this runtime (``RuntimeServer`` reads them off the auth frame,
+        #: ``network/dial.py`` writes them). ``None`` = "not said" and fails
+        #: CLOSED where it is read — see ``_delete_scope_refusal``. It is passed
+        #: for the same reason ``locality`` and ``may_loosen`` are: it is a
+        #: property of the CONNECTION, so only the caller that owns the
+        #: connection can answer it, and the verbs that need it are chosen
+        #: several frames below.
+        capabilities: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -4623,7 +4660,9 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session.frontend_state import SlashResult
 
-        result = await self._slash_result(command, args, SlashResult, locality, may_loosen)
+        result = await self._slash_result(
+            command, args, SlashResult, locality, may_loosen, capabilities
+        )
         result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -4793,6 +4832,7 @@ class ServingSessionHandle(SessionHandle):
         SlashResult: Any,
         locality: str = "local",
         may_loosen: bool | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
@@ -4888,6 +4928,20 @@ class ServingSessionHandle(SessionHandle):
             # ``reportUnreachable`` and flake8 has no unreachable check, so CI stays
             # green either way. The dead line is gone; this argument is not.
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
+        # THE DELETE-SCOPED VERBS ARE GATED HERE, where the verb is chosen.
+        # ``slash_result`` is authorised on ``slash``, which a ``drive`` member
+        # holds while holding no ``delete`` — and these three produce exactly the
+        # effect ``net_session_lifecycle`` reserves for ``delete``: they write
+        # THIS owner's archive index and delete ITS session files. Round 1 had no
+        # capability term anywhere on this path (``server.py`` passes none to the
+        # handle, ``_archive_slash`` takes none), so the only thing standing
+        # between a drive member and the owner's store was ``/delete``'s
+        # live-lease guard — which a session whose writer has exited does not
+        # have. Note this is a check on the VOCABULARY, not on the verb list: any
+        # future command that archives or deletes joins ``DELETE_SCOPED_SLASH``.
+        refusal = self._delete_scope_refusal(command, locality, capabilities, SlashResult)
+        if refusal is not None:
+            return refusal
         if command == "archive":
             return self._archive_slash(session, True, SlashResult)
         if command == "unarchive":
@@ -4969,6 +5023,37 @@ class ServingSessionHandle(SessionHandle):
             f"process does not hold — run it from a terminal on the machine you "
             f"want to configure",
             style="warning",
+        )
+
+    @staticmethod
+    def _delete_scope_refusal(
+        command: str,
+        locality: str,
+        capabilities: frozenset[str] | None,
+        SlashResult: Any,
+    ) -> Any | None:
+        """The refusal for a delete-scoped verb this CONNECTION may not run, else ``None``.
+
+        Imported rather than restated: the same predicate gates the TUI-hosted
+        owner (``OperatorApp._slash_result``), and the two hosts must answer a
+        follower identically — a second copy of the rule here is free to drift on
+        this path alone. The SENTENCE is shared for the same reason, so the two
+        receipts cannot read differently. The import is function-local because
+        ``network.types`` is on the mesh vocabulary's side of the session plane's
+        import graph, and this module is on the runtime's startup path.
+        """
+        from local_operator.network.types import (
+            DELETE_SCOPED_SLASH,
+            delete_scope_refusal_sentence,
+            may_run_delete_scoped_slash,
+        )
+
+        if command not in DELETE_SCOPED_SLASH:
+            return None
+        if may_run_delete_scoped_slash(locality, capabilities):
+            return None
+        return SlashResult(
+            kind="notice", text=delete_scope_refusal_sentence(command), style="warning"
         )
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:

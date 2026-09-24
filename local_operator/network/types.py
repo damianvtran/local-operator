@@ -404,11 +404,45 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "unwatch_job": "view",  # the matching unsubscribe
     "viewer_watch": "view",  # "someone is displaying this" — residency hint only
     "desktop_watch": "view",  # the desktop's presence lease — same hint, other surface
+    # event_mute and its UNMUTE are a PAIR and must never be split across two
+    # decisions. Both do the same thing to the same connection — ``event_mute``
+    # stops delta-grade frames on THIS one, ``event_unmute`` resumes them — so
+    # the narrowest capability covering either covers both. Round 1 shipped the
+    # mute alone, and the omission was worse than a refused optimisation:
+    # ``_forward_stream_frame`` (relay.py) writes an ``unknown_op`` error back
+    # and CLOSES the stream, so a viewer that parked its event controller and
+    # unparked it lost the whole session stream, silently and one-way.
+    # Reachable from a real viewer, not in theory: ``EventController.set_parked``
+    # → ``AttachedSession.set_event_mute`` → ``RemoteSessionClient`` → this op,
+    # and the runtime advertises ``EVENT_MUTE_CAPABILITY`` unconditionally
+    # (session/runtime/server.py ``_welcome_frame``). The pair is pinned by
+    # ``tests/unit/network/test_stream_op_gate.py``, which derives the ops a
+    # viewer sends from ``mobile/attach_client.py`` rather than listing them —
+    # the hand-written list is what missed this row.
     "event_mute": "view",  # stop sending THIS connection deltas; affects nobody else
-    "acknowledge_attention": "view",  # clear an unread-completion mark this viewer rendered
+    "event_unmute": "view",  # the matching resume, on the same connection
+    # session-scoped WRITE, not a per-viewer mark: it clears the OWNER's own
+    # attention state (serving.py ``acknowledge_attention`` →
+    # ``Session.acknowledge_attention``), and the runtime then pushes the new
+    # state to EVERY viewer (server.py ``_schedule_push``) — so one peer's
+    # viewer clears the mark the owner's desktop is showing. ``view`` is the
+    # narrowest capability whose WORDS cover that (the 36-character completion
+    # token is what bounds who may do it, not the capability), and the row says
+    # so rather than claiming a local-only effect. Round 1's comment claimed a
+    # per-viewer mark the op does not have.
+    "acknowledge_attention": "view",  # clears session-scoped attention for every viewer
     # slash — the authoritative slash seam. The owner's own dispatch decides what
     # each command does and refuses the terminal-only ones
     # (serving.py ``run_slash_authoritative`` / ``slash``: "terminal-only here").
+    #
+    # ``slash`` IS NOT THE WHOLE STORY FOR EVERY VERB: three of the commands the
+    # owner's dispatch answers with a real ACTION — ``/archive``, ``/unarchive``
+    # and ``/delete`` — produce exactly the effect ``delete`` is reserved for
+    # (``OP_CAPABILITY["net_session_lifecycle"]``, ``CAPABILITY_WORDS["delete"]``),
+    # so they are gated on ``delete`` at the point where the verb is chosen.
+    # See :data:`DELETE_SCOPED_SLASH` for why that gate cannot live in this
+    # table: the table authorises the SEAM, and only the dispatch knows which
+    # verb travelled down it.
     "slash_result": "slash",
     # prompt — session-scoped WRITES. The threshold is design §3.3: a member that
     # may prompt can already make the agent (which has a shell) do each of these.
@@ -454,6 +488,79 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # produces material a surface uses to SIGN as the operator, and no capability
     # in the transport's set grants a peer that authority.
 }
+
+
+#: The routed slash commands whose EFFECT the peer vocabulary already reserves
+#: for ``delete``.
+#:
+#: ``/archive``, ``/unarchive`` and ``/delete`` write the OWNER's archive index
+#: and its session store — the same acts as ``net_session_lifecycle``
+#: (``OP_CAPABILITY["net_session_lifecycle"] == "delete"``, whose words are
+#: "archive or delete a session here"). They reach the owner as ROUTED slash
+#: commands, and every carrier of those is authorised on ``slash`` — a ``drive``
+#: role holds ``slash`` and ``delete`` is not part of it. So over the mesh, a
+#: member that may not take the lifecycle lane could take the same action through
+#: a routed slash command, and the only thing that ever refused it was the
+#: owner's LIVE-LEASE guard — which a session whose writer has exited does not
+#: have.
+#:
+#: TWO CARRIERS, ONE RULE. ``slash_result`` returns a typed receipt and ``slash``
+#: renders one; both are admitted on ``slash``, so a gate on either alone leaves
+#: the effect one door over. Round 1's first fix sat on ``slash_result`` only, and
+#: a ``drive`` member's imaged ``{"op": "slash", "command": "archive"}``
+#: still archived the owner's session — measured over two real relays.
+#:
+#: WHY THE GATE IS NOT A TABLE ROW. ``INNER_OP_CAPABILITY`` authorises the SEAM:
+#: the frames that arrive are ``slash_result`` and ``slash``, and every routed
+#: command travels under them. Which VERB was typed is only known at the dispatch
+#: that chooses it, so the check belongs there — held here, beside the vocabulary
+#: it reads, because THREE hosts answer this way (``ServingSessionHandle`` in
+#: ``session/runtime/serving.py``, ``OperatorApp`` in ``tui/app.py``, and
+#: ``TuiSessionHandle`` in ``mobile/tui_handle.py``, whose carrier runs the line in
+#: the owner's own terminal rather than reaching a dispatcher at all) and a second
+#: copy of the set is free to drift on one host alone.
+DELETE_SCOPED_SLASH: frozenset[str] = frozenset({"archive", "unarchive", "delete"})
+
+
+def may_run_delete_scoped_slash(locality: str, capabilities: frozenset[str] | None) -> bool:
+    """Whether a client at ``locality`` holding ``capabilities`` may run one.
+
+    A LOCAL client is a process on this machine asked by its own user — the pane
+    that owns its own gate — and is allowed, the same way the approval gate
+    treats a caller whose ``may_loosen`` it can answer for itself. A RELAYED
+    client is allowed only if the CONNECTION proved ``delete``: these verbs
+    archive or delete a session on THIS owner, so a member the lifecycle lane
+    refuses must not reach the same effect down this one.
+
+    ``None`` is "the caller has not said", and it FAILS CLOSED — the direction
+    the ``may_loosen`` default takes one call over, and the only safe reading of
+    "unknown authority" for a verb that writes the owner's store. Any future
+    locality that is not ``"local"`` is treated as relayed for the same reason:
+    a gate whose default is "allow" is not a gate.
+    """
+    if locality == "local":
+        return True
+    return "delete" in (capabilities or frozenset())
+
+
+def delete_scope_refusal_sentence(command: str) -> str:
+    """The ONE sentence both slash hosts give for a delete-scoped verb refused.
+
+    Written once because both hosts need it and neither may drift: a session is
+    owned either by a detached runtime (``ServingSessionHandle._slash_result``)
+    or by the TUI (``OperatorApp._slash_result``), a follower may reach either,
+    and the two refuse the SAME act — so the receipt has to read the same
+    whichever host answered, the rule this repo keeps for every host pair.
+
+    It names the capability and no remedy on purpose: neither host can see who
+    the operator is or which device would have to grant it, and a viewer told to
+    ask for something it cannot name has been handed a task instead of a fact.
+    """
+    return (
+        f"/{command} archives or deletes a session on this machine, which needs the "
+        "'delete' capability. This connection holds 'slash' without 'delete', so it "
+        "was refused and nothing was changed."
+    )
 
 
 # ---------------------------------------------------------------------------

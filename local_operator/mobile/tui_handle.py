@@ -756,8 +756,17 @@ class TuiSessionHandle(SessionHandle):
         self._refresh_state()
         return f"effort: {effort}"
 
-    async def slash(self, command: str, args: str) -> str:
-        return await self.slash_images(command, args, None)
+    async def slash(
+        self,
+        command: str,
+        args: str,
+        *,
+        locality: str = "local",
+        capabilities: frozenset[str] | None = None,
+    ) -> str:
+        return await self.slash_images(
+            command, args, None, locality=locality, capabilities=capabilities
+        )
 
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         """Run an off-record provider request on the authoritative session."""
@@ -774,7 +783,42 @@ class TuiSessionHandle(SessionHandle):
         command: str,
         args: str,
         images: list[dict[str, str]] | None,
+        *,
+        locality: str = "local",
+        capabilities: frozenset[str] | None = None,
     ) -> str:
+        """Run one slash line in THIS terminal, or refuse a verb this connection may not run.
+
+        Unlike ``run_slash_authoritative`` — which answers a typed result the
+        follower renders — this runs the command's own UI HERE, in the owner's
+        terminal, and returns a ``ran /…`` receipt. That is why the delete-scoped
+        verbs have to be refused at this point: ``/archive``, ``/unarchive`` and
+        ``/delete`` dispatched here reach ``OperatorApp._run_slash_command``, whose
+        local handlers write THIS machine's archive index and remove THIS
+        machine's session files — the effect the mesh vocabulary reserves for
+        ``delete``, and the same act ``run_slash_authoritative`` refuses one carrier
+        over. Without this, a relayed ``{"op": "slash", "command": "archive"}``
+        executes it in the owner's terminal regardless of the connection's
+        capability set.
+
+        The refusal is the SHARED sentence (``network.types``), so a follower
+        reads the same words whichever carrier its command travelled — the two
+        spellings of one refusal is how the two hosts would drift. Only a RELAYED
+        connection is weighed: a local pane runs these as it always has.
+        """
+        from local_operator.network.types import (
+            DELETE_SCOPED_SLASH,
+            delete_scope_refusal_sentence,
+            may_run_delete_scoped_slash,
+        )
+        from local_operator.slash_commands import primary_slash_name
+
+        # The registry primary first: the branches and the verb set below match
+        # literals, and an ALIAS off the wire would otherwise walk past them.
+        if primary_slash_name(command) in DELETE_SCOPED_SLASH and not may_run_delete_scoped_slash(
+            locality, capabilities
+        ):
+            return delete_scope_refusal_sentence(primary_slash_name(command))
         line = f"/{command}" + (f" {args}" if args else "")
 
         def apply() -> None:
@@ -793,6 +837,7 @@ class TuiSessionHandle(SessionHandle):
         locality: str = "local",
         consumers: Iterable[str] | None = None,
         may_loosen: bool | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 
@@ -829,6 +874,13 @@ class TuiSessionHandle(SessionHandle):
         both. A viewer that does not consume action-carrying receipts has its
         request completed HERE when this TUI is the host, exactly as the
         runtime itself would.
+
+        ``capabilities`` is forwarded for the same reason and to the same end:
+        the app's dispatch gates the delete-scoped verbs (``/archive``,
+        ``/unarchive``, ``/delete``) on the capability the mesh vocabulary
+        reserves for their effect, and the registrant's seam is the only place
+        that knows what this connection resolved. ``None`` = "not said", which
+        the gate reads as withheld.
         """
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -842,6 +894,7 @@ class TuiSessionHandle(SessionHandle):
                     locality=locality,
                     consumers=consumers,
                     may_loosen=may_loosen,
+                    capabilities=capabilities,
                 )
             )
 
