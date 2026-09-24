@@ -1036,9 +1036,18 @@ def test_the_relay_never_becomes_a_session_owner() -> None:
         "local_operator.session.session",
         "session_lease",
     )
+    # THE ONE READ THE RELAY MAY MAKE OF THE LEASE, by exact import line.
+    # ``session_lease.lease_holder`` reads the claim file WITHOUT acquiring —
+    # that non-acquisition is its whole contract (see its docstring) — and the
+    # move's source-side retire needs it to refuse moving a session a record-less
+    # process is writing. Reading who holds a lease is not holding one. Every
+    # OTHER name in that module (``acquire_session_lease``, the reapers) is still
+    # forbidden: the carve-out is the literal line, so importing anything beside
+    # ``lease_holder`` on it, or importing the module, is an offender again.
+    read_only = "from local_operator.session_lease import lease_holder\n"
     offenders: list[str] = []
     for path in Path(__file__).resolve().parents[3].joinpath("local_operator/network").glob("*.py"):
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8").replace(read_only, "")
         for name in forbidden:
             if f"import {name}" in text or f"from local_operator.{name}" in text:
                 offenders.append(f"{path.name}: {name}")
