@@ -3176,6 +3176,59 @@ def test_nodes_make_no_filesystem_probe(tmp_path, monkeypatch) -> None:
     assert probes, "the probe moved: roster() must still check the transcript is on disk"
 
 
+def test_lifecycles_agree_with_the_roster_on_every_field_they_share(tmp_path) -> None:
+    """``lifecycles()`` is ``roster()`` minus the resumable verdict, never a rival.
+
+    The projection folds these four facts per root event; the roster answers
+    ``hub op='list'``. Both must read one derivation, so every shared field is
+    compared across a registry that reaches the distinct arms, including a
+    running child with an age and a settled one with terminal text.
+    """
+    comms = _settled_roster(6, tmp_path)
+    jobs = comms._session.jobs
+    live = jobs.get("job-0000")
+    live.status = "running"
+    live.start_time = 900.0
+    comms._records["job-0000"].settled = False
+    comms._records["job-0000"].child = FakeChild()
+    comms._records["job-0001"].outcome = "failed"
+    comms._records["job-0001"].error_text = "boom"
+    jobs.get("job-0001").status = "running"
+    comms._records["job-0002"].paused = True
+
+    read = comms.roster_pass(now=1_234.0)
+    roster = {row.job_id: row for row in read.roster()}
+    lifecycles = read.lifecycles()
+    assert set(lifecycles) == set(roster)
+    for job_id, row in roster.items():
+        cycle = lifecycles[job_id]
+        assert (cycle.status, cycle.result_text, cycle.error_text, cycle.age_s) == (
+            row.status,
+            row.result_text,
+            row.error_text,
+            row.age_s,
+        ), job_id
+    assert lifecycles["job-0000"].age_s == pytest.approx(334.0)
+    assert lifecycles["job-0001"].error_text == "boom"
+
+
+def test_lifecycles_make_no_filesystem_probe(tmp_path, monkeypatch) -> None:
+    """The per-event read answers from memory, like ``nodes()``."""
+    comms = _settled_roster(16, tmp_path)
+    from pathlib import Path
+
+    probes: list[Path] = []
+    original = Path.exists
+
+    def counting_exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        probes.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting_exists)
+    assert len(comms.roster_pass().lifecycles()) == 16
+    assert probes == []
+
+
 def test_the_roster_touches_each_record_a_constant_number_of_times(tmp_path) -> None:
     """``roster()`` is linear: one touch per record plus a constant.
 

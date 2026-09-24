@@ -2417,7 +2417,14 @@ class ProjectionFold:
         fourth walk added below would put it straight back.
         """
         read = comms.roster_pass()
-        roster = {item.job_id: item for item in read.roster()}
+        # ``lifecycles()`` rather than ``roster()``: this runs per root event,
+        # and ``roster()``'s resumable verdict (a transcript ``stat()`` per
+        # record) is a field this fold never reads. Probed so a registry
+        # stand-in that only offers ``roster()`` keeps working unchanged.
+        lifecycles = getattr(read, "lifecycles", None)
+        roster = (
+            lifecycles() if callable(lifecycles) else {item.job_id: item for item in read.roster()}
+        )
         nodes = read.nodes()
         by_id = {node.job_id: node for node in nodes}
         children: dict[str | None, list[Any]] = {}
