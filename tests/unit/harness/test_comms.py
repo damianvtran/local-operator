@@ -3108,18 +3108,18 @@ def test_node_status_is_describes_status_for_every_arm(tmp_path) -> None:
         record.child = FakeChild()
 
     def queued(record: Any) -> None:
-        jobs.get(record.job_id).queued = True
+        jobs.jobs[record.job_id].queued = True
 
     def pausing(record: Any) -> None:
         record.paused = True
 
     def paused(record: Any) -> None:
         record.paused = True
-        jobs.get(record.job_id).status = "cancelled"
+        jobs.jobs[record.job_id].status = "cancelled"
 
     def completed(record: Any) -> None:
         record.outcome = "completed"
-        jobs.get(record.job_id).status = "completed"
+        jobs.jobs[record.job_id].status = "completed"
 
     def swept(record: Any) -> None:
         record.settled = True
@@ -3185,15 +3185,17 @@ def test_lifecycles_agree_with_the_roster_on_every_field_they_share(tmp_path) ->
     running child with an age and a settled one with terminal text.
     """
     comms = _settled_roster(6, tmp_path)
-    jobs = comms._session.jobs
-    live = jobs.get("job-0000")
+    jobs = cast(FakeJobs, comms._session.jobs)
+    live = jobs.jobs["job-0000"]
     live.status = "running"
-    live.start_time = 900.0
+    # ``AsyncJob.start_time`` is what the age reads; ``FakeJob`` does not model
+    # it, so it is set the way a real row carries it.
+    setattr(live, "start_time", 900.0)
     comms._records["job-0000"].settled = False
     comms._records["job-0000"].child = FakeChild()
     comms._records["job-0001"].outcome = "failed"
     comms._records["job-0001"].error_text = "boom"
-    jobs.get("job-0001").status = "running"
+    jobs.jobs["job-0001"].status = "running"
     comms._records["job-0002"].paused = True
 
     read = comms.roster_pass(now=1_234.0)
