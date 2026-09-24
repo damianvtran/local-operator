@@ -468,12 +468,19 @@ def handoff_guard_refusal(config_dir: Path, session_id: str) -> str:
         )
     if entry is None:
         return ""
-    device = str(entry.get("to_name") or entry.get("to_device") or "another device")
     if str(entry.get("role") or "source") == "destination":
+        # THE DEVICE THE CONVERSATION IS COMING FROM, never this one. A destination
+        # entry's ``to_device`` is US (an entry records both ends), so the old
+        # sentence answered an engage with "This conversation is being received from
+        # <this device's own id>" — a sentence about nothing, naming the wrong end
+        # (review round 1, M-3 / NIT 5). ``from_name``/``from_device`` are what a
+        # person can act on.
+        source = str(entry.get("from_name") or entry.get("from_device") or "another device")
         return (
-            f"This conversation is being received from {device}; it will be available "
+            f"This conversation is being received from {source}; it will be available "
             "when the move finishes."
         )
+    device = str(entry.get("to_name") or entry.get("to_device") or "another device")
     return f"This conversation is being handed to {device}."
 
 

@@ -710,6 +710,76 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         client.close()
 
 
+def recover_stale_handoff(config_dir: Path, session_id: str) -> list[dict[str, Any]]:
+    """Apply the move's crash recovery to ``session_id``, if nobody live owns the entry.
+
+    THE AUTOMATIC TRIGGER, AND WHY IT HAS TO EXIST IN THE PRODUCT. ``reconcile`` was
+    correct and complete and NOTHING CALLED IT: the crash tests passed only because
+    they invoked it by hand, so a stale ``prepared`` entry left by a relay that died
+    blocked the owner's own conversation until a human happened to run another move
+    of the same id, and a destination stopped just after its ``os.replace`` could
+    not be opened (review round 1, M-3). Recovery now runs on three automatic
+    points: a relay STARTING on this root (``mobility.recover_on_start``), the first
+    ENGAGE of the id (here), and the first MOVE attempt (``local_move_handler``,
+    which already reconciled).
+
+    THE INSTANCE RULE IS THE SAFETY PROPERTY, and it is why this reads the journal
+    before it does anything. An entry is not evidence of a crash: ``prepared`` is
+    the normal state of a move whose copy is being made right now. So an entry
+    written by the relay CURRENTLY running on this root — or one that names no
+    writer at all while a relay is running, where the writer cannot be established
+    — is skipped, because recovering it could roll a live handoff back. Only an
+    entry whose writer is provably not this root's relay is applied, and with no
+    live relay there can be no live move (every phase of one is driven from a
+    relay), so an entry is then a leftover by definition.
+
+    BEST EFFORT BY CONTRACT: it swallows its own failures and reports ``[]``, and the
+    launch guard still refuses afterwards. Refusing is the fail-closed direction;
+    recovering is the convenience, so a recovery that cannot run must never turn a
+    refusal into a spawn.
+    """
+    from local_operator.session.placement import handoff_in_flight
+
+    try:
+        entry = handoff_in_flight(config_dir, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal is the guard's refusal
+        return []
+    if not entry:
+        return []
+    try:
+        own_instance = _live_relay_instance(config_dir)
+        wrote = str(entry.get("instance_id") or "")
+        if own_instance and (not wrote or wrote == own_instance):
+            # EITHER THIS RELAY'S OWN IN-FLIGHT MOVE, OR AN ENTRY WHOSE WRITER CANNOT
+            # BE ESTABLISHED while a relay is running. Both are skipped, and the
+            # second is the fail-closed direction: with a live relay on this root an
+            # entry that names no instance could be a handoff it is driving right
+            # now (an older build's entry, or one written by hand), and rolling that
+            # back is the sabotage the instance rule exists to prevent. The guard
+            # still refuses an engage, which is the safe answer.
+            return []
+        from local_operator.network import mobility
+
+        return mobility.reconcile(config_dir, only=session_id, own_instance=own_instance)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("runtime: stale-handoff recovery failed for %s", session_id, exc_info=True)
+        return []
+
+
+def _live_relay_instance(config_dir: Path) -> str:
+    """The instance id of the relay running on this root, or ``""`` if none is.
+
+    ``find_own_relay`` answers "is there a relay to TALK to" — a record whose owner
+    has stopped heartbeating is excluded — and that is exactly the question here:
+    a wedged relay is not driving a live handoff, and treating it as absent lets
+    recovery proceed on an entry it can no longer settle.
+    """
+    from local_operator.network import store
+
+    record = store.find_own_relay(config_dir)
+    return str(getattr(record, "instance_id", "") or "")
+
+
 async def engage_runtime(
     session_id: str,
     cwd: str,
@@ -782,6 +852,17 @@ async def engage_runtime(
     # every message a user sends to a cold session.
     from local_operator.session.placement import handoff_guard_refusal
 
+    # RECOVERY FIRST, REFUSAL SECOND (review round 1, M-3). A journal entry left by
+    # a relay that died is not a live handoff, and the guard cannot tell the two
+    # apart — so before it is consulted, any entry whose writer is not a relay still
+    # running on this root gets the §6.5 table applied to it. Without this, a stale
+    # ``prepared`` blocked the owner's own conversation after a restart until
+    # somebody happened to run another move of the same id, and a destination that
+    # died just after its ``os.replace`` stayed stuck with an engage that named the
+    # wrong device. The recovery is best effort by construction: it swallows its own
+    # failures and the guard still refuses afterwards, which is the fail-closed
+    # direction.
+    recover_stale_handoff(config_dir, session_id)
     handed_off = handoff_guard_refusal(config_dir, session_id)
     if handed_off:
         raise RuntimeStartupError(handed_off)

@@ -78,6 +78,22 @@ class NetworkState(Protocol):
         """
         return {}
 
+    def replica_owner(self, session_id: str) -> str:
+        """The device this device's REPLICA of ``session_id`` was synced FROM, or ``""``.
+
+        The second question a slice adds, and it exists for exactly one frame: the
+        owner's ``net_sync {phase: "available"}`` push, which tells a HOLDER that its
+        copy is stale. A holder is by definition not the owner of the id, so the
+        ordinary ownership rule refused that frame — measured on the real path, where
+        the holder's relay answered its own owner's push with "session … does not live
+        on this device", which is why a replica never refreshed (review round 1,
+        M-4).
+
+        The default body returns ``""`` — "this device holds no verified replica" —
+        so a state that predates replicas refuses closed.
+        """
+        return ""
+
 
 class Authorizer:
     """The chokepoint. Construct once per relay; ``check`` per inbound frame."""
@@ -294,6 +310,9 @@ class Authorizer:
         carved = self._move_scope(link, op, frame, session_id)
         if carved is not None:
             return carved
+        replicated = self._replica_scope(link, op, frame, session_id)
+        if replicated is not None:
+            return replicated
         owned = self._networks.local_session_ids()
         if session_id not in owned:
             refusal = Refusal(
@@ -304,6 +323,30 @@ class Authorizer:
             self._refused(link, op, refusal, frame)
             raise refusal
         return session_id
+
+    def _replica_scope(
+        self, link: LinkContext, op: str, frame: dict[str, Any], session_id: str
+    ) -> str | None:
+        """The ONE frame a device accepts about a session it does not own: a push.
+
+        ``net_sync {phase: "available"}`` travels OWNER -> HOLDER and says "your copy
+        of this id is behind". The holder is by definition not the owner, so the
+        ordinary rule refused it — the owner's watcher pushed, the holder's relay
+        answered "session … does not live on this device", and no replica ever
+        refreshed (review round 1, M-4; the reviewer's probe called the handler
+        directly and so saw the ack without seeing this).
+
+        THE CARVE-OUT IS THE SENDER, not the phase alone: only the device this
+        install's own replica was SYNCED FROM may tell it to pull. A third device
+        cannot use the phase to make this one copy bytes, and a device that holds no
+        verified replica of the id gets the ordinary refusal.
+        """
+        if op != "net_sync" or str(frame.get("phase") or "") != "available":
+            return None
+        owner = str(self._networks.replica_owner(session_id) or "")
+        if owner and owner == link.device_id:
+            return session_id
+        return None
 
     def _move_scope(
         self, link: LinkContext, op: str, frame: dict[str, Any], session_id: str
