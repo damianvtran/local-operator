@@ -385,3 +385,38 @@ def test_a_cold_cache_is_not_an_answer_about_silent_peers() -> None:
     catalog = _silent_peer_catalog()
     assert peer_rows_mod.unanswered_peers(Path("/tmp/x"), catalog=catalog)
     assert catalog.calls == 1
+
+
+def test_a_device_in_two_networks_contributes_one_row_per_session() -> None:
+    """QA round 1, Q1: a session belongs to a DEVICE, so a row cannot be per-network.
+
+    The relay's fan-out walks this device's networks and each network's members, so a
+    device that shares two networks with this one used to answer once per network and
+    have its rows appended twice: measured with three real paired devices on loopback,
+    two conversations on such a device arrived as FOUR rows — in the listing, in the
+    search, and in ``peer_catalogue``'s count — while the sidebar (which groups its own
+    rows by id) said two. The duplication is fed in directly here because the property
+    is this producer's: whatever the relay hands over, one session is one row.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [
+            _Row("s_1", "d_aa", name="Shared conversation"),
+            _Row("s_2", "d_aa", name="Another one"),
+            # ...and the same device's answer again, over its SECOND shared network.
+            _Row("s_1", "d_aa", name="Shared conversation"),
+            _Row("s_2", "d_aa", name="Another one"),
+        ],
+    )
+    rows = peer_session_rows(catalog=catalog)
+    assert [row.id for row in rows] == ["s_1", "s_2"]
+    assert [row.name for row in rows] == ["Shared conversation", "Another one"]
+
+    # THE CACHE ANSWERS THE SAME WAY, because it stores this producer's own tuple
+    # rather than the relay's raw rows — a second read that re-expanded them would put
+    # the duplication back on the sidebar's two-second poll.
+    clear_cache()
+    assert [row.id for row in peer_session_rows(catalog=catalog)] == ["s_1", "s_2"]
+    reads = catalog.calls
+    assert [row.id for row in peer_session_rows(catalog=catalog)] == ["s_1", "s_2"]
+    assert catalog.calls == reads, "the second read is the cache's, not a new fan-out"
