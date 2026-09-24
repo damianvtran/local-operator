@@ -658,6 +658,53 @@ async def test_a_scoped_answer_carries_no_off_page_pin(pins_api) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_extras_ride_one_page_of_a_walk(pins_api) -> None:
+    """A pinned row is an EXTRA once, on the first page -- not on every page.
+
+    ``pinned_off_page`` is a promise about the page the client paints first: the
+    whole pinned set rides the answer the Pinned section is drawn from. Built from
+    ``ranked[limit:]``, that list was appended on EVERY page of a walk that still
+    had the pin below it -- so one pinned row came back as a surplus row page after
+    page (QA measured the same id twice over a seven-page walk), and the further
+    down the listing the pin ranked, the more duplicates a walk accumulated. The
+    design sanctions the row's OWN later position (the row union is id-keyed and a
+    pinned row "may additionally be in the head"); what it does not sanction is a
+    second EXTRA.
+    """
+    client, root = pins_api
+    for index in range(6):
+        _session(root, f"lop{index:07d}")
+    # Ranked LAST: the fixture stamps one ``created_at`` on every session, so the
+    # id breaks the tie and ``oldpin...`` sorts after every ``lop...`` id -- which
+    # is what puts it below a page bound of 2 for the whole walk.
+    older = "oldpin000001"
+    _session(root, older)
+    assert toggle_pin(root, older) is True
+
+    cursor: str | None = None
+    surpluses: list[list[str]] = []
+    seen: list[str] = []
+    while True:
+        params: dict[str, Any] = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        result = (await _json(client.get("/v1/desktop/sessions", params=params)))["result"]
+        rows = [row["id"] for row in result["sessions"]]
+        # The client splits on ``limit``: the page, then whatever was appended.
+        surpluses.append(rows[2:])
+        seen += rows
+        assert result["truncated"] == (result["next_cursor"] is not None)
+        cursor = result["next_cursor"]
+        if cursor is None:
+            break
+
+    assert len(surpluses) == 4, seen
+    assert surpluses == [[older], [], [], []], surpluses
+    # Once as the extra, once at its own rank -- and no third time.
+    assert seen.count(older) == 2, seen
+
+
+@pytest.mark.asyncio
 async def test_a_pinned_conversation_beyond_the_page_is_carried_in_the_answer(pins_api) -> None:
     """THE FIX. A pin outside the page is a ROW in the answer, with its name and
     `pinned: true`, so the client's pinned section has something to draw."""

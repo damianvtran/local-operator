@@ -176,6 +176,16 @@ class ScopeTotal(BaseModel):
 class ScopeCounts(BaseModel):
     """How many conversations the listing holds, in total and per group.
 
+    THE POPULATION IS THE ONE THE PANEL CAN DRAW: **visible sessions that are not
+    archived**. Every default list in the app hides archived conversations, and
+    the defect this whole change answers was a number that disagreed with the
+    rows it sat beside -- a badge inflated by rows no default list can show is a
+    badge that invites a person into an empty group. So ``total``, ``active``,
+    ``unbound`` and every ``scopes[]`` entry all describe that one population,
+    while the answer's ``sessions`` still obeys the request's own
+    ``include_archived``: a client that asked for archived rows gets them, and
+    the counts do not move.
+
     Present only when the request asked for it (``with_counts=true``), because
     the census costs one ``attachment.json`` read per visible session -- memoized
     in ``session.catalog._BINDING_MEMO``, so a second call on an unchanged store

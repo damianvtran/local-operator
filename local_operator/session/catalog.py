@@ -824,6 +824,8 @@ class CatalogPage:
     desktop route already splits on ``limit``. ``next_cursor`` is minted from the
     page's LAST row and never from an appended extra: an extra ranks below the
     page by construction, so a cursor taken from one would re-serve the page.
+    The extras themselves are a FIRST-PAGE promise, appended only on the head
+    answer that carries no usable position -- see :func:`catalogue_page`.
 
     THERE IS NO SEPARATE TRUNCATION FLAG, deliberately: ``next_cursor`` IS the
     answer to "did this scope hold more than the page" (non-null exactly when it
@@ -1232,7 +1234,8 @@ def _memoized_birth(sessions: Path, session_id: str) -> float:
 #: most :data:`_BIRTH_MEMO_ROOTS` roots.
 #:
 #: THE SHAPE BOTH MEMOS SHARE: ``{session_id: ((ino, mtime_ns, size), value)}``
-#: with ``value`` deliberately UNTYPED here.
+#: with ``value`` deliberately UNTYPED here. ``_BIRTH_MEMO``, declared once with
+#: its own docstring above, has the identical shape.
 #:
 #: A type variable was the first spelling and the type gate refused it: the two
 #: memos carry different value types (a birth float, a ``(team, agent)`` pair),
@@ -1240,7 +1243,6 @@ def _memoized_birth(sessions: Path, session_id: str) -> float:
 #: type is annotated at the two CALL SITES (``_memo_root``, ``_memoized_binding``),
 #: which is where it actually matters; the shared part is the bound and the
 #: eviction order, and neither depends on what is stored.
-_BIRTH_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], float]]] = {}
 _BINDING_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], tuple[str, str]]]] = {}
 
 
@@ -1893,6 +1895,15 @@ def _census(ranked: Sequence[CatalogEntry], bindings: Mapping[str, tuple[str, st
     on every one of them), so ``total`` is a count over the bindings and
     ``active`` a sum over ``entry.active`` -- the counts' own cost is zero.
 
+    THE POPULATION IS THE ONE THE PANEL CAN DRAW: visible sessions that are NOT
+    ARCHIVED. Every default list in the app hides archived conversations, and the
+    bug this whole change answers was a number that disagreed with the rows -- a
+    badge inflated by rows no default list can show is a badge that invites a
+    person into an empty group. The archive flag is stamped by the SCAN, so this
+    is a predicate over rows that are already here rather than a second walk; the
+    listing's own ``include_archived`` still governs which ROWS come back, which
+    is why a request may carry archived rows while the census does not count them.
+
     Subagent rows are excluded. They are not conversations offered in the
     listing; they are the opt-in hidden layer, they carry no attachment of their
     own, and counting them would put the hidden population's size into a badge
@@ -1902,7 +1913,7 @@ def _census(ranked: Sequence[CatalogEntry], bindings: Mapping[str, tuple[str, st
     actives: dict[tuple[str, str], int] = {}
     total = active = unbound = 0
     for entry in ranked:
-        if entry.subagent:
+        if entry.subagent or entry.row.archived:
             continue
         total += 1
         if entry.active:
@@ -1947,9 +1958,11 @@ def catalogue_page(
     team's 434 conversations and get that team's top 25 -- not the head page
     filtered to whatever happened to survive it, which is the defect this exists
     to remove on a store where 151 of ``team:lopdev``'s rows are past a 500-row
-    page. ``limit`` must be at least 1, which the route enforces with its own
-    named refusal: a zero-length page has no last row to mint a resume position
-    from.
+    page. ``limit`` must be at least 1, which the route bounds with FastAPI's own
+    ``ge=1, le=500`` on a parameter this change did NOT introduce -- an out-of-range
+    ``limit`` is answered by the framework's generic validation detail, exactly as
+    it is on ``main`` -- because a zero-length page has no last row to mint a
+    resume position from.
 
     THE FILTER SITS AFTER RANKING AND BEFORE THE SLICE, and that is the only
     correct place for it: filtering the LISTING first would re-derive the ordering
@@ -2018,12 +2031,24 @@ def catalogue_page(
     # the emptiness check is here so a direct caller that ignored that
     # precondition gets no cursor rather than an ``IndexError``.
     next_cursor = encode_cursor(scope, entries[-1].rank) if entries and truncated else None
-    if pinned_off_page and scope is None:
-        # HEAD ONLY. A scoped answer cannot speak for the pinned set -- the client
-        # gates its pin facts on the head answer for exactly this reason -- and an
-        # extra here would be a row outside the scope it asked for. The caller
-        # passes ``pinned_off_page`` on the head request, whose first page is the
-        # answer that carries the whole pinned set.
+    if pinned_off_page and scope is None and position is None:
+        # FIRST PAGE OF THE HEAD ONLY, and the position clause is the half QA's
+        # walk found missing: the extras are appended from ``ranked[limit:]``,
+        # and a later page's ``ranked`` is already filtered past its cursor -- so
+        # EVERY such page appended every pin still below it, and a walk served
+        # the same pinned row twice (once as an extra, once as a page row). The
+        # promise this list exists for is the one the pin store makes: the whole
+        # pinned set rides the page the client paints first, and each later page
+        # is only the scope's continuation.
+        #
+        # GATED ON THE USABLE POSITION rather than on the query string, so the
+        # answer to an unusable or foreign cursor -- which IS this scope's first
+        # page, and says so with ``cursor_missing`` -- carries them exactly as a
+        # cursorless first page does.
+        #
+        # HEAD SCOPE ONLY. A scoped answer cannot speak for the pinned set -- the
+        # client gates its pin facts on the head answer for exactly this reason --
+        # and an extra here would be a row outside the scope it asked for.
         wanted = set(pinned_off_page)
         entries += [entry for entry in ranked[limit:] if entry.id in wanted]
     return CatalogPage(

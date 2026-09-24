@@ -1594,6 +1594,12 @@ async def list_sessions(
     scope_kind: str = Query(default=""),
     scope_name: str = Query(default=""),
     cursor: str = Query(default=""),
+    # THE CENSUS IS OPT-IN, and its POPULATION is fixed: visible sessions that are
+    # NOT ARCHIVED (``ScopeCounts``' own docstring carries the reasoning -- every
+    # default list in the app hides archived rows, and a badge inflated by rows
+    # the panel cannot draw is the defect this route's change answers). This
+    # request's ``include_archived`` still governs which ROWS come back; a client
+    # that asks for archived rows gets them and the counts do not move.
     with_counts: bool = Query(default=False),
 ):
     # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
