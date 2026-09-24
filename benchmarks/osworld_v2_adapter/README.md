@@ -311,6 +311,27 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    worker writes into its own environment (OSWorld reads it from nowhere
    else); it is scrubbed on `close`.
 
+7. **Anything else the task's own source declares** → the value itself, as a
+   `--secret` ref or an `--infra` value. A task whose source reaches a
+   controller that reads its value when the guest's task object is
+   instantiated — the website controller's `WEBSITE_HOST_SUFFIX`, the GitLab
+   controller's `GITLAB_PRIVATE_TOKEN` / `GITLAB_URL`, a `googledrive`/`login`
+   config's `GOOGLE_ACCOUNT_CREDENTIALS`, an LLM user simulator's
+   `OSWORLD_USER_SIM_API_KEY` — is **refused at `reset_start`, by name**,
+   without it: after the task is parsed and before the provider is constructed,
+   so no guest is ever allocated. Measured before the check existed: 44 of the
+   release's 108 tasks declared a value nothing supplied and no existing check
+   covered (40 of them `WEBSITE_HOST_SUFFIX`), and each allocated a desktop and
+   then died inside vendor code — `task_016` raised `ValueError:
+   WEBSITE_HOST_SUFFIX must be set in environment variables` from
+   `aws.py:863 _start_desktop_env`, a traceback naming no adapter, with an
+   instance left to tear down. The check reads the same requirement table
+   `inspect_requirements` answers from, so it demands exactly what the table
+   declares and never a name of its own; `required=False` rows stay optional,
+   and a value supplied for a task that does not need it is still accepted.
+   **Needs a wheel built from this source** — it is adapter code, so a wheel
+   pinned before this change keeps the old behaviour.
+
 ## How secrets reach the worker
 
 The worker is spawned with an environment built from a closed allowlist, so
