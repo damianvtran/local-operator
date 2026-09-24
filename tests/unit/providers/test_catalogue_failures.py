@@ -19,8 +19,10 @@ axes independently, because each one alone re-breaks one of the two reports.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -270,3 +272,44 @@ def test_the_statuses_map_is_read_only(controller: ProviderController) -> None:
     statuses = {"ollama": "static", "test": "static"}
     controller.catalogue_failures([], statuses)
     assert statuses == {"ollama": "static", "test": "static"}
+
+
+def test_the_live_fetch_is_handed_a_store_first_credential(
+    controller: ProviderController, isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: the report and the FETCH read ONE engagement view, so the key is used.
+
+    ``catalogue_failures`` engaging on the secret store while ``live_catalogue``
+    derived ``connected`` from ``usable_providers()`` alone failed in the worst
+    direction: a provider whose key came in through Settings was fetched with
+    ``api_key=None``, 401'd ANONYMOUSLY, and was then named as failing on every
+    live read, forever — with the working key resolvable on disk the whole time,
+    on exactly the ids the rule had just decided the user HAS engaged.
+
+    The instrument is the credential the fetch is HANDED: a keyless request and a
+    bogus-key request are indistinguishable on the wire (both 401), so only the
+    value crossing this boundary can tell the two apart.
+    """
+    store_provider_key("RADIENT_API_KEY", "sk-rad-from-settings", base=isolated)
+    # The premise, asserted rather than assumed: only the store knows this key.
+    assert "radient" not in (controller.usable_providers() or set())
+    assert "radient" in (controller.persisted_providers() or set())
+
+    seen: dict[str, str | None] = {}
+
+    def spy(provider_id: str, **kwargs: Any) -> tuple[list[Any], str]:
+        seen[provider_id] = kwargs.get("api_key")
+        return [], "static"
+
+    monkeypatch.setattr("local_operator.providers.controller.available_models", spy)
+    # No listing rows are returned, so the price leg has nothing to enrich; stubbed
+    # anyway so this case can never reach the network through it.
+    monkeypatch.setattr("local_operator.model.prices.models_dev_providers", lambda **_kw: {})
+    asyncio.run(controller.live_catalogue())
+
+    assert (
+        seen["radient"] == "sk-rad-from-settings"
+    ), "the store's key must reach the fetch — fetching keyless IS the bug"
+    # The control: a provider nothing engaged is still fetched keyless, so the
+    # assertion above is about the engagement axis and not about the spy.
+    assert seen["deepseek"] is None

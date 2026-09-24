@@ -25,6 +25,7 @@ providers that "did not answer".
 """
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -32,6 +33,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.model.discovery import DiscoveredModel
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.controller import (
     CATALOGUE_FAILURE_REASON,
@@ -288,3 +290,169 @@ async def test_the_map_is_wired_from_discovery_vocabulary_not_a_local_copy(catal
             continue
         expected = status in FAILED_LISTING_STATUSES
         assert (provider in EXPECTED_ERROR_KEYS) == expected
+
+
+class _RealHost:
+    """A host whose controller runs the REAL live read, with only the fetch stubbed.
+
+    The host above stubs ``live_catalogue``, which is right for cases about the
+    status rule but blind to what the live read did with a CREDENTIAL — the rows'
+    ``connected`` flag, and whether the provider's own listing failed at all, are
+    both products of it. Stubbing the transport is the narrowest way to reach
+    those two answers without a provider round trip.
+    """
+
+    def __init__(self, store: AuthStore) -> None:
+        self.store = store
+        self.last: ProviderController | None = None
+
+    def controller(self) -> ProviderController:
+        self.last = ProviderController(self.store)
+        return self.last
+
+    async def close(self) -> None:
+        if self.last is not None:
+            self.last.close()
+
+
+def _stub_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: dict[str, list[Any]],
+    failed: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Stub discovery per provider AND the price projection (no network at all).
+
+    ``rows`` are the providers whose listing answered; ``failed`` are the ones whose
+    fetch fails with nothing cached (discovery's ``static``/0-row shape); every
+    other provider answers ``unauthenticated`` — asked, no credential, silent by
+    design — so a case is never decided by an unrelated status.
+
+    ``seen`` is the unit-level instrument the credential question needs: the value
+    handed to the fetch. A keyless request and a bogus-key request are
+    indistinguishable on the wire — both 401 — so nothing downstream of this
+    boundary can tell a working key from a missing one.
+    """
+    seen: dict[str, str | None] = {}
+
+    def fake(provider_id: str, **kwargs: Any):
+        seen[provider_id] = kwargs.get("api_key")
+        if provider_id in rows:
+            return list(rows[provider_id]), "ok"
+        if provider_id in failed:
+            return [], "static"
+        return [], "unauthenticated"
+
+    monkeypatch.setattr("local_operator.providers.controller.available_models", fake)
+    monkeypatch.setattr("local_operator.model.prices.models_dev_providers", lambda **_kw: {})
+    return seen
+
+
+def _damage_secret_store(root: Path, payload: bytes) -> None:
+    """A REAL secret store, then its database replaced by a non-store file.
+
+    Order matters, and not for tidiness: damaging a store the rig never created
+    only reaches ``open_store``'s "no secret store found" path, which the reader
+    has always caught — so a rig that skips the initialization proves nothing and
+    would pass on the broken revision too.
+    """
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.keys import store_path
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-or-from-settings", base=root)
+    store_path(root).write_bytes(payload)
+
+
+async def test_a_store_first_key_reaches_the_live_fetch_and_its_rows(
+    catalogue, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """R2-1 on the wire: the key saved in Settings is USED, so the rows are connected.
+
+    Before this fix the provider was fetched with ``api_key=None`` while the rule
+    named it as failing — on every live read, indefinitely, with the working key
+    resolvable on disk. The two halves asserted here are the half the wire can
+    show (the rows carry ``connected: true`` where they carried ``false``) and the
+    half only the boundary can (``seen`` — the key actually handed to the fetch).
+    """
+    from local_operator.providers.registry import store_provider_key
+
+    client, app, store = catalogue
+    store_provider_key("RADIENT_API_KEY", "sk-rad-from-settings", base=tmp_path)
+    seen = _stub_transport(
+        monkeypatch,
+        {"radient": [DiscoveredModel(id="radient-1", name="Radient 1", context_window=8_000)]},
+    )
+    app.state.desktop_auth = _RealHost(store)
+
+    body = (await client.get("/v1/desktop/models?live=true")).json()["result"]
+
+    rows = [row for row in body["models"] if row["provider"] == "radient"]
+    assert seen["radient"] == "sk-rad-from-settings"
+    assert rows, "a provider whose listing answered must contribute its rows"
+    assert all(
+        row["connected"] for row in rows
+    ), "a key the store knows about must make the rows connected, not anonymous"
+    assert "radient" not in body["errors"], "it answered — there is nothing to report"
+
+
+async def test_a_store_first_key_that_failed_is_named_for_a_real_reason(
+    catalogue, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The other half: the same key, a listing that really failed, IS named.
+
+    The report is about a failure the user can act on, and here the app did try —
+    with their key — and the provider refused. That is the honest case the rule
+    exists for, and it must not be silenced by the fix above.
+    """
+    from local_operator.providers.registry import store_provider_key
+
+    client, app, store = catalogue
+    store_provider_key("RADIENT_API_KEY", "sk-rad-from-settings", base=tmp_path)
+    seen = _stub_transport(monkeypatch, {}, failed=("radient",))
+    app.state.desktop_auth = _RealHost(store)
+
+    body = (await client.get("/v1/desktop/models?live=true")).json()["result"]
+
+    assert seen["radient"] == "sk-rad-from-settings", "the key was used, so the failure is real"
+    assert body["errors"].get("radient") == CATALOGUE_FAILURE_REASON
+    assert all(
+        reason == CATALOGUE_FAILURE_REASON for reason in body["errors"].values()
+    ), "the wire shape is a provider -> generic reason map"
+
+
+async def test_a_damaged_secret_store_still_answers_the_live_read(
+    catalogue, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Q2-1: an unreadable store degrades, it does not 500 the picker's Refresh.
+
+    With ``secrets/store.db`` — a store this rig really created, holding a
+    provider row — replaced by a non-store file, this route answered 500: the
+    reader the union reaches (``stored_provider_env_keys`` through
+    ``persisted_providers``) caught neither ``sqlite3.DatabaseError`` nor
+    ``sqlite3.OperationalError``, and the route has no handler but ``finally:
+    controller.close()``. The body below is what "cannot be read" must look like:
+    a normal answer, with the store contributing nothing (exactly as if it held no
+    provider rows at all) while the CONFIG axis keeps its verdicts — an
+    unconfigured local preset stays silent even now, because the config is
+    readable. The AUTH store here is untouched, so ``credentials_known`` stays
+    true: this is the secret store's failure mode, not the auth store's.
+    """
+    from local_operator.providers.registry import stored_provider_env_keys
+
+    client, app, store = catalogue
+    _damage_secret_store(tmp_path, b"not-a-store-at-all")
+    _stub_transport(monkeypatch, {})
+    app.state.desktop_auth = _RealHost(store)
+
+    response = await client.get("/v1/desktop/models?live=true")
+
+    assert response.status_code == 200, "a damaged store must not become a 500"
+    # The identity that IS the degradation: the reader answers exactly what it
+    # answers for a store holding no provider rows, rather than raising.
+    assert stored_provider_env_keys(tmp_path) == set()
+    body = response.json()["result"]
+    assert isinstance(body["errors"], dict)
+    assert all(reason == CATALOGUE_FAILURE_REASON for reason in body["errors"].values())
+    assert body["credentials_known"] is True, "the AUTH store is readable and untouched"
+    assert (
+        "ollama" not in body["errors"]
+    ), "the config axis is still readable, so a preset nobody configured stays silent"

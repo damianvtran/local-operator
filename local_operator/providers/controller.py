@@ -2116,6 +2116,43 @@ class ProviderController:
             time_of_use=info.time_of_use if info is not None else None,
         )
 
+    def _engaged_providers(self) -> set[str] | None:
+        """Every provider id the user has ENGAGED — or ``None`` when unknowable.
+
+        ONE fact with TWO readers, and they have to agree: :meth:`live_catalogue`
+        decides from this whether a provider is fetched WITH its credential, and
+        :meth:`catalogue_failures` decides from it whether a failure is the user's
+        to see. Asking the credential question twice, two ways, is how the desktop
+        came to fetch a store-set provider ANONYMOUSLY and then report it as
+        failing — on every live read, indefinitely, with the working key
+        resolvable on disk the whole time (R2-1).
+
+        The union is load-bearing: ``usable_providers`` reads auth rows and the
+        environment, ``persisted_providers`` adds the provider-class rows of the
+        encrypted secret store — what ``PATCH /v1/credentials``, ``lop credential
+        update`` and the desktop Settings / onboarding flows write — which the
+        first cannot see at all. Either reader answering ``None`` means its store
+        could not be read, and unknown is not unengaged: the answer is ``None``.
+
+        COST, and it is on the event-loop thread: exactly one ``open_store()`` per
+        call — measured ~20.4 ms with a secret store on disk against ~0.022 ms for
+        ``usable_providers()`` alone (~0.09 ms with no store) — which is bounded
+        and immaterial beside the live fetch fan-out this feeds (up to 2 s per
+        provider of network budget), but it is real synchronous store I/O where
+        the route otherwise documents what it runs there. On a host whose store
+        exists with no broker listening, this can also START a secret-broker
+        daemon as a side effect of a ``GET``.
+
+        Deliberately NOT memoised on the instance: the answer depends on a store
+        other processes can change between the two calls in a single request, and
+        a stale engagement is precisely the bug this method exists to stop.
+        """
+        usable = self.usable_providers()
+        persisted = self.persisted_providers()
+        if usable is None or persisted is None:
+            return None
+        return usable | persisted
+
     def catalogue_failures(
         self, entries: Collection[CatalogueEntry], statuses: Mapping[str, str]
     ) -> dict[str, str]:
@@ -2137,29 +2174,28 @@ class ProviderController:
            ``test`` host) is excluded by the registry's own statement about those
            ids — they "cannot be listed at all, exposed so a UI can say so
            without first attempting a request that is guaranteed to fail".
-        2. The user ENGAGED it. A ``local_setup`` provider counts only when the
-           config carries ``providers.<id>.base_url``
-           (:func:`local.configured_local_providers`): the preset port nobody
-           chose is the app's own default with nobody home, which is not a
-           provider that went away. Every other provider counts when it has a
-           usable credential, and that means the UNION of both credential views —
-           ``usable_providers()`` (auth rows + the environment) and
+        2. The user ENGAGED it — the single view :meth:`_engaged_providers`
+           answers: a ``local_setup`` provider counts only when the config carries
+           ``providers.<id>.base_url`` (:func:`local.configured_local_providers`),
+           because the preset port nobody chose is the app's own default with
+           nobody home; every other provider counts when either credential reader
+           knows it — ``usable_providers()`` (auth rows + the environment) or
            ``persisted_providers()`` (which adds the provider-class rows of the
-           encrypted secret store). The union is load-bearing rather than
-           belt-and-braces: the store is where ``PATCH /v1/credentials``, ``lop
-           credential update`` and the desktop Settings / onboarding flows write a
-           key, and ``usable_providers()`` cannot see it — the gap
-           ``persisted_providers()`` exists to close, and the reason the mobile
-           daemon passes ``providers=`` into :meth:`live_catalogue`. Consulting
-           only the first made this rule go SILENT for a user whose key came in
-           through Settings, on exactly the ids ``live_catalogue`` fetches
-           ANONYMOUSLY (so the failure is real and the provider IS one they
-           engaged). **When a store could not be read at all (either reader
-           returning ``None``) the credential axis does NOT narrow** — unknown is
-           not unengaged, and this method follows the degradation that already
-           reads an unreadable store as "everything connected". The
-           local-endpoint axis is read from config instead, so it still applies in
-           that case.
+           encrypted secret store, where ``PATCH /v1/credentials``, ``lop
+           credential update`` and the desktop Settings / onboarding flows write
+           a key). Consulting only the first made this rule go SILENT for a user
+           whose key came in through Settings, on exactly the ids
+           ``live_catalogue`` fetches ANONYMOUSLY — and consulting only the first
+           in ``live_catalogue`` is what made the same provider's name PERMANENT
+           once it was named here (R2-1); both read this one view now. **A store
+           that could not be read at all does not narrow** — ``usable_providers``
+           answers ``None`` for an unreadable auth store, and that alone makes the
+           whole view ``None``. The secret-store reader cannot answer ``None``: it
+           swallows its own failures and yields an empty set (Q2-1 fixed that
+           reader's one remaining escape, a raising sqlite error), so an
+           unreadable secret store contributes NOTHING to the union rather than
+           suppressing it. The local-endpoint axis is read from config, so it
+           applies in every case.
         3. The listing actually failed. The existing rule, unchanged: a status in
            ``FAILED_LISTING_STATUSES`` (``stale``/``empty``), or ``static`` with
            no rows contributed — ``static`` conflates "no listing endpoint, only
@@ -2190,14 +2226,11 @@ class ProviderController:
 
         contributed = {entry.provider for entry in entries}
         configured_local = configured_local_providers()
-        # BOTH credential views, for the reason item 2 gives: a key written through
-        # Settings / `lop credential update` lives in the secret store, which
-        # ``usable_providers()`` does not read at all. Either reader answers
-        # ``None`` when its store is unreadable, and then the axis narrows on
-        # nothing — unknown is not unengaged.
-        usable = self.usable_providers()
-        persisted = self.persisted_providers()
-        engaged = None if usable is None or persisted is None else usable | persisted
+        # THE SAME VIEW live_catalogue FETCHES BY — see _engaged_providers, which
+        # owns the why (both credential stores, and unknown narrowing nothing) and
+        # the cost. One fact, two readers, so the listing layer and this rule
+        # cannot disagree about who is engaged.
+        engaged = self._engaged_providers()
         failures: dict[str, str] = {}
         for provider, status in statuses.items():
             if provider in NO_LISTING_PROVIDERS:
@@ -2229,10 +2262,15 @@ class ProviderController:
         ``ttl_s`` is the hard TTL passed to discovery; the picker passes
         :data:`PICKER_TTL_S`, and ``None`` keeps discovery's default.
 
-        Only providers with a credential are fetched. An unconnected provider still
-        contributes its STATIC models — the question "what would I get if I logged
-        in here" is precisely what a user cannot otherwise answer, and it was the
-        reason a newly released model was undiscoverable.
+        Only providers with a credential are fetched, and "a credential" is the
+        same engagement view :meth:`catalogue_failures` reads
+        (:meth:`_engaged_providers` — auth rows, the environment, and the
+        provider-class rows of the encrypted secret store), so a key saved through
+        Settings is used for the fetch rather than leaving the provider to be
+        listed anonymously and then reported as failing. An unconnected provider
+        still contributes its STATIC models — the question "what would I get if I
+        logged in here" is precisely what a user cannot otherwise answer, and it
+        was the reason a newly released model was undiscoverable.
 
         Each provider is isolated: discovery never raises by contract, but a
         credential resolution can (an OAuth refresh against a dead network), and
@@ -2255,7 +2293,12 @@ class ProviderController:
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
-        usable = self.usable_providers()
+        # THE ENGAGEMENT VIEW, not ``usable_providers`` alone: a store-set key
+        # (Settings, `lop credential update`) has to reach the fetch as a
+        # credential, or the provider is listed ANONYMOUSLY, fails, and is then
+        # named as failing by `catalogue_failures` on every read — with its key on
+        # disk. See `_engaged_providers`.
+        engaged = self._engaged_providers()
         # ``_chat_providers()`` filters FIRST, so an explicit ``providers`` set
         # naming a decision-only provider is honoured as "this catalogue request
         # mentions it" and still contributes no rows: the caller is asking for a
@@ -2272,16 +2315,16 @@ class ProviderController:
             definition: ProviderDefinition,
         ) -> tuple[ProviderDefinition, bool, list[DiscoveredModel], str]:
             # An explicit ``providers`` set is the CALLER's own credential
-            # determination and outranks ``usable_providers`` for the ids in it.
-            # It has to: ``usable_providers`` has no legacy ``credentials.env``
-            # rung, so a provider configured with ``lop credential update`` came
+            # determination and outranks the engaged view for the ids in it.
+            # It has to: the view has no legacy ``credentials.env`` rung, so a
+            # provider configured with ``lop credential update`` came
             # back unconnected here, listed ANONYMOUSLY, and the phone's picker
             # then showed it empty — with a credential on disk the whole time.
             # Narrowing without this makes the narrowing itself lose rows.
             connected = (
                 definition.id in providers
                 if providers is not None
-                else (usable is None or definition.id in usable)
+                else (engaged is None or definition.id in engaged)
             )
             api_key: str | None = None
             is_oauth = False

@@ -651,15 +651,45 @@ real; and it is what pytest's reused `tmp_path` exposed in `test_deepseek.py`.
 **The window also covers the user's own explicit read, and that is why it is a
 minute rather than five.** `GET /v1/desktop/models?live=true` — the picker's
 Refresh, the TUI's — is the user asking NOW, and inside the window it is answered
-from the memory with no request. What clears it early: any credential change or
-account removal (`invalidate_listing` → `invalidate_documents`), a newly
-configured local endpoint (`_configure_local` → `invalidate`), and a document that
-changed or vanished under the memory. The memory is also in-process only, so a
-restart retries at once — the property that keeps a short bound from becoming a
-state the user cannot clear by hand. The automation the bound actually defends
+from the memory with no request. What clears it early: a credential change that
+reaches `_invalidate_cached_listing` — `invalidate_listing` →
+`invalidate_documents` → the identity clear, which is the path every login,
+logout and account removal in the desktop and CLI surfaces takes, and the path
+`_configure_local` takes when a local provider is re-pointed — and a document that
+changed or vanished under the memory. It does NOT clear on a
+`PATCH /v1/credentials` save (that route writes the store row and drops only the
+model-info cache) nor on the credential screen in `desktop_radient.py`, so a key
+repaired through either waits out the window or a restart. Both gaps are
+pre-existing, and the first is why a minute rather than five is doing real work
+here. The memory is also in-process only, so a restart retries at once — the
+property that keeps a short bound from becoming a state the user cannot clear by
+hand. The automation the bound actually defends
 against (the renderer refetching a live query on window focus) is bounded in
 `local-operator-ui`, so one minute pays for the round trips without making a
 person wait for a Refresh.
+
+**One engagement view, two readers.** The desktop path asks "has the user engaged
+this provider?" twice — `live_catalogue` to decide whether to fetch it WITH its
+credential, `catalogue_failures` to decide whether a failed listing is the user's
+to see — and both read the single helper
+`ProviderController._engaged_providers` (`local_operator/providers/controller.py`).
+For anything that is not a `local_setup` preset it answers `usable_providers()` ∪
+`persisted_providers()`: the second is where `PATCH /v1/credentials`, `lop
+credential update` and the desktop Settings / onboarding flows write a key, and the
+first cannot see those rows at all. An unreadable AUTH store makes the answer
+`None` and the credential axis does not narrow; the secret-store reader cannot say
+`None` — it degrades a damaged or unopenable store to an empty set and re-raises
+only `sqlite3.ProgrammingError`, which is a caller bug rather than an unreadable
+store. The cost is one `open_store()` per call, measured ~20.4 ms with a store on
+disk against ~0.022 ms for `usable_providers()` alone (~0.09 ms with no store):
+synchronous store I/O on the loop thread, and on a host whose store exists with no
+broker listening it can start a secret-broker daemon from a `GET`. It is
+deliberately NOT memoised — the store can change between the two calls a single
+request makes. Asking that question two ways is the round-2 defect (R2-1): the
+listing layer fetched by `usable_providers()` alone while this rule reported by the
+union, so a key saved in Settings made the listing 401 ANONYMOUSLY and the banner
+name that provider on every live read, forever, with the working key resolvable on
+disk the whole time.
 
 ---
 

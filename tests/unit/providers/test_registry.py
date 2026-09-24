@@ -301,3 +301,98 @@ class TestOAuthHostSplit:
         assert zai_oauth.login is not None
         # No refresh: the minted key never expires, so there is nothing to refresh.
         assert zai_oauth.refresh_token is None
+
+
+def _seed_store_file(root: Any, payload: bytes) -> Any:
+    """Put a file at the secret store's path, valid or not, so the reader runs."""
+    from local_operator.secrets.keys import store_path
+
+    path = store_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return path
+
+
+def _initialized_then_damaged(root: Any, payload: bytes) -> Any:
+    """A REAL store, then damaged — the only shape that reaches the sqlite family.
+
+    Order matters, and not for tidiness: an *uninitialized* store path makes
+    ``open_store`` fail closed with ``SecretStoreError`` ("no secret store found"),
+    which the reader has always caught — so a rig that damages a store it never
+    created proves nothing. QA's 500 needed a store that HAD been written, whose
+    master key is still beside it, and then had its database corrupted.
+    """
+    from local_operator.providers.registry import (
+        store_provider_key,
+        stored_provider_env_keys,
+    )
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-or-from-settings", base=root)
+    assert stored_provider_env_keys(root) == {"OPENROUTER_API_KEY"}, "a real store, readable"
+    return _seed_store_file(root, payload)
+
+
+def test_a_damaged_secret_store_reads_as_no_provider_rows(tmp_path: Any) -> None:
+    """Q2-1: the reader's promise has to cover SQLITE'S exception family too.
+
+    ``stored_provider_env_keys`` caught ``(SecretStoreError, OSError,
+    ValueError)``, and a damaged store raises ``sqlite3.DatabaseError`` ("file is
+    not a database") — which is not an ``OSError``. So the reader a desktop
+    ``GET`` reaches through ``ProviderController.persisted_providers`` raised
+    straight into the route and answered **500** for the very store state this
+    function's docstring promises to survive: "an absent, locked or damaged store
+    yields an EMPTY set — never an error". One fix here covers both surfaces (the
+    same gap 500'd ``GET /v1/credentials``).
+    """
+    from local_operator.providers.registry import stored_provider_env_keys
+
+    _initialized_then_damaged(tmp_path, b"not-a-store-at-all")
+    assert stored_provider_env_keys(tmp_path) == set()
+
+
+def test_a_locked_secret_store_reads_as_no_provider_rows(tmp_path: Any) -> None:
+    """The other fault mode QA measured: ``chmod 000`` raises ``OperationalError``.
+
+    A permission-denied store is the "locked" case the docstring names first, and
+    it arrives from sqlite as ``sqlite3.OperationalError`` — again not an
+    ``OSError``, so the same gap covered it.
+    """
+    import os
+
+    from local_operator.providers.registry import stored_provider_env_keys
+
+    path = _initialized_then_damaged(tmp_path, b"")
+    # The store is only LOCKED, not overwritten: the payload above is empty, so the
+    # bytes on disk are still a valid database and the failure can only be the
+    # permission check.
+    os.chmod(path, 0o000)
+    try:
+        assert stored_provider_env_keys(tmp_path) == set()
+    finally:
+        # The tmp_path teardown needs to traverse what it created.
+        os.chmod(path, 0o600)
+
+
+def test_a_store_connection_used_from_another_thread_still_raises(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The one sqlite failure that is NOT an unreadable store: a caller BUG.
+
+    ``sqlite3.ProgrammingError`` is re-raised inside the family's own clause order
+    (it subclasses ``DatabaseError``, so the narrow clause must come first), the
+    same precedent ``usable_providers`` sets: a connection crossing threads must
+    not be dressed as "no provider rows", because that is a bug nobody would ever
+    find.
+    """
+    import sqlite3
+
+    from local_operator.providers.registry import stored_provider_env_keys
+
+    _seed_store_file(tmp_path, b"")
+
+    def raiser(_root: Any) -> Any:
+        raise sqlite3.ProgrammingError("SQLite objects created in a thread can only be used in it")
+
+    monkeypatch.setattr("local_operator.secrets.access.open_store", raiser)
+    with pytest.raises(sqlite3.ProgrammingError):
+        stored_provider_env_keys(tmp_path)
