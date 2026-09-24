@@ -661,60 +661,134 @@ declared field is actually populated; it gets the new row.
 ### 5.2 `request_access` and the pending text
 
 `_access_result_text` is the single renderer for every access state, and the
-`pending` arm has two variants keyed on one measured fact (the attachment of the
-session, read through `ToolContext.attached_probe` AT RENDER TIME — see §5.3).
-Both are hard-wrapped at ≤72 cells: the TUI receipt paints one row per raw line
-and clips each to the measure, and round 1 measured the unwrapped versions losing
-their load-bearing clauses on the card ("proceed with what you have", and the
-whole timeout receipt) — a green test cannot see that.
+`pending` arm has variants keyed on three measured facts: the attachment of the
+session (read through `ToolContext.attached_probe` AT RENDER TIME — see §5.3),
+the notify channel this caller actually has (`_notify_channel`), and whether the
+run is a DELEGATED one (`_delegated_here` — §5.2a).
 
-Shipped (attached), `{where}` naming the extension popup or the app's browser tab:
+**The wrapping is code, not authorship, and that is the fix for a whole class of
+finding.** Every arm leaves through `_wrap_receipt`, which wraps to
+`_RECEIPT_WRAP = 72` cells AFTER the interpolations: the card's lane is 76 cells
+at 80 columns and its measure is 72, it paints ONE ROW PER RAW LINE, and it clips
+a row that is longer. Round 1 measured the unwrapped bodies losing their
+load-bearing clauses ("proceed with what you have", "15 MINUTES", "not a
+refusal"); round 2 hand-wrapped the pending arms and still shipped three lines at
+74-78 cells — one of them losing exactly the notify clause interpolation had just
+added — plus `none`, `superseded` and `denied` as single 162-262-cell rows whose
+recovery step clipped at EVERY width, `none` being the commonest post-expiry
+state. A hand-measured line cannot be right when its length depends on
+`{notify}`/`{origin}`/`{where}`; wrapping where those values are known can be.
+`test_no_access_arm_has_a_row_the_card_would_clip` asserts the bound across every
+combination (state × host × attachment × delegation × channel), and
+`scripts/browser_access_shot.py` renders the real card for a look, at 80×30 and
+100×32.
 
-```
-approval for {origin} is pending ({position} of {pending_count}).
-The prompt is showing {where}.
-
-An interface is attached to this session, so the operator can answer
-it as soon as they look — make sure they are told ({notify}).
-
-- Wait UP TO 15 MINUTES in total for the decision: a person may be
-  away from the desk, and a slow answer is NOT a refusal.
-- Keep calling action='await_access' with the same url for that
-  budget — each call waits at most 240s, so about four calls span
-  it. That is the mechanism: there is no sleep shortcut here,
-  because the `wait` tool awaits a background job and this flow
-  has none.
-- The prompt expires after about 10 minutes. If await_access
-  returns "no live access request", call action='request_access'
-  with the same url to raise a NEW prompt — that is what pings the
-  operator again. Re-requesting while the old prompt is still live
-  changes nothing and notifies nobody, so do it only once it has
-  expired, and at most once per 15-minute window: after that,
-  report what you have and move on.
-- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as
-  refused — the request is still pending while an interface is
-  attached — but say plainly if you proceeded without access.
-```
-
-Shipped (unattached):
+Rendered (attached, with `origin=https://www.linkedin.com/feed/`, `position 1 of
+1`, `notify` the ask-bearing phrase, and `{where}` resolving to the extension
+popup):
 
 ```
-approval for {origin} is pending ({position} of {pending_count}).
-The prompt is showing {where}.
+approval for https://www.linkedin.com/feed/ is pending (1 of 1).
+The prompt is showing in the Local Operator extension popup (toolbar
+icon, numbered badge showing the pending count) — the badge alone is not
+reliably seen.
 
-No Local Operator pane is attached to this session right now, so
-nothing here will present the question — the prompt above is the
-surface, and the operator can answer it there. Notify them anyway, in
-a short message they will read, so the decision is waiting for them;
-then proceed with what you have rather than blocking the turn.
+An interface is attached to this session, so the operator can answer it
+as soon as they look — make sure they are told (a short message, or
+`ask`).
 
-- The prompt expires after about 10 minutes. Re-raise it with
-  action='request_access' (the same url) when the origin is next
-  needed — that is what pings the operator again rather than leaving
-  them a dead prompt.
-- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused:
-  an interface may attach later, and this request is what makes it
-  visible — but say plainly if you proceeded without access.
+- Wait UP TO 15 MINUTES in total for the decision: a person may be away
+  from the desk, and a slow answer is NOT a refusal.
+- Keep calling action='await_access' with the same url for that budget —
+  each call waits at most 240s, so about four calls sized to that cap
+  span it (an unsized call waits 120s, so eight of those do). That is
+  the mechanism: there is no sleep shortcut here, because the `wait`
+  tool awaits a background job and this flow has none.
+- The prompt expires after about 10 minutes. If await_access returns "no
+  live access request", call action='request_access' with the same url
+  to raise a NEW prompt — that is what pings the operator again.
+  Re-requesting while the old prompt is still live changes nothing and
+  notifies nobody, so do it only once it has expired, and at most once
+  per 15-minute window: after that, report what you have and move on.
+- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused —
+  the request is still pending while an interface is attached — but say
+  plainly if you proceeded without access.
+```
+
+Rendered (unattached — same inputs, `attached=False`):
+
+```
+UNapproval for https://www.linkedin.com/feed/ is pending (1 of 1).
+The prompt is showing in the Local Operator extension popup (toolbar
+icon, numbered badge showing the pending count) — the badge alone is not
+reliably seen.
+
+An interface is attached to this session, so the operator can answer it
+as soon as they look — make sure they are told (a short message, or
+`ask`).
+
+- Wait UP TO 15 MINUTES in total for the decision: a person may be away
+  from the desk, and a slow answer is NOT a refusal.
+- Keep calling action='await_access' with the same url for that budget —
+  each call waits at most 240s, so about four calls sized to that cap
+  span it (an unsized call waits 120s, so eight of those do). That is
+  the mechanism: there is no sleep shortcut here, because the `wait`
+  tool awaits a background job and this flow has none.
+- The prompt expires after about 10 minutes. If await_access returns "no
+  live access request", call action='request_access' with the same url
+  to raise a NEW prompt — that is what pings the operator again.
+  Re-requesting while the old prompt is still live changes nothing and
+  notifies nobody, so do it only once it has expired, and at most once
+  per 15-minute window: after that, report what you have and move on.
+- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused —
+  the request is still pending while an interface is attached — but say
+  plainly if you proceeded without access.
+```
+
+#### 5.2a A delegated run credits the session it was delegated from
+
+A child renders its PARENT's attachment answer — `harness/subagent.py` installs
+the parent's live probe on the child's holder — so "an interface is attached to
+this session" attributed the parent's pane to a run that owns none, while the
+child's own `<interactivity>` block (§4) says "the session this run was delegated
+from". The two are read by the same child in the same turn, and round 2's D9 is
+exactly that disagreement. `_delegated_here(context)` settles it with the SAME
+predicate `build_hub_tool` uses to choose the child-shaped `hub` tool
+(`subagent_comms.is_child(context.job_id)`): the subject becomes "the session this
+run was delegated from", and the notify channel becomes "a short message, or
+`hub` to that session" — the route the block beside it names (round 2, Q9). A
+top-level session holds `hub` too, so its children can reach IT, and is still
+offered only "a short message": naming a route it cannot notify anyone through
+would be the false instruction this flow exists to avoid.
+
+Rendered for such a reader (the `child` case of the shot script):
+
+```
+approval for https://www.linkedin.com/feed/ is pending (1 of 1).
+The prompt is showing in the Local Operator extension popup (toolbar
+icon, numbered badge showing the pending count) — the badge alone is not
+reliably seen.
+
+An interface is attached to the session this run was delegated from, so
+the operator can answer it as soon as they look — make sure they are
+told (a short message, or `hub` to that session).
+
+- Wait UP TO 15 MINUTES in total for the decision: a person may be away
+  from the desk, and a slow answer is NOT a refusal.
+- Keep calling action='await_access' with the same url for that budget —
+  each call waits at most 240s, so about four calls sized to that cap
+  span it (an unsized call waits 120s, so eight of those do). That is
+  the mechanism: there is no sleep shortcut here, because the `wait`
+  tool awaits a background job and this flow has none.
+- The prompt expires after about 10 minutes. If await_access returns "no
+  live access request", call action='request_access' with the same url
+  to raise a NEW prompt — that is what pings the operator again.
+  Re-requesting while the old prompt is still live changes nothing and
+  notifies nobody, so do it only once it has expired, and at most once
+  per 15-minute window: after that, report what you have and move on.
+- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused —
+  the request is still pending while an interface is attached — but say
+  plainly if you proceeded without access.
 ```
 
 Three round-2 corrections are visible in that text, and each is the fix for a
@@ -737,6 +811,14 @@ review finding:
   whose advice is "do not block the turn": `ask` parks the turn for hours. The
   two arms now agree about whether to hold.
 
+Round 3 added three more, all visible in the blocks above: the **subject** now
+names the session that owns the pane (a delegated run's parent — §5.2a, D9); the
+**arithmetic** states its assumption ("four calls sized to that cap", with "an
+unsized call waits 120s" beside it) instead of a count that was only true of
+calls the model sized to the cap itself; and the surface is named ONE way,
+"Local Operator pane", where the timeout arm used to say a bare "pane"
+(D8r2).
+
 ### 5.3 The await timeout text
 
 The `remaining_ms <= 0` arm is now rendered by `_access_result_text`
@@ -747,24 +829,24 @@ to keep waiting. It is attachment-aware, it names the wait that happened, and it
 next step is executable:
 
 ```
-still pending after {total_s:.0f}s, and the operator has not decided
-on this origin yet:
-{origin}
-Remind them to check {check}. Then:
+still pending after 240s, and the operator has not decided on this
+origin yet:
+https://www.linkedin.com/feed/
+Remind them to check the Local Operator extension popup. Then:
 - An interface is attached to this session: keep calling
-  action='await_access' — each call waits at most 240s — until
-  about 15 MINUTES in total have gone by.
-- Once the prompt has expired, call action='request_access' with
-  the same url to raise a new one: that is what pings them again.
+  action='await_access' — each call waits at most 240s — until about 15
+  MINUTES in total have gone by.
+- Once the prompt has expired, call action='request_access' with the
+  same url to raise a new one: that is what pings them again.
 AN UNANSWERED PROMPT IS NOT A REFUSAL.
 ```
 
 with the first bullet replaced, when unattached, by:
 
 ```
-- No pane is attached to this session, so nothing here will
-  present it: notify the operator and proceed with what you
-  have rather than blocking the turn.
+- No Local Operator pane is attached to this session, so nothing in this
+  run will present it: notify the operator (a short message) and proceed
+  with what you have rather than blocking the turn.
 ```
 
 The read of the attachment happens **here**, at render time, not once at the top
@@ -790,7 +872,10 @@ no longer exists on the await-terminal call site where it could never be used.
    One prompt cannot serve a 15-minute wait anyway: at ~10 minutes the tool sees
    `state="none"` and returns.
 3. **The budget is carried by REPEATED `await_access` CALLS**, which the pending
-   text now says explicitly (about four calls of 240s). This replaces the original
+   text now says explicitly — about four calls SIZED to the 240 s cap, with the
+   other half of the assumption beside it ("an unsized call waits 120s, so eight
+   of those do"): the count was true only of calls the model sized to the cap
+   itself (round 2, NIT 10). This replaces the original
    recommendation, which put the remainder in the `wait` tool and was **wrong**:
    `wait` awaits a background JOB (`WaitParams.job_id` is required) and a session
    awaiting an operator's click has none, so the named mechanism could not be
@@ -979,6 +1064,17 @@ prefer `scripts/ci_scope.py --run`; the whole-tree suite remains CI's job.
 | `test_tool_selection.py::test_a_pending_prompt_says_whether_an_interface_is_attached` | (extended) the unattached text denied the surface it named |
 | `test_tool_selection.py::test_the_await_timeout_names_re_request_not_an_endless_await` | (extended) the arm is attachment-aware and names the executable path |
 | `test_server.py::test_fifty_real_focus_changes_move_neither_tier_a_nor_its_answer` | focus flapping moved Tier A on a `can_notify=False` host (NIT 8: the old test fed the renderer a constant) |
+
+### 7.2 Round 3 (remediation) — what the new tests pin
+
+| test | the failure it exhibits before the round-3 change |
+|---|---|
+| `test_tool_selection.py::test_no_access_arm_has_a_row_the_card_would_clip` | three arms were single 162-262-cell lines and three lines sat at 74-78 cells, so the card clipped the notify clause and every recovery step; the assertion is per row, over every state × host × attachment × delegation × channel |
+| `test_tool_selection.py::test_a_delegated_run_credits_its_parents_interface` | a child's receipt said "an interface is attached to this session" about its parent's pane (D9), and its notify clause named no route at all |
+| `test_tool_selection.py::test_the_real_path_gives_a_child_the_parents_interface` | the WIRING: `execute_browser` must read the delegated fact off the live context, or the renderer-level fix is dead code |
+| `test_tool_selection.py::test_the_notify_route_names_only_tools_the_caller_has` | `hub` must be named for a child and NOT for a top-level session, which holds it for its own children (Q9) |
+| `test_tool_selection.py::test_the_pending_prompt_names_the_fifteen_minute_wait_and_the_re_request` | (extended) the call count is qualified by the size it assumes — four sized calls, eight unsized (NIT 10) |
+| `test_parked_gates.py::test_an_expired_question_is_not_reported_to_the_model_as_a_denial` | (extended) the model row said "the user" and said "expired unanswered" twice (D8r) |
 
 ## 8. Configuration
 

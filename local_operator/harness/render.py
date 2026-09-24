@@ -198,18 +198,22 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # was refused.
             kind = str(details.get("kind") or "approval").strip().lower()
             if kind == "ask":
+                # "never answered: it expired unanswered after 1d" said the same
+                # thing twice, and "a choice by the user" named the person one way
+                # in a row this PR had already moved to "the operator" everywhere
+                # else (round 2, D8r).
                 text = (
-                    f"[system] The question for {subject} was never answered: it "
-                    f"expired unanswered after {waited}. No decision was made — "
-                    "this was a timeout, not a choice by the user. Decide "
-                    "yourself (take your recommended option where you gave one), then "
-                    "say in one line what you assumed and carry on."
+                    f"[system] The question for {subject} expired unanswered after "
+                    f"{waited}. No decision was made — this was a timeout, not a "
+                    "choice by the operator. Decide yourself (take your recommended "
+                    "option where you gave one), then say in one line what you "
+                    "assumed and carry on."
                 )
             else:
                 text = (
                     f"[system] The approval request for {subject} expired unanswered "
                     f"after {waited} and was denied automatically. This was a "
-                    "timeout, not a decision by the user."
+                    "timeout, not a decision by the operator."
                 )
             out.append(_injected_user_message(text, message.id))
         elif message.custom_type in (
