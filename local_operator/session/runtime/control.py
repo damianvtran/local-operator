@@ -1357,12 +1357,22 @@ async def stop_session(
         # "nothing to do" got two opposite instructions. So this skip says why the
         # label and the ladder differ, and drops "nothing to do": the only remedy left
         # is ``--force``, which is exactly what the operator came here to decide on.
+        # The CAUSE is stated only when the artifact shows it (agent review round 1 on
+        # #1541, m1): "an older build" for a marker with no monotonic stamp, and
+        # cause-neutral words for a current-build marker whose sibling cannot settle it.
         remedy = _force_remedy(record.pid, _from_a_shell(_command))
-        if await asyncio.to_thread(_held_unconfirmed, record):
+        from local_operator.session.runtime import stall_watchdog
+
+        unproven = await asyncio.to_thread(_held_unconfirmed, record)
+        if unproven:
+            source = (
+                "comes from an older build and cannot be confirmed"
+                if unproven == stall_watchdog.UNPROVEN_OLD_BUILD
+                else "cannot be confirmed from its evidence"
+            )
             line = (
                 f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; its '
-                '"bound held" reading comes from an older build and cannot be confirmed, '
-                f"so it is left to finish ({remedy})"
+                f'"bound held" reading {source}, so it is left to finish ({remedy})'
             )
         else:
             line = (
@@ -1683,19 +1693,20 @@ def stall_tag(why: str) -> str:
     return "leaving, bound held"
 
 
-def _held_unconfirmed(record: SessionRecord) -> bool:
-    """Is ``record`` labelled ``bound held`` on evidence the ladder will not act on?
+def _held_unconfirmed(record: SessionRecord) -> str:
+    """Why ``record`` is labelled ``bound held`` on evidence the ladder will not act on.
 
-    Asked only on the skip path, where :func:`_drain_stalled` already answered that no
-    PROVEN held fire exists, so a held reading here is the unproven kind. Never raises:
-    a probe failure keeps the ordinary skip line.
+    ``stall_watchdog.unproven_cause``: ``"older build"``, ``"evidence"``, or ``""`` when
+    the label does not say held (or says it on proven evidence, which this skip path
+    never sees — :func:`_drain_stalled` would have taken it). Never raises: a probe
+    failure keeps the ordinary skip line.
     """
     try:
         from local_operator.session.runtime import stall_watchdog
 
-        return stall_watchdog.held_now(record.pid, record.started_at)
+        return stall_watchdog.unproven_cause(record.pid, record.started_at)
     except Exception:  # noqa: BLE001 — the ladder never raises over a probe
-        return False
+        return ""
 
 
 def _stop_targets(root: Path, own_pid: int | None = None) -> list[SessionRecord]:

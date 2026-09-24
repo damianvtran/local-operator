@@ -3789,6 +3789,33 @@ def held_now(
     return reading == HELD_PROVEN if proven else reading != NOT_HELD
 
 
+#: What :func:`unproven_cause` answers for an UNPROVEN held reading: the marker itself
+#: predates the monotonic stamp (a build before #1527), or it is a current-build marker
+#: whose deadline sibling is missing, foreign or torn.
+UNPROVEN_OLD_BUILD = "older build"
+UNPROVEN_EVIDENCE = "evidence"
+
+
+def unproven_cause(pid: int, started_at: float, directory: Path | None = None) -> str:
+    """Why THIS life's held reading is unproven, or ``""`` when it is not unproven.
+
+    FOR THE WORDS, NOT THE DECISION (agent review round 1 on #1541, m1): the ladder's
+    skip line explains why a ``bound held`` label did not stop the runtime, and "comes
+    from an older build" is true only when the marker carries no monotonic stamp. A
+    current build can leave an unproven reading too — ``_record_held_fire`` re-arms
+    without writing the sibling, so a fire before the next beat has none — and that
+    runtime must not be told its evidence is from another build. The same fence and the
+    same :func:`held_reading` as :func:`held_now`, so the line and the label agree about
+    which runtime is unproven.
+    """
+    evidence = dump_evidence(pid, directory)
+    if evidence is None or not dump_is_current(evidence[0], started_at):
+        return ""
+    if held_reading(*evidence) != HELD_UNPROVEN:
+        return ""
+    return UNPROVEN_OLD_BUILD if _held_fired_mono(evidence[1]) is None else UNPROVEN_EVIDENCE
+
+
 def fire_outcome(pid: int | None = None, directory: Path | None = None) -> str:
     """How this pid's fire ended the runtime, as far as the ARTIFACT proves it.
 
