@@ -1572,9 +1572,9 @@ async def test_a_listing_load_in_flight_cannot_overwrite_newer_pins(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_a_same_size_same_mtime_replace_is_still_detected(tmp_path, monkeypatch) -> None:
-    """The fingerprint's INODE term is the one that cannot miss, and it has to be
-    shown doing work (review round 7, F3: dropping ``st_ino`` left every pin test
-    green).
+    """The fingerprint's INODE term separates two same-size, same-mtime
+    replaces, and it has to be shown doing work (review round 7, F3: dropping
+    ``st_ino`` left every pin test green).
 
     Two writes are forced to agree on the fingerprint's other two terms -- the
     same byte length (two four-character ids, the same JSON shape) and the same
@@ -1582,6 +1582,16 @@ async def test_a_same_size_same_mtime_replace_is_still_detected(tmp_path, monkey
     the only difference left. The pass must still see a change, wake the list and
     publish the new set; with the inode stubbed out of ``fingerprint()`` the two
     reads compare equal and this fails.
+
+    WHAT THIS DEPENDS ON, and why it holds on Linux (review round 8, R8-1): the
+    inode only differs if the filesystem does not hand the replaced file's inode
+    NUMBER straight back to the next write. ext4 does exactly that -- the first
+    ``set_pin`` freed ``before``'s inode and the second one's ``mkstemp`` got the
+    same number back, so CI failed where APFS (which does not reuse promptly)
+    passed. The test therefore holds ``before``'s inode allocated with a hard
+    link for the whole rewrite: an inode with a live link cannot be freed, so no
+    filesystem can reissue its number, and the inequality below is a property of
+    ``os.replace`` rather than of the OS's reuse policy.
     """
     import os
 
@@ -1601,6 +1611,9 @@ async def test_a_same_size_same_mtime_replace_is_still_detected(tmp_path, monkey
     await daemon._scan_once()
     assert daemon.table.pins == ("aaaa",), "the first pass seeds the table's pins"
     before = (cfg / PINS_FILE).stat()
+    # Pin ``before``'s inode alive (see the docstring): without this link ext4
+    # recycles it for the second write and the premise below fails on CI.
+    os.link(cfg / PINS_FILE, tmp_path / "hold-previous-pins-inode")
     queue: asyncio.Queue[None] = asyncio.Queue()
     daemon.table.list_subscribers.add(queue)
 
@@ -1615,7 +1628,7 @@ async def test_a_same_size_same_mtime_replace_is_still_detected(tmp_path, monkey
         before.st_size,
         before.st_mtime_ns,
     ), "this test only means anything if size and mtime_ns are held equal"
-    assert after.st_ino != before.st_ino, "os.replace must land a new inode"
+    assert after.st_ino != before.st_ino, "a held inode cannot be reissued to the replace"
 
     await daemon._scan_once()
     assert not queue.empty(), "a same-size same-mtime replace must still reach the phone"
