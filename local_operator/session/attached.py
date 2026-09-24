@@ -110,6 +110,7 @@ from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import (
     CompactionOutcome,
+    GateUndeliveredHandler,
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
@@ -1236,7 +1237,7 @@ class AttachedSession:
         #: A separate channel from the refusal above because it is a separate
         #: fact — nothing refused this reply, nothing received it — and the two
         #: need different words on screen.
-        self._gate_undelivered_handler: Callable[[str], None] | None = None
+        self._gate_undelivered_handler: GateUndeliveredHandler | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
@@ -2423,6 +2424,48 @@ class AttachedSession:
         if not self.is_cold:
             return None
         return self._read_cold_reason or "no-runtime"
+
+    @property
+    def _deliberately_stopped_cold(self) -> bool:
+        """A stop this viewer was TOLD about, while it has nowhere to deliver.
+
+        The stop-credible half of G6's predicate (``_maybe_start_gate``), and the
+        term that makes the guard reachable on the sidebar's own facades: every
+        one of them is built with ``_can_go_cold = True``, so ``can_ever_bind`` is
+        True for the whole of their lives and could never refuse a card on the
+        path this PR is about (agent review round 3, A9 = QA Q2).
+
+        ``_deliberate_stop`` is the viewer's own record that the session ended on
+        purpose rather than that its owner was lost: set by the ``stopping``
+        frame a runtime writes before it closes (``_on_disconnected``'s
+        ``STOPPED_REASON`` arm), by this viewer's own ``request_stop`` before the
+        op goes out, and by ``_recover_runtime``'s inference from the
+        transcript's ``stopped_at`` marker for a stop someone else issued.
+        ``is_cold`` is the other half and is NOT the same fact: while a client is
+        connected and synced this pane can still POST the answer, so a stop it
+        has merely been told about must not cost it the card.
+
+        WHY IT CANNOT REFUSE A SESSION THAT CAN STILL RECOVER. ``_deliberate_stop``
+        is cleared by every successful sync — ``_finish_sync`` on the bound path
+        (``_sync_frontend``) and on the degraded-delta resync that follows one —
+        so a session that is stopped and later restarted or resumed by ANYONE,
+        and which this viewer then binds to, has the term false again before its
+        next card is offered. A stop ends the TURN, and the parked gate with it
+        (which is why refusing is honest); it does not end the session. The
+        reconcile that re-arms is level-triggered off the successor's own
+        frontend delta, so nothing has to remember to lift this by hand.
+
+        WHAT IT CANNOT SEE, because the absence is not evidence: an owner killed
+        WITHOUT an announcement (kill -9, OOM) leaves no ``stopping`` frame and —
+        for a session with no wake schedules — no ``stopped_at`` marker either
+        (``session_was_stopped`` documents both limits). Such a pane is
+        indistinguishable here from one whose LIVE owner is simply stalled, and
+        the second kind can still deliver its answer, so both keep the card.
+        Closing that arm needs a fact this predicate cannot read synchronously:
+        that no pid holds the lease at all (``cold_reason == "no-runtime"``,
+        classified only by a read).
+        """
+        return self._deliberate_stop and self.is_cold
 
     @property
     def can_ever_bind(self) -> bool:
@@ -5879,12 +5922,28 @@ class AttachedSession:
         # `✓ allowed` receipt for an approval (UX round 1, U1). Not
         # starting the bridge at all is what makes both unreachable rather
         # than merely apologised for.
-        if not self.can_ever_bind:
+        #
+        # THE SECOND TERM, and why it is not redundant with the first
+        # (agent review round 3, A9 = QA Q2): `can_ever_bind` is True for
+        # EVERY sidebar lease, because `_lease_sidebar_source` builds only
+        # `_can_go_cold` facades and that flag is one of `can_ever_bind`'s own
+        # disjuncts. So on the very path this guard was written for — the
+        # multi-session flow, where every session you switch TO is a viewer
+        # facade — the predicate had no false term at all and G6 could never
+        # fire: measured with the owner stopped while the user was away, the
+        # card was mounted AND focused over `Saved · This session was stopped;
+        # …`, re-offered on every visit, and every answer it took produced an
+        # "undelivered" notice for a question no owner could ever receive.
+        # `_deliberately_stopped_cold` is the stop fact a viewer DOES have on
+        # the return leg, so one term covers both contracts.
+        if not self.can_ever_bind or self._deliberately_stopped_cold:
             logger.debug(
-                "gate ladder G6: the viewer can never bind, so no owner can "
-                "take an answer for %s/%s",
+                "gate ladder G6: no owner can take an answer for %s/%s "
+                "(can_ever_bind=%s, deliberately_stopped_cold=%s)",
                 pending.kind,
                 pending.request_id,
+                self.can_ever_bind,
+                self._deliberately_stopped_cold,
             )
             return
         if pending.kind == "approval" and (self._approval_handler is not None or background):
@@ -5936,17 +5995,37 @@ class AttachedSession:
             self.preserve_viewer_gate_reply()
             try:
                 await client.approval_answer(pending.request_id, approved)
+            except OperatorAuthorityRequired:
+                # NOT A DELIVERY FAILURE, and it must not be reported as one
+                # (agent review round 3, A10 = QA Q3 = design D4).
+                # ``OperatorAuthorityRequired`` is a ``RuntimeError`` (see
+                # ``session.errors``), so without this arm it matches the clause
+                # BELOW and the pane is told "Answer not delivered" for an
+                # answer the owner RECEIVED and REFUSED: the session is
+                # connected, the card is still parked, and the one thing that
+                # fixes it -- the operator key -- is named by the refusal arm's
+                # own notice, which lands anyway. Worse, the transport clause
+                # retracts the pane's receipt, and retracting it is exactly what
+                # that ``not applied —`` prefix exists to avoid: the row has to
+                # RECORD that the answer was given here, corrected in its first
+                # words, not disappear. Ordered FIRST, so it is decided before
+                # the exception's class can be read as a transport fact.
+                raise
             except (RuntimeError, ConnectionError) as error:
-                # ACCEPTED HERE, NEVER DELIVERED THERE. Both arms below swallow
-                # this exception by design (a stale-request race, and the stop
-                # path's dead-owner post), and both are ordinary ends — but the
-                # operator who pressed the key is looking at a card that
+                # ACCEPTED HERE, NEVER DELIVERED THERE, but only in ONE of the
+                # two states this clause covers — see
+                # ``_gate_reply_reached_the_owner``, which tells them apart on
+                # the transport rather than on the exception's class. The other
+                # arm below swallows both by design (a stale-request race, and
+                # the stop path's dead-owner post), and both are ordinary ends —
+                # but the operator who pressed the key is looking at a card that
                 # resolved, and their answer went nowhere. The host is the only
                 # party that can take the `✓ allowed` receipt back and say so,
                 # so it is told here, on the ONE branch that means "the reply
                 # did not land" (UX round 1, U1). Re-raised unchanged: the
                 # swallow stays exactly where it was.
-                self._note_gate_reply_undelivered(pending, error)
+                if not self._gate_reply_reached_the_owner(client, error):
+                    self._note_gate_reply_undelivered(pending, error)
                 raise
             self._gate_answered_key = self._gate_identity(pending)
         except OperatorAuthorityRequired as error:
@@ -6020,6 +6099,31 @@ class AttachedSession:
             ):
                 self._gate_task = None
 
+    def _gate_reply_reached_the_owner(self, client: Any, error: BaseException) -> bool:
+        """Whether a FAILED gate post had nonetheless reached the owner.
+
+        THE RULE (agent review round 3, A11 = QA Q4), and it is about the WIRE,
+        not about the exception's class: the undelivered channel exists to say
+        "this pane could not hand your answer over", so it may speak only when
+        the transport is what failed. That clause in ``_run_approval`` catches a
+        ``RuntimeError`` too, because one of the two arms it feeds is a race the
+        owner adjudicated — "that approval is no longer waiting", from the
+        ``error`` frame the runtime sends when a FIRST answer already won. In
+        that case the owner READ this pane's reply and ruled on it: the answer
+        was delivered, and telling a connected operator that Send is unavailable
+        until connected is false in both clauses and points them at the wrong
+        repair entirely.
+
+        So the discrimination is on the transport's own state, which is the only
+        fact that separates the two: nothing provably crossed if the connection
+        is down at the failure or if the post raised a ``ConnectionError``;
+        everything provably crossed if a live connection came back with the
+        owner's own verdict. The retraction the race still owes its row is
+        unaffected — the pane's decision genuinely did not take effect — but it
+        is not this method's business.
+        """
+        return bool(getattr(client, "connected", False)) and not isinstance(error, ConnectionError)
+
     def _note_gate_reply_undelivered(self, pending: PendingRequest, error: BaseException) -> None:
         """Tell the host that an answer this pane accepted never reached the owner.
 
@@ -6047,7 +6151,17 @@ class AttachedSession:
         if notify is None:
             return
         with contextlib.suppress(Exception):
-            notify(pending.kind)
+            # THE GATE'S OWN IDENTITY RIDES ALONG, not just its kind. The host
+            # keeps a settled APPROVAL receipt so it can take back a claim the
+            # owner never got, and a kind alone cannot tell it WHICH gate that
+            # receipt belongs to: an approval answered with no card at all (an
+            # allow-all latch, a background approval) writes no receipt, so a
+            # later undelivered post would reach back and remove the previous,
+            # DELIVERED row instead (agent review round 3, A12 = QA Q5). The
+            # tuple is the same one the ladder keys bridges on
+            # (``_gate_identity``), so a host that stored it beside the block it
+            # wrote can match exactly.
+            notify(pending.kind, self._gate_identity(pending))
 
     async def _run_ask(self, pending: PendingRequest) -> None:
         try:
@@ -6070,13 +6184,25 @@ class AttachedSession:
                         values[0],
                         question_index=pending.question_index,
                     )
+                except OperatorAuthorityRequired:
+                    # The approval arm's first clause, one kind over: a refusal is
+                    # the owner ANSWERING us, so it must not be read as a
+                    # transport failure and must not retract anything. It
+                    # continues unclaimed here, exactly as it did before the
+                    # undelivered channel existed.
+                    raise
                 except (RuntimeError, ConnectionError) as error:
                     # The approval gate's branch, one kind over: an ask the
                     # operator answered on a viewer whose owner is gone was
                     # discarded in silence (UX round 1, U1). No transcript
                     # receipt is written for an ask, so the host's half here is
-                    # the sentence, not a correction.
-                    self._note_gate_reply_undelivered(pending, error)
+                    # the sentence, not a correction. Only the wire's own
+                    # failures: a post the owner RECEIVED and ruled on (the
+                    # first-answer-wins race) is not an undelivered reply, and
+                    # saying so on a live pane sends the operator to fix a
+                    # connection that is up (agent review round 3, A11).
+                    if not self._gate_reply_reached_the_owner(client, error):
+                        self._note_gate_reply_undelivered(pending, error)
                     raise
                 self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
@@ -8624,12 +8750,17 @@ class AttachedSession:
         """
         self._gate_refusal_handler = handler
 
-    def set_gate_undelivered_handler(self, handler: Callable[[str], None] | None) -> None:
+    def set_gate_undelivered_handler(self, handler: GateUndeliveredHandler | None) -> None:
         """Where an answer that never reached the owner goes, for a host with a voice.
 
-        ``handler`` receives the gate's kind (``"ask"`` or ``"approval"``).
-        Optional in the same way ``set_gate_refusal_handler`` is: a host with no
-        surface for it leaves this unset and the drop stays in the log.
+        ``handler`` receives the gate's KIND (``"ask"`` or ``"approval"``) and
+        its IDENTITY — the same ``(kind, request_id, question_index)`` tuple the
+        ladder keys bridges on — so a host that keeps a setted receipt for one
+        card can retract THAT row and no other (agent review round 3, A12 = QA
+        Q5: a kind alone let an undelivered approval that wrote no receipt of its
+        own remove the previous, DELIVERED one). Optional in the same way
+        ``set_gate_refusal_handler`` is: a host with no surface for it leaves this
+        unset and the drop stays in the log.
         """
         self._gate_undelivered_handler = handler
 
