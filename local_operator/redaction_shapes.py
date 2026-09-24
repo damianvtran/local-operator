@@ -3772,7 +3772,28 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
         # Readable material is checked FIRST, so the truncated-PEM branch below
         # cannot swallow an exposure: a block that was masked is contained, and
         # one that left a fragment readable is not.
-        exposed = _credential_fragments_survive(hit, index)
+        #
+        # A PLACEHOLDER/REFERENCE value is never graded EXPOSED, and this consult is
+        # the whole of the false-positive fix rather than a wording change. The DSN
+        # rule masks the copy INSIDE the URL and deliberately leaves a bare second
+        # mention READABLE — the value is a ``$VAR`` reference, and
+        # ``is_placeholder_component`` is exactly what keeps it unmasked (it is the
+        # predicate ``_value_is_not_a_credential`` consults at the masking floor).
+        # The fragment test then found that deliberately-readable survivor under the
+        # hit's own value and read it as a partial mask, so a duplicated reference
+        # filed a rotation demand for a value that was never credential material:
+        # ``postgres://u:$VAR@host`` plus a later ``$VAR`` escalated, and the same
+        # line without the second mention did not. The exposed path was the ONE site
+        # that did not consult the predicate — the masking floor and the registration
+        # floor (:func:`is_registerable_component`) both do — and no word-list change
+        # can reach it, because the value is correctly on the list already.
+        #
+        # The conservative direction is unchanged for every real value: only a
+        # placeholder is excused, and a genuinely half-masked SECRET (or a duplicate
+        # of one) still escalates, because its own characters are genuinely readable.
+        exposed = not is_placeholder_component(hit.value) and _credential_fragments_survive(
+            hit, index
+        )
         if _is_truncated_pem(hit) or exposed:
             # A BEGIN with no END is a key whose LENGTH we cannot see: everything
             # visible is masked, and the claim is still withheld, because nothing
