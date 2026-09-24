@@ -1139,7 +1139,23 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     assert "shared with" not in out.split("owner:")[1].split("\n")[0]
 
 
-_GARBLED = ("abc", -5, 10**18, float("nan"), float("inf"), True, [1], {"x": 1}, None)
+#: ``10**400`` is the shape the first helper missed (review round 4, R4-M1): ``json``
+#: decodes a 401-digit number to an ``int``, and ``float()`` of it raised
+#: ``OverflowError``. ``2**53 + 1`` is the first integer a float round-trip loses.
+_GARBLED = (
+    "abc",
+    -5,
+    10**18,
+    10**400,
+    "1" + "0" * 400,
+    2**53 + 1,
+    float("nan"),
+    float("inf"),
+    True,
+    [1],
+    {"x": 1},
+    None,
+)
 
 
 @pytest.mark.parametrize("value", _GARBLED)
@@ -1180,8 +1196,10 @@ def test_every_number_a_peer_sends_is_validated_at_the_boundary(value: Any) -> N
             "identity": value,
         }
     )
-    if value != 10**18:
-        assert grant.grant_expires_at_ms == 0 and grant.token_expires_at_ms == 0
+    # NO EXEMPTION (review round 4, R4-m1): the old test skipped ``10**18`` — exactly
+    # the value that was cached as live. Above ``PEER_NUMBER_CEILING`` it is garbage
+    # like any other, and a large value BELOW it is capped by the borrower (next test).
+    assert grant.grant_expires_at_ms == 0 and grant.token_expires_at_ms == 0
     assert grant.latency_ms >= 0 and grant.credential_ref.credential_id >= 0
     assert isinstance(grant.identity, dict)
 
@@ -1211,3 +1229,147 @@ def test_a_numeric_string_from_a_peer_still_reads_as_its_number() -> None:
 
     assert BrokerError.from_detail({"code": "x", "retry_after_ms": "1500"}).retry_after_ms == 1500
     assert BrokerError.from_detail({"code": "x"}).retry_after_ms == 0
+
+
+@pytest.mark.parametrize("value", [300_001, 10**18, 10**400, "10000000"])
+def test_an_over_cap_retry_is_clamped_to_the_cap_not_dropped_to_the_default(value: Any) -> None:
+    """R4-m2: the clamp is the property, and nothing pinned it.
+
+    Turning "over the cap → the cap" into "over the cap → the default" left every test
+    green, yet it SHORTENS the backoff: a ``quota_blocked`` refusal asking for more than
+    300 s was then cached for the 60 s default, and the borrower re-asked a rate-limited
+    owner five times sooner than the cap allows. Exact equality with the cap is the
+    only assertion that tells the two apart.
+    """
+    from local_operator.network.credentials.types import (
+        DEFAULT_RETRY_AFTER_MS,
+        MAX_PEER_RETRY_AFTER_MS,
+        BrokerError,
+    )
+
+    assert MAX_PEER_RETRY_AFTER_MS != DEFAULT_RETRY_AFTER_MS, "the test would be vacuous"
+    error = BrokerError.from_detail({"code": "quota_blocked", "retry_after_ms": value})
+    assert error.retry_after_ms == MAX_PEER_RETRY_AFTER_MS
+    assert error.cache_ttl_ms == MAX_PEER_RETRY_AFTER_MS
+
+
+def test_a_peer_integer_is_never_silently_rounded_to_a_neighbour() -> None:
+    """R4-n1: above ``2**53`` a float round-trip turned ``2**53 + 1`` into ``2**53``.
+
+    Every accepted value is at most :data:`PEER_NUMBER_CEILING` (``2**53``), and every
+    integer up to it is exact — so an accepted number is always the number sent. A
+    value above the ceiling is REFUSED (the default, or the clamp), never rounded to an
+    adjacent one: a rounded ``doc_rev`` or epoch would be a plausible wrong number.
+    """
+    from local_operator.network.credentials.types import PEER_NUMBER_CEILING, peer_int
+
+    assert peer_int(PEER_NUMBER_CEILING) == PEER_NUMBER_CEILING
+    assert peer_int(str(PEER_NUMBER_CEILING - 1)) == PEER_NUMBER_CEILING - 1
+    assert peer_int(1_700_000_000_123) == 1_700_000_000_123
+    assert peer_int(PEER_NUMBER_CEILING + 1) == 0
+    assert peer_int(str(PEER_NUMBER_CEILING + 1), default=1) == 1
+    assert peer_int(PEER_NUMBER_CEILING + 1, maximum=300_000) == 300_000
+
+
+def test_a_far_future_grant_is_cached_no_longer_than_grant_ttl(tmp_path: Path) -> None:
+    """R4-m1: the borrower enforces "a lent grant is dropped within grant_ttl_s" itself.
+
+    An expiry ten years out is a VALID number (below the peer ceiling), so the boundary
+    helper keeps it. Only the owner capped a grant's life until now; an owner clock far
+    ahead, or an owner that just said so, got a bearer cached as live for years.
+    """
+    import time
+
+    from local_operator.network.credentials import client as client_mod
+    from local_operator.network.credentials import grant_ttl_s
+    from local_operator.network.credentials.types import Grant
+
+    client = client_mod.MeshCredentialClient(
+        root=tmp_path, self_device=THIRD, network_id=NETWORK, placement=_document(tmp_path)
+    )
+    ten_years_ms = int(time.time() * 1000) + 10 * 365 * 86_400_000
+    before_ms = int(time.time() * 1000)
+    grant = client._from_reply(  # noqa: SLF001 — the leg-1 reply path the cache is fed from
+        {
+            "op": "ack",
+            "detail": {
+                "kind": "grant",
+                "access_token": "-".join(("synthetic", "bearer")),
+                "grant_expires_at_ms": ten_years_ms,
+                "token_expires_at_ms": ten_years_ms,
+            },
+        },
+        "deepseek",
+        "deepseek",
+        "sess-far",
+    )
+    ceiling_ms = int(time.time() * 1000) + int(grant_ttl_s(tmp_path) * 1000)
+    assert isinstance(grant, Grant), grant
+    cached = client.grants.get("deepseek", "sess-far")
+    assert cached is grant
+    assert before_ms < grant.grant_expires_at_ms <= ceiling_ms
+
+
+def test_a_member_whose_document_cannot_be_read_is_named_and_the_rest_still_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-M1, the pull half: one paired member's bytes must not stop everyone else's.
+
+    A 401-digit ``doc_rev`` raised ``OverflowError`` in the merge, and the loop caught
+    only ``(OSError, MeshRefusal)`` — so every member after that one went unmerged, for
+    every borrower, from one field any invited device could send. The helper is now
+    total; THIS pins the loop's own guarantee against the next shape nobody foresaw:
+    the member is refused BY NAME and the others merge.
+    """
+    from local_operator.network.credentials import client as client_mod
+
+    merged: list[str] = []
+
+    def _merge(
+        network_id: str, document: dict[str, Any], *, from_device: str, **_: Any
+    ) -> list[str]:
+        if from_device == OWNER:
+            raise OverflowError("int too large to convert to float")
+        merged.append(from_device)
+        return ["deepseek"]
+
+    client = client_mod.MeshCredentialClient(
+        root=tmp_path, self_device=THIRD, network_id=NETWORK, placement=_document(tmp_path)
+    )
+    monkeypatch.setattr(client_mod, "merge_from_peer", _merge)
+    monkeypatch.setattr(client, "_other_active_members", lambda: [OWNER, OTHER])
+    monkeypatch.setattr(
+        client,
+        "_ask_owner_directly",
+        lambda device, frame: {"op": "ack", "detail": {"kind": "placement", "document": {}}},
+    )
+    result = client.pull_placement()
+    assert merged == [OTHER], "the unreadable document stopped the loop"
+    assert result["changed"] == ["deepseek"] and result["owners"] == 2
+    assert result["skipped"] == [{"device": OWNER, "reason": "malformed_document"}]
+
+
+def test_a_real_merge_of_a_401_digit_revision_reads_it_as_the_floor(tmp_path: Path) -> None:
+    """R4-M1 without a stub: the REAL merge, fed the document a peer could send."""
+    import json
+
+    from local_operator.network.credentials import placement as placement_mod
+
+    wire = json.loads(
+        '{"epoch": 1'
+        + "0" * 400
+        + ', "credentials": [{"key": "deepseek", "owner_device": "'
+        + OWNER
+        + '", "doc_rev": 1'
+        + "0" * 400
+        + ', "holders": [{"device": "'
+        + THIRD
+        + '"}]}]}'
+    )
+    assert isinstance(wire["credentials"][0]["doc_rev"], int)
+    changed = placement_mod.merge_from_peer(
+        NETWORK, wire, from_device=OWNER, self_device=THIRD, root=tmp_path
+    )
+    assert changed == ["deepseek"]
+    merged = placement_mod.PlacementDocument.load(NETWORK, tmp_path).entries["deepseek"]
+    assert merged.doc_rev == 1

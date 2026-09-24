@@ -230,6 +230,11 @@ class MeshCredentialBroker:
         self._inflight: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
         self._report_refreshed: dict[int, float] = {}
         self._report_blocked: dict[tuple[str, int], float] = {}
+        #: ONE lock around each report arm's read-then-stamp (review round 4, R4-n2):
+        #: two reports racing the same window both read "not stamped", both answered
+        #: ``refreshed`` and both audited a refresh, while the store coalesced them
+        #: into ONE token POST — an acknowledgement and a record the owner did not earn.
+        self._report_lock = threading.Lock()
         self._op_deadline_s = _broker_deadline_s()
 
     # -- construction -------------------------------------------------------
@@ -815,10 +820,11 @@ class MeshCredentialBroker:
             return {"kind": "ack", "key": key, "action": "noted"}
         now = time.monotonic()
         slot = (by, credential_id)
-        last = self._report_blocked.get(slot)
-        if last is not None and now - last < REPORT_BLOCK_MIN_INTERVAL_S:
-            return {"kind": "ack", "key": key, "action": "coalesced"}
-        self._report_blocked[slot] = now
+        with self._report_lock:
+            last = self._report_blocked.get(slot)
+            if last is not None and now - last < REPORT_BLOCK_MIN_INTERVAL_S:
+                return {"kind": "ack", "key": key, "action": "coalesced"}
+            self._report_blocked[slot] = now
         block_ms = REMOTE_QUOTA_BLOCK_MAX_MS
         store = self._auth_store_instance()
         try:
@@ -862,10 +868,11 @@ class MeshCredentialBroker:
         # counts from boot: on any host up for less than the window — a fresh CI
         # runner, a laptop just after a reboot — the FIRST report was coalesced and
         # nothing was refreshed. The same ``is not None`` guard the block arm uses.
-        last = self._report_refreshed.get(credential_id)
-        if last is not None and now - last < REPORT_REFRESH_MIN_INTERVAL_S:
-            return {"kind": "ack", "key": key, "action": "coalesced"}
-        self._report_refreshed[credential_id] = now
+        with self._report_lock:
+            last = self._report_refreshed.get(credential_id)
+            if last is not None and now - last < REPORT_REFRESH_MIN_INTERVAL_S:
+                return {"kind": "ack", "key": key, "action": "coalesced"}
+            self._report_refreshed[credential_id] = now
         try:
             self._loop.submit(
                 self._owner_refresh(key, credential_id),
