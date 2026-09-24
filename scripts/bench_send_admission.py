@@ -269,7 +269,7 @@ async def _child_main(args: argparse.Namespace) -> None:
 
     def on_event(event: Any) -> None:
         if isinstance(event, MessageStartEvent) and getattr(event.message, "role", "") == "user":
-            marks.append(("emit_user", event.message.text.split()[0], time.perf_counter()))
+            marks.append(("emit_user", _first_word(event.message), time.perf_counter()))
         elif isinstance(event, AgentStartEvent):
             marks.append(("emit_start", "", time.perf_counter()))
 
@@ -417,6 +417,12 @@ async def _child_main(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _first_word(message: Any) -> str:
+    """The probe tag a user message leads with; "" for a non-text message."""
+    words = str(getattr(message, "text", "") or "").split()
+    return words[0] if words else ""
+
+
 def _pipeline_tag(args: Any) -> str:
     """The probe tag of the user message a pipeline/append call carries, if any."""
     for message in args[0] if args else []:
@@ -506,7 +512,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
                 isinstance(event, MessageStartEvent)
                 and getattr(event.message, "role", "") == "user"
             ):
-                seen.append(("echo", event.message.text.split()[0], now))
+                seen.append(("echo", _first_word(event.message), now))
             elif isinstance(event, AgentStartEvent):
                 seen.append(("start", "", now))
             elif isinstance(event, MessageUpdateEvent):
