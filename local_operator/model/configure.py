@@ -2458,9 +2458,20 @@ def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, b
     """
     bucket = int(time.time() // DEFAULT_TTL_S)
     info = _paint_memo.get((provider, model_id, bucket))
+    # SHALLOW copies, and the isolation they give is exactly what a deep copy
+    # gave: every ``ModelInfo`` field is a scalar (float/int/str/bool/None --
+    # ``test_paint_resolution_isolates_the_memo_with_a_shallow_copy`` pins that),
+    # so a caller assigning a field on its copy still cannot reach the memo or
+    # the registry row, and there is no nested container to share. What the
+    # deep copy cost was pydantic's ``__deepcopy__`` walk on every call, and
+    # this is called once per usage COMPONENT on every roster tick: at 16
+    # children the parent's 50 ms coalescer priced ~113 components per tick,
+    # and the deep copies were ~0.2 s of every second of that loop's CPU
+    # (``scripts/bench_subagent_fanout.py --profile``), paid on the same
+    # thread that runs every child's turn.
     if info is None:
-        return _registry_fallback(provider, model_id).model_copy(deep=True), False
-    return info.model_copy(deep=True), True
+        return _registry_fallback(provider, model_id).model_copy(), False
+    return info.model_copy(), True
 
 
 #: The effort ladder the PROVIDER'S OWN listing stated for a model, keyed the
