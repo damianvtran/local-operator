@@ -683,3 +683,486 @@ def test_sigusr1_reaches_the_leg_on_a_real_armed_runtime_child(
         signal_module.signal(signal_module.SIGUSR1, previous_usr1)
         if child is not None:
             _reap(child, config_dir)
+
+
+# ---------------------------------------------------------------------------------
+# WHO TAKES THE DEADLINE THE PROGRESS LEG RECORDS
+# ---------------------------------------------------------------------------------
+#: The window the two in-process cells arm with, in the fake clock's seconds. Short
+#: because the window IS the wait: the run has to span it before the predicate can be
+#: judged at all, and every step below is one sampler pass.
+CELL_WINDOW_S = 2.0
+
+#: How many sampler passes carry a plane stamp. A beat re-arms the deadline and is read
+#: before the sampler's own read in the same pass (see ``_SteppingProbe``), so a stamp on
+#: every pass would pre-empt the very wake a cell is measuring. Ten passes is one stamp
+#: per 1.0 s of the fake clock against a 2.0 s window: frequent enough that neither plane
+#: ever looks silent, sparse enough that the sampler's own read lands on passes no beat
+#: shares.
+STAMP_EVERY_PASSES = 10
+
+#: How many sampler passes a cell waits for before it says the reporter stopped. A
+#: pass is the sampler's whole wake, so this is "the leg kept looking", never a
+#: stopwatch on a bound.
+PASSES_BEFORE_VERDICT = 40
+
+
+class _SteppingClock:
+    """A clock the sampler is driven through, one pass at a time.
+
+    The module reads ``time.monotonic``/``process_time`` through its own module global,
+    so the readings the progress predicate is JUDGED on are exactly the two a cell can
+    control. Waiting out a real window would make every cell here a bet on host load —
+    this fleet runs the suite beside ~25 sessions at a load average of 50-100, where a
+    spinning child's own mean measures 0.017-0.021 of a core against the module's 0.05
+    floor (measured 2026-09-24, and the reason the child cell below lowers the floor).
+    The burn these cells judge is stated rather than measured: 0.05 s of CPU per 0.1 s
+    of wall is half a core, which is 2.6x the incident's own 0.19 and 10x the floor.
+    """
+
+    def __init__(self, *, wall_per_pass: float = 0.1, cpu_per_pass: float = 0.05) -> None:
+        self.wall = 1_000.0
+        self.cpu = 5.0
+        self.wall_per_pass = wall_per_pass
+        self.cpu_per_pass = cpu_per_pass
+
+    def monotonic(self) -> float:
+        return self.wall
+
+    def process_time(self) -> float:
+        return self.cpu
+
+    def time(self) -> float:
+        return 1_700_000_000.0
+
+    def localtime(self, _timestamp: float) -> str:
+        # ``_note_quiet_plane`` formats the instant a plane last reported, and ``beat``
+        # reaches it; a fixed string is enough, because what a cell asserts is a
+        # deadline or a marker, never this rendering.
+        return "2026-01-01 00:00:00"
+
+    def strftime(self, _fmt: str, _stamp: object = None) -> str:
+        return "2026-01-01 00:00:00"
+
+
+class _SteppingProbe:
+    """The progress probe, stepped: one call is one pass of the window.
+
+    ``_progress_sampler`` reads the probe exactly once per pass, outside its gate, so
+    advancing the clock HERE is what makes a pass a step — and it is why the run spans
+    its window by construction rather than by the host's willingness to schedule a
+    thread. It also STAMPS BOTH PLANES, as a runtime's own loops do: a runtime with
+    nothing reporting is the liveness leg's subject, and every cell here is about the
+    PROGRESS leg, so a bound left to expire from silence would fire for a reason that is
+    not under test.
+
+    THE STAMPS ARE EVERY ``STAMP_EVERY_PASSES`` PASSES RATHER THAN EVERY PASS, and that
+    is what the live runtime looks like rather than a convenience. A ``beat`` RE-ARMS
+    (:func:`beat` ends in :func:`_rearm`), and this probe is read before the sampler
+    reads ``due_at`` in the same pass — so a probe that stamped on every pass would push
+    the deadline ahead of that read on every pass, and a cell about "who takes the
+    deadline" would be measuring its own rig. The runtime's planes stamp from their own
+    loops, unsynchronised with the sampler, so at most one wake per beat can lose the
+    race — which is exactly what this cadence models.
+
+    The answers are the arms a real probe can give: a still report with a lane holding a
+    step (``in_flight``), and a registry that cannot be read at all (``raises``, which
+    the module's own read turns into "no live second leg").
+    """
+
+    def __init__(self, clock: _SteppingClock, *, in_flight: bool = False, raises: bool = False):
+        self.clock = clock
+        self.in_flight = in_flight
+        self.raises = raises
+        self.passes = 0
+
+    def __call__(self) -> tuple[object, bool]:
+        self.passes += 1
+        self.clock.wall += self.clock.wall_per_pass
+        self.clock.cpu += self.clock.cpu_per_pass
+        if self.passes % STAMP_EVERY_PASSES == 0:
+            stall_watchdog.beat(stall_watchdog.WORKLOAD)
+            stall_watchdog.beat(stall_watchdog.SERVING)
+        if self.raises:
+            raise RuntimeError("the lane registry could not be read")
+        return "still", self.in_flight
+
+
+def _dump_for_this_process(directory: Path) -> Path:
+    return stall_watchdog.dump_path(os.getpid(), directory)
+
+
+def _fires_in(text: str) -> int:
+    return text.count(stall_watchdog.FIRED_MARKER)
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+
+def _armed_in(tmp_path: Path, probe: _SteppingProbe) -> Path:
+    """Arm THIS process against ``tmp_path``, with the exit leg held, and return its dump.
+
+    The exit leg is held (``busy`` answers True) because the cell's subject is the
+    wake: an arm that is not held ends the process HERE, on the pytest worker, which
+    would take the reporter's own thread down with it — that arm is the child cell
+    below, where ending a process is the thing it is safe to observe.
+
+    THE SAMPLER IS ALREADY RUNNING WHEN THIS RETURNS (``arm`` starts it), so nothing
+    here may assume it has not woken yet: every wait below is on an EVENT — a marker in
+    the file, a pass count — never on the sampler being a step behind this thread.
+    """
+    assert stall_watchdog.arm(
+        seconds=CELL_WINDOW_S,
+        directory=tmp_path,
+        probe=probe,
+        busy=lambda: True,
+    ), "the bound could not be armed, so this cell would prove nothing about its wake"
+    dump = _dump_for_this_process(tmp_path)
+    assert dump.is_file(), "arming did not open the dump this process's fire is written to"
+    return dump
+
+
+def test_the_progress_deadline_is_taken_before_the_predicate_can_pre_empt_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE WAKE, both halves: the dump lands AND the sampler carries on firing.
+
+    THE DEFECT THIS CELL IS THE REGRESSION FOR (found by the migration lane on #1517's
+    own change). ``_sample`` did ``_fire_progress(armed, now)`` and returned ``not
+    armed.held``; with the C timer gone, the MIN_REARM_S deadline that call records is
+    taken by the sampler's NEXT pass — and that pass read ``due_at`` AFTER calling
+    ``_sample``, so on every pass where the predicate fired again it re-armed over its
+    own deadline (``pin``/``deadline`` answer ``now + MIN_REARM_S``) before the read
+    could see it. The arm cancelled itself: a loop whose burn never dips got its ``no
+    progress`` line and then nothing, for as long as it kept spinning.
+
+    WHY THIS CELL CANNOT PASS ON THE PRE-FIX HEAD, and it is the stepping probe that
+    makes that deterministic rather than load-dependent: with the arm held the sampler
+    does keep waking, but every one of its passes fires the predicate (a still report
+    and a stated half-core burn), so every pass re-arms the deadline it is about to
+    read. No dump is written at all, and the wait below times out on a file that holds
+    one progress line.
+
+    AND THE OTHER HALF IS THE SPARED DIRECTION: nothing here may end the runtime, which
+    is why the exit leg is held and disarm is what stops the leg.
+    """
+    clock = _SteppingClock()
+    monkeypatch.setattr(stall_watchdog, "time", clock)
+    probe = _SteppingProbe(clock)
+    dump = _armed_in(tmp_path, probe)
+    try:
+        assert _wait_for(lambda: _fires_in(_read(dump)) >= 1, timeout=120.0), (
+            "the progress leg's own deadline was never taken: the run wrote "
+            f"{_read(dump).count(stall_watchdog.PROGRESS_MARKER)} progress line(s) over "
+            f"{probe.passes} sampler passes and no fire, so the deadline it recorded is "
+            f"read after the predicate that pre-empts it:\n{_read(dump)[-600:]!r}"
+        )
+        text = _read(dump)
+        assert (
+            stall_watchdog.PROGRESS_MARKER in text
+        ), f"the fire does not name the leg that produced it:\n{text[-600:]!r}"
+        # AN ALL-THREAD DUMP, and the frames have to be THIS process's: a dump that
+        # names no frame of the running test is not the walk the fire promises.
+        assert (
+            "Thread 0x" in text or "Current thread" in text
+        ), f"the fire wrote no thread dump:\n{text[-600:]!r}"
+        assert Path(__file__).name in text, (
+            "the dump does not name a frame of this process, so it is not the all-thread "
+            f"walk the bound's evidence is:\n{text[-600:]!r}"
+        )
+        assert _wait_for(
+            lambda: any(
+                line.startswith(stall_watchdog.HELD_MARKER) for line in _read(dump).splitlines()
+            ),
+            timeout=120.0,
+        ), (
+            "the dump does not say the fire was held, so a reader cannot tell that this "
+            f"runtime survived it:\n{text[-600:]!r}"
+        )
+        # THE NEXT WAKE: the episode after the fire is re-armed for a whole bound, and a
+        # sampler that stopped here would leave that deadline with nobody to take it --
+        # one dump and silence, which is the class this fix is about.
+        assert _wait_for(lambda: _fires_in(_read(dump)) >= 2, timeout=180.0), (
+            "the sampler did not carry on to the next episode: the bound fired once and "
+            f"then stopped being re-armed over {probe.passes} passes:\n{_read(dump)[-600:]!r}"
+        )
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_a_lane_holding_a_step_is_spared_with_no_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE SPARED DIRECTION, first arm: work in flight is not a spin.
+
+    A probe answering ``in_flight`` restarts the run on every pass, which is what makes
+    the widening safe — a lane mid-batch or parked in a provider call must not be cut by
+    the leg that exists for loops going nowhere. What must NOT happen is the thing this
+    fix could have broken in the other direction: the sampler stopping (no further look,
+    so nothing is ever judged again) or a fire being recorded for a runtime that is
+    working. The pass count is the first half of that, the empty dump the second.
+    """
+    clock = _SteppingClock()
+    monkeypatch.setattr(stall_watchdog, "time", clock)
+    probe = _SteppingProbe(clock, in_flight=True)
+    dump = _armed_in(tmp_path, probe)
+    try:
+        assert _wait_for(lambda: probe.passes >= PASSES_BEFORE_VERDICT, timeout=120.0), (
+            f"the sampler stopped looking after {probe.passes} passes, so a working "
+            "runtime is no longer being judged at all"
+        )
+        text = _read(dump)
+        assert (
+            stall_watchdog.PROGRESS_MARKER not in text
+        ), f"a lane holding a step was read as a spin:\n{text[-600:]!r}"
+        assert (
+            stall_watchdog.FIRED_MARKER not in text
+        ), f"the bound fired over work in flight:\n{text[-600:]!r}"
+        assert stall_watchdog.fired_pids(tmp_path) == set(), "a spared arm left a fire on disk"
+    finally:
+        stall_watchdog.disarm()
+
+
+def test_an_unreadable_lane_is_spared_with_no_dump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE SPARED DIRECTION, second arm: "I could not read it" is not "it is idle".
+
+    The probe raises on every pass, which the module's own read turns into "no live
+    second leg" — the abstention, not a claim that the work has stopped. Fail closed is
+    the direction the widened read was asked for, and the sampler must keep looking
+    while it abstains: a raise that ended the reporter would turn a corrupt registry
+    into a runtime nothing is watching.
+    """
+    clock = _SteppingClock()
+    monkeypatch.setattr(stall_watchdog, "time", clock)
+    probe = _SteppingProbe(clock, raises=True)
+    dump = _armed_in(tmp_path, probe)
+    try:
+        assert _wait_for(lambda: probe.passes >= PASSES_BEFORE_VERDICT, timeout=120.0), (
+            f"the sampler stopped looking after {probe.passes} passes, so an unreadable "
+            "lane leaves the runtime with no reporter at all"
+        )
+        text = _read(dump)
+        assert (
+            stall_watchdog.PROGRESS_MARKER not in text
+        ), f"an unreadable lane was read as a spin:\n{text[-600:]!r}"
+        assert (
+            stall_watchdog.FIRED_MARKER not in text
+        ), f"the bound fired on a read it could not make:\n{text[-600:]!r}"
+        assert stall_watchdog.fired_pids(tmp_path) == set(), "a spared arm left a fire on disk"
+    finally:
+        stall_watchdog.disarm()
+
+
+#: The bound the spinning child arms with, in seconds. The old suite's own choice, and
+#: it keeps the cell's own wall time to a few bounds.
+SPIN_BOUND_S = 2.0
+
+#: How long the child gets to import this tree and boot its runtime before the cell
+#: calls it a wedge. GENEROUS ON PURPOSE: importing the session runtime under fleet load
+#: takes 40-75 s on this host (AGENTS.md, Environment), and a cell that timed out during
+#: the import would be measuring the host. The wait is on the child's own ``armed:``
+#: line, so a quick host never pays it.
+SPIN_BOOT_S = 300.0
+
+#: How long the cell then lets the child SPIN for. Several bounds, since the progress
+#: leg's window is one bound: the loop burns CPU with no transcript, roster or job
+#: movement for exactly this long, and nothing about the exit leg is under test here.
+SPIN_WINDOW_S = 15.0
+
+#: THE FLOOR IS LOWERED IN THE CHILD, and this is the one number in this cell that is
+#: about the HOST rather than the contract. The module's 0.05 of a core is a claim about
+#: a quiet machine: measured on this fleet (2026-09-24, load ~100 beside ~25 sessions) a
+#: spinning child measures 0.017-0.021 of a core, i.e. BELOW the floor, so on that host
+#: the predicate never fires and the cell would report "no dump" for a reason that has
+#: nothing to do with the wake it is about. The burn is real either way — only the
+#: threshold moves, and the subject here is who TAKES the deadline.
+SPIN_FLOOR = 0.0005
+
+#: A REAL runtime child that spins with no progress: a real session, a real
+#: ``RuntimeServer``, the PRODUCTION probes (``process._progress_probe`` and
+#: ``process._busy_probe``, supplied exactly as ``process.py`` supplies them), and a
+#: loop that burns CPU while yielding on every pass so both planes keep their cadence.
+#: The rig, not the product: it is the shape the old suite's ``_SPINNING_CHILD`` has,
+#: with the floor above.
+_SPINNING_CHILD = r"""
+import asyncio
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, sys.argv[3])
+
+from local_operator.harness.types import StreamEndEvent
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+
+def _stream(request, signal):
+    async def gen():
+        yield StreamEndEvent(stop_reason="stop")
+
+    return gen()
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    process.HEARTBEAT_INTERVAL_S = 0.3
+    server.HEARTBEAT_INTERVAL_S = 0.3
+    stall_watchdog.PROGRESS_CPU_FLOOR = float(sys.argv[4])
+
+    session = make_session(root, _stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published(), "the boot prologue never published"
+
+    # THE PRODUCTION SEAM, not a double: the handle the entry point publishes and the
+    # two probes the entry point arms with (``process.amain``).
+    process._live_handle = handle
+    assert stall_watchdog.arm(
+        seconds=float(sys.argv[1]), probe=process._progress_probe, busy=process._busy_probe
+    )
+    print(f"armed:{os.getpid()}", flush=True)
+    print(f"held-at-arm:{stall_watchdog._holds_work(process._busy_probe)}", flush=True)
+
+    stop = asyncio.Event()
+    asyncio.create_task(process._beat_stall_watchdog(stop))
+    # BOTH PLANES HAVE RUN: the workload ticker stamped its plane and the serving plane
+    # published a record. Without this the run says nothing about a process whose loops
+    # were ALIVE, which is the only state the progress leg is about.
+    await asyncio.sleep(1.0)
+    print("both-planes-ran", flush=True)
+
+    while True:
+        await asyncio.sleep(0)
+        sum(range(200_000))
+
+
+asyncio.run(main())
+"""
+
+
+def test_a_spinning_runtime_gets_its_dump_and_its_fire(tmp_path: Path) -> None:
+    """THE INCIDENT CLASS, on a real child: alive, ticking, and going nowhere.
+
+    THE DEFECT THIS CELL IS THE REGRESSION FOR is the same one, in the arm where it is
+    total: ``_sample`` returned ``not armed.held``, so with nothing in flight the
+    sampler returned on the first progress pass and NOTHING was left in the process that
+    could take the deadline it had just recorded. Measured on the pre-fix head (this rig,
+    2026-09-24): one ``no progress`` line in the dump, zero ``Timeout (`` lines, zero
+    thread stacks, and a child still burning a core when the cell killed it 15 s later
+    — the class was reported by one line and then not bounded or recorded at all.
+
+    WHAT THE FIX HAS TO SHOW HERE is the fire, not a survival: the deadline is taken by
+    the sampler's next pass and the dump is written. Which leg the fire then ends on is
+    ``_fire``'s own reading and is unchanged by this fix — on this head an arm with
+    nothing in flight is the runtime's documented wedge recovery, so the child leaves
+    with rc 1 (that is T1's policy on this branch, and #1463's dump-only fold is what
+    changes it, not this cell).
+
+    THE CONTINUED WAKE IS THE OTHER CELL'S SUBJECT, deliberately: this arm's runtime
+    does not survive its fire on this head, so "keeps waking" cannot be observed here —
+    see ``test_the_progress_deadline_is_taken_before_the_predicate_can_pre_empt_it``.
+    """
+    root = tmp_path / "spin"
+    root.mkdir(parents=True, exist_ok=True)
+    script = root / "spin_child.py"
+    script.write_text(_SPINNING_CHILD, encoding="utf-8")
+
+    child = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [
+            sys.executable,
+            str(script),
+            str(SPIN_BOUND_S),
+            str(root),
+            str(Path(__file__).resolve().parents[4]),
+            str(SPIN_FLOOR),
+        ],
+        env=_child_env(root),
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    lines: list[str] = []
+
+    def _drain_output() -> None:
+        """Collect the child's output on its own thread, so no wait can block on it.
+
+        A reader that ran in the cell's own thread would park in ``readline`` on exactly
+        the arm this cell exists to red: a child that never fires never prints again, and
+        a cell blocked in a read has no way to reach its own verdict.
+        """
+        assert child.stdout is not None
+        for line in child.stdout:
+            lines.append(line.rstrip("\n"))
+
+    reader = threading.Thread(target=_drain_output, name="spin-child-output", daemon=True)
+    reader.start()
+    try:
+
+        def armed_pid() -> int | None:
+            for line in list(lines):
+                if line.startswith("armed:"):
+                    return int(line.split(":", 1)[1].strip())
+            return None
+
+        assert _wait_for(
+            lambda: armed_pid() is not None or child.poll() is not None, timeout=SPIN_BOOT_S
+        ), (
+            f"the child neither armed its bound nor exited within {SPIN_BOOT_S}s "
+            f"(rc={child.poll()}): {lines[-8:]!r}"
+        )
+        pid = armed_pid()
+        assert pid is not None, (
+            f"the child exited before it armed its bound (rc={child.poll()}): {lines[-8:]!r}"
+        )
+        dump = stall_watchdog.dump_path(pid, root / "logs")
+
+        # THE SPIN: bounded, and the bound is the cell's, not the module's. Waiting on
+        # the child's own exit OR the window, never on a timer alone: a child that takes
+        # its fire in under the window ends the wait early.
+        # The result is deliberately unused: this is the WINDOW, and a child that is
+        # still up when it closes is the reading (it is what the pre-fix arm does).
+        _wait_for(lambda: child.poll() is not None, timeout=SPIN_WINDOW_S)
+        exited = child.poll() is not None
+        if not exited:
+            child.kill()
+        child.wait(timeout=30.0)
+        reader.join(timeout=15.0)
+        text = _read(dump)
+
+        assert "both-planes-ran" in "\n".join(lines), (
+            "the child's planes never ran, so this says nothing about a process whose "
+            f"loops were alive: {lines[-8:]!r}"
+        )
+        if not exited:
+            assert stall_watchdog.PROGRESS_MARKER in text, (
+                "this rig did not even reach the progress predicate, so it is not "
+                f"measuring the wake: {text[-600:]!r}"
+            )
+        assert stall_watchdog.FIRED_MARKER in text, (
+            "the progress leg named the stall and then wrote no fire at all: the loop "
+            "that burns a core with no progress is not bounded and its evidence is never "
+            f"written. Waited {SPIN_WINDOW_S}s past the arm, dump holds "
+            f"{text.count(stall_watchdog.PROGRESS_MARKER)} progress line(s):\n{text[-800:]!r}"
+        )
+        assert (
+            stall_watchdog.PROGRESS_MARKER in text
+        ), f"the fire does not name the leg that produced it:\n{text[-800:]!r}"
+        assert (
+            "Thread 0x" in text or "Current thread" in text
+        ), f"the fire wrote no all-thread dump:\n{text[-800:]!r}"
+        assert script.name in text, (
+            "the dump does not name the spinning loop's own frame, so the all-thread walk "
+            f"the fire promises is not in it:\n{text[-800:]!r}"
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=30.0)
