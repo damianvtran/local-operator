@@ -32186,28 +32186,22 @@ class OperatorApp(App[None]):
             # as "these will all be stopped".
             qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
         if stalled_pids:
-            # The other half: these are leaving too, but their turn is no longer
-            # reporting, so the press does NOT leave them alone. FUTURE TENSE, because
-            # this is the plan the press will try and the identity gate can still refuse
-            # it (QA round 2, Q-5). "Finish", as every other surface says (D4).
+            # The other half: these are leaving too, but the press does NOT leave them
+            # alone. CAUSE-NEUTRAL (design round 1 on #1541 D1, QA Q-1): the row tag
+            # already names each one's cause, and the two arms differ — a held runtime
+            # IS reporting — so a shared line naming one cause is false for the other.
+            # FUTURE TENSE, because the identity gate can still refuse (QA Q-5 on #1527).
             n = len(stalled_pids)
             qualifiers.append(
-                f"{n} leaving, not reporting — {'it' if n == 1 else 'they'} will be "
-                "stopped, not left to finish"
+                f"{n} leaving, but {'it' if n == 1 else 'they'} will be stopped, "
+                "not left to finish"
             )
-            # ONE QUALIFIER PER LINE once there are two kinds (design round 1, D2): folded
-            # into the header the pair wrapped at 110 columns (Q-5), and a header wrap
-            # directly above a qualifier line shares its indent, so at 80 columns the two
-            # read as one paragraph. The count stands alone; each qualifier is a line of at
-            # most 73 cells (two-digit counts), the notice body budget at 80 columns.
-            lines.extend(f"({q})" for q in qualifiers)
-        elif qualifiers:
-            # Drained-only keeps the one-line header it had before stalled drains
-            # were told apart: one qualifier, nothing to separate it from.
-            lines[0] = (
-                f"will stop {total} session{'s' if total != 1 else ''} "
-                f"({'; '.join(qualifiers)}):"
-            )
+        # ONE LAYOUT, ONE QUALIFIER PER LINE, whenever any exists (design D2 on #1527 and
+        # #1541, QA Q-2): folded into the header, the drained-only form alone was 72 cells
+        # against the 70-cell notice body at 80 columns and wrapped, and a header wrap
+        # sharing an indent with a qualifier line read as one paragraph. The longest
+        # qualifier is 58 cells at two-digit counts, 12 inside that 70-cell budget.
+        lines.extend(f"({q})" for q in qualifiers)
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
             # The qualifier rides inside the truncation budget so it can

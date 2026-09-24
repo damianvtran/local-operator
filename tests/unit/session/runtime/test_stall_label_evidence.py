@@ -799,6 +799,60 @@ def test_held_reading_opens_each_file_once(tmp_path: Path, monkeypatch: pytest.M
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["old-format", "current-no-sibling"])
+async def test_the_skip_line_names_an_older_build_only_when_the_marker_is_one(
+    no_signals, marker: str
+) -> None:
+    """Agent review round 1 on #1541, m1: the stated cause must be the artifact's.
+
+    Both runtimes are leaving with a fresh beat and an UNPROVEN held reading, so both
+    are skipped. An old-format marker (no monotonic stamp) is from an older build and
+    the line may say so. A CURRENT-build marker whose sibling is missing — reachable,
+    since ``_record_held_fire`` re-arms without writing one — gets cause-neutral words.
+    REPRODUCTION: a1a5de647 told the current-build runtime its reading came from an
+    older build.
+    """
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(
+        record,
+        busy=True,
+        leaving=LEAVING_FOR_BUILD,
+        heartbeat_at=time.time() - 5,
+        started_at=time.time() - 7 * 3600,
+    )
+    logs = stall_watchdog.dump_path(target.pid).parent
+    if marker == "old-format":
+        dump = _main_format_held_dump(logs, target.pid, sibling_epoch=time.time() + 290)
+    else:
+        dump = _held_dump(logs, target.pid, fired_mono=10_000.0, deadline_mono=None)
+    try:
+        assert stall_watchdog.held_reading(dump, dump.read_text("utf-8")) == (
+            stall_watchdog.HELD_UNPROVEN
+        )
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert handle.stops == []
+        if marker == "old-format":
+            assert (
+                '"bound held" reading comes from an older build and cannot be confirmed'
+                in outcome.line
+            ), outcome.line
+        else:
+            assert "older build" not in outcome.line, outcome.line
+            assert (
+                '"bound held" reading cannot be confirmed from its evidence' in outcome.line
+            ), outcome.line
+        assert "nothing to do" not in outcome.line, outcome.line
+        assert outcome.line.endswith("(--force to stop it anyway)"), outcome.line
+    finally:
+        server.close()
+        dump.unlink(missing_ok=True)
+        dump.with_suffix(stall_watchdog.DEADLINE_SUFFIX).unlink(missing_ok=True)
+
+
 def test_the_row_tag_names_the_reason_the_other_surfaces_show() -> None:
     """D1: the ``/stop all`` tag uses what ``lop sessions`` and ``lop stop`` say.
 
