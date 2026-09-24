@@ -214,6 +214,28 @@ def exec_server(tmp_path, monkeypatch):
         serving.join(timeout=5)
 
 
+def _running_status(job_status: Any, job_id: str, timeout: float = 20.0) -> dict[str, Any]:
+    """The job's status once its detached worker has left ``starting``.
+
+    ``--background`` returns as soon as the job record exists, and the worker
+    marks it ``running`` from its own process some time later. A cell that
+    asserts ``running`` on the next line is asserting a wall-clock race: it held
+    on a quiet host and failed under load (QA round 2 on #1475, Q5, which saw
+    ``'starting' == 'running'`` in three cells with a different set failing on
+    each of three runs). This is the deadline-bounded wait
+    ``test_dash_leading_values_reach_the_detached_worker`` already used, so a
+    worker that never boots still fails, on the caller's own assertion.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    state = job_status(job_id)
+    while time.monotonic() < deadline and state.get("status") == "starting":
+        time.sleep(0.05)
+        state = job_status(job_id)
+    return state
+
+
 def test_exec_team_count_loop_and_resume(exec_server):
     run, requests, root = exec_server
     result = run(
@@ -519,7 +541,7 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
         stdin="",
     )
     job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
-    state = job_status(job_id)
+    state = _running_status(job_status, job_id)
     assert state["status"] == "running"
     assert not (tmp_path / "written.txt").exists()
 
@@ -628,7 +650,7 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     )
     assert result.returncode == 0
     job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
-    status = job_status(job_id)
+    status = _running_status(job_status, job_id)
     assert status["status"] == "running"
     assert status["process_generation"]
     if termination == "stop":
@@ -801,7 +823,7 @@ def test_detached_worker_outliving_its_launcher_stays_running(exec_server):
     assert result.returncode == 0
     job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
 
-    status = job_status(job_id)
+    status = _running_status(job_status, job_id)
     assert status["status"] == "running"
     # The worker's generation is live; the launcher is provably gone.
     assert _owner_is_dead(status["pid"], status["process_generation"]) is False
