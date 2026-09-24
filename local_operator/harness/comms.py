@@ -211,6 +211,13 @@ def extract_parent_message(text: str) -> ParentMessage | None:
 #: cannot grow without bound; eviction is oldest-settled-first.
 MAX_RECORDS = 256
 
+#: How long a roster may reuse one child's "transcript is on disk" probe. The
+#: probe feeds only the roster's ``resumable`` hint (``resume`` re-probes before
+#: acting), so this bounds how stale a HINT may be, not a decision. Five seconds
+#: turns one ``stat`` per settled child per root event into one per child per
+#: five seconds; see ``SubagentComms._transcript_on_disk`` for the measurement.
+TRANSCRIPT_PROBE_TTL_S = 5.0
+
 DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "failed"]
 
 #: Default number of transcript steps ``peek`` returns when the caller does not
@@ -724,7 +731,7 @@ class RosterPass:
             return False
         cached = self._transcripts.get(session_dir)
         if cached is None:
-            cached = (session_dir / TRANSCRIPT_FILENAME).exists()
+            cached = self._comms._transcript_on_disk(session_dir)
             self._transcripts[session_dir] = cached
         return cached
 
@@ -978,6 +985,47 @@ class SubagentComms:
         self._detail_listeners: set[Callable[[str], None]] = set()
         self._change_listeners: set[Callable[[], None]] = set()
         self._aliases: dict[str, str] = {}
+        #: ``session_dir -> (transcript exists, monotonic probe time)``; see
+        #: :meth:`_transcript_on_disk` for why it outlives one roster pass.
+        self._transcript_probes: dict[Path, tuple[bool, float]] = {}
+
+    def _transcript_on_disk(self, session_dir: Path) -> bool:
+        """Whether ``session_dir`` holds a transcript, re-probed at most every
+        :data:`TRANSCRIPT_PROBE_TTL_S`.
+
+        WHY ACROSS PASSES. A roster pass runs on the session loop once per root
+        event (``serving._refresh_state`` -> ``set_subagent_details``), and a
+        parent with live lanes emits root events at token rate. The per-pass memo
+        in :class:`RosterPass` made the probe one ``stat`` per settled child per
+        EVENT, which is still O(roster) syscalls at token rate: sampled on a
+        runtime holding 12 stepping lanes and a 240-record roster
+        (``scripts/bench_send_admission.py --condition roster --sample``), 2,125
+        of 4,119 loop samples (52%) sat in ``pathlib.stat`` under
+        ``transcript_present``, the loop lagged 108 ms p50 / 674 ms p95, and a
+        prompt took 1.9 s p50 to be admitted. The stat is slow because the host
+        is: ~20 runtimes share one APFS volume at load 100.
+
+        THE INVALIDATION STORY, since a cached verdict can go stale:
+
+        * the answer only ever feeds the roster's ``resumable`` HINT. The
+          authority is :meth:`resume`, which probes the file itself
+          (``if not (record.session_dir / TRANSCRIPT_FILENAME).exists()``) at
+          the moment it acts, so a stale ``True`` can at worst advertise a
+          resume that is then refused with the accurate reason, and a stale
+          ``False`` withholds the hint for at most the TTL;
+        * the one transition this process causes itself — a child attaching to
+          a directory — drops that directory's entry (:meth:`attach`), so a
+          freshly attached child is probed afresh on the next pass;
+        * a deletion by another process (retention cleanup, a user ``rm``) is
+          seen within :data:`TRANSCRIPT_PROBE_TTL_S`.
+        """
+        now = time.monotonic()
+        cached = self._transcript_probes.get(session_dir)
+        if cached is not None and now - cached[1] < TRANSCRIPT_PROBE_TTL_S:
+            return cached[0]
+        present = (session_dir / TRANSCRIPT_FILENAME).exists()
+        self._transcript_probes[session_dir] = (present, now)
+        return present
 
     def subscribe_changes(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Observe graph/state changes without triggering durable history reads."""
@@ -1131,6 +1179,10 @@ class SubagentComms:
             self._aliases[alias] = job_id
         record.child = child
         record.session_dir = session_dir
+        # A child attaching is the one transcript-existence change this process
+        # causes itself; forget the directory's cached probe so the roster sees
+        # it on the next pass rather than after the TTL.
+        self._transcript_probes.pop(session_dir, None)
         record.job_ref = self.job(job_id)
         if record.unsubscribe_jobs is not None:
             record.unsubscribe_jobs()
@@ -2754,6 +2806,9 @@ class SubagentComms:
         evictable.sort(key=lambda record: (record.settled_at is not None, record.settled_at or 0.0))
         for record in evictable[:overflow]:
             del self._records[record.job_id]
+            # Keeps the probe cache bounded by the same cap as the records.
+            if record.session_dir is not None:
+                self._transcript_probes.pop(record.session_dir, None)
 
 
 # ---------------------------------------------------------------------------
