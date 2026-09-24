@@ -603,7 +603,7 @@ class SessionTable:
         # heartbeat or by adding filesystem work to the in-memory merge path.
         live_ids = {entry.record.session_id for entry in self.entries.values() if not entry.ended}
 
-        def load() -> tuple[dict[str, Any], dict[str, float], tuple[str, ...]]:
+        def load() -> tuple[dict[str, Any], dict[str, float]]:
             directory = config_dir()
             # ``recent_session_rows`` itself pays no creation-metadata reads —
             # it is on the CLI startup path. Each surface that needs birth
