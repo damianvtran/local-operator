@@ -404,6 +404,37 @@ _STEM_BASE_MUST_MASK: tuple[tuple[str, str], ...] = (
     ),
     ("foo" + "::" + "bar" + "::" + "Pass", "a stem leaf TWO segments deep"),
     ("&" + "Pass" + _LT + "Word" + _GT, "a REFERENCE-marked stem base: the marker is not the name"),
+    # --- the R4-1 class: the stem in a MIDDLE segment, read by neither end of the path ---
+    # The R3-1 fix read the base's FIRST segment (whole-base ``startswith``) and its LAST
+    # (the leaf helper). Every segment BETWEEN them was invisible to BOTH, so each row
+    # below was released whole, with no hit, on this branch — 504 of 504 in the round-4
+    # grid — while masking at ``origin/main``. These rows are what REDS if the segment
+    # read is narrowed back to first-and-last; the corpus could not, because it carried
+    # no interior-stem row at all, which is the same blindness that let R3-1 survive two
+    # rounds (agent reviews R3-2 and R4-3). Both positions are covered, with and without a
+    # reference marker and with and without an argument list, because the miss was a
+    # POSITION inside a site and not a site.
+    ("foo" + "::" + "Pass" + "::" + "Word", "an INTERIOR stem, no argument list"),
+    (
+        "foo" + "::" + "Pass" + "::" + "Word" + _LT + "X" + _GT,
+        "the same interior stem over an argument list",
+    ),
+    (
+        "std" + "::" + "Secret" + "::" + "String",
+        "an interior credential WORD, a type name after it",
+    ),
+    (
+        "a" + "::" + "Pass" + "::" + "B",
+        "the shortest spelling of the class, terminated by a one-letter leaf",
+    ),
+    (
+        "a" + "::" + "B" + "::" + "Pass" + "::" + "C",
+        "two interior positions in a four-segment path",
+    ),
+    (
+        "&" + "Pass" + "::" + "Word" + _LT + "X" + _GT,
+        "an interior stem BEHIND a reference marker: both markers at once",
+    ),
 )
 
 #: The other side of :data:`_STEM_BASE_MUST_MASK`, in the same shape: a type's OWN base
@@ -425,6 +456,21 @@ _STEM_BASE_STAYS_RELEASED: tuple[tuple[str, str], ...] = (
     ("foo" + "::" + "HashMap", "the same with a two-word type name"),
     ("&" + "str", "a REFERENCE-marked primitive: the marker is not a name either"),
     ("&&" + "str", "the same twice over"),
+    # The other side of the R4-1 rows: the same SEGMENTED shape over a type's own
+    # names, so the pair still reads as "the segment is the fact". The interior segments
+    # here are type-NEUTRAL lowercase names — a CamelCase module segment is refused by
+    # the PRE-EXISTING path convention (``segments[:-1]`` must be lowercase, which the
+    # ``Sv::Secret`` row of ``_CONFINEMENT_MUST_MASK`` pins), so a CamelCase control
+    # would measure that branch rather than this one. What these rows prove is that the
+    # segment read does not mask a qualified path whose every segment is a type name.
+    (
+        "foo" + "::" + "bar" + "::" + "String",
+        "an interior TYPE-NEUTRAL segment: nothing credential-shaped anywhere",
+    ),
+    (
+        "foo" + "::" + "bar" + "::" + "Vec" + _LT + "u8" + _GT,
+        "the same interior position over a nested application, no argument list",
+    ),
 )
 
 
@@ -550,19 +596,46 @@ def test_the_type_clause_refuses_a_credential_stem_base_whatever_the_argument() 
     red on it, because it has no qualified row at all, and that is exactly how the hole
     survived two rounds (agent review R3-2).
 
+    **R4-1 is the same family one POSITION over, and it is why this enumeration is by
+    window rather than by call site (agent review R4-3).** R3-1's fix left the read as
+    the FIRST segment (``startswith`` on the whole base) and the LAST (the leaf), so a
+    stem in a MIDDLE segment was released whole — ``foo::Pass::Word<X>``,
+    ``std``+``::``+``Secret``+``::``+``String``, ``&Pass::Word<X>`` — 504 of 504 measured,
+    and 0 of 504 at ``origin/main``. That is a POSITION inside site 1 of the family hunt,
+    a site the enumeration marked FIXED: "no other SITE" was true and "no other HOLE"
+    was false. The interior rows above are its regression, and they are the third time a
+    hole survived because no row covered it (R3-2 was the last). Every release-side test
+    in this clause now reads an extraction that returns ALL of a base's ``::`` segments,
+    so a narrower window is not available to be chosen at any site.
+
     Each mask must carry a real hit rather than being silent: a hit is what registers
     the value for the exact-value pass, so a silent mask contains it only on this line.
     """
     import local_operator.redaction_shapes as rs
 
-    # The refusal reads the base's LEAF as well as the whole base, and the leaf is
-    # extracted by the one helper both release-side tests share — a marker or a path in
-    # front of the name is SPELLING, and neither is part of what the token is called.
-    assert rs._type_token_leaf("foo" + "::" + "bar" + "::" + "Pass") == "Pass"
-    assert rs._type_token_leaf("&" + "str") == "str"
-    assert rs._type_token_leaf("&" + "&" + "Pass") == "Pass"
+    # The refusal reads EVERY ``::`` SEGMENT of the base, extracted by the one helper
+    # both release-side tests share — a marker or a path in front of the name is
+    # SPELLING, and neither is part of what the token is called. The tuple's FIRST entry
+    # is the whole token so the first-segment read is kept as well; the rest are the
+    # segments, which is what closes the interior position (agent review R4-1).
+    assert rs._type_token_segments("foo" + "::" + "bar" + "::" + "Pass") == (
+        "foo::bar::Pass",
+        "foo",
+        "bar",
+        "Pass",
+    )
+    assert rs._type_token_segments("&&" + "Pass") == ("Pass",)
+    assert rs._type_token_segments("&" + "str") == ("str",)
+    assert rs._type_token_segments("foo" + "::" + "Pass" + "::" + "Word") == (
+        "foo::Pass::Word",
+        "foo",
+        "Pass",
+        "Word",
+    )
     assert rs._base_is_a_credential_stem("foo" + "::" + "Pass") is True
     assert rs._base_is_a_credential_stem("&" + "Pass") is True
+    assert rs._base_is_a_credential_stem("foo" + "::" + "Pass" + "::" + "Word") is True
+    assert rs._base_is_a_credential_stem("foo" + "::" + "bar" + "::" + "Pass") is True
     assert rs._base_is_a_credential_stem("foo" + "::" + "Vec") is False
     assert rs._base_is_a_credential_stem("&" + "str") is False
 
@@ -3850,7 +3923,30 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    assignment rule's own value floor nothing matches at ANY revision (``a::Pass`` is
 #:    released at this head and at ``origin/main`` alike, while the type clause refuses it),
 #:    so a shorter row would pin a reading neither revision can reach.
-_CORPUS_GRADING_DIGEST = "6407c2d8b729b6f9b2724bec82092fa168e038d785ef3aa46ec148cd86feb3e9"
+#:
+#: MOVED ONCE MORE on 2026-09-24, in the R4-1 remediation, and the argument again has the
+#: two halves this constant's history asks for:
+#:
+#: 7. **The MODULE change moved NOTHING, measured before the corpus grew.** The two
+#:    release-side gates now read EVERY ``::`` segment of the base through one
+#:    ``_type_token_segments`` extraction (agent reviews R3-1 and R4-1) instead of the
+#:    whole base plus its leaf, so the interior-stem class went from RELEASED with no hit
+#:    to MASKED with a real hit. Graded against the corpus as it stood, the digest is BYTE
+#:    FOR BYTE the constant it replaced, computed under the fixed module: no pre-existing
+#:    row moves in either direction, because no corpus row contained a ``a::b::c`` path
+#:    whose MIDDLE segment is credential-shaped — which is precisely why nothing could red
+#:    on R4-1, and that is the gap R4-3 is about. The widening can only ever refuse a
+#:    release, so the ``_STEM_BASE_STAYS_RELEASED`` half is unmoved by it.
+#:
+#: 8. **The corpus change is FIVE additions, and they are the whole of the move.** They are
+#:    an interior stem with no argument list, the same over an argument list, an interior
+#:    credential WORD with a type name after it, two interior positions in one path, and an
+#:    interior stem behind a reference marker. All five are masks, so ``POSITIVE_CASES``
+#:    moves 298 -> 303 while ``NEGATIVE_CASES`` is unchanged at 194, and
+#:    ``TYPE_ANNOTATION_POSITIVES`` moves 29 -> 34. Both counts are measured from the
+#:    assembled tuples. Every added row is 8 characters or longer ON PURPOSE, for the
+#:    floor reason recorded above.
+_CORPUS_GRADING_DIGEST = "21314d8fd9a7c0da42db2593e9cdc7fc357a68e0e82179234284fe5d26c51528"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
