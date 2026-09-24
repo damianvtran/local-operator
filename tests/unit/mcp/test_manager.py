@@ -1,7 +1,9 @@
 """Manager: fast-startup gate, deferred tools, reconnect breaker, epochs.
 
-Every test stubs the ``_connect_server`` seam — no real MCP server, network,
-or SDK transport is required.
+No test needs a real MCP server, network, or SDK transport. Most tests stub the
+``_connect_server`` seam; the auth-block tests deliberately do not — they
+replace only ``_open_transport_and_session`` so the real ``_connect_server``
+body and its attempt seam run (agent review round 2, major-1).
 """
 
 from __future__ import annotations
