@@ -3566,9 +3566,9 @@ class TestAuthBlockRevalidation:
         self._stub_transport(monkeypatch, sibling_dial)
         try:
             await sibling._reconnect("dd", 0.0, sibling._epoch)
-            assert sibling.get_connection_status("dd") == "connected", (
-                "the sibling session did not stand up, so it witnessed nothing"
-            )
+            assert (
+                sibling.get_connection_status("dd") == "connected"
+            ), "the sibling session did not stand up, so it witnessed nothing"
         finally:
             await sibling.disconnect_all()
             self._stub_transport(monkeypatch, ours)
@@ -4682,10 +4682,9 @@ class TestAuthBlockRevalidation:
 
             self._stub_transport(monkeypatch, counting)
             assert await manager.revalidate_auth_blocked() == []
-            assert attempts == [], (
-                "a chain-unaware writer was read as a new grant: "
-                f"{len(attempts)} extra connects"
-            )
+            assert (
+                attempts == []
+            ), f"a chain-unaware writer was read as a new grant: {len(attempts)} extra connects"
             assert manager.auth_blocked("dd") is True
             assert manager.get_connection_status("dd") != "connected"
         finally:
@@ -4726,7 +4725,6 @@ class TestAuthBlockRevalidation:
         finally:
             await manager.disconnect_all()
             store.close()
-
 
     @pytest.mark.asyncio
     async def test_a_chain_unaware_writer_never_storms(
@@ -4854,9 +4852,7 @@ class TestAuthBlockRevalidation:
                 )
                 assert value is not None, "the sibling's connect wrote no witness"
 
-            self._stub_discovery(
-                monkeypatch, None, during=sibling_stands_up_during_our_attempt
-            )
+            self._stub_discovery(monkeypatch, None, during=sibling_stands_up_during_our_attempt)
             self._stub_transport(monkeypatch, refuses)
             await manager._reconnect("dd", 0.0, manager._epoch)
             assert manager.auth_blocked("dd") is True
@@ -4883,9 +4879,7 @@ class TestAuthBlockRevalidation:
 
             self._stub_transport(monkeypatch, counting)
             assert await manager.revalidate_auth_blocked() == ["dd"]
-            assert attempts == ["dd"], (
-                f"a sibling's success bought {len(attempts)} attempts, not 1"
-            )
+            assert attempts == ["dd"], f"a sibling's success bought {len(attempts)} attempts, not 1"
             assert manager.get_connection_status("dd") == "connected"
             for _ in range(5):
                 assert await manager.revalidate_auth_blocked() == []
@@ -5061,9 +5055,9 @@ class TestAuthBlockRevalidation:
             after = storage.grant_marker()
             assert after is not None
             assert after.stamp != before.stamp, "a new interactive grant must be a new chain"
-            assert after.stamp == row[TOKENS_OBTAINED_AT_KEY], (
-                "the new chain's stamp must be the tokens_obtained_at this write made"
-            )
+            assert (
+                after.stamp == row[TOKENS_OBTAINED_AT_KEY]
+            ), "the new chain's stamp must be the tokens_obtained_at this write made"
         finally:
             store.close()
 
@@ -5110,9 +5104,9 @@ class TestAuthBlockRevalidation:
             row = self._row(store)
             after = storage.grant_marker()
             assert after is not None
-            assert row[TOKENS_OBTAINED_AT_KEY] != 500.0, (
-                "the rotation did not move the row's timestamp: measured nothing"
-            )
+            assert (
+                row[TOKENS_OBTAINED_AT_KEY] != 500.0
+            ), "the rotation did not move the row's timestamp: measured nothing"
             assert after.stamp == before.stamp == 500.0, (
                 "our own rotation moved the chain stamp: the carry took the raw "
                 "tokens_obtained_at instead of the stamp the row already carried"
@@ -5154,9 +5148,9 @@ class TestAuthBlockRevalidation:
             self._stub_transport(monkeypatch, refuses)
             await manager._reconnect("dd", 0.0, manager._epoch)
             assert manager.auth_blocked("dd") is True
-            assert storage.grant_marker().witness_at is None, (
-                "a FAILED connect wrote a success witness"
-            )
+            assert (
+                storage.grant_marker().witness_at is None
+            ), "a FAILED connect wrote a success witness"
 
             value = await self._a_sibling_connect_stands_up(
                 tmp_path, store, monkeypatch, ours=refuses
@@ -5210,9 +5204,9 @@ class TestAuthBlockRevalidation:
                 return real_read()
 
             monkeypatch.setattr(storage, "_read", racing_read)
-            assert storage.record_grant_ok() is False, (
-                "the witness was written from a payload older than the rotation"
-            )
+            assert (
+                storage.record_grant_ok() is False
+            ), "the witness was written from a payload older than the rotation"
 
             row = self._row(store)
             assert row["tokens"]["access_token"] == "A2", (
@@ -5242,11 +5236,11 @@ class TestAuthBlockRevalidation:
         and a failed recovery both write nothing, which is what keeps the witness
         a fact about success rather than a heartbeat.
         """
+        import time as _time
+
         import httpx
 
         from local_operator.mcp.auth import McpTokenStorage, build_oauth_provider
-
-        import time as _time
 
         store = self._real_store(tmp_path, obtained_at=_time.time())
         manager = self._oauth_manager(tmp_path, store)
@@ -5261,9 +5255,7 @@ class TestAuthBlockRevalidation:
             )
             async with provider.context.lock:
                 await provider._initialize()
-            gen = provider.async_auth_flow(
-                httpx.Request("POST", self.URL, content=b"payload")
-            )
+            gen = provider.async_auth_flow(httpx.Request("POST", self.URL, content=b"payload"))
             try:
                 request = await gen.__anext__()
                 retried = await gen.asend(httpx.Response(401, request=request))
@@ -5702,9 +5694,7 @@ class TestAnUnreadableGrantMarkerIsNotAChangedGrant:
 
         store = AuthStore(str(tmp_path / "auth.db"))
         try:
-            marker = McpTokenStorage(
-                "https://never-authed.example/mcp", store
-            ).grant_marker()
+            marker = McpTokenStorage("https://never-authed.example/mcp", store).grant_marker()
             assert marker == (0.0, False, None)
         finally:
             store.close()
