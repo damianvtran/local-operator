@@ -575,7 +575,13 @@ def _grant_change_is_evidence(marker: GrantMarker, known: GrantMarker) -> bool:
     Two axes, and either one moving is evidence:
 
     * the STAMP — the row's chain stamp, which moves when a grant is actually
-      replaced (a peer's ``/mcp reauth``, a login, a logout).
+      replaced (a peer's ``/mcp reauth``, a login, a logout) — together with the
+      row's TOMBSTONE, which the pre-witness rule (``marker == known``) compared
+      as part of the same tuple and which is kept here for that reason: a peer
+      tombstoning the grant we blocked on is news about it, and the one attempt
+      it buys is bounded by the marker moving again. (Inert today, because the
+      store strips ``grant_dead_at`` on write — the deferred tombstone finding —
+      but the rule must not lose the axis the strip's fix will need.)
     * the WITNESS — ``grant_ok.at``, which moves when some process's connect
       STOOD UP on this chain. It is the only axis that can see a sibling's heal
       on the SAME chain, which a chain rule cannot: a sibling's rotation carries
@@ -595,7 +601,7 @@ def _grant_change_is_evidence(marker: GrantMarker, known: GrantMarker) -> bool:
     before this rule, because ``None`` is no information at all rather than a
     value that differs from whatever we hold.
     """
-    if marker.stamp != known.stamp:
+    if marker.stamp != known.stamp or marker.is_dead != known.is_dead:
         return True
     if marker.witness_at is None:
         return False
@@ -2863,7 +2869,6 @@ class McpManager:
             # `redaction.sanitize_exception`, which `explain` calls.
             raise stderr_log.explain(exc) from exc
 
-        conn.tools = tools
         # THE SUCCESS WITNESS IS WRITTEN HERE — after the connect stood up end to
         # end (transport entered, session initialized, tools listed) and before
         # the tools are attached to the connection.
@@ -2886,6 +2891,7 @@ class McpManager:
         # succeeded, and a store failure must never turn a live server into a
         # failed connect.
         self._record_grant_ok(name)
+        conn.tools = tools
         if self.tool_cache is not None:
             self.tool_cache.put(
                 name,
@@ -4289,7 +4295,7 @@ class McpManager:
             # The caller cannot say: the store is the evidence. This is the
             # pre-feature behaviour and it is still correct whenever no grant was
             # written during the attempt.
-            marker: tuple[float, bool] | None = self._grant_marker(name)
+            marker: GrantMarker | None = self._grant_marker(name)
         else:
             marker = attempted
         if marker is not None or name not in self._auth_grant_marker:
