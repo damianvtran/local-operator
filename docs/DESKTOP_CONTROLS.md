@@ -508,7 +508,7 @@ sessionless surface answers the same questions from the files on disk, gated on
 | Route | Body / query | Answer |
 | --- | --- | --- |
 | `GET /v1/desktop/mcp` | `cwd?` (absolute existing dir, default the user's home), `session_id?` | `CRUDResponse{result:{data:<catalog>, replayed:false}}` |
-| `POST /v1/desktop/mcp` | `MCPControl` plus `cwd?` | the FULL catalog again, plus `operation: <McpOperation>\|null` — the op this request started or named |
+| `POST /v1/desktop/mcp` | `MCPControl` plus `cwd?` | the FULL catalog again, plus `operation: <McpOperation>\|null` — the op this request started or named. A REFUSAL is `409 {code, message}` and carries NO document, so a client that needs rows after one re-reads the GET |
 | `POST /v1/desktop/mcp/credentials` | `MCPCredentials` plus `cwd?` | `{name, saved_ids, failed_ids, code, catalog:<catalog>}` |
 
 `add`, `remove`, `test`, `login`, `reauth`, `logout`, `status` and `cancel` are the
@@ -519,29 +519,49 @@ of. An invalid `cwd` is `422`; a refusal is `409 {code, message}` with a bounded
 credential). The codes are `exists`, `not_owned`, `project_scope_unavailable`,
 `unknown_server`, `oauth_unsupported`, `grant_running`, `too_many_operations`,
 `write_failed`, `mcp_starting`, plus `invalid_config` (the config layer refused the
-SHAPE of a definition) and `operation_unavailable` (a stale `operation_id`, or a
-live-only action on this route). An owner from before this change answers the single
+SHAPE of a definition) and `operation_unavailable`, whose ONE sentence has to read
+for two situations: a stale `operation_id`, and a live-only action on this route
+(`connect`/`disconnect`/`reload`/`probe`) — hence "a refusal is `409 {code,
+message}`" rather than "no longer available", which was only true of the first. An
+owner from before this change answers the single
 code `mcp_control_refused`, which renders the same generic sentence it always did.
 
 **The catalog document** is one payload: `cwd`, `project_scope_available`,
 `global_path`, `project_path` (null when the folder has no separate project file),
 `status_source` (`config` or `live`), `session_id`, `servers[]` and `operations[]`.
+The TWO fields that carry a project path mean different things, and are named
+accordingly: the catalog-level `project_path` is the project's mcp.json FILE (what a
+user can open), the row's `project_cwd` is the DIRECTORY that row's project scope
+applies to.
+
+`status_source` is `live` only when the overlay reached at least one row, and
+`session_id` is echoed on the same condition, so the two never claim a live fact
+that no row carries: it is "the session whose live facts were applied, `null` when
+none were" — a cold, foreign or unloaded session, or a GET with no `session_id`,
+all answer `config` + `null` rather than a failure or a dangling id.
+
 A row carries the server's identity and where it came from (`source.kind`,
 `source.path`, `editable`, `owned_scope` — `remove` is offered only when it is ours),
-its `scope` (`global`/`project`, where it APPLIES) with `project_path` set iff
-`project` and to the DIRECTORY (the catalog-level field is the FILE), a
-`transport`/`endpoint` pair with a redacted URL when the URL carried user-info, a
-query or a fragment, `status`/`status_reason`/`status_observed_at`/`status_basis`,
-an `auth` block (`kind`, `signed_in`, and the state of each `secret_refs` id), a
-`tool_count` with its basis, and the closed `actions` list. It is generated in
-`mcp/catalog.py` so no client derives any of it; `docs/fixtures/mcp-catalog.json` is
-a pinned sample of the shape (with one row per status, one project row, one
-foreign-import row and a running operation) for the UI's own parity tests, and a
-unit test fails if the builder's fields and the fixture's drift apart.
+its `scope` (`global`/`project`, where it APPLIES) with `project_cwd` set iff
+`project`, a `transport`/`endpoint` pair with a redacted URL when the URL carried
+user-info, a query or a fragment, `status`/`status_reason`/`status_observed_at`/
+`status_basis`, an `auth` block (`kind`, `signed_in`, and the state of each
+`secret_refs` id), a `tool_count` with its basis, and the closed `actions` list. It
+is generated in `mcp/catalog.py` — the ONE row builder behind this route — so no
+client derives any of it; `docs/fixtures/mcp-catalog.json` is a pinned sample of the
+shape (with one row per status, one project row, one foreign-import row and a
+running operation) for the UI's own parity tests, and a unit test fails if the
+builder's fields and the fixture's drift apart. The legacy session route keeps its
+own frozen row shape (`stdio`/`http`, the manager's status words) for desktop builds
+that predate `features.mcp_catalog`; the only thing that crosses between the two is
+the live overlay, translated by `live_facts_from_snapshot`.
 
 Status is `connected`, `needs_sign_in`, `not_started`, `connecting` or `error`, and
 `status_basis` says how it is known: `live` (a warm runtime), `probe` (an explicit
-Test or sign-in), or `stored` (config, the grant store, the encrypted store).
+Test or sign-in ANSWERED it), `operation` (one is running right now, so nothing has
+measured this server yet — `status_observed_at` is null), or `stored` (config, the
+grant store, the encrypted store). The bases are kept apart so a client never draws
+a settled result for an operation still in flight.
 **A stored fact never claims `connected`** — a grant revoked upstream still reads as
 signed in, so stored state is shown as "Ready". Precedence, first match wins: a
 config that fails validation is `error`; a running operation on that server is
@@ -552,8 +572,12 @@ synchronous answer: it spawns one short-lived manager, connects NON-interactivel
 `needs_sign_in` or `error`. One operation runs at a time (a second loopback OAuth
 listener would fight for the callback port), each is bounded and cancellable, and
 every spawned child is torn down inside the operation's own task — including on
-server shutdown, which cancels and JOINS the operation so no child outlives the
-process that spawned it.
+server shutdown, which cancels and JOINS the operation, so a `SIGTERM` reaps the
+child through the app's own teardown. Two limits, measured rather than assumed: a
+`SIGKILL` runs no teardown at all, so a child that ignores its stdin stays until it
+reads EOF and exits on its own (an ordinary stdio server does exactly that within
+seconds), and a second cancel landing during teardown interrupts `disconnect_all`
+before it closes the transports.
 
 The list never starts anything. `session_id` overlays a runtime's live statuses
 ONLY when that runtime is already bound and its folder is the requested one, inside

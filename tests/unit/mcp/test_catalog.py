@@ -192,7 +192,7 @@ def test_a_global_stdio_server_is_not_a_project_one(distinct: Path) -> None:
     assert document["operations"] == []
     assert row["id"] == row["name"] == "echoer"
     assert row["scope"] == "global"
-    assert row["project_path"] is None
+    assert row["project_cwd"] is None
     assert row["transport"] == "local_command"
     assert row["endpoint"] == {"command": COMMAND, "url": None, "endpoint_redacted": False}
     assert row["source"]["kind"] == "local-operator"
@@ -206,9 +206,10 @@ def test_a_project_server_applies_to_the_folder_that_defines_it(distinct: Path) 
     (row,) = describe_servers(str(distinct))["servers"]
 
     assert row["scope"] == "project"
-    # The ROW's project_path is the DIRECTORY it applies to (what the UI names);
-    # the catalog's is the FILE (what a user can open).
-    assert row["project_path"] == str(distinct)
+    # The ROW's project_cwd is the DIRECTORY it applies to (what the UI names);
+    # the catalog's project_path is the FILE (what a user can open). They are
+    # different kinds of value, so they are different fields.
+    assert row["project_cwd"] == str(distinct)
     assert row["source"]["owned_scope"] == "project"
     assert row["source"]["editable"] is True
 
@@ -222,7 +223,7 @@ def test_everything_reads_global_when_the_two_scopes_are_one_file(colliding: Pat
     assert document["project_scope_available"] is False
     assert document["project_path"] is None
     assert [row["scope"] for row in document["servers"]] == ["global"]
-    assert [row["project_path"] for row in document["servers"]] == [None]
+    assert [row["project_cwd"] for row in document["servers"]] == [None]
 
 
 def test_a_foreign_project_file_is_project_scoped_and_not_ours(distinct: Path) -> None:
@@ -296,6 +297,25 @@ def test_a_live_connected_server_reports_its_live_tool_count(distinct: Path) -> 
     assert row["actions"] == ["test", "remove", "disconnect"]
 
 
+def test_an_overlay_that_reached_no_row_is_not_a_live_document(distinct: Path) -> None:
+    """``status_source`` and ``session_id`` describe the rows, not the request.
+
+    An overlay that was consulted and used by nothing — a warm runtime that has
+    loaded none of these servers, or facts keyed by names this folder does not
+    configure — leaves every row reading from config. Calling that document
+    ``live``, and echoing a ``session_id``, claims a live fact no row carries.
+    """
+    add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
+
+    for overlay in ({}, {"elsewhere": LiveFacts(status="connected", tool_count=2)}):
+        document = describe_servers(str(distinct), live=overlay, session_id="8fd6c6a40934")
+        (row,) = document["servers"]
+
+        assert document["status_source"] == "config", overlay
+        assert document["session_id"] is None, overlay
+        assert (row["status"], row["status_basis"]) == ("not_started", "stored"), overlay
+
+
 def test_a_live_auth_block_is_needs_sign_in_with_its_reason(distinct: Path) -> None:
     add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
 
@@ -340,6 +360,11 @@ def test_a_running_operation_reads_connecting_even_under_a_live_overlay(
     read ``disconnected`` for a server being tested right now. The published
     contract is "a running test reads connecting", with no exception for a
     caller that also passed ``session_id``.
+
+    Its basis is ``operation``, not ``probe``: nothing has ANSWERED yet, and a
+    client that reads ``probe`` as a settled result would draw a finished Test —
+    with its tool count — for one still running. The null ``status_observed_at``
+    is the same statement.
     """
     add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
 
@@ -350,7 +375,9 @@ def test_a_running_operation_reads_connecting_even_under_a_live_overlay(
         running=frozenset({"echoer"}),
     )["servers"]
 
-    assert (row["status"], row["status_basis"]) == ("connecting", "probe")
+    assert (row["status"], row["status_basis"]) == ("connecting", "operation")
+    assert row["status_observed_at"] is None
+    assert row["tool_count"] is None, "an unfinished operation has measured nothing"
 
 
 def test_a_probe_within_its_ttl_is_the_rows_answer(distinct: Path) -> None:
@@ -676,14 +703,14 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
             "connecting",
             "error",
         }
-        assert row["status_basis"] in {"live", "probe", "stored"}
+        assert row["status_basis"] in {"live", "probe", "operation", "stored"}
         assert row["tool_count_basis"] in {"live", "probe", "last_seen", None}
         assert row["transport"] in {"local_command", "remote_url"}
         assert row["scope"] in {"global", "project"}
         # The two facts a UI keys off to decide whether it may offer a write.
         assert row["source"]["editable"] is (row["source"]["owned_scope"] is not None)
         assert ("remove" in row["actions"]) is row["source"]["editable"]
-        assert row["project_path"] == (fixture["cwd"] if row["scope"] == "project" else None)
+        assert row["project_cwd"] == (fixture["cwd"] if row["scope"] == "project" else None)
         for action in row["actions"]:
             assert action in {
                 "test",
@@ -730,4 +757,9 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
     assert any(row["source"]["editable"] is False for row in fixture["servers"])
     assert any(row["endpoint"]["endpoint_redacted"] for row in fixture["servers"])
     assert any(row["tool_count_basis"] == "last_seen" for row in fixture["servers"])
+    # The one row a merely-running operation owns: its basis is not a probe's,
+    # and it carries no observation, or a renderer cannot tell the two apart.
+    connecting = [row for row in fixture["servers"] if row["status"] == "connecting"]
+    assert [row["status_basis"] for row in connecting] == ["operation"]
+    assert all(row["status_observed_at"] is None for row in connecting)
     assert fixture["operations"][0]["status"] == "running"

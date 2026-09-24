@@ -1,4 +1,16 @@
-"""The MCP catalog: one row builder for every desktop MCP surface.
+"""The MCP catalog: the ONE row builder behind ``/v1/desktop/mcp``.
+
+Scope, because the claim is easy to overstate: these rows are built here and
+nowhere else, so no client of the sessionless surface can be shown a second
+opinion of the same server. The LEGACY session route
+(``/v1/desktop/sessions/{id}/mcp``) is deliberately NOT built here — desktop
+builds that predate ``features.mcp_catalog`` read its frozen shape (its own key
+names, ``stdio``/``http``, the manager's status words), and
+``MCPDesktop.snapshot`` in ``mcp/desktop.py`` still derives it, because two
+compatibility requirements cannot both be met by one body. What crosses between
+them is ONE seam: ``live_facts_from_snapshot`` translates the runtime's rows
+into the ``live`` overlay below. So the duplication is a translation of a frozen
+shape, not a competing definition of the catalog's vocabulary.
 
 Settings > Integrations used to read MCP state THROUGH a conversation: every
 read and write needed a session id, a fresh install with no model could not
@@ -13,7 +25,8 @@ overlay (``live``), and what only an explicit test can know arrives as a
 ``probe`` result. Precedence per row, first match wins:
 
 1. the config does not validate → ``error``;
-2. an operation (test / sign-in) running for the server → ``connecting``;
+2. an operation (test / sign-in) running for the server → ``connecting``, basis
+   ``operation``;
 3. a live overlay for a server that runtime actually loaded;
 4. a probe result within :data:`PROBE_TTL_S` for the CURRENT config digest;
 5. durable facts: a missing grant or key → ``needs_sign_in``, else
@@ -23,6 +36,16 @@ The status vocabulary is deliberately plain (``connected``, ``needs_sign_in``,
 ``not_started``, ``connecting``, ``error``) and ``status_basis`` says how we
 know, because a stored fact is not a live one: a token revoked upstream still
 reads as signed in, so ``stored`` is never allowed to claim ``connected``.
+
+The four bases are ``live`` (a warm runtime reported it), ``probe`` (an explicit
+Test or sign-in ANSWERED it), ``operation`` (one is running right now) and
+``stored`` (config and the durable stores). ``operation`` is a basis of its own
+rather than a second meaning of ``probe`` for a rendering reason: a client that
+reads ``probe`` as "a Test answered this" would draw a settled result — with a
+tool count — for an operation that has not finished. As a pair with a null
+``status_observed_at`` it is also the only honest reading of "nothing has
+observed this yet": an in-flight operation is knowledge that something is
+happening, not a measurement.
 
 The row also carries the ACTIONS it supports, computed here, so no client
 draws a button that dead-ends (a "Sign in" on a local command with no
@@ -322,7 +345,12 @@ def _row(
         # not the caller also passed a ``session_id`` — otherwise the same
         # press paints "Connecting" on a sessionless page and the runtime's
         # older status on one with an active conversation.
-        status, basis = "connecting", "probe"
+        #
+        # ``operation``, not ``probe``: no probe result exists yet (the
+        # operation is what will produce one), and reusing ``probe`` here made
+        # one word mean both "a Test answered this" and "a Test is running",
+        # with nothing in the payload to tell them apart.
+        status, basis = "connecting", "operation"
     elif facts is not None:
         basis, observed = "live", now
         if facts.status == "connected":
@@ -377,7 +405,11 @@ def _row(
         "id": name,
         "name": name,
         "scope": scope,
-        "project_path": cwd if scope == "project" else None,
+        # The row's field is the DIRECTORY the row's project scope applies to —
+        # NOT the catalog-level ``project_path``, which is the mcp.json FILE a
+        # user can open. Two kinds of value behind one name is what a client
+        # gets wrong, so they carry two names.
+        "project_cwd": cwd if scope == "project" else None,
         "source": {
             "kind": foreign[0] if foreign is not None else "local-operator",
             "path": str(source) if source else "",
@@ -423,6 +455,16 @@ def describe_servers(
     after that conversation started honestly reads from config instead of as
     "not started in this conversation". ``running`` names servers with an
     operation in flight.
+
+    ``status_source`` and ``session_id`` report the overlay ONLY when it
+    applied to at least one row. An overlay that was consulted and used by
+    nothing is not a different source of truth: an empty one (a warm runtime
+    that loaded none of these servers) or one keyed entirely by servers this
+    folder does not configure would otherwise stamp ``live`` on a document in
+    which every status came from config, and echo an id that explains no field
+    in it. A client reads ``session_id`` as "the session whose live facts were
+    applied", so ``null`` means exactly "none were" — never "the backend lost
+    the id you sent".
     """
     if tool_cache is None:
         from local_operator.mcp.tool_cache import McpToolCache
@@ -448,13 +490,18 @@ def describe_servers(
         )
         for name, cfg in configs.items()
     ]
+    # Whether the overlay reached a row, which is a lower bar than "an overlay
+    # was passed" and the honest one for the two fields below it: a warm session
+    # that loaded none of these servers, or facts keyed by names this folder
+    # does not configure, contribute nothing that a row could report.
+    applied = live is not None and any(name in live for name in configs)
     return {
         "cwd": cwd,
         "project_scope_available": available,
         "global_path": str(_scope_path(cwd, "global")),
         "project_path": str(_scope_path(cwd, "project")) if available else None,
-        "status_source": "live" if live is not None else "config",
-        "session_id": session_id if live is not None else None,
+        "status_source": "live" if applied else "config",
+        "session_id": session_id if applied else None,
         "servers": servers,
         "operations": list(operations or []),
     }

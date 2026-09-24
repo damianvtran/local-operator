@@ -22,8 +22,15 @@ This host answers without any runtime:
 
 Lifetime: the app's lifespan calls :meth:`McpHost.close` on shutdown, which
 cancels and JOINS any running operation — the cancellation runs that
-operation's ``disconnect_all`` in its own task, so no server child outlives the
-process that spawned it.
+operation's ``disconnect_all`` in its own task, so a child is reaped by the
+app's own teardown. Two limits of that, both measured (QA round 1 of the
+sessionless-MCP change): a ``SIGKILL`` runs no teardown at all, so a child that
+ignores its stdin stays until it reads EOF and exits on its own; and a second
+cancel landing during teardown interrupts ``disconnect_all`` before it closes
+the transports. Neither leaves a permanent orphan for an ordinary MCP server —
+a stdio server exits when its stdin ends — but "no server child outlives the
+process that spawned it" is only true for the ``SIGTERM`` path, where the
+lifespan runs.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.mcp.catalog import (
+    PROBE_TTL_S,
     LiveFacts,
     ProbeResult,
     describe_servers,
@@ -71,9 +79,20 @@ def resolve_cwd(raw: str | None) -> str:
     """
     if raw is None or raw == "":
         return str(Path.home())
-    if "\x00" in raw or not os.path.isabs(raw):
+    # ``~`` is EXPANDED before the absolute check, not refused as garbage: it is
+    # not an absolute path, and it is the desktop's own value for the default
+    # conversation folder — the folder this surface exists to serve (the
+    # renderer stores and sends the literal ``"~"``). Every other route that
+    # takes this folder already accepts it: the legacy create field has no
+    # absolute check and the MCP config layer expands it (``Path(cwd)
+    # .expanduser()``), which is what the legacy cold read feeds it. What stays
+    # refused is what the guard is for — relative paths, a NUL byte, and a path
+    # that is not a directory, including ``~somebody-else/x`` (no such home to
+    # expand, so it is still not absolute).
+    expanded = os.path.expanduser(raw)
+    if "\x00" in expanded or not os.path.isabs(expanded):
         raise ValueError("cwd must be an absolute path")
-    path = Path(raw)
+    path = Path(expanded)
     if not path.is_dir():
         raise ValueError("cwd must be an existing directory")
     return str(path)
@@ -109,7 +128,8 @@ class McpHost:
         self.config_dir = config_dir
         self.ops = McpOperations()
         #: Last probe outcome per ``(cwd, name)``; the catalog ignores one whose
-        #: config digest no longer matches or that is older than its TTL.
+        #: config digest no longer matches or that is older than its TTL, and
+        #: ``_remember_probe`` prunes the expired ones on every write.
         self.probes: dict[tuple[str, str], ProbeResult] = {}
         #: Which cwd each operation ran against, so a list for one folder does
         #: not paint another folder's same-named server as "connecting".
@@ -237,6 +257,22 @@ class McpHost:
             raise MCPRefusal("oauth_unsupported", "This server does not use OAuth")
         name = body.name
         digest = config_digest(cfg)
+        if action in ("login", "reauth", "logout"):
+            # A grant action changes the very fact a probe measured — the stored
+            # credential — so the cached answer for this server is dropped the
+            # moment the operation STARTS; only a newly recorded grant puts one
+            # back (``_record_grant``), and ``logout`` never does. Otherwise a
+            # repaint after a completed sign-out still reads "Connected, 3
+            # tools" beside a Sign in action for up to ``PROBE_TTL_S``, and the
+            # same lie appears after a key write (see ``store_credentials``).
+            #
+            # At START rather than on completion, because the paths that never
+            # complete are exactly the ones that must not keep the old answer: a
+            # cancelled reauth has already deleted the credential before it
+            # leaves, and any exception out of ``grant_operation`` skips
+            # ``_record_grant`` entirely. It sits after the refusals above, so a
+            # refused action never costs a valid answer.
+            self.probes.pop((cwd, name), None)
         host = self
 
         async def work(op: dict[str, Any]) -> None:
@@ -299,35 +335,72 @@ class McpHost:
             else:
                 status = "error"
             reason = public_reason(text)
-        self.probes[(cwd, name)] = ProbeResult(
-            status=status,  # type: ignore[arg-type]
-            reason=reason,
-            tool_count=count,
-            observed_at=time.time(),
-            digest=digest,
+        self._remember_probe(
+            cwd,
+            name,
+            ProbeResult(
+                status=status,  # type: ignore[arg-type]
+                reason=reason,
+                tool_count=count,
+                observed_at=time.time(),
+                digest=digest,
+            ),
         )
         op["status"] = "complete" if status == "connected" else "failed"
         op["message"] = reason
+
+    def _remember_probe(self, cwd: str, name: str, probe: ProbeResult) -> None:
+        """Store one probe, and prune the ones the catalog would now ignore.
+
+        ``PROBE_TTL_S`` is consulted when the catalog READS a probe, so nothing
+        ever removed an expired entry: a long-lived daemon kept one per
+        folder × server ever tested, each holding its sanitized reason string.
+        Pruning on write bounds the store to what has been tested inside one
+        TTL window, which is all a reader can use anyway.
+        """
+        for key in [
+            key
+            for key, old in self.probes.items()
+            if probe.observed_at - old.observed_at > PROBE_TTL_S
+        ]:
+            del self.probes[key]
+        self.probes[(cwd, name)] = probe
 
     def _record_grant(
         self, cwd: str, name: str, digest: str, op: dict[str, Any], count: int | None
     ) -> None:
         """A completed sign-in IS a successful connect: remember it as a probe."""
         if op["status"] == "complete":
-            self.probes[(cwd, name)] = ProbeResult(
-                status="connected",
-                reason=None,
-                tool_count=count,
-                observed_at=time.time(),
-                digest=digest,
+            self._remember_probe(
+                cwd,
+                name,
+                ProbeResult(
+                    status="connected",
+                    reason=None,
+                    tool_count=count,
+                    observed_at=time.time(),
+                    digest=digest,
+                ),
             )
         else:
             self.probes.pop((cwd, name), None)
 
     async def store_credentials(self, body: Any, cwd: str) -> dict[str, Any]:
+        """Write ``${NAME}`` values, then forget the probe they invalidate.
+
+        A probe recorded BEFORE the write can say ``needs_sign_in`` — what a
+        Test records when a required key is missing — so the row would keep
+        telling the user to do the thing they just did, next to its own
+        ``auth.signed_in: true``. The next read recomputes from the durable
+        stores instead. Dropped whatever the store answers: a refusal leaves
+        the facts as they were, and the durable answer for them is still the
+        right one to show.
+        """
         from local_operator.mcp.credentials import store_credentials
 
-        return await store_credentials(_SettingsCredentialsHost(cwd, self._base()), body)
+        result = await store_credentials(_SettingsCredentialsHost(cwd, self._base()), body)
+        self.probes.pop((cwd, body.name), None)
+        return result
 
     async def close(self) -> None:
         """Refuse new work, then cancel and join every running operation."""

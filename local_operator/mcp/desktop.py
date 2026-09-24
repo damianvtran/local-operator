@@ -140,7 +140,14 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "write_failed": "The MCP configuration could not be written.",
     "invalid_config": "That MCP server configuration is not valid.",
     "mcp_starting": "MCP is still starting in this conversation; try again in a moment.",
-    "operation_unavailable": "That MCP operation is no longer available.",
+    # One code, two situations, so the sentence has to read for BOTH: a stale
+    # ``operation_id`` (evicted from the bounded registry, or the daemon
+    # restarted under the client) and a live-only action (connect / disconnect /
+    # reload / probe) sent to the sessionless route, which has no runtime's
+    # connection to control. "no longer available" was true only of the first,
+    # and told the second user their control had expired when it was never
+    # offered here at all. Clients key on ``code``; this is the fallback copy.
+    "operation_unavailable": "That MCP operation is not available.",
     "mcp_control_refused": "The MCP control was refused.",
 }
 
@@ -369,6 +376,17 @@ class MCPDesktop:
         return self.ops.running
 
     def snapshot(self) -> dict[str, Any]:
+        """The LEGACY session-route row shape, derived here on purpose.
+
+        Desktop builds that predate ``features.mcp_catalog`` read this shape —
+        its own key names, ``stdio``/``http``, the manager's status words — so it
+        cannot be replaced by the catalog's rows in ``mcp/catalog.py``, which
+        carry the published catalog vocabulary. Two compatibility requirements
+        cannot be met by one body, so this is a translation of a frozen shape
+        rather than a second definition of the catalog; the catalog consumes it
+        through ``live_facts_from_snapshot``, and nothing else crosses between
+        them.
+        """
         from local_operator.mcp.catalog import public_reason, public_server_config
 
         configs, sources = load_all_mcp_configs(self.cwd)

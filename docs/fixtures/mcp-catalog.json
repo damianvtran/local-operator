@@ -10,7 +10,7 @@
       "id": "linear",
       "name": "linear",
       "scope": "global",
-      "project_path": null,
+      "project_cwd": null,
       "source": {
         "kind": "local-operator",
         "path": "/Users/you/.local-operator/mcp.json",
@@ -26,7 +26,7 @@
       "status": "connecting",
       "status_reason": null,
       "status_observed_at": null,
-      "status_basis": "probe",
+      "status_basis": "operation",
       "auth": {
         "kind": "unknown",
         "signed_in": null,
@@ -44,7 +44,7 @@
       "id": "github",
       "name": "github",
       "scope": "global",
-      "project_path": null,
+      "project_cwd": null,
       "source": {
         "kind": "local-operator",
         "path": "/Users/you/.local-operator/mcp.json",
@@ -79,7 +79,7 @@
       "id": "postgres-prod",
       "name": "postgres-prod",
       "scope": "project",
-      "project_path": "/Users/you/projects/acme",
+      "project_cwd": "/Users/you/projects/acme",
       "source": {
         "kind": "local-operator",
         "path": "/Users/you/projects/acme/.local-operator/mcp.json",
@@ -122,7 +122,7 @@
       "id": "filesystem",
       "name": "filesystem",
       "scope": "global",
-      "project_path": null,
+      "project_cwd": null,
       "source": {
         "kind": "local-operator",
         "path": "/Users/you/.local-operator/mcp.json",
@@ -155,7 +155,7 @@
       "id": "acme-broken",
       "name": "acme-broken",
       "scope": "global",
-      "project_path": null,
+      "project_cwd": null,
       "source": {
         "kind": "codex",
         "path": "/Users/you/.codex/config.toml",
@@ -187,7 +187,7 @@
       "id": "borrowed-github",
       "name": "borrowed-github",
       "scope": "global",
-      "project_path": null,
+      "project_cwd": null,
       "source": {
         "kind": "cursor",
         "path": "/Users/you/.cursor/mcp.json",

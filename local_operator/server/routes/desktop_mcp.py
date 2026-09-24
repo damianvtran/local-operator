@@ -5,11 +5,13 @@ unchanged in shape, for desktop builds that predate ``features.mcp_catalog``).
 These answer with no conversation and no model configured — see
 :mod:`local_operator.server.mcp_host` for why and how.
 
-Every POST answers with the whole catalog document so a client repaints from
-the response instead of re-reading (the old re-read raced the very reconnect it
-had just caused), plus ``operation`` — the op this request started or named.
-Refusals are ``409 {code, message}`` with a bounded code; never exception text,
-because config and connect errors can quote credentials.
+Every successful POST answers with the whole catalog document so a client
+repaints from the response instead of re-reading (the old re-read raced the very
+reconnect it had just caused), plus ``operation`` — the op this request started
+or named. A REFUSAL is the exception and cannot be otherwise: ``409 {code,
+message}`` carries a bounded code and fixed copy, never exception text (config
+and connect errors can quote credentials), and no document, so a client that
+needs rows after a refusal re-reads ``GET /v1/desktop/mcp``.
 """
 
 from __future__ import annotations
@@ -132,7 +134,11 @@ async def mcp_catalog(
 
 @router.post("/v1/desktop/mcp", response_model=CRUDResponse[Result])
 async def mcp_catalog_control(body: CatalogControl, request: Request):
-    """add / remove / test / login / reauth / logout / status / cancel."""
+    """add / remove / test / login / reauth / logout / status / cancel.
+
+    Answers the catalog document (see the module docstring for the 409
+    exception) around the operation this request started or named.
+    """
     folder = _cwd_or_422(body.cwd)
     if body.action not in ("status", "cancel", "list"):
         _refuse_if_retiring(request)

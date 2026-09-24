@@ -38,8 +38,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
+from local_operator.mcp.catalog import PROBE_TTL_S, ProbeResult
 from local_operator.mcp.config import MCPConfigWriteError
+from local_operator.mcp.credentials import MCPCredentials
 from local_operator.mcp.desktop import (
     OPERATION_LIMIT,
     REFUSAL_MESSAGES,
@@ -53,6 +56,11 @@ from local_operator.mcp.desktop import (
 from local_operator.server.mcp_host import SESSIONLESS_ACTIONS, McpHost, resolve_cwd
 
 pytestmark = pytest.mark.asyncio
+
+#: The repo's one real stdio MCP peer (one tool, ``fixture_echo``), reached by
+#: PATH rather than copied, for the tests whose subject is a COMPLETED operation
+#: (a probe written through the real path, and the pruning it does on write).
+FIXTURE_SERVER = Path(__file__).resolve().parents[2] / "e2e" / "desktop_mcp_fixture.py"
 
 #: Writes its pid, then never speaks MCP. Used to hold an operation open so a
 #: cancel and a shutdown land MID-operation deterministically — with a server
@@ -107,6 +115,15 @@ def _add(host: McpHost, name: str, *, cwd: str, **extra: Any):
     return host.execute(MCPControl.model_validate(body), cwd)
 
 
+def _add_remote(host: McpHost, name: str, *, cwd: str, **extra: Any):
+    """A URL server, which is the shape the grant and key actions apply to."""
+    from local_operator.mcp.desktop import MCPControl
+
+    body = {"action": "add", "name": name, "url": "https://mcp.example.com/sse"}
+    body.update(extra)
+    return host.execute(MCPControl.model_validate(body), cwd)
+
+
 # ---------------------------------------------------------------------------
 # cwd resolution
 # ---------------------------------------------------------------------------
@@ -128,6 +145,36 @@ def test_a_bad_cwd_is_rejected_outright(tmp_path: Path, bad: str | None) -> None
 
 def test_a_real_directory_is_resolved(tmp_path: Path) -> None:
     assert resolve_cwd(str(tmp_path)) == str(tmp_path)
+
+
+def test_the_default_folder_shorthand_is_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``~`` is what the desktop SENDS for the default conversation's folder.
+
+    It is not an absolute path, so a literal ``isabs`` check answered the page's
+    own default folder with 422 ``invalid_cwd`` — the install this whole change
+    exists to serve. Every other route that takes this folder already accepts
+    it, and the MCP config layer expands it too.
+
+    ``HOME`` is redirected: the folder has to EXIST for the check to pass, so a
+    test against the real home would write into it.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    assert resolve_cwd("~") == str(home)
+    nested = home / "nested"
+    nested.mkdir()
+    assert resolve_cwd("~/nested") == str(nested)
+
+
+@pytest.mark.parametrize("bad", ["~nosuchuser", "~nosuchuser/project"])
+def test_a_tilde_that_names_no_home_is_still_refused(bad: str) -> None:
+    """Expanding changes nothing here (no such home), so the guard still holds."""
+    with pytest.raises(ValueError):
+        resolve_cwd(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -267,10 +314,177 @@ def _test_control(name: str):
     return MCPControl.model_validate({"action": "test", "name": name})
 
 
+# ---------------------------------------------------------------------------
+# what a probe measured, and what invalidates it
+# ---------------------------------------------------------------------------
+
+
+def _seed_probe(
+    host: McpHost, cwd: str, name: str, *, status: str = "connected", tools: int | None = 3
+) -> None:
+    """Record a probe exactly as a completed Test / sign-in records one.
+
+    The digest is the CONFIG's own, so the catalog trusts the entry — every test
+    below asserts the row reads it BEFORE it invalidates anything, which is what
+    makes the entry a live answer rather than a dead one. Writing the store
+    directly is the point: it IS the cache under test, and the alternative (a
+    real Test) would need a reachable server to produce the same row.
+    """
+    from local_operator.mcp.config import load_all_mcp_configs
+    from local_operator.mcp.tool_cache import config_digest
+
+    configs, _ = load_all_mcp_configs(cwd)
+    host.probes[(cwd, name)] = ProbeResult(
+        status=status,  # type: ignore[arg-type]
+        reason=None,
+        tool_count=tools,
+        observed_at=time.time(),
+        digest=config_digest(configs[name]),
+    )
+
+
+async def _first_row(host: McpHost, cwd: str) -> dict[str, Any]:
+    return (await host.catalog(cwd))["servers"][0]
+
+
+async def _settle(host: McpHost, operation_id: str, *, timeout: float = 60.0) -> dict[str, Any]:
+    """Wait for the operation to leave the running set; return its record."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        record = next((op for op in host.ops.records() if op["id"] == operation_id), None)
+        if record is not None and operation_id not in host.ops.running:
+            return record
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"the operation {operation_id} never settled")
+
+
+async def test_a_sign_out_forgets_the_probe_it_invalidates(host: McpHost, tmp_path: Path) -> None:
+    """A probe that outlives the fact it measured is a lie about that fact.
+
+    A completed sign-out leaves the row reading "Connected, 3 tools" beside a
+    Sign in action for up to ``PROBE_TTL_S``. Nothing else can remove this
+    entry: ``_record_grant`` is skipped for ``logout`` altogether, and ``_start``
+    creates the operation's task without yielding to it, so the assertion right
+    after ``execute`` is the invalidation and not a race the operation won.
+    """
+    cwd = str(tmp_path)
+    await _add(host, "echoer", cwd=cwd, command=sys.executable, args=STDIO_PING)
+    _seed_probe(host, cwd, "echoer")
+    assert (await _first_row(host, cwd))["status"] == "connected", "the seeded probe is live"
+
+    operation = await host.execute(_logout_control("echoer"), cwd)
+
+    assert operation is not None
+    assert (cwd, "echoer") not in host.probes
+    settled = await _settle(host, str(operation["id"]))
+    assert settled["status"] in {"complete", "failed"}, settled
+    after = await _first_row(host, cwd)
+    assert after["status"] != "connected", after
+    assert after["status_basis"] == "stored", after
+
+
+async def test_a_credentials_write_forgets_the_probe_it_invalidates(
+    host: McpHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row told the user to set the key they had just set.
+
+    A Test records ``needs_sign_in`` when a required ``${KEY}`` is missing, and
+    that answer stayed the row's after a real write — next to the same row's
+    ``auth.signed_in: true``. The write changes the durable fact a probe
+    measured, so the answer is dropped and the row is recomputed inside the same
+    response: ``routes/desktop_mcp.py`` repaints from a catalog built after the
+    operation.
+    """
+    # Real store, no persistent broker: the same seam the credentials tests use.
+    monkeypatch.setattr("local_operator.secrets.client.ensure_broker", lambda *a, **kw: False)
+    cwd = str(tmp_path)
+    await _add_remote(host, "remote", cwd=cwd, headers={"Authorization": "${PROBEKEY}"})
+    _seed_probe(host, cwd, "remote", status="needs_sign_in", tools=None)
+    before = await _first_row(host, cwd)
+    assert (before["status"], before["auth"]["signed_in"]) == ("needs_sign_in", False)
+
+    result = await host.store_credentials(
+        MCPCredentials(name="remote", values={"PROBEKEY": SecretStr("padlock")}), cwd
+    )
+
+    assert result["code"] == "saved", result
+    assert (cwd, "remote") not in host.probes
+    after = await _first_row(host, cwd)
+    assert (after["status"], after["status_basis"]) == ("not_started", "stored"), after
+    assert after["auth"]["signed_in"] is True, after
+
+
+@pytest.mark.parametrize("action", ["login", "reauth"])
+async def test_a_grant_action_drops_the_probe_before_it_starts(
+    host: McpHost, tmp_path: Path, action: str
+) -> None:
+    """The paths that never COMPLETE are why this happens at start.
+
+    ``reauth`` deletes the stored credential before it reconnects, so a cancel
+    in that window leaves the server with no credential — and ``_record_grant``
+    never runs, so nothing would have dropped the old answer. Asserted on the
+    store right after ``execute`` returns, which is before the operation's task
+    has had a chance to run at all.
+    """
+    cwd = str(tmp_path)
+    await _add_remote(host, "remote", cwd=cwd)
+    _seed_probe(host, cwd, "remote")
+    assert (await _first_row(host, cwd))["status"] == "connected", "the seeded probe is live"
+
+    operation = await host.execute(_grant_control(action, "remote"), cwd)
+
+    assert operation is not None
+    assert (cwd, "remote") not in host.probes
+    try:
+        await host.execute(_cancel_control(str(operation["id"])), cwd)
+    finally:
+        await host.close()
+    assert (await _first_row(host, cwd))["status"] != "connected"
+
+
+async def test_a_new_probe_prunes_the_expired_ones(host: McpHost, tmp_path: Path) -> None:
+    """``PROBE_TTL_S`` is read at read time, so nothing else ever collected one.
+
+    A long-lived daemon kept one entry per folder × server ever tested, each
+    holding its sanitized reason string. The real path is exercised: a Test that
+    reaches a real MCP server writes its probe through the same helper.
+    """
+    cwd = str(tmp_path)
+    await _add(host, "fixture", cwd=cwd, command=sys.executable, args=[str(FIXTURE_SERVER)])
+    stale = ProbeResult(
+        status="connected",
+        reason="a server that is long gone",
+        tool_count=1,
+        observed_at=time.time() - PROBE_TTL_S - 1.0,
+        digest="0" * 64,
+    )
+    host.probes[(str(tmp_path / "other"), "gone")] = stale
+
+    operation = await host.execute(_test_control("fixture"), cwd)
+    assert operation is not None
+    settled = await _settle(host, str(operation["id"]))
+
+    assert settled["status"] == "complete", settled
+    assert (str(tmp_path / "other"), "gone") not in host.probes, "an expired probe survived"
+    assert (cwd, "fixture") in host.probes
+
+
 def _cancel_control(operation_id: str):
     from local_operator.mcp.desktop import MCPControl
 
     return MCPControl.model_validate({"action": "cancel", "operation_id": operation_id})
+
+
+def _logout_control(name: str):
+    from local_operator.mcp.desktop import MCPControl
+
+    return MCPControl.model_validate({"action": "logout", "name": name, "confirmed": True})
+
+
+def _grant_control(action: str, name: str):
+    from local_operator.mcp.desktop import MCPControl
+
+    return MCPControl.model_validate({"action": action, "name": name, "confirmed": True})
 
 
 async def test_the_registry_bounds_its_history(tmp_path: Path) -> None:

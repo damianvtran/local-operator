@@ -133,7 +133,9 @@ def _row(document: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"no row for {name}: {[r['name'] for r in document['servers']]}")
 
 
-def _add_body(folder: str, *, name: str = "echoer", scope: str = "global", **extra: Any) -> dict[str, Any]:
+def _add_body(
+    folder: str, *, name: str = "echoer", scope: str = "global", **extra: Any
+) -> dict[str, Any]:
     body = {
         "action": "add",
         "name": name,
@@ -228,7 +230,7 @@ async def test_add_into_a_project_scope_writes_the_project_file(app_env) -> None
     assert response.status_code == 200
     row = _row(_data(response), "echoer")
     assert row["scope"] == "project"
-    assert row["project_path"] == str(project)
+    assert row["project_cwd"] == str(project)
     assert (project / ".local-operator" / "mcp.json").exists()
     assert not (app_env.config / "mcp.json").exists()
 
@@ -383,9 +385,12 @@ async def test_test_connects_a_real_child_and_leaves_nothing_behind(app_env) -> 
     assert operation["action"] == "test"
     assert operation["status"] == "running"
     assert operation["browser_opened"] is None, "a test must never open a browser"
-    # While it runs, the row is connecting with a probe basis (the contract).
+    # While it runs, the row is connecting with the OPERATION basis (the
+    # contract): no probe has answered yet, and the pair is what lets a client
+    # tell "a Test is running" from "a Test ended like this".
     row = _row(document, "fixture")
-    assert (row["status"], row["status_basis"]) == ("connecting", "probe")
+    assert (row["status"], row["status_basis"]) == ("connecting", "operation")
+    assert row["status_observed_at"] is None
 
     settled = await _until_settled(app_env.client, str(Path.home()))
     row = _row(settled, "fixture")
@@ -626,6 +631,48 @@ async def test_a_warm_session_in_the_same_folder_overlays_its_statuses(app_env) 
     assert (row["tool_count"], row["tool_count_basis"]) == (4, "live")
     assert row["actions"] == ["test", "remove", "disconnect"]
     assert remote.binds == 0, "the overlay must not bind either"
+
+
+async def test_a_warm_session_with_no_loaded_rows_is_not_a_live_document(app_env) -> None:
+    """An overlay that reached no row must not stamp the document ``live``.
+
+    A warm runtime that has loaded none of this folder's servers (they were
+    added after the conversation started) contributes nothing a row can report,
+    so every status in the answer comes from config. Reporting ``live`` there —
+    and echoing the id — would tell a client its statuses are a runtime's, and
+    set ``session_id`` on a document with no live fact in it.
+    """
+    project = app_env.tmp / "project"
+    project.mkdir()
+    await app_env.client.post(
+        "/v1/desktop/mcp",
+        json={
+            "action": "add",
+            "name": "echoer",
+            "scope": "project",
+            "cwd": str(project),
+            "command": sys.executable,
+            "args": [],
+        },
+    )
+    # The runtime knows the folder but has loaded no server (`loaded: false` is
+    # what the legacy snapshot says for one added after the conversation began).
+    remote = FakeRemote(
+        str(project),
+        rows=[{"name": "echoer", "status": "cold", "tool_count": 0, "loaded": False}],
+    )
+    app_env.app.state.desktop_sessions = FakePool({"8fd6c6a40934": remote})
+
+    document = _data(
+        await app_env.client.get(
+            "/v1/desktop/mcp", params={"cwd": str(project), "session_id": "8fd6c6a40934"}
+        )
+    )
+
+    assert document["status_source"] == "config"
+    assert document["session_id"] is None
+    row = _row(document, "echoer")
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored")
 
 
 async def test_a_warm_session_in_another_folder_is_not_an_overlay(app_env) -> None:
