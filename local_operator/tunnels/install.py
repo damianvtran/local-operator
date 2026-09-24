@@ -307,15 +307,22 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # THE CONSEQUENCE CLAUSE IS THE TUNNEL'S ALONE (design review round 1,
             # D4): this is the one restart of the four the operator can feel — the
             # phone link drops for a moment — and the summary already teaches that
-            # shape elsewhere (`mobile daemon restarted — refresh the phone UI`). It
-            # says what will happen next, never that anything was lost.
+            # shape elsewhere (`mobile daemon restarted — refresh the phone UI`).
+            #
+            # IT IS BOUNDED TO WHAT THE SUMMARY CAN SEE (round 2, D5). "remote access
+            # reconnects by itself" was the first spelling and it promises an outcome
+            # this step cannot observe: a restarted connector can come up with the
+            # relay still down (`LOGIN_REQUIRED`, `REFUSED` on suspended billing,
+            # `LEASE_PENDING`), and the remedy then lives on a surface the reader has
+            # no reason to open. This says what to expect and nothing more — 79
+            # columns, so it is still one row at 80.
             return launchd.restart_if_build_moved(
                 name=name,
                 label=LABEL,
                 path=path,
                 recovery="lop tunnel install",
                 run=_launchctl,
-                consequence="remote access reconnects by itself",
+                consequence="expect a brief remote-access blip",
             )
         if outcome.kind != "repaired":
             return outcome

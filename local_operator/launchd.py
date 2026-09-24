@@ -213,12 +213,18 @@ class PlistRefresh:
 
     ``consequence`` is the one clause a daemon's repair site adds about what the
     operator may NOTICE, and only the tunnel has one to give: its restart is the
-    only one of the four a person can feel (remote access reconnects). It rides on
-    the outcome rather than in the shared sentence because it is per-daemon
-    knowledge — the repair site knows it and the shared template cannot — and it is
-    deliberately absent for a restart that could not be confirmed
+    only one of the four a person can feel (remote access). It rides on the outcome
+    rather than in the shared sentence because it is per-daemon knowledge — the
+    repair site knows it and the shared template cannot — and it is deliberately
+    absent for a restart that could not be confirmed
     (:func:`build_move_failure`), so it can never be printed over a move that did
-    not happen.
+    not happen. It DISPLACES the generation id where it exists (round 2 ruling).
+
+    It must not promise an OUTCOME the summary cannot see (round 2, D5): a
+    restarted connector can come up with remote access still down — `LOGIN_REQUIRED`,
+    `REFUSED` on suspended billing and `LEASE_PENDING` are all states where it does
+    not return by itself — so the clause describes what to expect, never that
+    everything is well.
     """
 
     name: str
@@ -240,21 +246,32 @@ class PlistRefresh:
         answer is the generation the daemon was still running — so the line names
         where it went and where it was.
 
-        THE WORDING IS THE DESIGNER'S (design review round 1, D1-D2), and each part
-        of it is deliberate: no backticked ``current`` (that reads as a command the
-        reader could run, and this is a concept); an em-dash for the consequence
-        clause, as the sibling summary lines use; and "the new build" rather than
-        the pointer's own vocabulary, because the generation id in the parentheses
-        only makes sense to someone who has read this module. It claims the daemon
-        was RESTARTED, never that it is now healthy or verified on the new build — a
-        restart launchd accepted but that brought no new process up is not reported
-        as this at all (:func:`build_move_failure`).
+        THE WORDING IS THE DESIGNER'S, twice over (design review rounds 1 and 2), and
+        each part of it is deliberate: no backticked ``current`` (that reads as a
+        command the reader could run, and this is a concept); an em-dash for the
+        consequence clause, as the sibling summary lines use; and "the new build"
+        rather than the pointer's own vocabulary, because the generation id in the
+        parentheses only makes sense to someone who has read this module. It claims
+        the daemon was RESTARTED, never that it is now healthy, verified on the new
+        build, or still up — the confirmation behind it proves a new PROCESS is
+        behind the label, and launchd publishes a pid even for an attempt that dies
+        instantly (QA round 2, Q5). A restart that launchd refused, or that brought
+        no process back, is not reported as this at all
+        (:func:`build_move_failure`).
+
+        THE CONSEQUENCE CLAUSE DISPLACES THE GENERATION ID (round 2 ruling), rather
+        than following it: following it put this line at 119 columns, which re-opened
+        the width D2 had just closed, and the id is the one span a reader who has not
+        read this module cannot decode — whether it is even actionable is the ruling's
+        business, not this function's. The three daemons with no clause keep the tail,
+        so a block in which one of them moved still carries provenance on screen.
         """
         if self.kind == "repaired":
             return f"{self.name} daemon: refreshed a stale LaunchAgent and restarted it"
         if self.kind == "restarted":
-            line = f"{self.name} daemon: restarted onto the new build (was on {self.detail})"
-            return f"{line} — {self.consequence}" if self.consequence else line
+            if self.consequence:
+                return f"{self.name} daemon: restarted onto the new build — {self.consequence}"
+            return f"{self.name} daemon: restarted onto the new build (was on {self.detail})"
         return ""
 
     def warning(self) -> str:
@@ -604,6 +621,13 @@ def _await_new_pid(
     claim this module's own principle forbids in the other direction: a fact asserted
     from a probe that did not establish it (``None`` means no move; the mirror is
     "no new process means no move").
+
+    WHAT A CHANGED PID PROVES, NOTHING MORE: that launchd has a NEW PROCESS behind
+    the label. It is not evidence the process survived its first seconds (measured:
+    a pid is published even for an attempt that exits instantly) and it is not
+    evidence the new build was reached (that rests on the plist naming the shim, the
+    case :func:`restart_if_build_moved`'s own docstring names). The caller's sentence
+    is scoped to exactly this.
 
     Bounded and POLLED rather than a single read, for the measured reason
     :func:`_await_registration` exists: launchd takes a moment to publish the pid of
@@ -1216,10 +1240,22 @@ def restart_if_build_moved(
     if _await_new_pid(label=label, path=path, previous=pid, run=run) is None:
         # THE RESTART WAS ACCEPTED AND NOTHING CAME UP. The exit code is not evidence
         # (R3): reporting this as a move would announce a daemon that is not there.
+        #
+        # WHAT THIS CONFIRMATION DOES AND DOES NOT PROVE (QA round 2, Q5). A pid that
+        # changed proves a NEW PROCESS is behind the label; it does not prove the
+        # process survived (launchd publishes a pid even for an attempt that dies
+        # instantly, measured) and it does not prove the new BUILD was reached — that
+        # half rests on the plist naming the shim, which is why the summary claims
+        # "restarted" and never "healthy". The bound is in the sentence because it is
+        # a claim about the world made at a deadline: a launchd slower than it has a
+        # running daemon and an operator told otherwise.
         return build_move_failure(
             name,
             recovery,
             stale,
-            why="the restart it accepted did not bring a new process up",
+            why=(
+                "the restart it accepted did not report a new process within "
+                f"{_KICKSTART_PID_DEADLINE_S:g} s"
+            ),
         )
     return PlistRefresh(name=name, kind="restarted", detail=stale.name, consequence=consequence)

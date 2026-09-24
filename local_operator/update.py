@@ -1492,7 +1492,18 @@ def stale_generation_of_process(pid: int) -> Path | None:
     current = current_generation()
     if current is None:
         return None
-    return None if running.name == current.resolve().name else running
+    try:
+        current_name = current.resolve().name
+    except OSError:
+        # ``resolve`` can raise ``EINVAL`` on this platform while the link is being
+        # replaced underneath the reader — the same hazard ``current_generation``
+        # documents for its own ``readlink``. Measured at 0 failures in 400k reads
+        # against a tight symlink+rename loop (review round 2, NIT-5), so this is
+        # hardening rather than a fix; it is here because the module's rule is that
+        # an unreadable answer means NO MOVE, and a raise here would instead escape
+        # as a warning from the installer's guard.
+        return None
+    return None if running.name == current_name else running
 
 
 def current_install_root() -> Path | None:
@@ -4887,7 +4898,15 @@ def _daemon_refresh_invocation() -> tuple[list[str], str | None] | None:
     """
     from local_operator import procname
 
-    return _post_upgrade_invocation(procname.LABEL_DAEMONS_REFRESH, ["update", "--refresh-daemons"])
+    return _post_upgrade_invocation(
+        procname.LABEL_DAEMONS_REFRESH,
+        # ``--services-only``: this child's caller owns the mobile half. An upgrade
+        # bounces that daemon itself right after this process
+        # (:func:`refresh_daemons_after_upgrade`), so a child that bounced it too
+        # would restart the phone relay twice for one upgrade. See
+        # :func:`_run_daemon_repair`.
+        ["update", "--refresh-daemons", "--services-only"],
+    )
 
 
 def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], str | None] | None:
@@ -5350,6 +5369,35 @@ def daemons_refresh_command() -> int:
     return 0
 
 
+def _run_daemon_repair(*, services_only: bool) -> int:
+    """``lop update --refresh-daemons``: the repair, and the mobile half with it.
+
+    TWO CALLERS WITH ONE DIFFERENCE, which is what the flag carries. An UPGRADE
+    spawns the child that runs :func:`daemons_refresh_command` and then bounces the
+    mobile daemon itself (:func:`refresh_daemons_after_upgrade`, and the TUI's own
+    composition), so its child must not bounce it too — that is the double restart
+    review round 1 (R4) removed, and the child is told with ``--services-only``. A
+    HAND RUN has no caller to do it, so it does both halves, which is exactly what an
+    upgrade does; without that, a stale mobile daemon is skipped here while the other
+    three move (review round 2, MINOR-2).
+
+    The mobile half is UNCONDITIONAL, as it is on the upgrade path: the build
+    question is deliberately not asked for that daemon (see
+    ``mobile/install.py``), so this is not "bounce it if it is behind" but "the
+    phone relay is restarted by a repair, as it is by an upgrade".
+
+    A REFUSED REPAIR BOUNCES NOTHING (``_repair_refusal``, evaluated here because the
+    child reports a refusal as a printed warning and exit 0, which the caller cannot
+    tell from "nothing needed repairing"). A repair that is not allowed to rewrite a
+    plist must not restart the operator's daemon as a consolation.
+    """
+    code = daemons_refresh_command()
+    if services_only or _repair_refusal() is not None:
+        return code
+    _print_daemon_refreshes([_mobile_daemon_refresh(refresh_mobile_after_upgrade())])
+    return code
+
+
 def _print_current_generation() -> None:
     """Name the generation ``current`` now points at, or say nothing.
 
@@ -5673,6 +5721,7 @@ def update_command(
     *,
     check: bool = False,
     refresh_daemons: bool = False,
+    services_only: bool = False,
     from_snapshot: str | None = None,
     services: bool = True,
 ) -> int:
@@ -5681,9 +5730,15 @@ def update_command(
     ``--refresh-daemons`` is not an upgrade: it is the repair step that the
     upgrade path runs in a CHILD process from the newly installed wheel, so that
     the plists it renders are this build's and not the previous one's. See
-    :func:`daemons_refresh_command`. It is checked before the PyPI call because
-    it must work on any machine, including one whose network is down, and it
-    never reports a version. See the architect table for the other codes.
+    :func:`daemons_refresh_command` and :func:`_run_daemon_repair`. It is checked
+    before the PyPI call because it must work on any machine, including one whose
+    network is down, and it never reports a version. See the architect table for
+    the other codes.
+
+    ``services_only`` is what that CHILD is told by the upgrade that spawned it
+    (``--services-only``, hidden like the flag above): the caller bounces the mobile
+    daemon itself, immediately after, so the child must not — see
+    :func:`_run_daemon_repair`.
 
     ``--from-snapshot`` is checked before the PyPI call for the same reason: it
     installs a build that is already on this machine, so a host with no route to
@@ -5692,7 +5747,7 @@ def update_command(
     different questions and a caller that asked for both has asked for neither.
     """
     if refresh_daemons:
-        return daemons_refresh_command()
+        return _run_daemon_repair(services_only=services_only)
 
     if from_snapshot is not None:
         if check:
