@@ -148,7 +148,11 @@ async def test_resume_of_a_peers_session_names_the_device_and_mints_nothing(
                 server_b.identity.name in shown
             ), f"the guard did not name the owning device: {shown!r}"
             assert REMOTE_ID in shown, shown
-            assert "--engage warms it" in shown, shown
+            # SLICE V: the guard now OPENS the session on the peer rather than
+            # announcing it (mesh build plan §0 finding 2) — the device is still
+            # named, and the assertions below (no local factory, no local
+            # directory) are the ones that pin "nothing was minted here".
+            assert f"opened {REMOTE_ID} on" in shown, shown
 
         # AND THE FACTORY WAS NEVER REACHED. The other half of the guard's job: a
         # local session under the peer's id is minted by the resume factory, so
@@ -221,7 +225,11 @@ async def test_the_guard_speaks_without_the_sidebar_ever_having_polled(
                 "the guard was silent on a cold cache — which is the U20 defect, "
                 f"byte-for-byte: {shown!r}"
             )
-            assert "--engage warms it" in shown, shown
+            # SLICE V: the guard now OPENS the session on the peer rather than
+            # announcing it (mesh build plan §0 finding 2) — the device is still
+            # named, and the assertions below (no local factory, no local
+            # directory) are the ones that pin "nothing was minted here".
+            assert f"opened {REMOTE_ID} on" in shown, shown
 
         assert launched == [], "the guard let a peer's id reach the resume factory"
         assert not (server_a.root / "sessions" / REMOTE_ID).exists()
@@ -295,7 +303,11 @@ async def test_picking_a_peer_row_from_the_sidebar_names_the_device_not_the_loca
                 "the pick did not name the device holding the session: " f"{shown!r}"
             )
             assert REMOTE_ID in shown, shown
-            assert "--engage warms it" in shown, shown
+            # SLICE V: the guard now OPENS the session on the peer rather than
+            # announcing it (mesh build plan §0 finding 2) — the device is still
+            # named, and the assertions below (no local factory, no local
+            # directory) are the ones that pin "nothing was minted here".
+            assert f"opened {REMOTE_ID} on" in shown, shown
             # THE LOCAL STORE'S SENTENCE IS THE DEFECT, so its absence is the
             # assertion — on the pick path it was the whole answer.
             assert "no longer available" not in shown, shown

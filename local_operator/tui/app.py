@@ -252,6 +252,12 @@ from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
+from local_operator.tui.session_move import (
+    MOVE_PHASE_ORDER,
+    MoveTo,
+    parse_move_to,
+    run_session_move,
+)
 from local_operator.tui.session_navigation import SessionNavigation
 from local_operator.tui.session_presentation import (
     DraftRecoveryNotice,
@@ -8691,11 +8697,17 @@ class OperatorApp(App[None]):
             from local_operator.paths import config_dir
 
             if self._announce_remote_session(session_id, config_dir()):
-                # NOTHING IS HEADED ANYWHERE, so the intent a burst of keys reads
-                # is cleared here exactly as the no-op arm above clears it: a
-                # refusal must not leave the next `ctrl+shift+down` stepping from
-                # a row this device cannot open.
-                self._sidebar_navigation.intend("")
+                # THE PEER ROW STAYS THE ORIGIN (review round 9, MINOR 1). This
+                # used to clear the intent, and ``_switch_session_from`` then
+                # re-derived its origin from the ATTACHED session — the local row
+                # BEFORE the peer row — so the next `ctrl+shift+down` recomputed
+                # the same peer row forever and nothing below it was reachable by
+                # the shortcut. Leaving the id published means the next press
+                # steps from where the user just went: past the row, whether it
+                # opened (a remote viewer transition is under way) or was refused
+                # (an unreachable peer). ``intend`` never raises a boundary or
+                # starts a preparation, so leaving it set commits to nothing.
+                self._sidebar_navigation.intend(session_id)
                 return None
         self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
         return self._sidebar_navigation.select(session_id)
@@ -14070,61 +14082,79 @@ class OperatorApp(App[None]):
         self._resume_session(arg.strip() or RESUME_LATEST, notice)
 
     def _announce_remote_session(self, session_id: str, root: Path) -> bool:
-        """Say the peer's sentence for ``session_id`` when ANOTHER DEVICE holds it.
+        """OPEN ``session_id`` as a remote viewer when ANOTHER DEVICE holds it.
 
         THE ONE GUARD BEHIND EVERY WAY A USER NAMES A SESSION THEY ARE NOT ON
-        (UX round 5, U27). ``/resume <id>`` asked this question and the SIDEBAR'S
-        OWN PICK did not, so one session was answered two ways in one frame: the
-        composer said ``<id> is running on pixel-8 — /network sessions --peer
-        pixel-8 lists it …`` while ``enter`` on the row under the ``⇄ pixel-8``
-        heading said ``Could not open conversation: This conversation is no
-        longer available`` — the local store's FileNotFoundError, about a
-        conversation running perfectly well on the other machine, with no device,
-        no command and no next step in it. The design assigns the peer sentence
-        to that exact act (``mesh-ui.md`` §1.3: "a remote session picked from the
-        list"), so ONE guard is what keeps the sentence, the vocabulary and the
-        remote-before-local precedence from drifting a second time.
+        (UX round 5, U27), and it used to stop at a sentence: the sidebar's pick
+        and ``/resume`` both printed ``<id> is running on <device> — /network
+        sessions --peer …`` because nothing in production could open a remote
+        session (mesh build plan §0, finding 2). It now OPENS it: a viewer whose
+        owner is the peer (``session.remote_open``), adopted by the same code as
+        a local attach, so prompts, steering, ``/stop``, ``/model``, ``/rename``
+        and every routed slash execute on the peer's runtime.
 
-        CACHE-ONLY ON THE HIT, ONE READ ON THE MISS. It reads the producer the
-        sidebar's poll fills (``peer_session_rows``), so a row the user can SEE
-        costs a tuple scan on the path every pick and every ``/resume`` takes; the
-        read happens only when this device holds NO directory for the id, which is
-        what keeps a local resume from paying a dial (UX round 3, U20 — the guard
-        used to be cache-only with no fallback, so a user who had not opened the
-        sidebar this session got no guard at all, measured A/B on one build and
-        one id). Opening a remote session needs ``projection.resolve_owner`` wired
-        into the factory, which has no consumer in this tree yet — so the refusal
-        says what DOES reach it rather than pretending the row was dead.
+        The name is kept so both callers read unchanged; the contract is too — a
+        ``True`` is the WHOLE outcome for that id and the caller must start
+        nothing of its own (the U27 lesson: the pick used to start a local
+        navigation anyway and print the local store's failure over the top).
 
-        Returns whether it spoke. A ``True`` is the WHOLE outcome for that id: the
-        caller must return without starting anything (that is the difference U27
-        was about — the pick used to start a navigation anyway and report the
-        local store's failure over the top of this sentence).
+        CACHE-ONLY ON THE HIT, ONE READ ON THE MISS (UX round 3, U20):
+        ``remote_row_for`` reads the producer the sidebar's poll fills, and pays a
+        read only when this device holds no directory for the id, so a local
+        resume never waits on a peer.
+
+        AN UNREACHABLE PEER IS REFUSED WITH ITS REASON, not opened into a viewer
+        that can never bind (``mesh-ui.md`` §1.3 degraded states): the sentence
+        names the device, the reason in words, and the one command that
+        diagnoses the link.
+        """
+        from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
+        from local_operator.session.remote_open import remote_row_for
+
+        row = remote_row_for(session_id, root)
+        if row is None:
+            return False
+        device = row.owner_label or UNNAMED_DEVICE
+        if not row.reachable:
+            self._system_notice(
+                f"{session_id} is on {device}, which is unreachable "
+                f"({peer_reason_words(row.unreachable_reason)}). /network doctor "
+                f"{row.owner_device_name or row.owner_device} diagnoses the link.",
+                "warning",
+            )
+            return True
+        self._run_session_transition(self._open_remote_session(session_id, row, root))
+        return True
+
+    async def _open_remote_session(self, session_id: str, row: Any, root: Path) -> None:
+        """Build the peer's viewer and adopt it as the current session.
+
+        COLD, exactly like a local ``lop`` boot: nothing runs on the peer until
+        the user does something, and the first act binds it through the remote
+        owner. A failure to build the viewer (a relay that stopped between the
+        pick and here) is reported with the device named, and the current
+        session is left exactly as it was.
         """
         from local_operator.resume import UNNAMED_DEVICE
-        from local_operator.session.peer_rows import peer_session_row, peer_session_rows
+        from local_operator.session.remote_open import open_remote_viewer
 
-        remote = peer_session_row(session_id, root)
-        if remote is None and not (root / "sessions" / session_id).is_dir():
-            peer_session_rows(root)
-            remote = peer_session_row(session_id, root)
-        if remote is None or not remote.owner_device:
-            return False
-        self._system_notice(
-            f"{session_id} is running on {remote.owner_label or UNNAMED_DEVICE} — "
-            # THE REMEDY NAMES THE DEVICE THE SENTENCE JUST NAMED (QA round
-            # 11 Q-R11-2 / UX round 2 U12). It printed the 34-character
-            # id beside the device's own label, so the command it invites
-            # the user to run was spelled with the one word that sentence
-            # had just replaced. The NAME when there is one, and the full
-            # id otherwise — never ``owner_label``'s 8-cell abbreviation,
-            # which is a column here and not something the relay resolves.
-            f"/network sessions --peer "
-            f"{remote.owner_device_name or remote.owner_device} lists it, "
-            "--engage warms it, --stop ends it",
-            "warning",
-        )
-        return True
+        async def refuse_takeover() -> Any:
+            raise RuntimeError("a remote viewer never takes over a session")
+
+        device = row.owner_label or UNNAMED_DEVICE
+        try:
+            remote = await open_remote_viewer(
+                session_id, config_dir=root, takeover=refuse_takeover, row=row
+            )
+        except Exception as error:  # noqa: BLE001 — reported, never raised into the loop
+            logger.debug("could not open the remote session", exc_info=True)
+            self._system_notice(f"could not open {session_id} on {device}: {error}", "warning")
+            return
+        if remote is None:
+            self._system_notice(f"{session_id} is no longer listed on {device}", "warning")
+            return
+        await self._adopt_built_viewer(remote)
+        self._system_notice(f"opened {session_id} on {device}", "info")
 
     def _resume_session(
         self, resume_id: str, notice: NoticeFn, *, preserve_outgoing: bool = False
@@ -15080,7 +15110,16 @@ class OperatorApp(App[None]):
         # and nothing that still speaks in the present tense.
         if retry_notice is not None and retry_notice.is_attached:
             self._transcript_view().remove_block(retry_notice)
+        await self._adopt_built_viewer(remote)
 
+    async def _adopt_built_viewer(self, remote: Any) -> None:
+        """Swap an already-built viewer in for the current session, in one frame.
+
+        Extracted from :meth:`_attach_or_refuse` so a REMOTE viewer (mesh slice V,
+        :meth:`_open_remote_session`) is adopted by literally the same code as a
+        local attach — the gates, the outgoing session's offer-back, the ledger
+        reset — rather than by a second copy that drifts.
+        """
         detach_gates = getattr(self._session, "detach_viewer_gates", None)
         if callable(detach_gates):
             await cast(Callable[[], Awaitable[None]], detach_gates)()
@@ -15190,6 +15229,8 @@ class OperatorApp(App[None]):
         session: nothing lists it, so a user who did not copy the id has only
         `/resume` and the picker's Archived toggle to find it again.
         """
+        if self._route_lifecycle_to_peer("archive" if archived else "unarchive", False):
+            return
         session_id = self._resumable_session_id()
         if not session_id:
             # No transcript yet, so no id any resume path would accept. Saying
@@ -15231,6 +15272,85 @@ class OperatorApp(App[None]):
         # adds `/unarchive` to the composer, un-archiving takes it away.
         self._refresh_offered_commands()
 
+    def _remote_owner_facts(self) -> tuple[str, str, str] | None:
+        """``(session_id, device_id, device_name)`` when the CURRENT session is a peer's.
+
+        Read from the viewer's own owner (its placement names the home device),
+        so the answer is the one the facade already acts on — never a second
+        lookup that could disagree with where prompts are going.
+        """
+        session = self._session
+        if session is None or getattr(session, "runtime_locality", "") != "another-machine":
+            return None
+        owner = getattr(session, "_owner", None)
+        facts = getattr(owner, "facts", None)
+        device_id = str(getattr(facts, "device_id", "") or "")
+        if not device_id:
+            placement = getattr(owner, "placement", None)
+            device_id = str(getattr(placement, "home_device", "") or "")
+        if not device_id:
+            return None
+        return (
+            str(session.session_id),
+            device_id,
+            str(getattr(facts, "device_name", "") or ""),
+        )
+
+    def _route_lifecycle_to_peer(self, action: str, confirmed: bool) -> bool:
+        """Run ``/archive``, ``/unarchive`` or ``/delete`` ON THE PEER for a remote session.
+
+        Returns whether it took the command. The local handlers write THIS
+        device's ``archived-sessions.json`` and remove THIS device's directory —
+        both wrong for a conversation another device owns (design §8.3: never
+        write the local archive index for a remote id). The owner's own
+        implementation runs instead (``mobility.lifecycle`` →
+        ``archive_change``/``delete_session`` on the peer), and its sentence is
+        printed VERBATIM — including a refusal's guard sentence — because the
+        owner is the only side that can see why it said no.
+
+        ``/delete`` keeps its two-step shape: bare is the OWNER's rehearsal, and
+        only ``/delete yes`` sends ``confirmed``.
+        """
+        owner = self._remote_owner_facts()
+        if owner is None:
+            return False
+        session_id, device_id, device_name = owner
+        label = device_name or device_id
+
+        async def run() -> None:
+            from local_operator.network import mobility
+
+            try:
+                detail = await asyncio.to_thread(
+                    mobility.lifecycle,
+                    session_id,
+                    action=action,  # type: ignore[arg-type]
+                    peer=device_id,
+                    confirmed=confirmed,
+                )
+            except Exception as error:  # noqa: BLE001 — a sentence, never a crash
+                logger.debug("remote lifecycle failed", exc_info=True)
+                self._system_notice(f"{label} could not be asked to {action} it: {error}", "error")
+                return
+            message = str(detail.get("message") or "")
+            if not detail.get("ok"):
+                self._system_notice(f"{label} refused: {message or 'no reason given'}", "warning")
+                return
+            if action == "delete" and not confirmed:
+                self._system_notice(
+                    f"{message} Nothing was deleted. /delete yes deletes it on {label}.",
+                    "warning",
+                )
+                return
+            self._system_notice(f"{message} ({label})" if message else f"done on {label}", "info")
+            if action == "delete":
+                # The conversation no longer exists anywhere; land somewhere sane,
+                # exactly as the local delete does.
+                self._cmd_new("", self._notice)
+
+        self.run_worker(run(), group="session-delete", exit_on_error=False)
+        return True
+
     def _cmd_delete(self, arg: str, notice: NoticeFn) -> None:
         """``/delete [yes]`` — remove the current conversation for good.
 
@@ -15259,13 +15379,15 @@ class OperatorApp(App[None]):
         from local_operator.paths import config_dir
         from local_operator.session.cleanup import delete_session
 
+        confirmed = arg.strip().casefold() == "yes"
+        if self._route_lifecycle_to_peer("delete", confirmed):
+            return
         session_id = self._resumable_session_id()
         if not session_id:
             notice(
                 "this conversation has nothing saved yet — there is nothing to delete", "warning"
             )
             return
-        confirmed = arg.strip().casefold() == "yes"
 
         async def delete() -> None:
             try:
@@ -19646,6 +19768,13 @@ class OperatorApp(App[None]):
         `mobile/daemon.py` bounds the identical call the same way.
         """
         if session is None:
+            return
+        if getattr(session, "runtime_locality", "") == "another-machine":
+            # A REMOTE RUNTIME IS NEVER OFFERED BACK (mesh cell 1.2, mobility
+            # §3.3). "I engaged this and am leaving unused" is a claim only a
+            # viewer on the runtime's own machine can make: this terminal did not
+            # start the peer's runtime, and quitting here must never be what ends
+            # it. The peer's own residency drain still decides when it exits.
             return
         retire = getattr(session, "retire_if_unused", None)
         if not callable(retire):
@@ -26625,6 +26754,14 @@ class OperatorApp(App[None]):
         someone who cannot see them — the same argument ``/settings`` and
         ``/theme`` make about config.yml.
         """
+        # THE MOBILITY FORM IS DISCRIMINATED BY ``--to`` AND BY NOTHING ELSE
+        # (``mesh-ui.md`` §1.7): a path can look like an id and an id like a path,
+        # so the shape of the first token must never decide. Without ``--to`` the
+        # command below is today's, byte for byte.
+        mobility = parse_move_to(arg)
+        if mobility is not None:
+            self._cmd_move_session(mobility, notice)
+            return
         session = self._session
         if session is None:
             # A rejected command changed nothing, so the boot composition must
@@ -26678,6 +26815,152 @@ class OperatorApp(App[None]):
             MovePickerScreen(targets, current=cwd, complete=_complete, self_target=_self_target),
             _move_choice,
         )
+
+    def _cmd_move_session(self, request: "MoveTo", notice: NoticeFn) -> None:
+        """``/move [<id>] --to <peer|local> [--keep]`` — move a SESSION between devices.
+
+        THE CLI OWNS THE PROTOCOL (``lop sessions move … --json``, slice M's
+        frozen ``session_move`` contract) and this surface renders it: the phase
+        transcript while it runs, the receipt or the refusal after. Run as a
+        subprocess for the reason ``/new remote`` is: a move takes seconds to
+        minutes, far past a frame, and its refusal vocabulary is the relay's.
+
+        MOVING THE SESSION YOU ARE IN (plan §0 finding 9, slice M §9): an
+        attached viewer blocks the owner's exclusive retire, and this TUI's
+        viewer IS attached. So the current session is LEFT first — the TUI
+        switches to a fresh local session, which disposes the viewer and its
+        socket — and only then is the move run. A session with a turn in flight
+        is refused before anything is touched: the owner would refuse it anyway,
+        and leaving it first would strand the user on an empty screen for a move
+        that was never going to happen. On ``committed`` the moved session is
+        reopened where it now lives: attached-remote for ``--to <peer>``, local
+        for ``--to local``.
+        """
+        current = str(getattr(self._session, "session_id", "") or "")
+        target_id = request.session_id or current
+        if request.error:
+            self._system_notice(request.error, "error")
+            return
+        if not target_id:
+            body, kind = self._no_session_notice()
+            self._system_notice(body, kind)
+            return
+        if getattr(self, "_move_in_flight", False):
+            self._system_notice("a move is already running.", "warning")
+            return
+        leaving = target_id == current
+        if leaving and self._turn_is_live():
+            self._system_notice(
+                f"Could not move {target_id}: a turn is still running. Nothing changed. "
+                "esc first, or wait for it to finish.",
+                "error",
+            )
+            return
+        # THIS TUI'S OWN HOLD ON THE SESSION (M's deferred lease refusal, the TUI
+        # half): a sidebar source parked on the id is an attached viewer too, and
+        # the owner's exclusive fence would refuse the move naming "another
+        # terminal" — this one. Refused here in words that say which terminal,
+        # before anything moves; the relay-side backstop covers every other holder.
+        held = self._sidebar_sources.get(target_id)
+        if not leaving and held is not None and not held.retired:
+            self._system_notice(
+                f"Could not move {target_id}: this terminal is still holding it open in the "
+                "sidebar. Open it and run /move --to from inside it, or wait a moment for "
+                "the sidebar to let it go. Nothing changed.",
+                "error",
+            )
+            return
+        self._move_in_flight = True
+        phase_notice = NoticeBlock(self._move_phase_text(target_id, request, []), "info")
+        self._append_block(phase_notice, ends_empty_state=False)
+
+        async def run() -> None:
+            try:
+                if leaving:
+                    # DETACH FIRST: the move cannot retire a runtime this viewer
+                    # is attached to. `/new`'s own transition is the one that
+                    # disposes a viewer cleanly (and offers an unused LOCAL
+                    # runtime back — never a remote one, see
+                    # `_retire_unused_runtime`).
+                    await self._leave_for_move()
+                result = await asyncio.to_thread(
+                    run_session_move, target_id, request.to, keep=request.keep
+                )
+            finally:
+                self._move_in_flight = False
+            self._publish_move_result(target_id, request, result, phase_notice)
+
+        self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
+
+    async def _leave_for_move(self) -> None:
+        """Swap the current session out for a fresh local one, and wait for it."""
+        if self._resume_factory is None:
+            return
+        self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
+        await self._reload_session()
+
+    def _move_phase_text(self, session_id: str, request: "MoveTo", phases: list[str]) -> str:
+        """The live phase line: where the move is, in the contract's own order."""
+        steps = []
+        for phase in MOVE_PHASE_ORDER:
+            mark = "✓" if phase in phases else "·"
+            steps.append(f"{mark} {phase.replace('_', ' ')}")
+        verb = "copying" if request.keep else "moving"
+        return f"{verb} {session_id} to {request.to} — " + "  ".join(steps)
+
+    def _publish_move_result(
+        self,
+        session_id: str,
+        request: "MoveTo",
+        result: dict[str, Any],
+        phase_notice: NoticeBlock,
+    ) -> None:
+        """Restate the phase row as the receipt, then reopen the session where it lives."""
+        phases = [str(item.get("phase") or "") for item in result.get("phases") or ()]
+        if not result.get("ok"):
+            reached = str(result.get("phase_reached") or "")
+            changed = bool(result.get("changed"))
+            tail = "" if changed else " Nothing changed."
+            message = str(result.get("message") or "the move was refused")
+            text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
+            if reached in MOVE_PHASE_ORDER:
+                # A PARTIAL MOVE KEEPS ITS PHASE ROW: which step it reached is
+                # the fact the user needs to know what state the two devices are in.
+                phases = list(MOVE_PHASE_ORDER[: MOVE_PHASE_ORDER.index(reached) + 1])
+                phase_notice.restate(self._move_phase_text(session_id, request, phases), "error")
+            elif phase_notice.is_attached:
+                # A REFUSAL BEFORE ANY PHASE is one sentence, not two: a row of
+                # four empty steps painted red beside it only repeats "nothing
+                # happened" in a second, louder register (seen in the frame).
+                self._transcript_view().remove_block(phase_notice)
+            self._system_notice(text, "error")
+            return
+        phase_notice.restate(self._move_phase_text(session_id, request, phases), "info")
+        to_block = result.get("to_device") or {}
+        target = str(to_block.get("name") or to_block.get("device_id") or request.to)
+        new_id = str(result.get("new_session_id") or session_id)
+        if result.get("mode") == "keep":
+            receipt = f"Copied {session_id} to {target} as {new_id}; the original is untouched."
+        elif request.to == "local":
+            from_block = result.get("from_device") or {}
+            source = str(from_block.get("name") or from_block.get("device_id") or "the peer")
+            receipt = (
+                f"Moved {session_id} home from {source} (the copy there was deleted; "
+                "--keep would have left it)."
+            )
+        else:
+            receipt = f"Moved {session_id} to {target}. It runs there now."
+        self._system_notice(receipt, "info")
+        if str(result.get("phase") or "") not in ("committed", "done"):
+            return
+        # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both
+        # answers: a peer's id opens attached-remote (`_announce_remote_session`),
+        # a local id resumes. The peer cache is dropped first so the pick does
+        # not answer from a listing taken before the move committed.
+        from local_operator.session.peer_rows import clear_cache
+
+        clear_cache()
+        self._select_sidebar_session(new_id)
 
     def _apply_move(self, raw: str, notice: NoticeFn) -> None:
         """Validate ``raw`` and move the session to it, or say why not.
