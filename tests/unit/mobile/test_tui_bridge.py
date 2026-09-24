@@ -758,24 +758,46 @@ async def test_tui_hop_names_itself_on_all_three_expiry_paths(monkeypatch) -> No
     assert handle._late_hop_tasks, "the in-flight hop is not held by the handle"
 
 
+#: Commands a RELAYED connection must NOT be able to run in the owner's terminal,
+#: as ``(command, args, the name the refusal must use)``. The name differs from the
+#: command only for an alias, which is one of the spellings a denylist loses.
+_RELAYED_TERMINAL_REFUSED: tuple[tuple[str, str, str], ...] = (
+    # THE VERB THE REVIEW MEASURED: custody of a session handed to another device,
+    # or its whole transcript copied there with ``--keep``. The mesh vocabulary
+    # reserves this effect for ``move``, which a ``drive`` role does not hold.
+    ("move", "victim --to attacker-dev", "move"),
+    # The rest of the terminal's own verb set, which the mesh makes reachable:
+    ("exit", "", "exit"),
+    ("quit", "", "exit"),  # the registry ALIAS of /exit
+    ("update", "", "update"),
+    ("resume", "", "resume"),
+    ("rename", "new name", "rename"),
+    # Delete-scoped verbs keep their OWN sentence, because it names the capability
+    # an operator would have to grant.
+    ("archive", "", "archive"),
+    ("delete", "yes", "delete"),
+)
+
+
 @pytest.mark.asyncio
-async def test_a_relayed_slash_op_cannot_run_a_delete_scoped_verb_in_the_owners_terminal() -> None:
-    """V2 on the TUI host's OTHER carrier: this command runs in the OWNER's terminal.
+async def test_a_relayed_slash_op_runs_only_the_allowlist_in_the_owners_terminal() -> None:
+    """R2-1: this carrier types the line into the OWNER's terminal, so it is an ALLOWLIST.
 
     ``TuiSessionHandle.slash_images`` answers no typed result — it runs the line
-    through ``OperatorApp._run_slash_command`` and returns a ``ran /…`` receipt.
-    On this host ``/archive`` and ``/delete`` therefore reach this machine's OWN
-    local handlers: ``archive_change`` on this config root, and
-    ``delete_session`` against this machine's session directory. That is the
-    effect the mesh vocabulary reserves for ``delete``, while the ``slash`` op
-    that carries the command is authorised on ``slash`` — which a ``drive`` role
-    holds with no ``delete`` in it.
+    through ``OperatorApp._run_slash_command``, the owner's LOCAL dispatch, and
+    returns a ``ran /…`` receipt. The verbs there are the terminal's own, so a
+    denylist is always one verb behind: round 1 named the three delete-scoped ones
+    and round 2's review drove ``/move <id> --to <device>`` straight through it —
+    measured in two halves, the handle admitting ``ran /move victim --to
+    attacker-dev`` and that exact line making the real ``OperatorApp`` call
+    ``run_session_move('victim', 'attacker-dev')``. ``/exit``, ``/update``,
+    ``/resume`` and the rest arrive the same way.
 
-    Measured over two real relays on round 1's head, through the runtime host:
-    ``{"op": "slash", "command": "archive"}`` with one image attached reached the
-    owner's dispatcher with no connection facts at all, so the archive ran and
-    the owner's index recorded it. The TUI host needed its own gate because its
-    carrier never reaches the dispatcher at all.
+    THE DEFAULT IS THE OTHER HALF OF THE FIX, and the cells below pin it: with no
+    connection facts at all — ``locality`` and ``capabilities`` both unset, which is
+    the shape every forgotten forward takes — a command is REFUSED rather than
+    typed. Round 1's ``locality="local"`` default made a dropped forward permissive,
+    which is how V2 survived its first fix and this survived its second.
     """
     ran: list[str] = []
 
@@ -794,26 +816,54 @@ async def test_a_relayed_slash_op_cannot_run_a_delete_scoped_verb_in_the_owners_
     # runtime to fold.
     handle._refresh_state = lambda: None  # type: ignore[method-assign]
     drive = frozenset({"list", "view", "prompt", "steer", "stop", "slash"})
-    for command in ("archive", "unarchive", "delete"):
-        plain = await handle.slash(command, "yes", locality="remote", capabilities=drive)
-        imaged = await handle.slash_images(
-            command,
-            "yes",
-            [{"media_type": "image/png", "data": "aGk="}],
-            locality="remote",
-            capabilities=drive,
-        )
-        for receipt in (plain, imaged):
-            assert command in receipt, receipt
-            assert "delete" in receipt, receipt
+
+    for command, args, named in _RELAYED_TERMINAL_REFUSED:
+        receipts = [
+            await handle.slash(command, args, locality="remote", capabilities=drive),
+            await handle.slash_images(
+                command,
+                args,
+                [{"media_type": "image/png", "data": "aGk="}],
+                locality="remote",
+                capabilities=drive,
+            ),
+        ]
+        for receipt in receipts:
+            assert not receipt.startswith("ran "), receipt
+            assert f"/{named}" in receipt, receipt
+        if named in {"archive", "delete"}:
+            assert all("delete" in receipt for receipt in receipts), receipts
     assert ran == [], ran
 
-    # THE NEGATIVE CONTROL: the gate weighs the CAPABILITY, not the verb, so the
-    # same frame from a connection that resolved ``delete`` still runs the command
-    # in the owner's terminal exactly as it always has.
-    permitted = await handle.slash("archive", "", locality="remote", capabilities=drive | {"delete"})
-    assert permitted == "ran /archive", permitted
-    assert ran == ["/archive"], ran
-    # AND A LOCAL PANE IS UNTOUCHED BY ANY OF THIS.
+    # THE INVERTED DEFAULT, cell by cell: facts not forwarded at all; a locality
+    # with no capabilities; capabilities with no locality. All three are relayed
+    # as far as the gate can prove, and all three must refuse rather than run.
+    # Annotated because the three cells carry different value types, which is the
+    # point of the table rather than an accident of it.
+    cells: tuple[dict[str, Any], ...] = (
+        {},
+        {"locality": "remote"},
+        {"capabilities": drive},
+    )
+    for facts in cells:
+        receipt = await handle.slash("move", "victim --to attacker-dev", **facts)
+        assert not receipt.startswith("ran "), (facts, receipt)
+    # The half-forwarded case above is also the one a WRONG locality cannot cover:
+    # the gate is not "did the caller say remote", it is "is the caller provably
+    # local", and `None` is not.
+    assert ran == [], ran
+
+    # THE ALLOWLIST ITSELF: the set the runtime host runs down this same carrier
+    # for a relayed connection, so the two hosts answer a follower identically.
+    for command, args in (("goal", "read the logs"), ("compact", "")):
+        receipt = await handle.slash(command, args, locality="remote", capabilities=drive)
+        assert receipt == f"ran /{command}" + (f" {args}" if args else ""), receipt
+    assert ran == ["/goal read the logs", "/compact"], ran
+
+    # AND A LOCAL PANE IS UNTOUCHED: the user's own terminal keeps every verb,
+    # delete-scoped and move included, exactly as it always has.
     assert await handle.slash("archive", "", locality="local") == "ran /archive"
-    assert ran == ["/archive", "/archive"], ran
+    assert await handle.slash("move", "victim --to attacker-dev", locality="local") == (
+        "ran /move victim --to attacker-dev"
+    )
+    assert ran[-2:] == ["/archive", "/move victim --to attacker-dev"], ran

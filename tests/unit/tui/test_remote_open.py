@@ -316,23 +316,83 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
         assert "Moved sess1 to pixel-8. It runs there now." in shown, shown
 
 
+#: The five refusals the move contract can produce AFTER the current session has
+#: already been left, as ``(code, message, phase_reached, changed, tail)``. The
+#: shapes are the ones ``network.mobility`` builds: ``deadline_exceeded`` is the
+#: one that arrives with ``changed=True`` (``_move_refusal``'s ``changed=bool(
+#: reached and reached != "prepared")``), and its own message says the handoff was
+#: already committed — which is why a tail claiming "it did not move" contradicted
+#: the same sentence (round 2, R2-3).
+_MOVE_REFUSALS: tuple[tuple[str, str, str | None, bool, str], ...] = (
+    (
+        "busy",
+        "This session is working right now — try again when the turn finishes",
+        None,
+        False,
+        " You are back on sess1 — it did not move.",
+    ),
+    (
+        "digest_mismatch",
+        "the copy did not verify; it was rolled back",
+        "handing_off",
+        False,
+        " You are back on sess1 — it did not move.",
+    ),
+    (
+        "relay_unavailable",
+        "this device's relay is not running",
+        None,
+        False,
+        " You are back on sess1 — it did not move.",
+    ),
+    (
+        "session_unreachable",
+        "the session's runtime did not answer",
+        None,
+        False,
+        " You are back on sess1 — it did not move.",
+    ),
+    (
+        "deadline_exceeded",
+        "pixel-8 did not finish taking sess1 in time. This device has already "
+        "committed the handoff, so ask again rather than retrying from scratch",
+        "committed",
+        True,
+        " You are back on sess1; this move may already have gone through, so check "
+        "before asking again.",
+    ),
+)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message", "phase_reached", "changed", "tail"),
+    _MOVE_REFUSALS,
+    ids=[cell[0] for cell in _MOVE_REFUSALS],
+)
 async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
     monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    message: str,
+    phase_reached: str | None,
+    changed: bool,
+    tail: str,
 ) -> None:
-    """V3: leaving first is right; a refusal after it owes the user a way back.
+    """V3: leaving first is right; every refusal after it owes a way back — TRUE about the state.
 
     The ordered pair is genuinely required — an attached viewer blocks the owner's
     exclusive retire — so the CURRENT session is left before the CLI runs. Then
-    every refusal the CLI can produce (``busy``, ``digest_mismatch``,
-    ``relay_unavailable``, ``session_unreachable``, and the ``deadline_exceeded``
-    one built with ``changed=True``) returned without reopening it, because
+    every refusal the CLI produces returned without reopening it, because
     ``_publish_move_result`` reopened only on success. Measured against the real
     app on round 1's head: ``order == ['leave', 'move …']``, ``reopened == []``,
     the app sitting on the fresh local replacement — while the receipt said
-    "Nothing changed", which is false about a screen the user can see. The
-    committed refusal test used a NON-current id, so ``leaving`` was False and
-    this branch had no coverage at all.
+    "Nothing changed", which is false about a screen the user can see.
+
+    ALL FIVE CODES ARE CELLS (round 2, R2-3 asked for the ``changed=True`` one): the
+    way back has to hold for each, and the tail has to be true about each. A refusal
+    that arrives with ``changed=True`` says the move may already have gone through,
+    because ``network.mobility`` says exactly that in the message the same receipt
+    carries — a tail claiming "it did not move" would contradict it in one sentence.
 
     Nothing on either side of the sequence is stubbed: the real ``_leave_for_move``
     does the detaching and the real ``_select_sidebar_session`` is the way back, so
@@ -343,11 +403,11 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
     def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
         return {
             "ok": False,
-            "code": "busy",
-            "message": "This session is working right now — try again when the turn finishes",
+            "code": code,
+            "message": message,
             "session_id": session_id,
-            "phase_reached": None,
-            "changed": False,
+            "phase_reached": phase_reached,
+            "changed": changed,
         }
 
     monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
@@ -367,14 +427,16 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
         shown = " ".join(_notices(app))
         # THE WAY BACK: the app's own navigation completed on the session the user
         # was in, so the refusal did not leave them on the fresh local
-        # replacement. Before the fix this id was never reached — the refusal
+        # replacement. Before round 1's fix this id was never reached — the refusal
         # branch returned before the reopen, which only the success path had.
         assert app._sidebar_navigation.committed_id == "sess1"
         assert "sess1" in app._sidebar_sources, list(app._sidebar_sources)
-        # AND THE SENTENCE IS TRUE ABOUT IT. "Nothing changed" is false here:
-        # locally the TUI did leave, and the refusal did not put it back.
-        assert "You are back on sess1" in shown, shown
+        # AND THE SENTENCE IS TRUE ABOUT IT. "Nothing changed" is never true here:
+        # locally the TUI did leave.
+        assert f"Could not move sess1: {message}.{tail}" in shown, shown
         assert "Nothing changed." not in shown, shown
+        if changed:
+            assert "it did not move" not in shown, shown
 
 
 @pytest.mark.asyncio

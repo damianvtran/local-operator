@@ -26936,7 +26936,20 @@ class OperatorApp(App[None]):
         if not result.get("ok"):
             reached = str(result.get("phase_reached") or "")
             changed = bool(result.get("changed"))
-            if left:
+            if left and changed:
+                # THE HALF-COMMITTED CASE, where round 1's sentence was simply
+                # false. ``changed=True`` means the contract says the move already
+                # DID something — the CLI's own message for the
+                # ``deadline_exceeded`` refusal says the handoff was committed, and
+                # its ``--keep`` variant warns that asking again would make another
+                # copy — so "it did not move" would contradict the refusal printed
+                # in the same sentence. What is true, and all the user needs, is
+                # where they are now and that the move may have gone through.
+                tail = (
+                    f" You are back on {session_id}; this move may already have gone "
+                    "through, so check before asking again."
+                )
+            elif left:
                 # THE USER WAS MOVED OFF THE SESSION TO GET HERE. Saying
                 # "Nothing changed" would be a lie about a screen the user can
                 # see, and the caller would be left on a fresh local session with
@@ -40362,7 +40375,7 @@ class OperatorApp(App[None]):
         args: str,
         images: list[Any] | None = None,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         consumers: Iterable[str] | None = None,
         # ``None`` = "not said", read conservatively: only the LOCAL path omits
         # it, and that path is a pane that owns its gate, whose answer the local
@@ -40389,9 +40402,13 @@ class OperatorApp(App[None]):
                 round trip, and local model activation refreshes capacity off the UI loop.
 
                 ``locality`` is the invoking client's declared position (see
-                ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
-                opened here is in front of a user at THIS machine, which is true of
-        every client today and false for a future relayed remote device.
+                ``ClientLocality``), and ``None`` means the caller did not say
+                (round 2, R2-1): every gate reads that as RELAYED rather than as
+                local, so a carrier that forgets to forward it refuses instead of
+                running a verb against the owner's machine. Two readers now: the
+                ``/mcp`` grant verbs, where a browser opened here is in front of a
+                user at THIS machine, and the delete-scoped verbs, which the mesh
+                vocabulary reserves for ``delete`` (``_delete_scope_refusal``).
 
         NOT THE SAME FIELD AS ``SessionRow.locality`` (review round 4, NIT 2),
         and the two are named apart here rather than re-spelled: this one is
@@ -40483,7 +40500,7 @@ class OperatorApp(App[None]):
         command: str,
         args: str,
         images: list[Any] | None,
-        locality: str = "local",
+        locality: str | None = None,
         may_loosen: bool | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> Any:
@@ -40566,32 +40583,26 @@ class OperatorApp(App[None]):
     @staticmethod
     def _delete_scope_refusal(
         command: str,
-        locality: str,
+        locality: str | None,
         capabilities: frozenset[str] | None,
         SlashResult: Any,
     ) -> Any | None:
         """The refusal for a delete-scoped verb this CONNECTION may not run, else ``None``.
 
-        THE APP'S TWIN of ``ServingSessionHandle._delete_scope_refusal``, and
-        both read ONE predicate (``network.types.may_run_delete_scoped_slash``)
-        so a follower gets the same answer whichever host owns the session. The
-        import is function-local for the reason the sibling import in
-        ``_complete_unconsumed_action`` is: the TUI reaches the runtime's
-        package lazily rather than at module scope.
+        THE DECISION AND THE SENTENCE ARE NOT HERE: both live in
+        ``network.types.delete_scope_refusal``, which all three hosts call so they
+        cannot drift (round 2, R2-5; round 1 had the same three lines in three
+        files). This wrapper only wraps the sentence in this host's ``SlashResult``.
+        The import is function-local for the reason the sibling import in
+        ``_complete_unconsumed_action`` is: the TUI reaches the runtime's package
+        lazily rather than at module scope.
         """
-        from local_operator.network.types import (
-            DELETE_SCOPED_SLASH,
-            delete_scope_refusal_sentence,
-            may_run_delete_scoped_slash,
-        )
+        from local_operator.network.types import delete_scope_refusal
 
-        if command not in DELETE_SCOPED_SLASH:
+        text = delete_scope_refusal(command, locality, capabilities)
+        if text is None:
             return None
-        if may_run_delete_scoped_slash(locality, capabilities):
-            return None
-        return SlashResult(
-            kind="notice", text=delete_scope_refusal_sentence(command), style="warning"
-        )
+        return SlashResult(kind="notice", text=text, style="warning")
 
     def _archive_slash_result(self, archived: bool, SlashResult: Any) -> Any:
         """``/archive`` and ``/unarchive`` for a viewer attached to THIS owner.
@@ -41044,7 +41055,15 @@ class OperatorApp(App[None]):
             style="info",
         )
 
-    async def _mcp_slash_result(self, arg: str, SlashResult: Any, locality: str = "local") -> Any:
+    async def _mcp_slash_result(
+        self,
+        arg: str,
+        SlashResult: Any,
+        # ``None`` = "not said", read the same fail-closed way as the delete-scoped
+        # gate one call over (round 2, R2-1): a browser cannot be opened in front of
+        # a caller we cannot place.
+        locality: str | None = None,
+    ) -> Any:
         parts = arg.split()
         if not parts:
             block = self._mcp_block()
@@ -41112,7 +41131,7 @@ class OperatorApp(App[None]):
             self._session,
             sub,
             parts[1],
-            browser_is_reachable=locality != "remote",
+            browser_is_reachable=locality == "local",
             notify=lambda body, style: self._system_notice(body, cast("NoticeKind", style)),
             spawn=self._spawn_mcp_grant,
         )

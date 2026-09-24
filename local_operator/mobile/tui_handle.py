@@ -761,7 +761,7 @@ class TuiSessionHandle(SessionHandle):
         command: str,
         args: str,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> str:
         return await self.slash_images(
@@ -784,41 +784,47 @@ class TuiSessionHandle(SessionHandle):
         args: str,
         images: list[dict[str, str]] | None,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> str:
-        """Run one slash line in THIS terminal, or refuse a verb this connection may not run.
+        """Run one slash line in THIS terminal — for a LOCAL caller only.
 
         Unlike ``run_slash_authoritative`` — which answers a typed result the
         follower renders — this runs the command's own UI HERE, in the owner's
-        terminal, and returns a ``ran /…`` receipt. That is why the delete-scoped
-        verbs have to be refused at this point: ``/archive``, ``/unarchive`` and
-        ``/delete`` dispatched here reach ``OperatorApp._run_slash_command``, whose
-        local handlers write THIS machine's archive index and remove THIS
-        machine's session files — the effect the mesh vocabulary reserves for
-        ``delete``, and the same act ``run_slash_authoritative`` refuses one carrier
-        over. Without this, a relayed ``{"op": "slash", "command": "archive"}``
-        executes it in the owner's terminal regardless of the connection's
-        capability set.
+        terminal, and returns a ``ran /…`` receipt. That is why the decision is an
+        ALLOWLIST for a relaying connection rather than a list of forbidden
+        effects: the line reaches ``OperatorApp._run_slash_command``, whose verbs
+        are the terminal's own. Round 1 guarded the three delete-scoped verbs, and
+        round 2's review found the same carrier running ``/move <id> --to
+        <device>`` for a member holding no ``move`` — custody of the session
+        handed to another device, or copied off it with ``--keep`` — with
+        ``/exit``, ``/update`` and ``/resume`` behind it in the same set. A routed
+        command (``/rename``, ``/model``, ``/theme``) arrives as a ``slash_result``
+        frame instead — ``route_shared_slash`` is the seam that carries it — and
+        reaches ``run_slash_authoritative``, which answers without painting in this
+        terminal. The RUNTIME host's twin of this method refuses the same commands
+        for the same reason ("terminal-only here"), so a follower is not losing a
+        capability here that it has there: the refusal is what makes the two hosts
+        agree on the un-imaged ``slash`` frame.
 
-        The refusal is the SHARED sentence (``network.types``), so a follower
-        reads the same words whichever carrier its command travelled — the two
-        spellings of one refusal is how the two hosts would drift. Only a RELAYED
-        connection is weighed: a local pane runs these as it always has.
+        THE DECISION AND THE WORDS ARE NOT HERE. Both live in
+        ``network.types.terminal_slash_refusal``, which is also where the DEFAULT
+        was inverted: ``locality`` is ``None`` when a caller did not forward it,
+        and ``None`` is read as RELAYED, so a carrier that forgets the forward
+        refuses instead of running the line. Round 1's ``locality="local"``
+        default was the permissive direction, and every forgotten forward in this
+        slice has taken it.
+
+        The alias is resolved first because the decision matches registry PRIMARY
+        names, and the helper cannot resolve it (``network.types`` is stdlib-only by
+        contract, ``slash_commands`` is not).
         """
-        from local_operator.network.types import (
-            DELETE_SCOPED_SLASH,
-            delete_scope_refusal_sentence,
-            may_run_delete_scoped_slash,
-        )
+        from local_operator.network.types import terminal_slash_refusal
         from local_operator.slash_commands import primary_slash_name
 
-        # The registry primary first: the branches and the verb set below match
-        # literals, and an ALIAS off the wire would otherwise walk past them.
-        if primary_slash_name(command) in DELETE_SCOPED_SLASH and not may_run_delete_scoped_slash(
-            locality, capabilities
-        ):
-            return delete_scope_refusal_sentence(primary_slash_name(command))
+        refusal = terminal_slash_refusal(primary_slash_name(command), locality, capabilities)
+        if refusal is not None:
+            return refusal
         line = f"/{command}" + (f" {args}" if args else "")
 
         def apply() -> None:
