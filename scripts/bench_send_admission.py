@@ -64,7 +64,6 @@ import asyncio
 import json
 import os
 import signal
-import statistics
 import subprocess
 import sys
 import threading
@@ -516,7 +515,6 @@ def main() -> int:
             print(f"  {count:6d} {name}")
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2))
-    del statistics
     return 0
 
 
