@@ -99,6 +99,15 @@ afterEach(() => {
 	applySessionPin.mockClear();
 });
 
+/* QA Q18: the heaviest tests in this file are SECONDS of real work under load —
+   a module re-import per case, four scroll positions in a loop, waits on
+   animation frames — and the default 5s per-test budget is what they trip
+   (4 of 220 in the full suite at load, 220/220 with `--testTimeout=30000`).
+   Raised HERE, on the tests that do that work, and not suite-wide: the budget
+   is a property of what a test does, not of the runner, and a global raise
+   would hide a genuinely hung test everywhere else. */
+const SLOW = 30_000;
+
 describe("★ Pinned section", () => {
 	it("shows a pinned row under ★ Pinned and not in Active or Previous", () => {
 		sessionList = [
@@ -493,7 +502,7 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		} finally {
 			vi.unstubAllGlobals();
 		}
-	});
+	}, SLOW);
 
 	it("does not pay a collapse twice when the browser already clamped it at the bottom (Q5)", async () => {
 		/* THE REGRESSION. At the very bottom, the old layout sibling's collapse
@@ -510,7 +519,7 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		} finally {
 			vi.unstubAllGlobals();
 		}
-	});
+	}, SLOW);
 
 	it("shows and hides the band without reflowing the list", async () => {
 		/* THE PROPERTY THAT RETIRES THE WHOLE CLASS OF DEFECT (Q9–Q11, D18–D21):
@@ -541,7 +550,7 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		}
 		expect(list.className).toBe(listBefore);
 		expect(list.getAttribute("style")).toBeNull();
-	});
+	}, SLOW);
 
 	it("keeps the band collapsed and empty until a refusal arrives", () => {
 		sessionList = longList();
@@ -569,4 +578,381 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		const captionBox = caption.parentElement?.parentElement as HTMLElement;
 		expect(captionBox.className).toContain("grid-rows-[1fr]");
 	});
+});
+
+describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D18)", () => {
+	/* THE REAL STORE, FED THE FRAMES A DAEMON SENDS. The blocks above stub the
+	   store's optimistic half away, which is exactly the half under test here:
+	   with `useSessions` pinned to the test's own array, no press can reorder
+	   anything and a test written up there would pass on the defect as it
+	   stands. So this block re-imports the module with only the list STREAM
+	   replaced, and everything above it — the frame handler, the mark
+	   settlement, the screen's own `applySessionPin` — is the production one.
+	   `vi.doMock` here beats the file-level `vi.mock` for the dynamic import
+	   below, which is what makes the re-import possible at all. */
+	const ROWS = 12;
+	const NAMES = Array.from({ length: ROWS }, (_, index) => `Row ${index}`);
+
+	/* One card at 100% root font, and the band's box at the two scales Q13 and
+	   Q15 were measured at. happy-dom lays nothing out, so the geometry the
+	   pressed-row rule reads is supplied below. */
+	const ROW_H = 56;
+	const ROW_H_200 = 112;
+	const BAND_H = 44;
+	const BAND_H_200 = 100;
+	const COLUMN = 740;
+
+	function rowsOf(count: number, pinned: string[] = []): SessionSummary[] {
+		return Array.from({ length: count }, (_, index) =>
+			summary({
+				session_id: `r${index}`,
+				conversation_name: `Row ${index}`,
+				pinned: pinned.includes(`r${index}`),
+			}),
+		);
+	}
+
+	/* THE DAEMON'S TRANSPORT, faked at the one place the browser owns it. The
+	   store's own plumbing — the frame handler, the mark settlement, the
+	   refcount — stays real, which is the point: the defect lives in that code,
+	   not in EventSource. */
+	let opened: FakeEventSource[] = [];
+	class FakeEventSource {
+		readonly listeners = new Map<string, Array<(event: { data: string }) => void>>();
+		onopen: (() => void) | null = null;
+		onerror: (() => void) | null = null;
+		constructor(readonly url: string) {
+			opened.push(this);
+		}
+		addEventListener(event: string, listener: (event: { data: string }) => void) {
+			const list = this.listeners.get(event) ?? [];
+			list.push(listener);
+			this.listeners.set(event, list);
+		}
+		removeEventListener() {}
+		close() {}
+	}
+
+	/* The real store, and a stream with no state of its own: a fresh module per
+	   test, so a source left over from the previous one is never the one that
+	   answers. Renders, because every case below starts from the daemon's first
+	   frame and that is all it starts from. */
+	async function realStoreHarness() {
+		vi.resetModules();
+		vi.doUnmock("./store");
+		opened = [];
+		vi.stubGlobal("EventSource", FakeEventSource);
+		const { SessionListScreen: Screen } = await import(
+			"./screens/session-list"
+		);
+		render(<Screen />);
+		expect(opened).toHaveLength(1);
+	}
+
+	/* One list frame, exactly as the daemon writes it. Awaited `act`, because the
+	   store hands the frame to React from outside React's own event handling and a
+	   synchronous `act` scope does not flush that update before the next assertion
+	   (measured: the DOM still showed the previous frame's ★ after the push). */
+	async function pushFrame(sessions: SessionSummary[]) {
+		await act(async () => {
+			for (const source of opened) {
+				for (const listener of source.listeners.get("sessions") ?? []) {
+					listener({ data: JSON.stringify({ sessions }) });
+				}
+			}
+		});
+	}
+
+	function mainScroller(): HTMLElement {
+		const found = cardByName("Row 0").closest(".overflow-y-auto");
+		expect(found).not.toBeNull();
+		return found as HTMLElement;
+	}
+
+	/* THE ROWS IN THE ORDER THE BROWSER LAYS THEM OUT. This is the instrument
+	   that matters for both defects: the scroll the reader saw was the browser
+	   answering a REORDER, so the thing to assert about is the rendered order
+	   of the rows, not any computed position. Names are matched longest-first
+	   because `Row 1` is a prefix of `Row 10`. */
+	function rowOrder(list: HTMLElement): string[] {
+		const longestFirst = [...NAMES].sort((a, b) => b.length - a.length);
+		return Array.from(list.querySelectorAll("button")).map(
+			(card) =>
+				longestFirst.find((name) => (card.textContent ?? "").includes(name)) ??
+				"?",
+		);
+	}
+
+	function pinnedSection(): boolean {
+		return screen.queryByText("★ Pinned") !== null;
+	}
+
+	function starOn(name: string): boolean {
+		return cardByName(name).querySelector("[aria-label=\"pinned\"]") !== null;
+	}
+
+	/* The column, modelled: one `rowHeight`-tall card per rendered row, in DOM
+	   order, offset by the scroller's own `scrollTop`. What it buys is the one
+	   thing these tests are about — a row's position is a function of the ORDER
+	   it is rendered in, so a reorder moves every row below it exactly as it
+	   does in a browser, and the screen's own `getBoundingClientRect` reads
+	   answer about that model. `writes` counts only the SCREEN's writes. */
+	function modelColumn(
+		list: HTMLElement,
+		geometry: { rowHeight: number; bandHeight: number },
+	) {
+		let offset = 0;
+		let writes = 0;
+		const cards = () =>
+			Array.from(list.querySelectorAll("button")) as HTMLElement[];
+		const box = (top: number, height: number): DOMRect =>
+			({
+				top,
+				bottom: top + height,
+				height,
+				left: 0,
+				right: 0,
+				width: 0,
+				x: 0,
+				y: top,
+				toJSON: () => ({}),
+			}) as DOMRect;
+		Object.defineProperty(list, "scrollTop", {
+			configurable: true,
+			get: () => offset,
+			set: (value: number) => {
+				writes += 1;
+				offset = Math.max(0, Math.round(value));
+			},
+		});
+		Object.defineProperty(list, "clientHeight", {
+			configurable: true,
+			get: () => COLUMN,
+		});
+		Object.defineProperty(list, "scrollHeight", {
+			configurable: true,
+			get: () => cards().length * geometry.rowHeight,
+		});
+		const band = screen.getByRole("alert").parentElement as HTMLElement;
+		Object.defineProperty(band, "offsetHeight", {
+			configurable: true,
+			get: () => geometry.bandHeight,
+		});
+		const realRect = HTMLElement.prototype.getBoundingClientRect;
+		HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+			if (this === list) return box(0, COLUMN);
+			const index = cards().indexOf(this);
+			if (index < 0) return realRect.call(this);
+			return box(index * geometry.rowHeight - offset, geometry.rowHeight);
+		};
+		return {
+			bandBottom: () => geometry.bandHeight,
+			offset: () => offset,
+			writes: () => writes,
+			scrollTo(value: number) {
+				offset = Math.max(0, Math.round(value));
+			},
+			restore() {
+				HTMLElement.prototype.getBoundingClientRect = realRect;
+			},
+		};
+	}
+
+	/* The two frames the pressed-row rule waits for, waited for: the screen's
+	   pair was scheduled at the commit, so a pair scheduled after it runs after
+	   it — the move has been made by the time this resolves. */
+	async function settled() {
+		await act(async () => {
+			await new Promise((resolve) =>
+				requestAnimationFrame(() => requestAnimationFrame(resolve)),
+			);
+			await Promise.resolve();
+		});
+	}
+
+	async function refusedPinOn(name: string) {
+		setSessionPin.mockRejectedValueOnce(
+			new Error("no saved messages yet — pin it after you send one"),
+		);
+		longPress(cardByName(name));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).not.toBe(""),
+		);
+	}
+
+	const restores: Array<() => void> = [];
+	afterEach(() => {
+		while (restores.length > 0) restores.pop()?.();
+		/* The faked transport goes with the test that faked it. */
+		vi.unstubAllGlobals();
+		vi.doUnmock("./store");
+	});
+
+	it("shows the ★ on the press, and leaves the list alone until the daemon answers (Q13/D18)", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(4));
+		const list = mainScroller();
+		const before = rowOrder(list);
+
+		longPress(cardByName("Row 2"));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+
+		/* Instant feedback: the ★ is drawn in the commit that handles the tap. */
+		expect(starOn("Row 2")).toBe(true);
+		/* And the list has not moved: no section, same order. THE DEFECT WAS
+		   HERE — the row lifted into ★ Pinned on this commit, and the browser
+		   answering that reorder is what scrolled the reader. */
+		expect(pinnedSection()).toBe(false);
+		expect(rowOrder(list)).toEqual(before);
+
+		/* The POST resolving is not a confirmation either: the daemon's list
+		   frame is, and only it moves the row. */
+		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("r2", true));
+		await settled();
+		expect(pinnedSection()).toBe(false);
+		expect(rowOrder(list)).toEqual(before);
+
+		await pushFrame(rowsOf(4, ["r2"]));
+		expect(pinnedSection()).toBe(true);
+		expect(rowOrder(list)[0]).toBe("Row 2");
+	}, SLOW);
+
+	it("reorders nothing at all when the pin is refused, at 100% and at 200% (Q13/D18)", async () => {
+		for (const [scale, rowHeight, bandHeight] of [
+			["100%", ROW_H, BAND_H],
+			["200%", ROW_H_200, BAND_H_200],
+		] as Array<[string, number, number]>) {
+			await realStoreHarness();
+			await pushFrame(rowsOf(6));
+			const list = mainScroller();
+			const model = modelColumn(list, { rowHeight, bandHeight });
+			restores.push(() => model.restore());
+			const before = rowOrder(list);
+
+			await refusedPinOn("Row 3");
+			await settled();
+
+			/* Both halves of the property, at both scales: the refusal is on
+			   screen, the ★ it refuted has fallen back, no ★ Pinned section ever
+			   existed, and the rows are in the order they were — nothing moved,
+			   so there is nothing to move back. The pixel response of the old
+			   optimistic lift (−51.0px at 100%, −101.5px at 200%) came from this
+			   reorder happening; it cannot happen from here. */
+			expect(screen.getByRole("alert").textContent).toContain(
+				"no saved messages yet",
+			);
+			expect(starOn("Row 3")).toBe(false);
+			expect(pinnedSection()).toBe(false);
+			expect(rowOrder(list)).toEqual(before);
+
+			cleanup();
+		}
+	}, SLOW);
+
+	it("moves rows for a pin the daemon confirms, and only by that one row (Q14, accepted)", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(6));
+		const list = mainScroller();
+		const before = rowOrder(list);
+
+		/* Another client pins Row 1. The row leaves Active for ★ Pinned and the
+		   rows below it move by at most its own height: a CONFIRMED pin reorders
+		   the list, which the maintainer accepted and the PR documents. */
+		await pushFrame(rowsOf(6, ["r1"]));
+		expect(pinnedSection()).toBe(true);
+		expect(rowOrder(list)).toEqual([
+			"Row 1",
+			...before.filter((name) => name !== "Row 1"),
+		]);
+
+		/* And the refusal that follows moves nothing further: the same gesture,
+		   one answered and one not, and only the answered one may reorder. */
+		const confirmed = rowOrder(list);
+		await refusedPinOn("Row 4");
+		await settled();
+		expect(rowOrder(list)).toEqual(confirmed);
+	}, SLOW);
+
+	it("keeps the pressed row clear of the band once the list has settled, at 200% (Q15/D20)", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(ROWS));
+		const list = mainScroller();
+		const model = modelColumn(list, {
+			rowHeight: ROW_H_200,
+			bandHeight: BAND_H_200,
+		});
+		restores.push(() => model.restore());
+		/* The reader is at the top of the row they press: at 200% root font the
+		   band covers that row, so the reason would be unreadable beside it. */
+		model.scrollTo(3 * ROW_H_200);
+
+		await refusedPinOn("Row 3");
+		await settled();
+
+		expect(cardByName("Row 3").getBoundingClientRect().top).toBeGreaterThanOrEqual(
+			model.bandBottom(),
+		);
+		/* The minimum that clears the band, written once. Before the fix this
+		   effect ran in the commit that carried the error text, against a
+		   layout the reader never saw — the row's pre-lift position — so its
+		   own condition was false and it never ran again (writes stayed 0). */
+		expect(model.writes()).toBe(1);
+		expect(model.offset()).toBe(3 * ROW_H_200 - BAND_H_200);
+	}, SLOW);
+
+	it("leaves the scroll untouched when the pressed row is already clear of the band", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(ROWS));
+		const list = mainScroller();
+		const model = modelColumn(list, {
+			rowHeight: ROW_H_200,
+			bandHeight: BAND_H_200,
+		});
+		restores.push(() => model.restore());
+		/* Scrolled PAST the row that was pressed: the reason is behind the
+		   reader, and the rule must not drag them back to a row they left. */
+		model.scrollTo(6 * ROW_H_200);
+
+		await refusedPinOn("Row 3");
+		await settled();
+
+		expect(model.writes()).toBe(0);
+		expect(model.offset()).toBe(6 * ROW_H_200);
+	}, SLOW);
+
+	it("never shows the ★ Pinned section across a refused pin — nothing ever reordered (D18)", async () => {
+		await realStoreHarness();
+		await pushFrame(rowsOf(6));
+		const list = mainScroller();
+		const before = rowOrder(list);
+
+		/* Sampled at each commit the refusal passes through. The ★ on the row is
+		   the control that proves the samples can see a change at all: if the
+		   section is absent in every one of them, it is because no commit
+		   contained it, not because the sampler was looking at the wrong DOM. */
+		setSessionPin.mockRejectedValueOnce(
+			new Error("no saved messages yet — pin it after you send one"),
+		);
+		longPress(cardByName("Row 3"));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin to the top" }));
+		const pressed = { star: starOn("Row 3"), section: pinnedSection() };
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).not.toBe(""),
+		);
+		await settled();
+		const refused = { star: starOn("Row 3"), section: pinnedSection() };
+		/* The daemon's own frame, carrying the truth, closes the sequence out. */
+		await pushFrame(rowsOf(6));
+		const reported = pinnedSection();
+
+		expect(pressed.star).toBe(true);
+		expect([pressed.section, refused.section, reported]).toEqual([
+			false,
+			false,
+			false,
+		]);
+		expect(refused.star).toBe(false);
+		expect(rowOrder(list)).toEqual(before);
+	}, SLOW);
 });
