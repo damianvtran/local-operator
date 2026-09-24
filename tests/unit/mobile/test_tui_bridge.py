@@ -758,112 +758,144 @@ async def test_tui_hop_names_itself_on_all_three_expiry_paths(monkeypatch) -> No
     assert handle._late_hop_tasks, "the in-flight hop is not held by the handle"
 
 
-#: Commands a RELAYED connection must NOT be able to run in the owner's terminal,
-#: as ``(command, args, the name the refusal must use)``. The name differs from the
-#: command only for an alias, which is one of the spellings a denylist loses.
-_RELAYED_TERMINAL_REFUSED: tuple[tuple[str, str, str], ...] = (
-    # THE VERB THE REVIEW MEASURED: custody of a session handed to another device,
-    # or its whole transcript copied there with ``--keep``. The mesh vocabulary
-    # reserves this effect for ``move``, which a ``drive`` role does not hold.
-    ("move", "victim --to attacker-dev", "move"),
-    # The rest of the terminal's own verb set, which the mesh makes reachable:
-    ("exit", "", "exit"),
-    ("quit", "", "exit"),  # the registry ALIAS of /exit
-    ("update", "", "update"),
-    ("resume", "", "resume"),
-    ("rename", "new name", "rename"),
-    # Delete-scoped verbs keep their OWN sentence, because it names the capability
-    # an operator would have to grant.
-    ("archive", "", "archive"),
-    ("delete", "yes", "delete"),
+#: The four verbs the review named for a phone, and the lane each must reach.
+#: ``terminal`` is the owner's own dispatch (``OperatorApp._run_slash_command``);
+#: ``dispatcher`` is the per-verb-gated typed seam it must be ROUTED to, which is
+#: what keeps the phone working without re-opening ``/move``.
+_PHONE_COMMANDS: tuple[tuple[str, str, str], ...] = (
+    ("rename", "probe title", "dispatcher"),
+    ("model", "", "dispatcher"),
+    ("mcp", "login notion", "dispatcher"),
+    ("stop", "", "terminal"),
+)
+
+#: And the verbs a phone must NOT reach, with the lane that answers them. The
+#: delete-scoped pair is refused by the CAPABILITY gate before any lane; the rest
+#: are refused by the dispatcher itself, which has no branch for them — so the
+#: "no" is the app's own sentence rather than a second copy of it here.
+_PHONE_REFUSED: tuple[tuple[str, str, str], ...] = (
+    ("move", "abc --to evil", "dispatcher"),
+    ("archive", "", "refused"),
+    ("delete", "yes", "refused"),
+    ("exit", "", "dispatcher"),
+    ("update", "", "dispatcher"),
+    ("btw", "", "dispatcher"),
 )
 
 
 @pytest.mark.asyncio
-async def test_a_relayed_slash_op_runs_only_the_allowlist_in_the_owners_terminal() -> None:
-    """R2-1: this carrier types the line into the OWNER's terminal, so it is an ALLOWLIST.
+async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() -> None:
+    """R3-1: the phone sends every typed ``/…`` line down this op, so ROUTE, don't refuse.
 
-    ``TuiSessionHandle.slash_images`` answers no typed result — it runs the line
-    through ``OperatorApp._run_slash_command``, the owner's LOCAL dispatch, and
-    returns a ``ran /…`` receipt. The verbs there are the terminal's own, so a
-    denylist is always one verb behind: round 1 named the three delete-scoped ones
-    and round 2's review drove ``/move <id> --to <device>`` straight through it —
-    measured in two halves, the handle admitting ``ran /move victim --to
-    attacker-dev`` and that exact line making the real ``OperatorApp`` call
-    ``run_session_move('victim', 'attacker-dev')``. ``/exit``, ``/update``,
-    ``/resume`` and the rest arrive the same way.
+    The phone composer sends any ``/…`` line as ``{"op": "slash"}`` and the phone
+    daemon authenticates with ``"locality": "remote"`` and no capabilities, so the
+    round-2 allowlist turned away the operator's own phone: ``/model``, ``/rename``
+    and ``/mcp login`` were refused on a TUI-hosted session where the same session
+    on a runtime host answers them. Locality alone cannot tell a phone from a mesh
+    member, so the fix is to route: a relayed command outside the terminal set goes
+    to the per-verb-gated dispatcher (``run_slash_authoritative``), which has no
+    branch for ``/move``, ``/exit`` or ``/update`` and therefore cannot run them.
 
-    THE DEFAULT IS THE OTHER HALF OF THE FIX, and the cells below pin it: with no
-    connection facts at all — ``locality`` and ``capabilities`` both unset, which is
-    the shape every forgotten forward takes — a command is REFUSED rather than
-    typed. Round 1's ``locality="local"`` default made a dropped forward permissive,
-    which is how V2 survived its first fix and this survived its second.
+    ``stop`` is the one verb that stays in the terminal set: it is session-scoped,
+    the caller is looking at the session it stops, and the dispatcher has no branch
+    for it — routing it would break the phone's ``/stop`` for nothing.
     """
     ran: list[str] = []
+    routed: list[tuple[str, str, str | None, frozenset[str] | None]] = []
 
     class App:
         def __init__(self) -> None:
             self._session = FakeSession()
+            self._loop = asyncio.get_running_loop()
 
         def call_from_thread(self, callback) -> None:  # noqa: ANN001
-            callback()
+            # The REAL ``App.call_from_thread`` runs the callback on Textual's
+            # loop, where a running loop exists and ``_on_app``'s ``wrapped`` can
+            # create the task that carries the answer back. Calling it inline
+            # instead runs it on the worker thread ``_on_app`` hops through, which
+            # has no running loop — measured here as ``RuntimeError: no running
+            # event loop``, the failure ``tests/unit/mobile/test_tui_ask.py``
+            # documents for same-thread calls.
+            self._loop.call_soon_threadsafe(callback)
 
         def _run_slash_command(self, line, attachments=None) -> None:  # noqa: ANN001
             ran.append(line)
+
+        async def run_slash_authoritative(  # noqa: ANN201
+            self, command, args, images=None, *, locality=None, capabilities=None, **kw
+        ):
+            routed.append((command, args, locality, capabilities))
+            return {"kind": "notice", "text": f"owner answered /{command}", "style": "info"}
 
     handle = TuiSessionHandle(App())  # type: ignore[arg-type]
     # The projection push is not what this test is about, and a fake app has no
     # runtime to fold.
     handle._refresh_state = lambda: None  # type: ignore[method-assign]
-    drive = frozenset({"list", "view", "prompt", "steer", "stop", "slash"})
 
-    for command, args, named in _RELAYED_TERMINAL_REFUSED:
-        receipts = [
-            await handle.slash(command, args, locality="remote", capabilities=drive),
-            await handle.slash_images(
-                command,
-                args,
-                [{"media_type": "image/png", "data": "aGk="}],
-                locality="remote",
-                capabilities=drive,
-            ),
-        ]
-        for receipt in receipts:
-            assert not receipt.startswith("ran "), receipt
-            assert f"/{named}" in receipt, receipt
-        if named in {"archive", "delete"}:
-            assert all("delete" in receipt for receipt in receipts), receipts
+    # THE PHONE'S OWN FRAME: ``locality="remote"`` and no capability claim at all.
+    for command, args, lane in _PHONE_COMMANDS:
+        receipt = await handle.slash(command, args, locality="remote")
+        if lane == "terminal":
+            assert receipt == f"ran /{command}" + (f" {args}" if args else ""), receipt
+        else:
+            assert receipt == f"owner answered /{command}", receipt
+    assert ran == ["/stop"], ran
+    assert [row[0] for row in routed] == ["rename", "model", "mcp"], routed
+
+    # AND NOTHING DANGEROUS GETS THERE. The delete-scoped pair is refused before a
+    # lane is chosen; the rest reach the dispatcher, whose refusal is its own.
+    ran.clear()
+    routed.clear()
+    for command, args, lane in _PHONE_REFUSED:
+        receipt = await handle.slash(command, args, locality="remote")
+        assert not receipt.startswith("ran "), receipt
+        if lane == "refused":
+            assert "delete" in receipt, receipt
+        else:
+            assert receipt == f"owner answered /{command}", receipt
     assert ran == [], ran
+    assert [row[0] for row in routed] == ["move", "exit", "update", "btw"], routed
 
-    # THE INVERTED DEFAULT, cell by cell: facts not forwarded at all; a locality
-    # with no capabilities; capabilities with no locality. All three are relayed
-    # as far as the gate can prove, and all three must refuse rather than run.
-    # Annotated because the three cells carry different value types, which is the
-    # point of the table rather than an accident of it.
+    # A RELAYED MESH MEMBER WITH ``delete`` KEEPS ITS TERMINAL LANE (round 1's
+    # negative control, and the one receipt shape routing must not change): the
+    # routed dispatcher would answer with a typed notice instead of ``ran /…``.
+    ran.clear()
+    routed.clear()
+    receipt = await handle.slash(
+        "archive", "", locality="remote", capabilities=frozenset({"slash", "delete"})
+    )
+    assert receipt == "ran /archive", receipt
+    assert ran == ["/archive"] and routed == []
+
+    # A LOCAL PANE IS UNTOUCHED: the user's own terminal keeps every verb,
+    # delete-scoped and move included, exactly as it always has.
+    ran.clear()
+    routed.clear()
+    moved = await handle.slash("move", "abc --to evil", locality="local")
+    assert moved == "ran /move abc --to evil", moved
+    assert await handle.slash("archive", "", locality="local") == "ran /archive"
+    assert ran == ["/move abc --to evil", "/archive"] and routed == []
+
+    # THE DEFAULT IS STILL FAIL-CLOSED, and what it proves is narrower than
+    # "a forgotten forward is refused" (round 3, R3-5): with no facts the caller is
+    # routed to the DISPATCHER rather than into the terminal. Restoring the
+    # permissive default puts the line back in the terminal — mutate
+    # ``locality: str | None = None`` to ``locality: str = "local"`` on both handle
+    # methods and these cells report ``ran /move …`` instead. What it does NOT
+    # prove is that a future carrier passing ``"local"`` while holding no facts is
+    # safe: that caller reaches the terminal lane, and only the terminal set plus
+    # the delete gate bound what it can do there.
     cells: tuple[dict[str, Any], ...] = (
         {},
         {"locality": "remote"},
-        {"capabilities": drive},
+        {"capabilities": frozenset({"slash", "delete"})},
     )
     for facts in cells:
-        receipt = await handle.slash("move", "victim --to attacker-dev", **facts)
+        ran.clear()
+        routed.clear()
+        receipt = await handle.slash("move", "abc --to evil", **facts)
         assert not receipt.startswith("ran "), (facts, receipt)
-    # The half-forwarded case above is also the one a WRONG locality cannot cover:
-    # the gate is not "did the caller say remote", it is "is the caller provably
-    # local", and `None` is not.
-    assert ran == [], ran
-
-    # THE ALLOWLIST ITSELF: the set the runtime host runs down this same carrier
-    # for a relayed connection, so the two hosts answer a follower identically.
-    for command, args in (("goal", "read the logs"), ("compact", "")):
-        receipt = await handle.slash(command, args, locality="remote", capabilities=drive)
-        assert receipt == f"ran /{command}" + (f" {args}" if args else ""), receipt
-    assert ran == ["/goal read the logs", "/compact"], ran
-
-    # AND A LOCAL PANE IS UNTOUCHED: the user's own terminal keeps every verb,
-    # delete-scoped and move included, exactly as it always has.
-    assert await handle.slash("archive", "", locality="local") == "ran /archive"
-    assert await handle.slash("move", "victim --to attacker-dev", locality="local") == (
-        "ran /move victim --to attacker-dev"
-    )
-    assert ran[-2:] == ["/archive", "/move victim --to attacker-dev"], ran
+        assert ran == [], (facts, ran)
+    # The half-forwarded case is the one a WRONG locality cannot cover: the gate is
+    # not "did the caller say remote", it is "is the caller provably local".
+    assert routed and all(row[2] != "local" for row in routed), routed

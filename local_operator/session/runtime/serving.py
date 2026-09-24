@@ -3543,13 +3543,14 @@ class ServingSessionHandle(SessionHandle):
         """Session-level slash commands — the ones with meaning off-terminal.
         TUI chrome (/help tables, /usage panels) is the phone UI's own job.
 
-        THE ALLOWLIST IS THIS METHOD'S WHOLE SURFACE, and it is why the runtime
+        THESE TWO VERBS ARE THIS METHOD'S WHOLE SURFACE, and it is why the runtime
         host cannot repeat carrier 5's defect: ``goal`` and ``compact`` are run,
         and everything else is refused by name before anything happens. A relaying
         caller is no more privileged here than a local one — there is no terminal
         to type into — while the TUI host's twin, which DOES type into the owner's
-        terminal, has to allowlist separately (``network.types.
-        terminal_slash_refusal``).
+        terminal, decides its lane separately and sends everything outside its own
+        session-scoped set to the per-verb-gated dispatcher instead
+        (``network.types.may_run_slash_in_the_owners_terminal``; round 3, R3-1).
         """
         self._check_loop_thread()
         if command == "goal":

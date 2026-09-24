@@ -520,9 +520,12 @@ INNER_OP_CAPABILITY: dict[str, str] = {
 #: the owner's own terminal rather than reaching a dispatcher at all) and a second
 #: copy of the set is free to drift on one host alone. Round 2 found that the
 #: terminal carrier cannot be closed by naming effects at all — it reaches the
-#: terminal's WHOLE local verb set, ``/move --to`` and ``/exit`` included — so it is
-#: allowlisted instead (:func:`terminal_slash_refusal`); this set stays what the
-#: three ROUTED hosts check.
+#: terminal's WHOLE local verb set, ``/move --to`` and ``/exit`` included — so round
+#: 3 replaced the naming with a LANE decision (``/move`` and friends go to the typed
+#: dispatcher, which has no branch for them, rather than to a refusal list:
+#: :func:`may_run_slash_in_the_owners_terminal`). This set stays what the three
+#: ROUTED hosts check, and what the terminal carrier checks for a delete-scoped verb
+#: before letting a capable member run it there.
 DELETE_SCOPED_SLASH: frozenset[str] = frozenset({"archive", "unarchive", "delete"})
 
 
@@ -562,45 +565,17 @@ def delete_scope_refusal_sentence(command: str) -> str:
     It names the capability and no remedy on purpose: neither host can see who
     the operator is or which device would have to grant it, and a viewer told to
     ask for something it cannot name has been handed a task instead of a fact.
+    It also says what the CONNECTION did not resolve rather than what it holds,
+    because the callers refused here are not all mesh members: the phone sends
+    ``locality="remote"`` with no capability set at all, so a sentence claiming it
+    "holds 'slash' without 'delete'" would be false about the caller it is told to
+    (agent review round 3, R3-4).
     """
     return (
         f"/{command} archives or deletes a session on this machine, which needs the "
-        "'delete' capability. This connection holds 'slash' without 'delete', so it "
-        "was refused and nothing was changed."
+        "'delete' capability. This connection did not resolve it, so the command was "
+        "refused and nothing was changed."
     )
-
-
-#: The slash commands a RELAYED connection may run through the ONE carrier that
-#: types the line into the OWNER's own terminal.
-#:
-#: WHY AN ALLOWLIST, WHERE THE DELETE-SCOPED GATE IS A CAPABILITY CHECK. The other
-#: carriers answer from a dispatcher whose verb set is known and gated per verb
-#: (``slash_result`` → ``ServingSessionHandle._slash_result`` /
-#: ``OperatorApp._slash_result``, and the runtime host's imaged ``slash``, which
-#: defers to that same dispatcher). This carrier is different in kind: it hands the
-#: line to the owner's LOCAL command dispatch (``OperatorApp._run_slash_command``),
-#: where the verbs are the terminal's own — ``/exit`` ends the owner's app,
-#: ``/update`` rebuilds its install, ``/resume``/``/new``/``/clear`` drive its
-#: session store, and ``/move <id> --to <device>`` hands a session's custody to
-#: another device or copies its whole transcript there with ``--keep``. That set is
-#: not enumerable from here and it grows, so a denylist is always one round behind:
-#: naming three verbs closed three verbs, and the fourth was the next review's
-#: blocker.
-#:
-#: WHY THESE TWO. They are the set the RUNTIME host runs down this same op —
-#: ``ServingSessionHandle.slash`` runs ``goal`` and ``compact`` and answers
-#: "terminal-only here" for everything else — so a follower's un-imaged command is
-#: refused or run by both hosts alike, instead of one host running in its terminal
-#: what the other refuses. Both are also session-scoped work with no machine-local
-#: effect: they change the session's goal or compaction, not the machine.
-#:
-#: THE IMAGED TWIN DIFFERS BY NECESSITY, and the direction is the safe one. A
-#: runtime host's imaged ``slash`` defers to the typed dispatcher, which is gated
-#: per verb and paints nothing in anyone's terminal; a TUI host's imaged ``slash``
-#: lands in the owner's terminal just like the un-imaged one, so it is allowlisted
-#: here too. The rule is about the CARRIER — does this reach a terminal — not about
-#: the frame's payload.
-RELAYED_TERMINAL_SLASH: frozenset[str] = frozenset({"goal", "compact"})
 
 
 def delete_scope_refusal(
@@ -608,11 +583,16 @@ def delete_scope_refusal(
 ) -> str | None:
     """The ONE refusal for a delete-scoped verb this connection may not run.
 
-    ``None`` means "may run". All THREE routed hosts ask this and then wrap the
-    sentence in their own shape (a ``SlashResult`` for the two dispatchers, a
-    receipt for the terminal carrier), which is why the decision and the words
-    live here and not in each host: they were copied into three places in round 1,
-    and R2-5 asked for one.
+    ``None`` means "may run". The three routed hosts ask this and wrap the sentence
+    in their own shape (a ``SlashResult`` for the two dispatchers, a receipt for the
+    terminal carrier), which is why the decision and the words live here and not in
+    each host: they were copied into three places in round 1, and R2-5 asked for one.
+
+    A RELAYED caller with NO capability set fails closed here, and that half is not
+    implied by the locality half — ``capabilities=None`` means "not said", not
+    "said none", and both refuse. Round 3's review found the surviving mutation on
+    exactly this asymmetry, so see the cells in ``test_stream_op_gate.py`` and
+    ``test_serving.py`` that pin it.
 
     ``command`` must already be the registry PRIMARY name. This module is
     stdlib-only by contract — ``cli.py`` imports the network package for every
@@ -627,48 +607,79 @@ def delete_scope_refusal(
     return delete_scope_refusal_sentence(command)
 
 
-def terminal_slash_refusal(
-    command: str, locality: str | None, capabilities: frozenset[str] | None
-) -> str | None:
-    """The refusal for a command this connection may not run in the OWNER's terminal.
+#: The slash commands a RELAYED connection may run through the ONE carrier that
+#: types the line into the OWNER's own terminal.
+#:
+#: WHY A LIST AT ALL, WHEN EVERYTHING ELSE IS ROUTED. The other carriers answer
+#: from a dispatcher whose verb set is known and gated per verb (``slash_result`` →
+#: ``ServingSessionHandle._slash_result`` / ``OperatorApp._slash_result``). This
+#: carrier is different in kind: it hands the line to the owner's LOCAL command
+#: dispatch (``OperatorApp._run_slash_command``), where the verbs are the
+#: terminal's own — ``/exit`` ends the owner's app, ``/update`` rebuilds its
+#: install, ``/resume``/``/new``/``/clear`` drive its session store, and
+#: ``/move <id> --to <device>`` hands a session's custody to another device or
+#: copies its whole transcript there with ``--keep``. That set is not enumerable
+#: from here and it grows, so a denylist is always one round behind: naming three
+#: verbs closed three verbs, and the fourth was a review's blocker.
+#:
+#: SO A RELAYED COMMAND THAT IS NOT LISTED HERE GOES TO THE TYPED DISPATCHER
+#: rather than being refused (:func:`may_run_slash_in_the_owners_terminal` decides
+#: which lane a command gets). That is what keeps the operator's PHONE working: the
+#: phone composer sends every typed ``/…`` line as the ``slash`` op
+#: (``mobile/web/src/components/composer.tsx``), and the phone daemon authenticates
+#: with ``"locality": "remote"`` and no capabilities (``mobile/daemon.py``), so a
+#: refusal here is a refusal for the phone. The dispatcher is the right lane for it
+#: because it gates per verb, answers with a typed receipt, and has NO branch for
+#: ``/move``, ``/exit`` or ``/update`` — the verbs that made this carrier dangerous
+#: — so those come back as its own honest sentence.
+#:
+#: WHY THESE THREE. ``goal`` and ``compact`` are the set the RUNTIME host runs down
+#: this same op (``ServingSessionHandle.slash`` runs them and answers
+#: "terminal-only here" for everything else), so a follower's un-imaged command is
+#: run by both hosts alike instead of one host running in its terminal what the
+#: other refuses; both are session-scoped work with no machine-local effect.
+#: ``stop`` is the kill switch: it is session-scoped, the caller is looking at the
+#: session it stops, and it is the one verb in this family the routed dispatcher
+#: has no branch for — refusing it would break ``/stop`` on the phone, which is a
+#: verb the operator uses. It grants no authority a relayed caller did not already
+#: hold: the ``stop`` op is its own row and the phone's dedicated stop path uses it.
+#:
+#: THE IMAGED TWIN USES THE SAME RULE, because the rule is about the CARRIER — does
+#: this reach a terminal — not about the frame's payload.
+RELAYED_TERMINAL_SLASH: frozenset[str] = frozenset({"goal", "compact", "stop"})
 
-    THE DEFAULT IS THE FIX, NOT THE LIST. ``locality`` is ``None`` when a caller
-    did not forward the connection's facts, and ``None`` is read as RELAYED — so a
-    carrier that forgets to pass them gets the refusal rather than the owner's
-    terminal. Round 1 shipped the opposite reading (``locality: str = "local"``),
-    which made every forgotten forward permissive: V2 survived its first fix that
-    way, and a ``drive`` member's ``/move --to`` survived its second.
 
-    Order, and why: the delete-scoped verbs answer with their own sentence first,
-    because that one names the capability an operator would have to grant, while
-    the generic one only says the command does not travel. A LOCAL caller is
-    refused by neither — it is the user's own terminal, and ``/exit`` must still
-    exit.
+def may_run_slash_in_the_owners_terminal(
+    command: str, locality: str | None, capabilities: frozenset[str] | None = None
+) -> bool:
+    """Whether this connection's command may be TYPED INTO the owner's terminal.
+
+    THREE WAYS TO BE ALLOWED, and nothing else is:
+
+    * a LOCAL caller — it is the user's own terminal, and ``/exit`` must still exit;
+    * a relayed command in :data:`RELAYED_TERMINAL_SLASH` — the session-scoped set
+      the runtime host runs down this same op;
+    * a delete-scoped verb the connection RESOLVED (``delete``), because those have
+      no other lane that keeps their receipt: the routed dispatcher would archive on
+      the owner and answer with a typed notice, while the caller that holds the
+      capability asked this carrier and has always got ``ran /archive``.
+
+    THE DEFAULT IS THE FIX, NOT THE LIST. ``locality`` is ``None`` when a caller did
+    not forward the connection's facts, and ``None`` is read as RELAYED — so a
+    carrier that forgets to pass them routes to the dispatcher rather than into the
+    owner's terminal. Round 1 shipped the opposite reading
+    (``locality: str = "local"``), which made every forgotten forward permissive:
+    V2 survived its first fix that way, and a ``drive`` member's ``/move --to``
+    survived its second.
 
     ``command`` must already be the registry PRIMARY name; see
     :func:`delete_scope_refusal` for why this module cannot resolve it.
     """
-    delete_refusal = delete_scope_refusal(command, locality, capabilities)
-    if delete_refusal is not None:
-        return delete_refusal
     if locality == "local":
-        return None
+        return True
     if command in RELAYED_TERMINAL_SLASH:
-        return None
-    return terminal_slash_refusal_sentence(command)
-
-
-def terminal_slash_refusal_sentence(command: str) -> str:
-    """The ONE sentence for a command this carrier will not run for a remote device.
-
-    It names where the command DOES work rather than what the peer lacks: the peer
-    cannot grant itself anything, and a sentence that only says "no" leaves the
-    operator with nothing to do next — the same rule the peer lane's refusals keep.
-    """
-    return (
-        f"/{command} runs in the terminal that holds this session, and a remote device "
-        "cannot run it there — run it on that machine"
-    )
+        return True
+    return command in DELETE_SCOPED_SLASH and may_run_delete_scoped_slash(locality, capabilities)
 
 
 # ---------------------------------------------------------------------------

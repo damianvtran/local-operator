@@ -299,6 +299,33 @@ def _settle(client: _StreamClient) -> None:
             return
 
 
+def test_the_delete_gate_refuses_a_relayed_caller_with_no_capability_set_at_all() -> None:
+    """R3-3: the CAPABILITY half of the delete gate, which no routed cell covered.
+
+    ``capabilities=None`` means "not said" and must fail closed, exactly as
+    ``locality=None`` does. Until this cell existed, the mutation
+    ``may_run_delete_scoped_slash = lambda loc, caps: loc == "local" or caps is None
+    or "delete" in caps`` passed the whole suite — every routed cell either carried
+    a set or was already refused by its locality, so a relayed caller that had
+    resolved nothing could archive, and round 3's review found the mutation alive.
+
+    Both spellings of "nothing" are here on purpose: ``None`` is a caller that did
+    not forward a set, ``frozenset()`` is one that forwarded an empty one. The
+    allowed directions are pinned too, so a predicate that simply refused every
+    relayed caller could not satisfy this.
+    """
+    from local_operator.network.types import delete_scope_refusal
+
+    for command in ("archive", "unarchive", "delete"):
+        assert delete_scope_refusal(command, "remote", None) is not None, command
+        assert delete_scope_refusal(command, "remote", frozenset()) is not None, command
+        assert delete_scope_refusal(command, None, None) is not None, command
+        assert delete_scope_refusal(command, "remote", frozenset({"slash", "delete"})) is None
+        assert delete_scope_refusal(command, "local", None) is None
+    # And a verb outside the set is never this gate's business, whatever the facts.
+    assert delete_scope_refusal("rename", "remote", None) is None
+
+
 def test_a_drive_member_cannot_archive_or_delete_through_the_slash_seam(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
