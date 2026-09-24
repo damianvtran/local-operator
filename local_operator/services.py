@@ -514,10 +514,9 @@ def is_serve_command(command: str) -> bool:
     # most needed to be able to end (review round 3, R3-1: this predicate refused the
     # app's live backend on 1111 while `services status` told the operator to reclaim
     # that exact pid).
-    entrypoint = _serve_entrypoint_length(words[1:])
+    entrypoint = _serve_entrypoint_length(words)
     if entrypoint:
-        verb = 1 + entrypoint
-        return verb < len(words) and words[verb] == SERVE_LAUNCHER_VERB
+        return True
     return False
 
 
@@ -538,17 +537,32 @@ def _procname_label_length(words: list[str]) -> int:
 
 
 def _serve_entrypoint_length(words: list[str]) -> int:
-    """How many leading words are the desktop app's ``-c`` entry point; ``0`` if none.
+    """Where the desktop app's ``-c`` entry point ends and its verb sits; ``0`` if none.
 
     ``<interpreter> -c "from local_operator.cli import main; main()" serve …`` — the
     app's managed backend, which is never branded (see :data:`SERVE_ENTRYPOINT_WORDS`).
+
+    THE ``-c`` IS FOUND, NOT ASSUMED TO BE ``words[1]``. The interpreter comes from
+    the console script's shebang, which is a home-derived path, so a home with a
+    space in it (``/Users/John Doe/…``) makes the interpreter two ``ps`` words and
+    the ``-c`` the third — and the round-3 version refused the app's own backend for
+    exactly those users. Measured (review round 4, R4-1).
+
+    The accepted trade-off, recorded because it widens a proof: this also admits the
+    app's own pre-exec wrapper (``bash -c 'exec "$@"' owned-serve <interpreter> -c …
+    serve``). That costs nothing here — the plan execs, so no nameable pid is ever
+    that ``bash``, and if one were, it would be a shell whose argv carries this
+    product's serve entry point, which is what a STRAY proof has to recognise.
     """
     window = len(SERVE_ENTRYPOINT_WORDS)
-    if len(words) < window + 1 or words[0] != "-c":
-        return 0
-    if tuple(words[1 : 1 + window]) != SERVE_ENTRYPOINT_WORDS:
-        return 0
-    return window + 1
+    for index in range(len(words) - window - 1):
+        if words[index] != "-c":
+            continue
+        if tuple(words[index + 1 : index + 1 + window]) != SERVE_ENTRYPOINT_WORDS:
+            continue
+        if words[index + 1 + window] == SERVE_LAUNCHER_VERB:
+            return index + window + 2
+    return 0
 
 
 def serve_process(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> str | None:

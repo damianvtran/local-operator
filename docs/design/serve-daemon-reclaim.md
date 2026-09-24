@@ -185,6 +185,14 @@ read is the evidence.
 
 ## 5. Follow-ups this record does not cover
 
+- **The ``-c`` entry point is transcribed, not shared.** `SERVE_ENTRYPOINT_WORDS`
+  mirrors ``local-operator-ui``'s ``SERVE_ENTRYPOINT``
+  (``src/main/backend/owned-serve-launch.ts``); nothing on either side can detect
+  drift, and a change there silently re-creates the refusal of the app's own
+  backend (review round 4, R4-2, recorded only). A cross-repo constant is not
+  available today: the app is TypeScript and this is Python, and the two ship
+  independently.
+
 1. **The app must not die from an address it did not choose.** The other half of
    the incident: two independent gates (`blocksSpawn` on a record in its own
    root; the occupancy gate on the configured origin) each refuse, and the app

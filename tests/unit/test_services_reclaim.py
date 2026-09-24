@@ -931,6 +931,20 @@ def test_the_launcher_proof_survives_the_procname_label_and_the_app_entrypoint()
         "/Users/me/.local/share/lop/generations/2026/tools/local-operator/bin/python "
         "-c from local_operator.cli import main; main() --version"
     )
+    # A HOME WITH A SPACE IN IT (review round 4, R4-1): the interpreter is reached by
+    # a home-derived path, so it can be two `ps` words — and the round-3 version,
+    # which assumed `words[1]` was the `-c`, refused the app's own backend for exactly
+    # those users.
+    assert services.is_serve_command(
+        "/Users/John Doe/.local/share/lop/generations/2026/tools/local-operator/bin/python "
+        "-c from local_operator.cli import main; main() serve --port 1111"
+    )
+    # And the app's pre-exec wrapper, which the search admits: no nameable pid is
+    # ever that bash (the plan execs), and its argv still carries the entry point.
+    assert services.is_serve_command(
+        "bash -c exec \"$@\" owned-serve /Users/me/.local/bin/python "
+        "-c from local_operator.cli import main; main() serve --port 1111"
+    )
 
 
 def test_the_wait_answers_from_its_last_read() -> None:
