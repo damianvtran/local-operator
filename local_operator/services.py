@@ -399,9 +399,9 @@ SERVE_LAUNCHER_VERB = "serve"
 #: must not be able to leave this proof behind (review round 3, NIT-2).
 _SERVE_LABEL_PREFIX = re.compile(
     "^"
-    + re.escape(procname.LABEL_SERVE).replace(
-        re.escape("{brand}"), re.escape(procname.BRAND)
-    ).replace(re.escape("{port}"), r"\d+")
+    + re.escape(procname.LABEL_SERVE)
+    .replace(re.escape("{brand}"), re.escape(procname.BRAND))
+    .replace(re.escape("{port}"), r"\d+")
     + "$"
 )
 
@@ -698,9 +698,7 @@ VERDICTS: dict[str, _Verdict] = {
     ),
     WEDGED: _Verdict("recorded on {address}, but the daemon stopped reporting", "wedged"),
     STALE: _Verdict("recorded on {address}, but its process has exited", "stale"),
-    STRAY: _Verdict(
-        "serves {address}, which no record of this install claims", "stray"
-    ),
+    STRAY: _Verdict("serves {address}, which no record of this install claims", "stray"),
 }
 
 

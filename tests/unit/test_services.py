@@ -357,10 +357,16 @@ def test_status_lines_name_the_drift_and_the_capability(
     # The pointer names a build WITH a ref, so the ref half of every comparison is
     # visible in the assertions below.
     pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
-    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([
-            _record(source_ref="9f2c1ab"),
-            _record(pid=9, version="0.59.0", source_ref="4d3ce1d", reloadable=False),
-        ]))
+    monkeypatch.setattr(
+        services,
+        "serve_daemon_reports",
+        _fleet(
+            [
+                _record(source_ref="9f2c1ab"),
+                _record(pid=9, version="0.59.0", source_ref="4d3ce1d", reloadable=False),
+            ]
+        ),
+    )
     monkeypatch.setattr(
         services,
         "_supervised_daemon_plists",
@@ -636,10 +642,16 @@ def test_the_hand_restart_count_agrees_with_itself(
 ) -> None:
     """Code round 12, R12-3: `1 need restarting by hand` is right at two, wrong at one."""
     pointer["stamp"] = BuildStamp(version="0.59.0", source_ref="4d3ce1d")
-    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([
-            _record(source_ref="a"),
-            _record(pid=4, source_ref="b", reloadable=False),
-        ]))
+    monkeypatch.setattr(
+        services,
+        "serve_daemon_reports",
+        _fleet(
+            [
+                _record(source_ref="a"),
+                _record(pid=4, source_ref="b", reloadable=False),
+            ]
+        ),
+    )
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     assert (
         "run `lop services restart` for the 1 it can move; 1 needs restarting by hand"
