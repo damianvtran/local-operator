@@ -638,19 +638,40 @@ def delete_scope_refusal(
 #: "terminal-only here" for everything else), so a follower's un-imaged command is
 #: run by both hosts alike instead of one host running in its terminal what the
 #: other refuses; both are session-scoped work with no machine-local effect.
-#: ``stop`` is the kill switch: it is session-scoped, the caller is looking at the
-#: session it stops, and it is the one verb in this family the routed dispatcher
-#: has no branch for — refusing it would break ``/stop`` on the phone, which is a
-#: verb the operator uses. It grants no authority a relayed caller did not already
-#: hold: the ``stop`` op is its own row and the phone's dedicated stop path uses it.
+#: ``stop`` is the kill switch, and it is the one verb in this family the routed
+#: dispatcher has no branch for — so it stays here, and its SCOPE is pinned
+#: separately below. Round 4 (V4-1) measured why that pin is load-bearing: this lane
+#: hands over the WHOLE LINE, and ``/stop``'s local handler is argument-sensitive,
+#: so a relayed ``/stop all`` armed the owner's machine-wide fan-out on the caller's
+#: screen and ``/stop <pid>`` reached a session the caller does not host.
+#: ``CAPABILITY_WORDS["stop"]`` is "stop a session here", SINGULAR: the argument
+#: forms name the fleet or another session, which no row in the mesh vocabulary
+#: grants a relayed caller.
 #:
 #: THE IMAGED TWIN USES THE SAME RULE, because the rule is about the CARRIER — does
 #: this reach a terminal — not about the frame's payload.
 RELAYED_TERMINAL_SLASH: frozenset[str] = frozenset({"goal", "compact", "stop"})
 
+#: The subset of :data:`RELAYED_TERMINAL_SLASH` whose ARGUMENTS change WHAT IT ACTS
+#: ON, and which a relayed caller may therefore run only in its BARE, session-scoped
+#: form (round 4, V4-1).
+#:
+#: ``/stop`` bare is the kill switch for the session the caller is looking at — the
+#: one session this carrier is attached to, and exactly what ``stop``'s capability
+#: words promise. ``/stop all`` sweeps every agent on the machine (``_stop_all`` in
+#: ``tui/app.py``), ``/stop <pid>`` resolves through the send vocabulary to another
+#: session, and a flag is answered with a remedy that names both. The other two
+#: verbs in the set are not here on purpose: ``/goal <text>`` acts on THIS session
+#: (it submits a turn for it) and ``/compact`` takes no argument that changes its
+#: target.
+ARG_SCOPED_TERMINAL_SLASH: frozenset[str] = frozenset({"stop"})
+
 
 def may_run_slash_in_the_owners_terminal(
-    command: str, locality: str | None, capabilities: frozenset[str] | None = None
+    command: str,
+    locality: str | None,
+    capabilities: frozenset[str] | None = None,
+    args: str = "",
 ) -> bool:
     """Whether this connection's command may be TYPED INTO the owner's terminal.
 
@@ -658,11 +679,21 @@ def may_run_slash_in_the_owners_terminal(
 
     * a LOCAL caller — it is the user's own terminal, and ``/exit`` must still exit;
     * a relayed command in :data:`RELAYED_TERMINAL_SLASH` — the session-scoped set
-      the runtime host runs down this same op;
+      the runtime host runs down this same op — in its BARE form when it is also in
+      :data:`ARG_SCOPED_TERMINAL_SLASH`;
     * a delete-scoped verb the connection RESOLVED (``delete``), because those have
       no other lane that keeps their receipt: the routed dispatcher would archive on
       the owner and answer with a typed notice, while the caller that holds the
       capability asked this carrier and has always got ``ran /archive``.
+
+    ``args`` is READ, because the LANE is chosen by the LINE and not by the verb: this
+    carrier types the whole line into the owner's local dispatch, whose handlers are
+    argument-sensitive. Round 4 (V4-1) measured the cost of a verb-only test — a
+    relayed ``/stop all`` reached ``_stop_all`` and ``/stop <pid>`` reached another
+    session — so a verb whose arguments change its target is allowed here only when it
+    carries none. The argument form is not refused BY THIS MODULE: it falls out of the
+    terminal lane and takes the routed dispatcher, which has no ``stop`` branch and
+    answers with its own honest sentence.
 
     THE DEFAULT IS THE FIX, NOT THE LIST. ``locality`` is ``None`` when a caller did
     not forward the connection's facts, and ``None`` is read as RELAYED — so a
@@ -678,6 +709,10 @@ def may_run_slash_in_the_owners_terminal(
     if locality == "local":
         return True
     if command in RELAYED_TERMINAL_SLASH:
+        # Bare only for the argument-scoped subset: the line's ARGUMENTS are what
+        # widen its scope, and a verb-only test cannot see them (V4-1).
+        if command in ARG_SCOPED_TERMINAL_SLASH and args.strip():
+            return False
         return True
     return command in DELETE_SCOPED_SLASH and may_run_delete_scoped_slash(locality, capabilities)
 

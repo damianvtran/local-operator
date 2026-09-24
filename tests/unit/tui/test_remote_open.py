@@ -677,12 +677,16 @@ async def test_a_relayed_connection_without_delete_cannot_archive_through_this_a
         assert "capability" not in allowed["text"], allowed
 
 
-async def _phone_dial(record: Any, *, locality: str | None = "remote") -> tuple[Any, Any]:
+async def _phone_dial(record: Any, *, locality: Any = "remote") -> tuple[Any, Any]:
     """One connection carrying the PHONE's own auth frame.
 
     ``mobile/daemon.py`` authenticates with ``{"key": …, "locality": "remote"}`` and
     no capabilities at all, so that is what this sends — the shape the round-3
     review used to show the allowlist turning the operator's phone away.
+
+    ``locality`` is ``Any`` because the V4-2 cells send values a dialer should never
+    send (``0``, ``""``, ``"LOCAL"``) to prove the reader refuses to guess: only the
+    exact expected value may take the local lane.
 
     The record is selected by PID rather than by position: ``registry.scan()`` lists
     every live runtime on this machine, and dialling the first one reaches a
@@ -800,7 +804,12 @@ async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui
         "local_operator.session.archived.archive_change",
         lambda *args, **kwargs: writes.append((args, kwargs)) or (False, []),
     )
+    stop_all: list[str] = []
     app = OperatorApp(lambda: _factory(session), resume_factory=_no_resume)
+    # THIS IS THE INSTRUMENT THAT MATTERS FOR V4-1: the fan-out is an ACTION, and a
+    # receipt cannot show whether it ran, so the method itself is replaced. A relayed
+    # `/stop all` that reaches it is a machine-wide stop in production.
+    monkeypatch.setattr(app, "_stop_all", lambda notice: stop_all.append("ARMED"))
     async with app.run_test(size=(100, 30)) as pilot:
         for _ in range(400):
             await pilot.pause()
@@ -864,6 +873,32 @@ async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui
                 # The rename really landed on the session the phone was watching.
                 assert session.conversation_name == "probe title", session.conversation_name
 
+                # V4-1: THE ARGUMENT FORMS OF `/stop` ARE NOT THE PHONE'S. This lane
+                # hands over the whole LINE, and `/stop`'s local handler is
+                # argument-sensitive: `all` arms the machine-wide fan-out and <pid>
+                # reaches another session. Both must fall out of the terminal lane and
+                # be refused — asserted on the fan-out's own method, because a receipt
+                # cannot prove an action did not run.
+                for args, expect in (
+                    ("all", "attached terminal"),
+                    ("ALL", "attached terminal"),
+                    ("62181", "attached terminal"),
+                    ("--all", "attached terminal"),
+                ):
+                    terminal.clear()
+                    dispatched.clear()
+                    req += 1
+                    receipt = await _phone_call(pilot, reader, writer, "stop", args, req)
+                    assert not receipt.startswith("ran "), (args, receipt)
+                    assert expect in receipt, (args, receipt)
+                    assert terminal == [], (args, terminal)
+                    assert [row[0] for row in dispatched] == ["stop"], (args, dispatched)
+                assert stop_all == [], stop_all
+                # THE POSITIVE CONTROL for the same rule: the BARE form is the kill
+                # switch for the session this carrier is attached to and still reaches
+                # the terminal lane (asserted with the four verbs above), so V4-1 was
+                # fixed by scoping the ARGUMENT, not by taking `/stop` from the phone.
+
                 # AND THE FIVE THAT MUST BE REFUSED. The delete-scoped pair is
                 # refused by the capability gate before a lane is chosen; `move`,
                 # `exit` and `update` reach the dispatcher and come back with the
@@ -889,6 +924,33 @@ async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui
                 assert [row[0] for row in dispatched] == ["move", "exit", "update"], dispatched
             finally:
                 writer.close()
+
+            # V4-2: ONLY THE EXACT VALUE TAKES THE LOCAL LANE. Every other spelling a
+            # dialer could send must be read as RELAYED — the old reading handed them
+            # the widest lane, `/move` and the whole local verb set included. Each cell
+            # asks for the one command that PROVES the lane: `/move` runs in the owner's
+            # terminal iff the connection was read as local.
+            for spelling in ("loopback", "", 0, "LOCAL", "Local", "remote "):
+                reader3, writer3 = await _phone_dial(record=None, locality=spelling)
+                try:
+                    terminal.clear()
+                    dispatched.clear()
+                    moved.clear()
+                    req += 1
+                    receipt = await _phone_call(
+                        pilot, reader3, writer3, "move", "abc --to evil", req
+                    )
+                    assert moved == [], (spelling, moved)
+                    assert terminal == [], (spelling, terminal)
+                    assert not receipt.startswith("ran "), (spelling, receipt)
+                    assert "attached terminal" in receipt, (spelling, receipt)
+                    # ... and the capability gate still answers the delete-scoped verb.
+                    req += 1
+                    refused = await _phone_call(pilot, reader3, writer3, "archive", "", req)
+                    assert "delete" in refused and "nothing was changed" in refused, refused
+                finally:
+                    writer3.close()
+                assert writes == [], writes
 
             # THE CONTROL: an unmarked loopback connection is still LOCAL, and every
             # one of those same commands runs in the terminal exactly as before.

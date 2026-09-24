@@ -840,6 +840,11 @@ _PHONE_COMMANDS: tuple[tuple[str, str, str], ...] = (
 #: are refused by the dispatcher itself, which has no branch for them — so the
 #: "no" is the app's own sentence rather than a second copy of it here.
 _PHONE_REFUSED: tuple[tuple[str, str, str], ...] = (
+    # V4-1: `/stop`'s ARGUMENT forms are the fleet and other sessions, so they take
+    # the dispatcher's refusal like every other verb the carrier does not own. The
+    # bare form is the four-verb table above; the line is what the lane is chosen by.
+    ("stop", "all", "dispatcher"),
+    ("stop", "62181", "dispatcher"),
     ("move", "abc --to evil", "dispatcher"),
     ("archive", "", "refused"),
     ("delete", "yes", "refused"),
@@ -920,7 +925,7 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
         else:
             assert receipt == f"owner answered /{command}", receipt
     assert ran == [], ran
-    assert [row[0] for row in routed] == ["move", "exit", "update", "btw"], routed
+    assert [row[0] for row in routed] == ["stop", "stop", "move", "exit", "update", "btw"], routed
 
     # A RELAYED MESH MEMBER WITH ``delete`` KEEPS ITS TERMINAL LANE (round 1's
     # negative control, and the one receipt shape routing must not change): the
@@ -933,6 +938,12 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     assert receipt == "ran /archive", receipt
     assert ran == ["/archive"] and routed == []
 
+    # A LOCAL PANE IS UNTOUCHED, `/stop all` INCLUDED: the fan-out is this machine's
+    # own kill switch and the user at this terminal is the one entitled to it.
+    assert await handle.slash("stop", "all", locality="local") == "ran /stop all"
+    if ran:
+        ran.clear()
+
     # A LOCAL PANE IS UNTOUCHED: the user's own terminal keeps every verb,
     # delete-scoped and move included, exactly as it always has.
     ran.clear()
@@ -943,14 +954,15 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     assert ran == ["/move abc --to evil", "/archive"] and routed == []
 
     # THE DEFAULT IS STILL FAIL-CLOSED, and what it proves is narrower than
-    # "a forgotten forward is refused" (round 3, R3-5): with no facts the caller is
-    # routed to the DISPATCHER rather than into the terminal. Restoring the
-    # permissive default puts the line back in the terminal — mutate
-    # ``locality: str | None = None`` to ``locality: str = "local"`` on both handle
-    # methods and these cells report ``ran /move …`` instead. What it does NOT
-    # prove is that a future carrier passing ``"local"`` while holding no facts is
-    # safe: that caller reaches the terminal lane, and only the terminal set plus
-    # the delete gate bound what it can do there.
+    # "a forgotten forward is refused" (round 3 R3-5, corrected in round 4 V4-5):
+    # with no facts the caller is routed to the DISPATCHER rather than into the
+    # terminal. Restoring the permissive default puts the line back in the terminal —
+    # mutating ``locality: str | None = None`` to ``locality: str = "local"`` on
+    # ``slash`` makes THESE cells report ``ran /move …``, and the cells below pin the
+    # same default on the other entry point, ``slash_images``, which ``slash`` does
+    # not exercise. What it does NOT prove is that a future carrier passing
+    # ``"local"`` while holding no facts is safe: that caller reaches the terminal
+    # lane, and only the terminal set plus the delete gate bound what it can do.
     cells: tuple[dict[str, Any], ...] = (
         {},
         {"locality": "remote"},
@@ -965,3 +977,22 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     # The half-forwarded case is the one a WRONG locality cannot cover: the gate is
     # not "did the caller say remote", it is "is the caller provably local".
     assert routed and all(row[2] != "local" for row in routed), routed
+
+    # THE IMAGED CARRIER IS ITS OWN ENTRY POINT WITH ITS OWN DEFAULT. Round 4 (V4-5)
+    # measured that mutating only ``slash_images``'s default left every cell above
+    # green, because they all call ``slash`` — so the twin is pinned here directly.
+    # In production both callers pass ``locality`` explicitly (``slash`` above, and
+    # ``server.py``'s forward for the imaged half), which is why this is a
+    # forgotten-forward guard rather than a live path; it is fail-closed all the same.
+    image_cells: tuple[dict[str, Any], ...] = ({}, {"locality": "remote"})
+    for facts in image_cells:
+        ran.clear()
+        routed.clear()
+        receipt = await handle.slash_images("move", "abc --to evil", None, **facts)
+        assert not receipt.startswith("ran "), (facts, receipt)
+        assert ran == [], (facts, ran)
+    ran.clear()
+    routed.clear()
+    local_images = await handle.slash_images("move", "abc --to evil", None, locality="local")
+    assert local_images == "ran /move abc --to evil", local_images
+    assert ran == ["/move abc --to evil"], ran

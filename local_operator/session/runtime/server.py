@@ -3523,12 +3523,27 @@ class RuntimeServer:
         # upgrade would demote the phone bridge to a follower.
         raw_kind = frame.get("client", "daemon")
         kind: ClientKind = "attach" if raw_kind == "attach" else "daemon"
-        # Absent means LOCAL, matching every client that exists today: the
-        # listener is loopback-only, so anything that dialed is on this
-        # machine. A relay forwarding a remote device's commands is the one
-        # caller that must say ``"remote"``, and an old client that never
-        # heard of the field keeps the behaviour it always had.
-        locality: ClientLocality = "remote" if frame.get("locality") == "remote" else "local"
+        # ONLY THE EXACT EXPECTED VALUE TAKES THE LOCAL LANE (round 4, V4-2).
+        # Absent is the pre-field default every client that exists today relies
+        # on — the listener is loopback-only, so anything that dialed is on this
+        # machine, and an old client that never heard of the field keeps the
+        # behaviour it always had. The string ``"local"`` is what this repo's own
+        # desktop router sends. Anything ELSE a client bothered to send — a typo,
+        # ``""``, ``0``, ``"LOCAL"``, ``"loopback"`` — is read as RELAYED, because
+        # ``local`` is now the WIDEST lane in the model (it types into the owner's
+        # terminal): the old reading was ``"remote" if … else "local"``, which
+        # handed every unrecognised spelling that lane, measured with a relayed
+        # ``/move`` actually running. That is the fail-open shape rounds 1-3 closed
+        # three times one layer down, so it is closed at the layer that PRODUCES the
+        # value too. Nothing legitimate sends an unrecognised one: ``locality`` is
+        # written only by a dialer (``mobile/daemon.py`` and ``network/dial.py``
+        # hardcode ``"remote"``, ``dial.py``'s ``AUTH_FIELDS`` excludes it from a
+        # caller-supplied ``auth`` dict), and the peer-link authorizer refuses a
+        # frame claiming ``local`` (``network/authorizer.py``).
+        raw_locality = frame.get("locality")
+        locality: ClientLocality = (
+            "local" if raw_locality is None or raw_locality == "local" else "remote"
+        )
         # §3.3: the capabilities the dialling relay RESOLVED for the member it is
         # relaying for. Absent (every client that exists today, plus every local
         # dial) is the empty set, which leaves each gate below at the flat refusal
