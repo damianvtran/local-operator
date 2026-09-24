@@ -2191,13 +2191,26 @@ def _register_evidence_signal(armed: "_Armed") -> None:
     inherit this leg; a child that forks WITHOUT exec inherits both the handler and
     the descriptor, which this side cannot prevent.
 
-    THE ORDERING LIMIT, stated here because it decides how much this leg is worth:
-    ``process.amain`` installs its own ``SIGUSR1`` handler on the loop (the
-    ``LOP_RUNTIME_DEBUG_STACKS`` task-stack dump, on by default) and the loop is
-    created AFTER this arm, so on a live runtime that later registration wins and
-    ``kill -USR1`` reaches the asyncio dump rather than this one. Making both
-    available is a change on the loop's side (chain into
-    ``faulthandler.dump_traceback`` there), not a second registration here.
+    THE ONE WAY IT IS INSTALLED, AND THE GAP THAT LEAVES (measured, with the numbers):
+    :func:`arm` registers it. ``process.amain`` then installs its own ``SIGUSR1``
+    handler on the loop (``LOP_RUNTIME_DEBUG_STACKS``, on by default), and a signal has
+    one sigaction slot, so THAT one is the live handler and this leg is shadowed for the
+    rest of a live runtime's life. Re-registering on top of it was implemented and
+    MEASURED TO SEGFAULT the runtime child — ``faulthandler.unregister`` restores the
+    handler saved at arm time (default/``SIG_IGN``) rather than the loop's, and the
+    re-registered chain then faults inside signal handling: a real armed runtime child,
+    spawned by ``launch._spawn_runtime``, died ``rc=-11`` on the first ``SIGUSR1`` that
+    the suite's own readiness probe sent, with ``Fatal Python error: Segmentation fault``
+    and no frames (killing the diagnostic that was meant to explain the stall). So this
+    leg is reachable on a runtime that never installs a loop handler, or while
+    ``LOP_RUNTIME_DEBUG_STACKS=0``, and NOT on the default live runtime.
+    THE FIX NEEDS A DECISION, not another attempt: either the loop's handler routes its
+    evidence through this module's registration, or this leg moves to a signal nothing
+    else owns (``SIGUSR2`` is free but its default disposition is fatal, which the
+    registry's own comment rejects for a mixed-version fleet), or the chain path is
+    debugged at the CPython level. The class this leg exists for — no Python running at
+    all — is currently uncovered on a live runtime, and this paragraph is here so that
+    is a stated gap rather than an assumed capability.
 
     Never raises: a diagnostic that cannot install its own leg must leave the
     runtime otherwise untouched.
