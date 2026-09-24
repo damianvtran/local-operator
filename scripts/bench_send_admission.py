@@ -237,13 +237,17 @@ class _Sampler:
 
 
 async def _child_main(args: argparse.Namespace) -> None:
-    from local_operator.harness.types import AgentStartEvent, MessageStartEvent, ModelSpec
+    from local_operator.harness.types import (
+        AgentStartEvent,
+        MessageStartEvent,
+        ModelSpec,
+        ToolContext,
+    )
     from local_operator.session.runtime import server as server_module
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
-    from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
 
     marks: list[tuple[str, str, float]] = []
@@ -434,9 +438,7 @@ def _pcts(values: list[float]) -> dict[str, float]:
 
 
 def _child_env() -> dict[str, str]:
-    env = {
-        k: v for k, v in os.environ.items() if not k.startswith(("LOP_", "CMUX_", "XPC_FLAGS"))
-    }
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LOP_", "CMUX_", "XPC_FLAGS"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
@@ -500,7 +502,10 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
 
         def on_event(event: Any) -> None:
             now = time.perf_counter()
-            if isinstance(event, MessageStartEvent) and getattr(event.message, "role", "") == "user":
+            if (
+                isinstance(event, MessageStartEvent)
+                and getattr(event.message, "role", "") == "user"
+            ):
                 seen.append(("echo", event.message.text.split()[0], now))
             elif isinstance(event, AgentStartEvent):
                 seen.append(("start", "", now))
@@ -528,7 +533,9 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
                 if echo is not None:
                     after = [s for s in window if s[2] >= echo[2] - 0.5]
                     start = next((s for s in after if s[0] == "start"), None)
-                    delta = next((s for s in after if s[0] == "delta" and start and s[2] >= start[2]), None)
+                    delta = next(
+                        (s for s in after if s[0] == "delta" and start and s[2] >= start[2]), None
+                    )
                     if start is not None and delta is not None:
                         row["echo_ms"] = (echo[2] - t0) * 1000
                         row["start_ms"] = (start[2] - t0) * 1000
