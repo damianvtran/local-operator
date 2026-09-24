@@ -83,6 +83,11 @@ from local_operator.server.utils.store_failures import (
 )
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import SupersededCompletionToken
+from local_operator.session.catalog import (
+    SCOPE_KINDS,
+    SCOPE_NAME_MAX_LENGTH,
+    CatalogueScope,
+)
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import (
     MoveIndeterminate,
@@ -1516,12 +1521,84 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         raise _store_refusal(request, failure, error) from None
 
 
+def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
+    """The scope a request asked for, or ``None`` for the head listing.
+
+    REFUSES BY NAME, which is why the query parameters are declared as plain
+    strings and bounded here rather than left to ``Query(max_length=...)``: this
+    codebase's rule for bad input on this route is that the answer names the
+    offending field, and a framework-shaped validation error names a location
+    instead. A HALF-SCOPE IS A CLIENT BUG, not an empty listing: a client that
+    sent ``scope_kind`` and no name has concatenated a URL, and answering it with
+    the whole catalogue would draw every team's rows under one team.
+
+    An EMPTY STRING IS ABSENCE, not a scope named "". ``?scope_kind=&scope_name=``
+    is what a client sends for "no scope", and a session's stored binding can
+    never be empty (``write_session_attachment`` strips, and an empty name is how
+    the file records "unattached"), so treating it as a refusal would refuse the
+    ordinary case.
+
+    Names are STRIPPED, matching the writer: ``write_session_attachment`` stores
+    stripped values, so a trailing space in a query would otherwise look up a
+    group that cannot exist and answer an empty page.
+    """
+    kind = scope_kind.strip()
+    name = scope_name.strip()
+    if kind and not name:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_name_required",
+                "message": "scope_name is required when scope_kind is given.",
+            },
+        )
+    if name and not kind:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_kind_required",
+                "message": "scope_kind is required when scope_name is given.",
+            },
+        )
+    if not kind:
+        return None
+    if kind not in SCOPE_KINDS:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_kind_unknown",
+                "message": f"scope_kind must be one of {', '.join(SCOPE_KINDS)}.",
+            },
+        )
+    if len(name) > SCOPE_NAME_MAX_LENGTH:
+        raise HTTPException(
+            422,
+            {
+                "code": "scope_name_too_long",
+                "message": f"scope_name must be at most {SCOPE_NAME_MAX_LENGTH} characters.",
+            },
+        )
+    return CatalogueScope(kind, name)
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     include_archived: bool = Query(default=False),
+    # THE SCOPED, PAGED PARAMETERS, all optional and all defaulted so that a
+    # request which sends none of them is answered exactly as it was before this
+    # existed. Declared as strings rather than as ``Literal``/``max_length``
+    # because the refusals are answered BY NAME by ``_requested_scope`` and by
+    # ``decode_cursor``'s tolerance, not by the framework's validation shape.
+    scope_kind: str = Query(default=""),
+    scope_name: str = Query(default=""),
+    cursor: str = Query(default=""),
+    with_counts: bool = Query(default=False),
 ):
+    # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
+    # cannot be answered by anything the store says.
+    scope = _requested_scope(scope_kind, scope_name)
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
@@ -1539,7 +1616,12 @@ async def list_sessions(
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
         page = await host(request).list(
-            limit, status_stamps=stamps, include_archived=include_archived
+            limit,
+            status_stamps=stamps,
+            include_archived=include_archived,
+            scope=scope,
+            cursor=cursor or None,
+            with_counts=with_counts,
         )
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
         # DECIDED, not left open: concatenated on the wire rather than published
@@ -1586,6 +1668,20 @@ async def list_sessions(
                 "truncated": page.truncated,
                 "limit": limit,
                 "degraded": degraded,
+                # THE FOUR PAGING FIELDS, always present and defaulted (see
+                # ``SessionList``): the position to resume this scope from, whether
+                # the cursor the client sent could be used, an echo of the scope
+                # this page answers, and the census when it was asked for.
+                #
+                # ``scope`` is echoed from the REQUEST rather than read off the
+                # answer's rows, because a page may land after the operator
+                # collapsed the group that asked for it: the client must be able to
+                # attribute an answer to the request that produced it without
+                # relying on the ordering of its own promises.
+                "next_cursor": page.next_cursor,
+                "cursor_missing": page.cursor_missing,
+                "scope": None if scope is None else {"kind": scope.kind, "name": scope.name},
+                "counts": page.counts,
             }
         )
 

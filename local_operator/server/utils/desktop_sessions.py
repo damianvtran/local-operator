@@ -61,7 +61,12 @@ from local_operator.session.attached import (
 )
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
-from local_operator.session.catalog import DECORATION_ATTENTION, load_catalog
+from local_operator.session.catalog import (
+    DECORATION_ATTENTION,
+    CatalogueScope,
+    ScopeCensus,
+    catalogue_page,
+)
 from local_operator.session.cleanup import delete_session
 from local_operator.session.cold_model import resolve_birth_effort
 from local_operator.session.errors import MoveIndeterminate
@@ -3549,6 +3554,47 @@ class SessionPage:
     rows: list[dict[str, Any]]
     pinned_off_page: list[dict[str, Any]]
     truncated: bool
+    #: The position to resume this page from, or ``None`` at the end of the scope.
+    #: Defaulted rather than required so a caller that only reads ``rows`` (the
+    #: existing tests and the TUI's own path) keeps constructing this unchanged.
+    next_cursor: str | None = None
+    #: The request carried a cursor that could not be used, so this page is the
+    #: scope's FIRST one. Not an error -- see ``SessionList.cursor_missing``.
+    cursor_missing: bool = False
+    #: The per-group census, present only when the caller asked for it, already in
+    #: the wire shape (``SessionList.counts``): the adapter owns every row's wire
+    #: shape, and the counts are one more answer about the same rows.
+    counts: dict[str, Any] | None = None
+
+
+def _counts_payload(census: ScopeCensus | None) -> dict[str, Any] | None:
+    """The census in the wire shape (``ScopeCounts``), or ``None`` if unasked.
+
+    Mapped HERE rather than in the route, for the reason every other wire shape on
+    this path lives here: the adapter owns what an answer looks like, and the
+    counts are one more answer about the same rows. ``None`` stays ``None`` rather
+    than becoming an empty census, so "this request did not ask" and "this store
+    holds nothing" stay different answers (the second is ``total: 0``).
+    """
+    if census is None:
+        return None
+    return {
+        "total": census.total,
+        "active": census.active,
+        "unbound": census.unbound,
+        # Order is the census's own (``-total, kind, name``) and is NOT re-sorted
+        # here: a second ordering authority is how two readers come to disagree
+        # about what "the biggest group" is.
+        "scopes": [
+            {
+                "kind": tally.kind,
+                "name": tally.name,
+                "total": tally.total,
+                "active": tally.active,
+            }
+            for tally in census.scopes
+        ],
+    }
 
 
 class DesktopSessions:
@@ -4296,6 +4342,9 @@ class DesktopSessions:
         status_stamps: tuple[str, dict[str, int]] | None = None,
         *,
         include_archived: bool = False,
+        scope: CatalogueScope | None = None,
+        cursor: str | None = None,
+        with_counts: bool = False,
     ) -> SessionPage:
         """One page of rows, plus the pinned rows the page does not carry.
 
@@ -4336,6 +4385,20 @@ class DesktopSessions:
         unstamped response is byte-identical to what this returned before.
         ``SessionRow`` is ``extra="allow"``, so the two keys serialize without a
         model change.
+
+        ``scope``/``cursor``/``with_counts`` are the SCOPED, paged half of the
+        listing (``session.catalog.catalogue_page``), all three defaulted so that
+        a caller that passes none of them gets byte-for-byte the answer this
+        returned before: the head page, the whole visible ranking, the append-
+        below-the-page pins, and no cursor and no counts.
+
+        THE PINS ARE APPENDED ON THE HEAD ANSWER ONLY. ``pinned_off_page`` exists
+        because a client that holds one page cannot otherwise render a pin made on
+        an older conversation, and that argument is about the listing as a whole —
+        which only the head request speaks for. A scoped answer carrying them
+        would be handing the client rows belonging to other teams under this
+        team, and the client gates its pin facts on the head answer for exactly
+        this reason.
         """
 
         def rows() -> SessionPage:
@@ -4347,25 +4410,29 @@ class DesktopSessions:
             # row of one answer describes the same pin set, which two reads a
             # millisecond apart would not guarantee.
             pins = set(read_pins(self.root))
-            # ``limit + 1`` is the truncation PROBE and nothing else: one row
-            # beyond the page is enough to answer "did the ranking hold more",
-            # and asking for it here rather than at the route keeps the answer
-            # from needing a second scan to interpret. Nothing in the store's
-            # scan is bounded by this number (it is limit-independent), so the
-            # extra row costs one rank position.
-            entries = load_catalog(
+            # THE CATALOGUE, SCOPED AND PAGED — one call, and the same one the
+            # head page makes: `catalogue_page` with no scope, no cursor and no
+            # counts IS `load_catalog` plus the truncation verdict this method
+            # used to derive from a ``limit + 1`` probe. The probe now lives inside
+            # the catalogue (it is a rank position there, not a second scan), so
+            # the two shapes of this listing cannot drift apart.
+            page = catalogue_page(
                 self.root,
-                limit=limit + 1,
-                pinned_off_page=tuple(pins),
+                scope=scope,
+                cursor=cursor,
+                limit=limit,
+                pinned_off_page=tuple(pins) if scope is None else (),
                 # THE ARCHIVE FILTER, at the one choke point the two surfaces
-                # share. ``load_catalog`` reaches the predicate through
+                # share. ``catalogue_page`` reaches the predicate through
                 # ``_scan_sessions``, so this route and the TUI sidebar cannot
                 # disagree about which conversations exist to be offered — and
                 # a pinned ARCHIVED conversation is filtered with the rest, so
                 # it cannot come back through the off-page pinned resolution
                 # below as a phantom row with no section to belong to.
                 include_archived=include_archived,
+                with_counts=with_counts,
             )
+            entries = page.entries
             page_entries = entries[:limit]
             # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
             # rather than on the projected row's flag so it runs before the
@@ -4454,13 +4521,18 @@ class DesktopSessions:
             return SessionPage(
                 rows=[projected[entry.id] for entry in page_entries],
                 pinned_off_page=[projected[entry.id] for entry in extra_entries],
-                # MORE ROWS THAN THE PAGE, which is the original question and
-                # is still the right one: `entries` is the probe window plus
-                # whatever was appended beyond it, and the window is full
-                # exactly when the ranking held more than `limit` rows. Derived
-                # from `entries` rather than from the page alone because the
-                # probe row was ASKED for and correctly answered this.
-                truncated=len(entries) > limit,
+                # MORE ROWS THAN THE PAGE, which is the original question and is
+                # still the right one -- and it IS ``next_cursor``: the catalogue
+                # answers "is there more" once, as the position that more can be
+                # read from, because a boolean beside it would state one fact in
+                # two fields and they could then be stated two ways. What this
+                # field is for is the CLIENT's question ("has history run out?"),
+                # and the invariant the model documents ties the two together on
+                # every answer.
+                truncated=page.next_cursor is not None,
+                next_cursor=page.next_cursor,
+                cursor_missing=page.cursor_missing,
+                counts=_counts_payload(page.counts),
             )
 
         return await asyncio.to_thread(rows)
