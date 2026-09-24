@@ -2109,3 +2109,165 @@ async def test_the_returned_rows_actionable_half_stays_whole_at_eighty_columns(
         assert "It is back in the composer: send it again to retry." in rows, rows
         frozen.thaw(fail=ConnectionError("gone"))
         await _pump(pilot, lambda: not app._warm_engage_started)
+
+
+# --- The account OUTLIVES the attempt (agent review round 4, F-1; UX U14; QA Q-1) ---
+#
+# Every switch arm above asserts BEFORE any bind lands, which is why they all
+# passed while the account could still be lost: the row's only holder was the
+# attempt, which ends when a carrier binds, and the view it was painted into is
+# replaced when the switch back's connect re-commits the conversation. These
+# arms land a bind at each of the three points that matter and assert that the
+# account is either on screen or genuinely no longer owed — never silently gone.
+
+
+class _Coldness:
+    """`is_cold` for the paint-first facade, moved by the test the way a bind moves it.
+
+    Only the paint-first facade's class is patched; the sidebar doubles are
+    `SidebarRemote`s and keep their own answer.
+    """
+
+    def __init__(self, monkeypatch, session) -> None:  # noqa: ANN001
+        self.cold = True
+        state = self
+        monkeypatch.setattr(type(session), "is_cold", property(lambda _self: state.cold))
+
+
+@pytest.mark.asyncio
+async def test_a_landing_between_the_capture_and_the_return_still_accounts_for_it(
+    monkeypatch, tmp_path
+):
+    """F-1a: the engage binds, the facade resyncs, THEN the message's bind fails.
+
+    Before (``c09c0608``): ``landed`` closed the attempt, so the return found it
+    "not alive" and said nothing — the text went back to the composer with no
+    row and no notice at all. ``3424719f`` painted the row; this pins that.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        await _compose_and_send(pilot, app, "SILENT")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        # The engage binds the attach: the attempt is over.
+        coldness.cold = False
+        frozen.thaw()
+        assert await _pump(pilot, lambda: not app._attach_behind_attempts)
+        # ...and the facade is cold again (a resync: `not _ready_for_events`)
+        # when the message's own bind is refused.
+        coldness.cold = True
+        sends.refuse_all()
+        source = app._interaction
+        assert await _pump(pilot, lambda: not source.active_workers)
+        users, notices = _view_rows(app._transcript_view())
+        assert "SILENT" not in users, ("a returned message is still drawn as sent", users)
+        assert app.query_one(Editor).text.strip() == "SILENT"
+        assert len(_returned_rows(notices)) == 1, (
+            "the text came back with no account of how it got there",
+            notices,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_landing_after_the_row_is_painted_keeps_it_through_the_recommit(
+    monkeypatch, tmp_path
+):
+    """F-1b / QA Q-1: the switch back's connect re-commits a fresh view on the bind.
+
+    Before: the row lived only in the widget it was painted into, and the
+    connect worker's re-commit swapped that view out as soon as the owner
+    answered — taking the "is answering again" restatement with it (U3 says a
+    row that stated an outcome is restated, never silently removed).
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        await _compose_and_send(pilot, app, "GONE-R")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        sends.refuse_all()
+        source_a = app._sidebar_sources["frozen-1"]
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        await _back_to(app, pilot, owner)
+        before = app._transcript_view()
+        assert len(_returned_rows(_view_rows(before)[1])) == 1, _view_rows(before)
+        # The owner answers: the engage binds and the switch back's connect
+        # worker re-commits the conversation over a fresh replay.
+        coldness.cold = False
+        frozen.thaw()
+
+        def settled() -> bool:
+            notices = _view_rows(app._transcript_view())[1]
+            return any("is answering again" in n for n in notices)
+
+        assert await _pump(pilot, settled), (
+            "the recovered account left with the replaced view",
+            app._transcript_view() is before,
+            _view_rows(app._transcript_view()),
+        )
+        for _ in range(20):
+            await pilot.pause()
+        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+        assert len(rows) == 1 and "is answering again" in rows[0], rows
+        assert app.query_one(Editor).text.strip() == "GONE-R"
+
+
+@pytest.mark.asyncio
+async def test_the_owner_answering_while_the_user_is_away_is_shown_on_return(monkeypatch, tmp_path):
+    """U14: the account of a returned message, when the owner answers while away.
+
+    Before: the bind restated the row in the parked view (or the attempt closed
+    first), and the conversation came back without it — the text sat in the
+    composer with nothing saying how it got there, or that the owner is back.
+    """
+    async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
+        app, pilot, owner, sends, frozen = ctx
+        from local_operator.tui.widgets.editor import Editor
+
+        coldness = _Coldness(monkeypatch, owner)
+        await _compose_and_send(pilot, app, "GONE-W")
+        assert await _pump(pilot, lambda: len(sends.gates) == 1)
+        sends.refuse_all()
+        source_a = app._interaction
+        assert await _pump(pilot, lambda: not source_a.active_workers)
+        assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
+        await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
+        view_b = app._transcript_view()
+        # The owner answers while the user is away.
+        coldness.cold = False
+        frozen.thaw()
+        assert await _pump(pilot, lambda: not app._attach_behind_attempts)
+        assert not [n for n in _view_rows(view_b)[1] if "frozen-1" in n], _view_rows(view_b)
+        # The return is served by a REBUILT presentation, not the parked one:
+        # the cache misses whenever the conversation changed while away (a
+        # bind that landed is such a change), which is the shape UX walked in
+        # a real pty. A row that lived only in the parked widget is gone then.
+        parked = app._sidebar_presentations.pop("frozen-1", None)
+        assert parked is not None, "precondition: the conversation was parked"
+        await _back_to(app, pilot, owner)
+        assert app._transcript_view() is not parked.replay.view
+        for _ in range(20):
+            await pilot.pause()
+        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
+        assert len(rows) == 1 and "is answering again" in rows[0], (
+            "the conversation came back without its account",
+            rows,
+        )
+        assert app.query_one(Editor).text.strip() == "GONE-W"
+
+
+@pytest.mark.asyncio
+async def test_a_retired_conversation_leaves_nothing_in_the_attempt_table(monkeypatch, tmp_path):
+    """m-1: a judged attempt whose conversation is then retired does not linger."""
+    async with _paint_first_with_sends(monkeypatch, tmp_path, bound_s=0.6) as ctx:
+        app, pilot, _owner, _sends, _frozen = ctx
+        assert await _pump(pilot, lambda: any("is not answering" in n for n in _notices(app)))
+        source = app._interaction
+        assert source.token in app._attach_behind_attempts
+        app._retire_attach_behind(source)
+        assert source.token not in app._attach_behind_attempts
+        assert source.attach_behind_account is None
