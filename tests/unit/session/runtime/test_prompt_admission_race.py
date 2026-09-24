@@ -63,7 +63,10 @@ class _GatedStream(ScriptedStream):
 
 
 async def _deliver_a_job_result_and_hold_it(tmp_path: Path) -> tuple[Any, Any, _GatedStream]:
-    stream = _GatedStream([text_turn("delivery reply"), text_turn("prompt reply")])
+    # Spare turns beyond the two a cell needs: a first real prompt also spends a
+    # provider call on naming the conversation, and a short tape would answer
+    # the user turn from the wrong script.
+    stream = _GatedStream([text_turn(f"reply {i}") for i in range(4)])
     session = build_session(tmp_path / "sess", stream)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     # The production opener for a settled child's result (one idle-time turn,
@@ -77,6 +80,29 @@ async def _deliver_a_job_result_and_hold_it(tmp_path: Path) -> tuple[Any, Any, _
 def _landed(directory: Path, command_id: str) -> bool:
     """Read the durable index from DISK, the authority a restart would read."""
     return Transcript(directory).has_admitted_command(command_id)
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_accepted_during_a_delivery_turn_waits_and_lands(tmp_path: Path) -> None:
+    """The admitted prompt waits for the delivery turn instead of failing.
+
+    On the unfixed drain the prompt's receipt raises ``TurnInFlight`` — the 503
+    the desktop route answered — the instant the drain reaches it.
+    """
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        receipt = asyncio.ensure_future(handle.prompt("race hi", command_id="race-1"))
+        # Let the drain reach the head while the lock is still held — the
+        # forced interleaving. A refusal would complete the receipt here.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not receipt.done() or receipt.exception() is None, receipt.exception()
+        stream.release.set()
+        assert await asyncio.wait_for(receipt, 10) == "prompt admitted"
+        assert _landed(tmp_path / "sess", "race-1")
+    finally:
+        stream.release.set()
+        await handle.dispose()
 
 
 @pytest.mark.asyncio
@@ -120,3 +146,65 @@ async def _idle(session: Any, handle: ServingSessionHandle) -> None:
     """Bounded by the caller's ``wait_for``; polls the handle's own busy view."""
     while handle.is_busy() or session.is_streaming:
         await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_the_boot_inbox_drain_still_steers_instead_of_waiting(tmp_path: Path) -> None:
+    """The one caller that must NOT wait: the boot drain of the spool.
+
+    ``process._drain_inbox_into`` runs before the control socket listens, so a
+    prompt that waited out a wake turn there would keep the runtime unreachable
+    for that whole turn. It opts out (``wait_for_turn=False``) and answers the
+    refusal by steering the owner's row into the turn in flight — the path QA
+    round 1 (Q-1) built. Pinned against a real ``Session`` so the opt-out is
+    proved to reach the drain: without it the drain call below would park until
+    ``release`` is set and ``wait_for`` would time out.
+    """
+    from local_operator.session.runtime import process as child_mod
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        append_inbox(
+            tmp_path / "sess",
+            InboxLine(
+                text="spooled hi",
+                sender={},
+                mode="mailbox",
+                wake=True,
+                source=SOURCE_USER,
+                command_id="spool-1",
+            ),
+        )
+        assert await asyncio.wait_for(child_mod._drain_inbox_into(handle), 5) == 1
+        assert [getattr(m, "id", None) for m in session.queued_steering()] == ["spool-1"]
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_headless_exec_turn_waits_for_a_turn_it_did_not_open(tmp_path: Path) -> None:
+    """``lop exec`` (and ``--resume``) submits through the same queue.
+
+    The sighting beside Q1-5: ``lop exec --resume`` failed with "session is
+    already streaming; use steer() to inject mid-turn" when the session was busy
+    with a turn exec did not open — a resume catch-up, a job-result delivery.
+    ``run_headless_prompt`` must now wait that turn out and complete its own,
+    not report failure.
+    """
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        run = asyncio.ensure_future(handle.run_headless_prompt("exec hi"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not run.done(), f"exec gave up while the delivery turn ran: {run.result()}"
+        stream.release.set()
+        assert await asyncio.wait_for(run, 10) is True, handle.last_prompt_failure
+    finally:
+        stream.release.set()
+        await handle.dispose()

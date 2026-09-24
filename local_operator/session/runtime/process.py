@@ -3730,9 +3730,17 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
         return
+    # REFUSE, DO NOT WAIT: the serving handle now makes an accepted prompt wait
+    # out a turn it did not open, and this drain runs before the control socket
+    # listens — waiting here would keep the runtime unreachable for a whole
+    # wake turn. Asking for the refusal keeps the steer below the answer to a
+    # busy session. Probed, as every optional seam on this path is.
+    fields: dict[str, Any] = {}
+    if "wait_for_turn" in inspect.signature(run).parameters:
+        fields["wait_for_turn"] = False
     try:
         if command_id:
-            await run(line.text, command_id=command_id)
+            await run(line.text, command_id=command_id, **fields)
             # RECORDED AFTER THE DELIVERY, not before it: the batch's own repeat
             # only needs suppressing when the first row LANDED. The file's
             # contract is at-least-once, and a second row carrying the same id is
@@ -3745,7 +3753,7 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
             # field can produce. It still runs: the message is the user's, and
             # dropping it is worse than a duplicate it cannot be compared
             # against.
-            await run(line.text)
+            await run(line.text, **fields)
         return
     except RuntimeError as error:
         # STRUCTURALLY, with the old sentence as the cross-build fallback: the
