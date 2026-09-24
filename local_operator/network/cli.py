@@ -971,7 +971,6 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     learned. ``allow_no_answer`` because a listing must still work with the relay
     down: it then shows what this device already knew, which is honest.
     """
-    from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.state import PlacementState
     from local_operator.network.identity import load as load_identity
 
@@ -980,12 +979,20 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     self_device = identity.device_id if identity is not None else ""
     self_name = identity.name if identity is not None else ""
 
+    # ENUMERATED FROM THE DOCUMENTS, NOT THE NETWORK RECORDS, and the difference is
+    # not stylistic: the placement files are the authority for "what is shared", and a
+    # device that has been shared a credential but whose record has not been re-read
+    # would otherwise print "nothing is shared" — the exact state this listing exists
+    # to make visible. The record is joined only for the NAME.
     networks: list[dict[str, Any]] = []
     lines: list[str] = []
-    for record in _networks():
-        document = placement_mod.PlacementDocument.load(record.network_id, self_device=self_device)
-        state = PlacementState.load(record.network_id)
+    for document in _placement_documents():
+        record = _record_for(document.network_id)
+        network_name = record.name if record is not None else document.network_id
+        state = PlacementState.load(document.network_id)
         keys: list[dict[str, Any]] = []
+        if not document.entries:
+            continue
         for key in sorted(document.entries):
             entry = document.entries[key]
             row: dict[str, Any] = {
@@ -996,7 +1003,11 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 "identity_label": entry.identity_label,
                 "owned_here": entry.owner_device == self_device,
                 "holders": [
-                    {"device": h.device, "name": _member_name(record, h.device), "scope": h.scope}
+                    {
+                        "device": h.device,
+                        "name": _member_name(record, h.device) if record is not None else "",
+                        "scope": h.scope,
+                    }
                     for h in entry.holders
                 ],
             }
@@ -1004,9 +1015,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 row["observation"] = state.status(key) or "not_asked"
             keys.append(row)
         if not keys:
-            lines.append(f"{record.name}: nothing is shared in this network yet")
+            lines.append(f"{network_name}: nothing is shared in this network yet")
         else:
-            lines.append(f"{record.name}:")
+            lines.append(f"{network_name}:")
             for row in keys:
                 owner = (
                     "this device"
@@ -1016,7 +1027,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 who = f" ({row['identity_label']})" if row["identity_label"] else ""
                 lines.append(f"  {row['key']:<14} {row['kind']:<15} owner: {owner}{who}")
                 for holder in row["holders"]:
-                    if holder["device"] == self_device:
+                    # The owner's own row and this device's are not "shares": the first
+                    # is what makes the entry coherent and the second is the reader.
+                    if holder["device"] in (self_device, row["owner_device"]):
                         continue
                     lines.append(
                         f"      shared with {holder['name'] or holder['device']} "
@@ -1026,8 +1039,8 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     lines.append(f"      borrowed: {row['observation']}")
         networks.append(
             {
-                "network_id": record.network_id,
-                "network": record.name,
+                "network_id": document.network_id,
+                "network": network_name,
                 "credentials": keys,
             }
         )
@@ -1222,6 +1235,26 @@ def _networks() -> list[Any]:
     from local_operator.network import store
 
     return list(store.list_networks())
+
+
+def _placement_documents() -> list[Any]:
+    """Every placement document on this device, loaded. The listing's authority."""
+    from local_operator.network.credentials import placement as placement_mod
+
+    return [
+        placement_mod.PlacementDocument.load(path.parent.name)
+        for path in sorted(
+            placement_mod.credentials_root().glob(f"*/{placement_mod.PLACEMENT_FILENAME}")
+        )
+    ]
+
+
+def _record_for(network_id: str) -> Any:
+    """This device's record for ``network_id``, or ``None``. For the NAME only."""
+    for record in _networks():
+        if record.network_id == network_id:
+            return record
+    return None
 
 
 def _held_keys(record: Any, device: str) -> list[str]:

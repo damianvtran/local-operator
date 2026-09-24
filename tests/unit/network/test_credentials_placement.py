@@ -793,3 +793,49 @@ def test_a_failed_borrow_is_reported_to_the_owner_and_not_repaired_here(
         assert wrapper.local.list_credentials("openai", include_disabled=True) == []
     finally:
         wrapper.close()
+
+
+def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The listing is driven by the DOCUMENTS, and it says who owns what.
+
+    Driven by the placement files rather than by the network records on purpose: a
+    device that has been shared a credential but whose record has not been re-read
+    would otherwise print "nothing is shared" — the one state this listing exists to
+    make visible.
+    """
+    from local_operator.network import cli as network_cli
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    identity = mint(root, name="borrower-laptop")
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare(
+        "openai",
+        owner_device=OWNER,
+        owner_device_name="damian-mbp",
+        provider="openai",
+        identity_label="damian@example.test",
+        by=OWNER,
+    )
+    document.grant("openai", identity.device_id, scope="session", by=OWNER)
+    document.save()
+    # ONE instance, then save: two would be two documents and the second would write
+    # the empty one.
+    state = PlacementState(NETWORK, root=root)
+    state.observe("openai", "owner_offline", owner_device=OWNER, retry_after_ms=600_000)
+    state.save()
+
+    args = _parser().parse_args(["network", "credentials"])
+    args.network = ""
+    args.json = False
+    assert network_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "owner: damian-mbp (damian@example.test)" in out
+    assert "borrowed: owner_offline" in out
+    # The owner's own row is not a share, and this device is the reader.
+    assert "shared with" not in out.split("owner:")[1].split("\n")[0]
