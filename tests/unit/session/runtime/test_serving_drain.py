@@ -85,6 +85,10 @@ class DrainHost:
     """
 
     begin_drain = ServingSessionHandle.begin_drain
+    # Bound for the same reason as the latch it undoes: the release is what makes the
+    # session take work again after an abandoned handover (``process._abandon_move``),
+    # and a rig that re-implemented it would pin nothing about the real latch.
+    end_drain = ServingSessionHandle.end_drain
     begin_retire = ServingSessionHandle.begin_retire
     # The EXIT rung that writes what the two latches recorded, bound here for
     # the same reason they are: the note's placement is the behaviour under
@@ -835,6 +839,11 @@ class PromptHost(DrainHost):
     prompt = ServingSessionHandle.prompt
     steer = ServingSessionHandle.steer
     is_busy = ServingSessionHandle.is_busy
+    # The admitted path's own queue drain, bound for the same reason the latch is: a
+    # release that let a prompt through the refusal check but stalled in a re-implemented
+    # drain would pass a weaker assertion than the one this file is making.
+    _drain_prompt_queue = ServingSessionHandle._drain_prompt_queue
+    _observe_prompt_drain = ServingSessionHandle._observe_prompt_drain
 
     def __init__(self, session: PromptSession, *, busy: bool = True) -> None:
         super().__init__(session, busy=busy)
@@ -853,6 +862,12 @@ class PromptHost(DrainHost):
             note_user_message=lambda *_a, **_k: None,
         )
         self._projection = SimpleNamespace(queued_count=0)
+        # The auto-naming hop the ADMITTED path takes (``serving.prompt``), stubbed to a
+        # no-op rather than modelled: it titles the conversation from the first prompt,
+        # which is nothing this file asserts about, and the cells that get past the drain
+        # check are exactly the ones that need it to exist
+        # (``test_a_released_drain_admits_a_prompt_instead_of_spooling_it``).
+        self._maybe_name_conversation = lambda _text: None
 
 
 class PromptSession(FakeSession):
@@ -874,6 +889,16 @@ class PromptSession(FakeSession):
 
     def steer(self, text: str, images: Any = None, **kwargs: Any) -> None:
         self.steered.append(text)
+
+    def subscribe(self, handler: Any) -> Any:  # noqa: ANN401
+        """The turn pipeline's end-observer subscription, stubbed to a no-op.
+
+        This double has no event bus, and the cell that reaches here
+        (``test_a_released_drain_admits_a_prompt_instead_of_spooling_it``) asserts the
+        ADMISSION — ``prompt_calls`` — not the turn's outcome. Returning the unsubscribe
+        callable is the whole contract the pipeline reads.
+        """
+        return lambda: None
 
 
 def _prompt_host(tmp_path: Path, *, busy: bool = True) -> tuple[PromptHost, PromptSession]:
@@ -907,6 +932,38 @@ async def test_a_prompt_during_the_drain_is_spooled_for_the_successor(tmp_path: 
     assert rows[0].source == SOURCE_USER, "the successor must not deliver this as a peer's"
     assert rows[0].command_id == "p" * 8, "the admission identity has to survive the handover"
     assert rows[0].wake is True, "a user prompt asks for a turn"
+
+
+@pytest.mark.asyncio
+async def test_a_released_drain_admits_a_prompt_instead_of_spooling_it(tmp_path: Path) -> None:
+    """After ``end_drain`` a message is the RUNTIME'S OWN work again, not a successor's.
+
+    THE OTHER HALF OF THE ABANDON (``process._abandon_move`` calls ``end_drain``, then
+    keeps serving), and the half a released latch can quietly lose: a handle that
+    stopped draining but still spooled would tell the operator their message was
+    queued for a build that is not coming, while the runtime they are talking to is
+    perfectly able to run it. The durable admission is therefore asserted BOTH ways —
+    the turn starts here, and the inbox stays empty, so the successor cannot deliver a
+    second copy of the same row.
+    """
+    host, session = _prompt_host(tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+    assert host.end_drain() is True
+    assert host.end_drain() is False, "the release has to be idempotent for its caller"
+
+    await host.prompt("deploy the fix", command_id="p" * 8)
+    # The admission is a QUEUE drain on the handle's own loop, so the run has to be
+    # waited out rather than assumed: awaiting the handle's own task is the event this
+    # cell is about, not a sleep.
+    if host._prompt_drain_task is not None:
+        await asyncio.wait_for(asyncio.shield(host._prompt_drain_task), timeout=5)
+
+    assert session.prompt_calls == [
+        "deploy the fix"
+    ], "the released handle refused or spooled a message it should have run"
+    assert (
+        peek_inbox(session.transcript.directory) == []
+    ), "the released handle spooled the message for a successor that is not coming"
 
 
 @pytest.mark.asyncio

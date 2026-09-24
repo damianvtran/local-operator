@@ -2750,6 +2750,318 @@ def test_the_progress_leg_spares_a_genuine_long_await(tmp_path: Path) -> None:
     assert stall_watchdog.fired_leg(pid, tmp_path / "logs") is None
 
 
+# -- the SAME spin, with a child lane in the process --------------------------
+#
+# THE MANAGER SHAPE, and the reason it needs its own child: a parent driving
+# subagents IN PROCESS, its own loop burning CPU in the roster projection walk,
+# while a lane holds a step. Nothing in that state moves a plane's stamp and
+# nothing closes a STEP — ``_subagent_roster_generation`` bumps on a completed
+# assistant message, never on a step being open — so all three progress legs held
+# and the process was cut while it was working (``stall_watchdog`` names the shape
+# and the O(N^2) walk behind the CPU that makes it reachable).
+#
+# The child below is ``_SPINNING_CHILD`` plus exactly ONE real lane on the real
+# registry, and ``MODE`` is the only thing that varies:
+#
+#   open_step    the lane's live tail is an assistant message whose tool calls
+#                have no answers — a lane parked in a long in-process tool. No
+#                counter can express this; it is what the widening adds.
+#   parked_call  the lane's OWN forked stream is parked inside ``_record_stream``:
+#                a lane waiting on its provider. The shared counter already covers
+#                this half, so this arm is a regression guard for it rather than
+#                new coverage.
+#   unreadable   the lane's context raises, so the per-lane read cannot answer.
+#                Fail closed: the process must survive.
+#
+# The probe's own answer is PRINTED while the lane is in the state under test
+# rather than inferred from a missing dump: "no file" says the leg did not fire,
+# and the printed tuple is what says the answer it did not fire on was the widened
+# one. Each arm gets its own config dir, so each arm has its own dump file.
+_LANE_PROBE_CHILD = r"""
+import asyncio
+import os
+import pathlib
+import sys
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+sys.path.insert(0, sys.argv[4])
+
+from local_operator.harness.types import ChatRequest, Message, ModelSpec, ToolCall
+from local_operator.model.configure import SessionStreamFn
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+MODE = sys.argv[3]
+
+
+class _UnreadableContext:
+    # A lane whose own step cannot be read: the fail-closed branch's input.
+
+    @property
+    def messages(self):
+        raise RuntimeError("the lane's context cannot be read")
+
+
+def _completed_tail(lane) -> None:
+    # A lane whose last step landed: what a lane parked in a model call looks like.
+    lane._context.messages.extend(
+        [
+            Message.user("do the thing"),
+            Message.assistant(tool_calls=[ToolCall(id="done-1", name="bash", arguments={})]),
+            Message(role="tool", content=[], tool_call_id="done-1", tool_name="bash"),
+            Message.assistant("step done"),
+        ]
+    )
+
+
+def _open_step(lane) -> None:
+    # A lane mid-batch: the tail is an assistant message with unanswered calls.
+    lane._context.messages.extend(
+        [
+            Message.user("run the long tool"),
+            Message.assistant(tool_calls=[ToolCall(id="open-1", name="bash", arguments={})]),
+        ]
+    )
+
+
+async def _park_a_provider_call(stream) -> None:
+    # Hold a REAL forked child stream inside ``_record_stream``, forever.
+    #
+    # The production counter path (``SessionStreamFn.fork`` setting
+    # ``_counts_as_child_request``) rather than a double: this is what an in-process
+    # lane parked in a model call does, and the shared scalar is what the probe's
+    # existing counter term reads.
+    fork = stream.fork("lane-parked")
+    fork._record_usage = MagicMock()
+
+    async def never():
+        if False:  # pragma: no cover - makes this an async generator
+            yield None
+        await asyncio.Event().wait()
+
+    request = ChatRequest(
+        model=ModelSpec(provider="test", model_id="m"), messages=[Message.user("go")]
+    )
+    # ``_record_stream`` is an ASYNC GENERATOR (the product consumes it the same
+    # way), and iterating it is what enters the provider call the counter counts.
+    async for _event in fork._record_stream(request, never()):  # pragma: no cover
+        pass
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    process.HEARTBEAT_INTERVAL_S = 0.3
+    server.HEARTBEAT_INTERVAL_S = 0.3
+
+    # THE MANAGER'S OWN STREAM IS A REAL ``SessionStreamFn``, because a lane's
+    # provider request is this process's child work only through a FORK of it.
+    stream = SessionStreamFn(MagicMock(), {}, "lane-probe-child")
+    stream._record_usage = MagicMock()
+    session = make_session(root, stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published()
+
+    # A REAL lane on the REAL registry: built by the product's own constructor and
+    # attached through the product's own ``record_launch`` / ``attach``.
+    lane = make_session(root / "lane", stream)
+    _completed_tail(lane)
+    comms = session.subagent_comms
+    comms.record_launch("job-lane", "lane")
+    comms.attach("job-lane", lane, root / "lane")
+
+    # THE STATE IS ESTABLISHED BEFORE THE ARM, so nothing this child does after it
+    # can move the work footprint: this cell is about a static process whose only
+    # moving part is the CPU its own loop burns.
+    if MODE == "open_step":
+        _open_step(lane)
+    elif MODE == "unreadable":
+        lane._context = _UnreadableContext()
+    elif MODE == "unreadable_shape":
+        # A record whose ``child`` is not a lane this read can vouch for: the flag
+        # reads a real False and there is no tail to scan. The direction has to be
+        # "hold" — never "judge it idle" — for a shape a future lane class or a
+        # double can present (agent review round 1, MINOR 3).
+        comms._records["job-lane"].child = SimpleNamespace(_compacting=False)
+    elif MODE == "parked_call":
+        asyncio.create_task(_park_a_provider_call(stream))
+        await asyncio.sleep(0.5)
+        assert stream.child_model_requests_in_flight, "the fork never entered its provider call"
+    else:
+        raise SystemExit(f"unknown MODE {MODE}")
+
+    bound = float(sys.argv[1])
+    process._live_handle = handle
+    assert stall_watchdog.arm(seconds=bound, probe=process._progress_probe)
+    print(f"armed:{os.getpid()}", flush=True)
+
+    stop = asyncio.Event()
+    asyncio.create_task(process._beat_stall_watchdog(stop))
+    # THE LEG'S OWN ANSWER, taken while the lane holds the state under test.
+    print(f"probe:{process._progress_probe()}", flush=True)
+
+    # THE INCIDENT'S LOOP: yielding every pass, so both planes keep their cadence
+    # and keep re-arming the timer, while burning CPU and advancing no work.
+    started = time.monotonic()
+    while time.monotonic() - started < bound * 4:
+        await asyncio.sleep(0)
+        sum(range(200_000))
+    print(f"still-alive:{time.monotonic() - started:.1f}", flush=True)
+    os._exit(0)
+
+
+asyncio.run(main())
+"""
+
+
+def _run_lane_child(root: Path, mode: str) -> subprocess.CompletedProcess[str]:
+    """One lane arm: its own config dir, so its own dump file and its own logs."""
+    root.mkdir(parents=True, exist_ok=True)
+    return _run_script(
+        _LANE_PROBE_CHILD,
+        root,
+        args=(str(CHILD_BOUND_S), str(root), mode, str(REPO)),
+        timeout=120.0,
+    )
+
+
+def _probe_answer(stdout: str) -> tuple[object, bool] | None:
+    """The probe tuple the child printed, PARSED rather than substring-matched.
+
+    ``_assert_spared`` asked whether the text ``", True)"`` appeared anywhere in the
+    child's stdout (agent review round 1, NIT 2). That is a match on a tuple
+    ``repr``: it would start passing for the wrong reason the day ``_work_motion``'s
+    own shape carries a ``True``, and it says nothing about WHICH element answered.
+    The second element of ``(motion, in_flight)`` is what every arm here is about,
+    so the second element is what is asserted — parsed out of the line the child
+    prints for exactly this purpose.
+    """
+    for line in stdout.splitlines():
+        if line.startswith("probe:"):
+            answer = ast.literal_eval(line[len("probe:") :])
+            assert isinstance(answer, tuple) and len(answer) == 2, (
+                f"the child printed a probe answer that is not the (motion, in_flight) "
+                f"pair, so this arm cannot read it: {line!r}"
+            )
+            return answer
+    return None
+
+
+def _assert_spared(result: subprocess.CompletedProcess[str], root: Path, mode: str) -> None:
+    """The shared half of the arms: the leg answered, and nothing fired."""
+    assert result.returncode == 0, (
+        f"the progress leg cut a manager whose lane was in '{mode}': "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    answer = _probe_answer(result.stdout)
+    assert answer is not None, (
+        f"the '{mode}' child never printed the probe's own answer, so this arm would pass "
+        f"for a different reason than the one it is named for: {result.stdout!r}"
+    )
+    assert answer[1] is True, (
+        f"the probe did not answer 'in flight' for '{mode}', so this arm would pass for "
+        f"a different reason than the one it is named for: {result.stdout!r}"
+    )
+    waited = float(result.stdout.split("still-alive:", 1)[1].split()[0])
+    assert waited >= CHILD_BOUND_S * 3, (
+        f"the '{mode}' child did not outlast the bound ({waited}s), so it proves nothing: "
+        f"{result.stdout!r}"
+    )
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    dump = _dump_for(root, pid)
+    assert dump.is_file(), f"the '{mode}' child never armed, so this cell is vacuous"
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER not in text, text
+    assert stall_watchdog.PROGRESS_MARKER not in text, text
+    assert stall_watchdog.fired_leg(pid, root / "logs") is None
+
+
+def test_the_progress_leg_spares_a_manager_whose_lane_holds_a_step(tmp_path: Path) -> None:
+    """THE DISCRIMINATING PAIR: the lane's own open step is the only difference.
+
+    Same child, same real runtime, same real probe, same CPU-burning loop and the
+    same static footprint; the WITH-LANE run has one lane mid-batch and the
+    WITHOUT-LANE run is ``_SPINNING_CHILD``. The first must survive (its lane holds
+    an open step) and the second must still be cut and dumped, which is what keeps
+    the widening from being "stop firing at all".
+
+    Cannot pass on the committed head: the lane's open batch is not in flight by
+    any measure that build had, so the with-lane child fires exactly like the
+    control and this cell reads rc 1.
+    """
+    with_lane = _run_lane_child(tmp_path / "with-lane", "open_step")
+    _assert_spared(with_lane, tmp_path / "with-lane", "open_step")
+
+    control_root = tmp_path / "without-lane"
+    control_root.mkdir(parents=True, exist_ok=True)
+    control = _run_script(
+        _SPINNING_CHILD,
+        control_root,
+        args=(str(CHILD_BOUND_S), str(control_root), str(REPO)),
+        timeout=120.0,
+    )
+    assert control.returncode == 1, (
+        f"the control (no lane at all) was not cut, so this cell cannot tell the "
+        f"widening from a leg that stopped working: {control.stdout!r} {control.stderr!r}"
+    )
+    pid = int(control.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(control_root, pid).read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text
+    assert stall_watchdog.PROGRESS_MARKER in text, text
+    assert stall_watchdog.fired_leg(pid, control_root / "logs") == (stall_watchdog.LEG_PROGRESS)
+
+
+def test_the_progress_leg_spares_a_manager_whose_lane_is_parked_in_a_provider_call(
+    tmp_path: Path,
+) -> None:
+    """The model-call half of the lane, which the shared forked-stream counter covers.
+
+    Half of the required pair rather than a courtesy: a manager whose lanes are all
+    parked in long model calls is the shape the incident was measured in, and a
+    widening that spared its sibling arm (a lane holding a tool batch) while
+    letting this one be cut would have moved the false positive rather than closed
+    it.
+    """
+    result = _run_lane_child(tmp_path / "parked-call", "parked_call")
+    _assert_spared(result, tmp_path / "parked-call", "parked_call")
+
+
+def test_an_unreadable_lane_leaves_the_runtime_alive(tmp_path: Path) -> None:
+    """FAIL CLOSED: a lane whose step cannot be read preserves the process.
+
+    The direction is the opposite of this session's own tail (``process``
+    documents why), and it is the direction the widened read was asked for: the
+    lane is known to be there, so "I could not read it" must not be spent as "no
+    lane holds work". A run that fired here would make a corrupt registry fatal.
+    """
+    result = _run_lane_child(tmp_path / "unreadable", "unreadable")
+    _assert_spared(result, tmp_path / "unreadable", "unreadable")
+
+
+def test_a_lane_of_an_unrecognised_shape_holds_the_runtime(tmp_path: Path) -> None:
+    """FAIL CLOSED on a child this read cannot vouch for (agent review round 1, MINOR 3).
+
+    The gate is an ``isinstance`` against the real ``Session``, so a
+    ``record.child`` that is not a ``Session`` — a double, a lane class built on
+    another base — is HELD and the hold is announced. The ``_compacting`` read
+    behind it is still plain truthiness, and a ``Session`` SUBCLASS passes the gate
+    and is judged by its tail instead: this arm is about the non-``Session`` shape.
+    Plain truthiness was the defect: a
+    ``MagicMock``'s attribute is truthy for the life of the process, which answered
+    "in flight" forever with nothing recording that the read never worked, and the
+    mirror case (an attribute reading a real ``False`` on a shape with no tail to
+    scan) was spent as "not in flight". ``_assert_spared`` carries the rest: alive
+    past four bounds, no fired marker and no progress line in the dump.
+    """
+    result = _run_lane_child(tmp_path / "unreadable-shape", "unreadable_shape")
+    _assert_spared(result, tmp_path / "unreadable-shape", "unreadable_shape")
+
+
 #: A clock the progress leg can be driven through: the predicate is about the
 #: RELATION between three readings, so the readings are what a test has to
 #: control. Waiting out a real window would make every cell here a bet on host

@@ -145,7 +145,6 @@ from local_operator.clipboard import (
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
-from local_operator.references import at_references_enabled, reference_resolves
 from local_operator.sigils import at_token, at_token_spans, split_token
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
@@ -4722,6 +4721,15 @@ class Editor(TextArea):
         blocks a path that does exist. The ink is a hint about what the resolver
         will do; the resolver's own verdict, not the hint, decides what is sent.
         """
+        if "@" not in self.text:
+            # No token can resolve in a draft without an `@`, whatever the kill
+            # switch says -- and answering that here is what keeps
+            # `local_operator.references` (which drags `tools.builtin` in, ~260 ms)
+            # off the first paint: `render_line` reaches this on every frame,
+            # including the empty composer at boot (backend load report B-F10).
+            return {}
+        from local_operator.references import at_references_enabled, reference_resolves
+
         cwd = self._reference_cwd()
         enabled = at_references_enabled()
         key: tuple[object, ...] = (self.text, cwd, enabled)

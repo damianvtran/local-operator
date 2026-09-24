@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import statistics
 import threading
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from typing import Any, Callable, Coroutine, cast
 
 import pytest
@@ -28,6 +30,7 @@ from local_operator.mobile.types import (
 from local_operator.session.frontend_state import FrontendSubscription
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
 
 
@@ -289,6 +292,16 @@ async def _on_runtime_loop(runtime: RuntimeServer, coro: Coroutine[Any, Any, Any
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, loop))
 
 
+#: The ops a WELCOME may arrive as, for assertions that are not about the
+#: welcome itself. A connection asking for BOTH the canonical frontend and the
+#: raw event stream is welcomed with the identity-only ``welcome`` frame
+#: (``RuntimeServer._slim_welcome_frame``) instead of a full capped projection,
+#: because that client shape reads the welcome for identity alone; every other
+#: shape keeps the projection. A test whose subject IS the welcome asserts the
+#: exact op rather than this set.
+_WELCOME_OPS = ("projection", "welcome")
+
+
 async def _dial(
     record: registry.SessionRecord,
     *,
@@ -410,7 +423,7 @@ async def test_v4_event_client_gets_seed_and_events_daemon_gets_no_raw_frames() 
             + b"\n"
         )
         await attach_writer.drain()
-        assert json.loads(await attach_reader.readline())["op"] == "projection"
+        assert json.loads(await attach_reader.readline())["op"] in _WELCOME_OPS
         seed = json.loads(await attach_reader.readline())
         assert seed["op"] == "frontend_sync"
         assert seed["data"]["snapshot"]["streaming"] is False
@@ -461,7 +474,15 @@ async def test_pending_gate_uses_canonical_stream_not_projection_overlay() -> No
         await attach_writer.drain()
         follower = json.loads(await attach_reader.readline())
         sync = json.loads(await attach_reader.readline())
-        assert follower["data"]["pending"] is None
+        # The ATTACH welcome is identity-only (``_slim_welcome_frame``): a full-TUI
+        # client discards the projection, so what it carries is the identity with
+        # EMPTY collections — no gate overlay to render, and no roster to walk.
+        # What the follower actually reads is the canonical snapshot below, which
+        # is the assertion this test is about; the daemon's projection overlay is
+        # checked at the end of the walk.
+        assert follower["op"] == "welcome", follower
+        assert follower["data"]["pending"] is None, follower
+        assert follower["data"]["subagents"] == [], follower
         assert sync["data"]["snapshot"]["pending_gate"] is None
 
         handle._frontend.mutate(
@@ -507,7 +528,7 @@ async def test_event_seed_covers_events_before_client_is_ready() -> None:
             + b"\n"
         )
         await writer.drain()
-        assert json.loads(await reader.readline())["op"] == "projection"
+        assert json.loads(await reader.readline())["op"] in _WELCOME_OPS
         seed = json.loads(await reader.readline())
         assert seed["op"] == "frontend_sync"
         assert seed["data"]["snapshot"]["streaming"] is True
@@ -1037,7 +1058,7 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
             + b"\n"
         )
         await slow_writer.drain()
-        assert json.loads(await slow_reader.readline())["op"] == "projection"
+        assert json.loads(await slow_reader.readline())["op"] in _WELCOME_OPS
         assert json.loads(await slow_reader.readline())["op"] == "frontend_sync"
         assert len(runtime._clients) == 1
         slow_conn = next(iter(runtime._clients.values()))
@@ -1057,7 +1078,7 @@ async def test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_or
             + b"\n"
         )
         await healthy_writer.drain()
-        assert json.loads(await healthy_reader.readline())["op"] == "projection"
+        assert json.loads(await healthy_reader.readline())["op"] in _WELCOME_OPS
         assert json.loads(await healthy_reader.readline())["op"] == "frontend_sync"
 
         async def block_only_slow(conn, frame):  # noqa: ANN001, ANN202
@@ -2079,6 +2100,339 @@ async def test_desktop_watch_lease_separates_visibility_and_notification_deliver
         runtime.close()
 
 
+# ---------------------------------------------------------------------------
+# ATTACHED vs ATTENDED (docs/design/attached-interface-signal.md §2)
+#
+# The incident: a desktop app that was open, FOCUSED and VISIBLE, holding a live
+# lease on this session's conversation, whose machine-wide record could not NAME
+# the conversation it was showing (``session_id: ""``) — so the attention
+# predicate denied, the model-facing probe answered False, and at least twenty
+# live sessions carried a block telling their model ``nobody is watching a
+# screen``. The operator was reading one of them.
+#
+# Two questions are pinned apart here, and each consumer reads exactly one:
+# ATTACHED ("an interface can PRESENT a question") for the model; ATTENDED ("a
+# person is looking right now") for notification rung 1, unchanged.
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _desktop_presence_claim(
+    root, *, session_id: str, focused: bool = True, visible: bool = True
+) -> Iterator[None]:
+    """Publish the machine-wide delivery record the incident was read from (§1.1).
+
+    Written through the REAL publisher, so the record carries this process's pid
+    and a fresh heartbeat — the file's shape is the contract between the app and
+    this reader, and a hand-built dict would stop testing it. Closed on exit:
+    ``close`` withdraws only the publisher's OWN record (R6) and reaps its beat
+    task, so nothing outlives the test.
+    """
+    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
+    from local_operator.session.runtime import presence
+
+    publisher = DesktopDeliveryPublisher(root)
+    publisher.update(
+        "sub-1",
+        can_notify=True,
+        can_notify_kinds=["complete", "error"],
+        session_id=session_id,
+        window={"exists": True, "focused": focused, "visible": visible, "minimized": False},
+    )
+    # The reader caches its answer for PRESENCE_CACHE_TTL_S, so a write must
+    # never be masked by an answer taken before it.
+    presence.reset_cache()
+    try:
+        yield
+    finally:
+        publisher.close()
+        presence.reset_cache()
+
+
+def _desktop_connection(runtime: RuntimeServer):
+    """The live desktop attach connection in this runtime's table."""
+    return next(c for c in runtime._clients.values() if c.surface == "desktop")
+
+
+@pytest.mark.asyncio
+async def test_a_focused_desktop_pane_that_cannot_name_its_conversation_is_still_attached(
+    monkeypatch, tmp_path
+) -> None:
+    """THE INCIDENT REPRODUCTION (§1.1, §2.3).
+
+    A desktop app with a focused, visible window, a live delivery lease and this
+    session's pane mounted, whose record cannot name the conversation, must count
+    as ATTACHED — and must still count as UNATTENDED, because focus/visibility on
+    a machine-wide record is rung 1's business, not the model's.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=False, can_notify=True)
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            # Tier B deliberately does NOT move here: `desktop_visible` is false,
+            # so nobody is looking at this session — which is what routing needs.
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unfocused_desktop_pane_is_attached_though_nobody_is_watching(
+    monkeypatch, tmp_path
+) -> None:
+    """§1.3: focus is the wrong question for the model, and it FLAPS.
+
+    A window that is visible but not focused (the operator is reading a terminal
+    beside it) reports ``attended=False``, so rung 1 correctly sees no watcher —
+    while the pane is mounted and a card painted now would be there when they
+    look. Tier A must answer across that difference; Tier B must not.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id="s1", focused=False):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_multiplexed_terminal_away_from_this_session_is_attached_but_not_attended() -> None:
+    """A viewer holding this session in a tab it is not displaying (§1.3).
+
+    Tier A counts the connection, because that process can paint the card the
+    moment the operator switches to it; Tier B must keep dropping it, which is
+    the whole of the ``viewer_watch`` fix it was written for.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    terminal = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _wait_record()
+        await terminal.connect(record, "s1")
+        await terminal.viewer_watch(displaying=False)
+        assert runtime.attached_surfaces() == frozenset({"attach"})
+        assert runtime.watching_surfaces() == frozenset()
+    finally:
+        await terminal.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_connection_is_never_attached() -> None:
+    """The mobile daemon's ADOPTION dial covers every session on the machine.
+
+    Counting it would let a machine running ``lop mobile`` report an interface on
+    every session, including one nobody has ever opened — the same reasoning as
+    rung 1's (``server.py::watching_surfaces``), applied to the model-facing
+    question because a model told "a question WILL be presented" has to be told
+    the truth.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        _reader, writer = await _dial(record)
+        assert runtime.attached_surfaces() == frozenset()
+        assert runtime.watching_surfaces() == frozenset()
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_fifty_real_focus_changes_move_neither_tier_a_nor_its_answer() -> None:
+    """FIFTY REAL FOCUS CHANGES ON THE REAL WIRE (round 1, MINOR 5 / NIT 8).
+
+    The churn requirement is that raising and lowering the window cannot move the
+    block inside the persisted system prompt. The desktop arm used to be
+    ``lease and (visible or can_notify)``, and the wire's ``visible`` is already
+    the app's ``visibilityState === 'visible' && hasFocus()`` — so on a host with
+    no OS-notification channel that arm WAS focus, and fifty flaps flipped the
+    model-facing answer fifty times, writing a ``[session-state]`` row each way.
+
+    The churn test in ``test_prompts_api`` cannot see this: it feeds the renderer
+    a constant. This one drives the real ``desktop_watch`` handler with both
+    notification configurations and both window states, and asserts the answer
+    never moves — while the ATTENTION tier, which is supposed to follow the
+    window, does.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        answers: set[frozenset[str]] = set()
+        for can_notify in (False, True):
+            for index in range(50):
+                await desktop.desktop_watch(visible=bool(index % 2), can_notify=can_notify)
+                answers.add(runtime.attached_surfaces())
+        assert answers == {frozenset({"desktop"})}
+
+        # The two tiers stay separable: the window is now unfocused/hidden, so
+        # nothing is being LOOKED AT — while the pane is still the surface a
+        # question would appear on.
+        await desktop.desktop_watch(visible=False, can_notify=True)
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_reaper_still_sees_no_viewer_without_a_visible_panel() -> None:
+    """THE NEGATIVE THAT MUST NOT MOVE: residency was not loosened (§1.5).
+
+    ``attach_clients()`` is the predicate that keeps a runtime resident. A
+    desktop connection that is neither visible nor notification-capable is not a
+    front end, so it still counts for nothing THERE — a runtime with no panel on
+    screen still exits.
+
+    TIER A SPLITS FROM IT HERE, deliberately (round 1, MINOR 5). The LEASE is a
+    heartbeat that names this session's own subscription and is withdrawn when
+    the pane leaves, so "lease live" IS "a pane holds this conversation" — the
+    fact the model-facing block is about — and ``visible``/``can_notify`` are
+    attention and reachability, which is why the two predicates are no longer the
+    same expression. The churn the old clause caused is the reason it had to
+    change: ``desktop_visible`` is the app's ``visible && focused``, so on a host
+    with no notification channel the arm collapsed to focus, and raising and
+    lowering that window moved the block inside the persisted system prompt.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=False, can_notify=False)
+        assert runtime.attach_clients() == 0
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_that_cannot_name_a_session_falls_back_to_the_connection(
+    monkeypatch, tmp_path
+) -> None:
+    """ABSENCE OF EVIDENCE IS NOT EVIDENCE AGAINST (§2.3).
+
+    The publisher blanks ``session_id`` whenever it cannot vouch for it, so an
+    empty field says nothing about which conversation is on screen. The
+    per-connection flag is the per-session answer, and falling through to it is
+    the pre-presence behaviour the reader's docstring promises an older app.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is True
+            assert runtime.watching_surfaces() == frozenset({"desktop"})
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_naming_another_session_still_denies(monkeypatch, tmp_path) -> None:
+    """The denied direction is preserved where the record IS evidence.
+
+    An app that names a DIFFERENT conversation must not suppress this session's
+    background banner: that is exactly the case the record exists to catch.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id="some-other-session"):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is False
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_that_cannot_name_a_session_does_not_suppress_an_unfocused_banner(
+    monkeypatch, tmp_path
+) -> None:
+    """The fallback is SCOPED: an unfocused window still banners (§2.3).
+
+    Falling through to ``conn.desktop_visible`` only grants when the pane really
+    is visible, so a window behind another app keeps raising the OS banner —
+    otherwise the empty field would silence every surface for a conversation
+    nobody is looking at, which is the defect the record was built to stop.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            # THE UNFOCUSED CASE IS EXPRESSED THROUGH ``visible=False``, NOT
+            # ``focused=False``, because that is what the app actually SENDS: the
+            # desktop host computes the wire ``visible`` as
+            # ``visibilityState === 'visible' && hasFocus()``
+            # (``local-operator-ui/src/main/desktop-notifier.ts``), so focus is
+            # already folded into it. Flipping the RECORD's ``focused=`` would
+            # test a different seam (Tier B's presence read), not this one.
+            await desktop.desktop_watch(visible=False, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is False
+            assert runtime.watching_surfaces() == frozenset()
+            # ...and the app is still reachable for the out-of-band toast.
+            assert runtime.notification_surfaces() == frozenset({"desktop"})
+            # Attached all the same: the pane is mounted, so a question is
+            # presentable the moment the operator returns to it.
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
 @pytest.mark.asyncio
 async def test_desktop_attach_refuses_old_runtime_before_becoming_a_false_terminal() -> None:
     from dataclasses import replace
@@ -2862,9 +3216,14 @@ async def test_push_builds_no_payload_without_projection_recipients() -> None:
                 + b"\n"
             )
             await writer.drain()
-            assert json.loads(await reader.readline())["op"] == "projection"
+            assert json.loads(await reader.readline())["op"] in _WELCOME_OPS
             assert json.loads(await reader.readline())["op"] == "frontend_sync"
-            payload.assert_called_once()  # Identity welcome is never suppressed.
+            # A full-TUI attach RENDERS nothing from the projection, so its welcome
+            # no longer builds one at all (``_slim_welcome_frame``). The next two
+            # assertions are the half that must not regress: the daemon, which
+            # does render it, still gets a built payload — and ``_push`` still
+            # skips the attach without building anything.
+            payload.assert_not_called()
             payload.reset_mock()
             for _ in range(20):
                 await runtime._push()
@@ -2924,7 +3283,7 @@ async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> Non
             + b"\n"
         )
         await tui_writer.drain()
-        assert json.loads(await tui_reader.readline())["op"] == "projection"
+        assert json.loads(await tui_reader.readline())["op"] in _WELCOME_OPS
         seed = json.loads(await tui_reader.readline())
         assert seed["op"] == "frontend_sync"
 
@@ -4018,7 +4377,7 @@ async def _dial_frontend(
         + b"\n"
     )
     await writer.drain()
-    assert json.loads(await asyncio.wait_for(reader.readline(), timeout=5))["op"] == "projection"
+    assert json.loads(await asyncio.wait_for(reader.readline(), timeout=5))["op"] in _WELCOME_OPS
     return reader, writer
 
 
@@ -4365,3 +4724,455 @@ async def test_a_viewer_that_dies_mid_bind_leaves_no_subscription_behind() -> No
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+class _OffLoopCapableHeldBindHandle(_HeldBindHandle):
+    """A PARKED on-loop bind plus a working off-loop one — the busy-owner shape.
+
+    ``_HeldBindHandle`` covers the case where the grace expires and there is
+    nothing to fall back to, so the wait simply continues (a single-plane handle,
+    the TUI kind). This is the daemon/exec handle the grace exists for: the
+    on-loop bind stays parked for the whole test, so the ONLY way this connection
+    can be given a canonical state is the off-loop path, and the park is then
+    released to model the shielded bind landing late.
+
+    ``release_gate`` is a SECOND gate, and deliberately: it holds the handle call
+    open AFTER the subscription has been registered, which is the only window in
+    which a stale relay callback can be observed at all. Modelling "the bind
+    lands late" without that window would test ``_release_when_landed`` and never
+    the token.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_gate = threading.Event()
+        self.late_registered = threading.Event()
+        self.off_loop_binds = 0
+
+    async def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001
+        subscription = await super().subscribe_frontend(on_update, display_window=display_window)
+        # REGISTERED, and the call has not returned: the abandoned on-loop bind
+        # now holds a live subscription whose relay callback is stamped stale.
+        self.late_registered.set()
+        await asyncio.to_thread(self.release_gate.wait, 10.0)
+        return subscription
+
+    def subscribe_frontend_nowait(self, on_update):  # noqa: ANN001
+        self.off_loop_binds += 1
+        # The REAL store call the production handle makes, so the ordering these
+        # tests assert is the store's own rather than a double's idea of it.
+        return self._frontend.subscribe_threadsafe(on_update)
+
+
+class _DrainingOffLoopCapableHeldBindHandle(_OffLoopCapableHeldBindHandle):
+    """The parked-owner double WITH the production drain latch available on it.
+
+    Bound as a class attribute rather than called unbound, which is the pattern
+    ``test_serving_drain``'s ``DrainHost`` uses: a double that re-implemented the latch
+    would pin nothing about the state a viewer actually meets, and the attributes the
+    real method writes are declared here so the cells can read them back.
+    """
+
+    begin_drain = ServingSessionHandle.begin_drain
+    end_drain = ServingSessionHandle.end_drain
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: Written by ``begin_drain`` / cleared by ``end_drain``, read by the cells.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
+
+
+class _CountingBindHandle(FakeHandle):
+    """A HEALTHY handle: binds at once, and records if the fallback was used.
+
+    ``FakeHandle.subscribe_frontend`` returns immediately, so this is the owner
+    shape ``_ONLOOP_BIND_GRACE_S`` is sized for (a real one answers in 4.7-5.0 ms
+    p50). The off-loop entry point exists and is countable, which is the point:
+    "the grace never fires on a healthy owner" is otherwise asserted only by the
+    absence of a symptom, and the symptom it would have (no display window on
+    every viewer) is invisible while the attach still looks fast and green.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.off_loop_calls = 0
+
+    def subscribe_frontend_nowait(self, on_update):  # noqa: ANN001
+        self.off_loop_calls += 1
+        return self._frontend.subscribe_threadsafe(on_update)
+
+
+async def _frontend_delta_sequences(reader: asyncio.StreamReader, count: int) -> list[int]:
+    """Read exactly ``count`` canonical deltas and return their sequences.
+
+    Other frames are skipped rather than assumed absent (a repaint, an event
+    frame): what is under test is the ORDER of the deltas, and a helper that
+    tripped over an unrelated frame would fail for the wrong reason.
+    """
+    sequences: list[int] = []
+    for _ in range(80):
+        if len(sequences) == count:
+            return sequences
+        raw = await asyncio.wait_for(reader.readline(), timeout=5)
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        frame = json.loads(text)
+        if frame.get("op") == "frontend_update":
+            sequences.append(frame["data"]["sequence"])
+    raise AssertionError(f"only {sequences} of {count} deltas arrived")
+
+
+async def _subscribers_become(handle: FakeHandle, want: int) -> None:
+    """Wait on an EVENT (the store's own roster), never on a clock."""
+    for _ in range(200):
+        if len(handle._frontend._subscribers) == want:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"the store holds {len(handle._frontend._subscribers)} subscribers, wanted {want}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_relays(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The grace, the fallback and the bind token, on a real socket.
+
+    WHAT THIS PINS. The on-loop bind is shielded and cannot be cancelled, so an
+    attach that outlives the grace is served off-loop while the parked bind is
+    STILL going to land — and when it lands it registers a SECOND subscriber on
+    the same store. The assertion is on the sequences that reach the socket, not
+    on the subscriber count alone: if the late callback relayed, this connection
+    would receive every delta twice, and a client reading an exact-``+1`` stream
+    reads a duplicate as a gap and redials.
+
+    The whole test is event-driven (the handle's own gates, the store's own
+    roster) because a schedule this subtle held together by sleeps would be a bet
+    on the host.
+    """
+    handle = _OffLoopCapableHeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        with caplog.at_level(logging.INFO, logger="local_operator.session.runtime.server"):
+            sync = await _until(reader, "frontend_sync")
+        assert handle.off_loop_binds == 1, (
+            "the sync arrived off-loop, but the recorded fallback count says the "
+            "grace did not hand the bind over"
+        )
+        # AND THE HAND-OFF IS OBSERVABLE FROM OUTSIDE THE HANDLE. The runtime's
+        # own counter and line are what answer the design's rollout question
+        # ("is the fallback firing on healthy owners?") in a production log —
+        # pinned HERE because this is the only attach in the file that takes the
+        # fallback, and a counter nothing asserts is a number nobody can trust.
+        assert runtime.frontend_off_loop_binds == 1
+        assert "missed the 100 ms on-loop grace" in caplog.text
+        assert sync["data"].get("display_history") is None, (
+            "the off-loop path has no display window: it reads the loop-owned "
+            "transcript, which is the loop this path exists to avoid"
+        )
+        base = sync["data"]["sequence"]
+
+        # BEFORE the late bind lands, so these ride the off-loop registration.
+        handle._frontend.mutate(goal="before the late bind")
+        assert await _frontend_delta_sequences(reader, 1) == [base + 1]
+
+        # RELEASE THE PARK: the abandoned on-loop bind registers its own
+        # subscriber, whose callback was stamped before the fallback bumped the
+        # token. Both subscribers exist NOW, which is the window this test is for.
+        handle.bind_gate.set()
+        assert await asyncio.to_thread(handle.late_registered.wait, 5), "the late bind never landed"
+        await _subscribers_become(handle, 2)
+        handle._frontend.mutate(goal="while both are registered")
+        assert await _frontend_delta_sequences(reader, 1) == [base + 2]
+
+        # AND THE STALE SUBSCRIBER IS RECLAIMED, not merely muted: the release
+        # the cancellation path already uses runs when the bind lands.
+        handle.release_gate.set()
+        await _subscribers_become(handle, 1)
+        handle._frontend.mutate(goal="after the release")
+        assert await _frontend_delta_sequences(reader, 1) == [base + 3]
+
+        # NOTHING ELSE IS ON THE WIRE. A duplicate would sit BEHIND the last
+        # assertion above, so a stream that ended here is the claim.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(reader.readline(), timeout=0.3)
+    finally:
+        handle.bind_gate.set()
+        handle.release_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_draining_owner_still_lands_the_canonical_sync_inside_the_envelope() -> None:
+    """THE OPERATOR'S SYMPTOM, with the drain latched: a viewer still gets its state.
+
+    The incident's configuration, not an invented one. The runtime that could not be
+    attached had latched a stale-build drain (``begin_drain``, taken here through the
+    PRODUCTION latch rather than a fake that re-implements it) and was still stepping
+    three subagent lanes, so its session loop was exactly as busy as the parked owner
+    below models — the attach then missed the 15 s envelope and the operator got
+    ``RuntimeUnresponsiveError`` while the session was, technically, alive and serving.
+
+    So this is the parked-owner rig re-driven under a drain. Two things are asserted,
+    and the second is the one a future change is most likely to break: the canonical
+    ``frontend_sync`` LANDS, inside a bound well under the attach envelope, and it
+    lands through the OFF-LOOP fallback — a draining runtime still serves a joining
+    viewer. Gating the fallback on "not draining" (a plausible-looking reading of "a
+    runtime that is leaving should not bind new viewers") is what this cell fails on,
+    and the cost of that gate is another attach nobody can complete.
+
+    The latch is asserted while the sync is in flight, because the property is about a
+    DRAINING owner: a test that released the drain before dialling would prove nothing
+    about the state the operator was in.
+    """
+    handle = _DrainingOffLoopCapableHeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        # The PRODUCTION latch over this reduced handle: ``begin_drain`` asks only for
+        # ``_disposing`` and an optional ``session.retire_wakes_to_inbox``, so the same
+        # method the real handle runs is the one under test here.
+        assert handle.begin_drain("stale-build", "0.62.9 -> 0.62.12")
+        assert (
+            handle._draining is True
+        ), "the drain has to be latched for this cell to mean anything"
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        started = time.monotonic()
+        sync = await _until(reader, "frontend_sync")
+        landed_after = time.monotonic() - started
+
+        assert sync["data"].get("sequence") is not None, "the sync carried no canonical state"
+        assert landed_after < 10.0, (
+            "a draining owner's viewer waited "
+            f"{landed_after:.1f}s for its state, and the attach envelope is 15 s: this is "
+            "the shape that made the runtime unattachable"
+        )
+        assert handle.off_loop_binds == 1, (
+            "the parked on-loop bind carried the sync, so the off-loop fallback a "
+            "draining runtime needs was not used"
+        )
+        assert runtime.frontend_off_loop_binds == 1
+        assert handle._draining is True, (
+            "the drain was released under the viewer, so this no longer says anything "
+            "about a DRAINING owner"
+        )
+    finally:
+        handle.bind_gate.set()
+        handle.release_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_owner_never_reaches_the_off_loop_fallback() -> None:
+    """The other half of the grace, on a real socket.
+
+    THE GRACE IS A BET THAT IS WORTHLESS IF IT FIRES ON EVERYONE. The off-loop
+    path has no display window, so a grace that misfires on healthy owners takes
+    the window away from every viewer while the attach still looks fast and every
+    other test stays green. This drives the healthy shape end to end: a handle
+    that binds on the session loop at once, its off-loop entry point present and
+    countable, and the ``frontend_sync`` read off the wire.
+    """
+    handle = _CountingBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        sync = await _until(reader, "frontend_sync")
+        assert sync["data"]["sequence"] >= 0
+        assert handle.off_loop_calls == 0, (
+            "a handle that answers in microseconds was served off-loop: the "
+            "grace is mistuned for healthy owners"
+        )
+        assert runtime.frontend_off_loop_binds == 0
+        await _subscribers_become(handle, 1)
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+def test_the_on_loop_grace_keeps_its_headroom_over_a_healthy_owners_bind() -> None:
+    """The constant is pinned to the distribution that sized it, as a RATIO.
+
+    ``_ONLOOP_BIND_GRACE_S`` is justified by measured healthy binds (p50
+    4.7-5.0 ms, p95 <= 15 ms for a whole sync) and nothing else in the tree ties
+    the two together: a later change that lowered the grace to 20 ms would leave
+    every test green while pushing healthy owners onto the fallback, whose only
+    trace is the log line this change adds. A ratio rather than a duration, so
+    the assertion states the HEADROOM that was chosen and does not pin a
+    host-speed number into the suite.
+    """
+    from local_operator.session.runtime import server as server_module
+
+    healthy_bind_p95_s = 0.015
+    assert server_module._ONLOOP_BIND_GRACE_S >= 6 * healthy_bind_p95_s, (
+        f"the on-loop grace is {server_module._ONLOOP_BIND_GRACE_S * 1000:.0f} ms, "
+        "which is no longer an order of magnitude over a healthy owner's p95 bind "
+        "(15 ms) — healthy owners would take the off-loop fallback and lose their "
+        "display window"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_attach_is_welcomed_with_identity_alone_while_a_daemon_keeps_its_projection() -> (
+    None
+):
+    """The slim welcome, on the wire, for the client shape it is for.
+
+    A connection asking for the canonical frontend AND the event stream is a full
+    terminal or the desktop, and that client DISCARDS the projection
+    (``session/attached.py`` builds it with an ``on_projection`` that ignores its
+    argument), so the runtime no longer builds and caps a whole projection for it
+    inline on the serving loop. The daemon is the client that DOES render a
+    projection, and its welcome is untouched — the two halves are asserted
+    together so a change that slimmed both would fail here.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.types import _projection_from_json
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = daemon_writer = None
+    client = None
+    try:
+        record = await _wait_record()
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        welcome = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+        assert welcome["op"] == "welcome", welcome
+        data = welcome["data"]
+        # THE IDENTITY IS ALL THAT SURVIVES, and it must: the client checks the
+        # conversation it landed on against this field before anything else.
+        assert data["session_id"] == "s1"
+        assert data["conversation_name"] == "fake"
+        # THE PAYLOAD IS EMPTY, NOT MERELY SMALL: the collections are present and
+        # empty, which is what keeps the frame a valid projection of its own op
+        # for a client that rebuilds it field by field — and it is the same object
+        # the send ceiling substitutes, so "identity only" has one definition.
+        assert data["transcript"] == [], data
+        assert data["subagents"] == [], data
+        assert data["todos"] == [], data
+        assert data["pending"] is None, data
+        # THE COMPATIBILITY CLAIM, TESTED RATHER THAN ASSUMED: the client's own
+        # parser rebuilds a projection from this payload.
+        assert _projection_from_json(data, record).session_id == "s1"
+
+        # ...and a live connection of the real client shape attaches from it.
+        client = AttachClient(
+            lambda _projection: None,
+            lambda _reason: None,
+            events=True,
+            frontend_state=True,
+        )
+        await client.connect(record, "s1")
+
+        # THE OTHER HALF: a daemon renders the projection, so it still gets one.
+        daemon_reader, daemon_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        daemon_writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
+        await daemon_writer.drain()
+        daemon_welcome = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=5))
+        assert daemon_welcome["op"] == "projection", daemon_welcome
+        assert (
+            "transcript" in daemon_welcome["data"]
+        ), "the daemon renders the projection; slimming it would blank the phone"
+    finally:
+        if client is not None:
+            await client.detach()
+        if writer is not None:
+            writer.close()
+        if daemon_writer is not None:
+            daemon_writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_that_landed_as_the_grace_fired_is_used_rather_than_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same-turn race ``_bind_with_grace``'s second exit exists for.
+
+    FORCED rather than raced. The wrapper below lets the shielded task land and
+    THEN reports the grace as expired, which is the schedule in which ``wait_for``
+    cancels the shield while the task that shield covered is already done.
+    Handing off there would bind the connection twice, release the landed
+    subscription a moment later, and mark a HEALTHY owner as window-less — the
+    display window being the one thing the on-loop path carries that the off-loop
+    path cannot. So the assertion is that the LANDED subscription is returned.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    real_wait_for = asyncio.wait_for
+
+    async def grace_expires_after_the_bind_landed(fut, timeout, **kwargs):  # noqa: ANN001
+        await real_wait_for(fut, timeout, **kwargs)
+        raise TimeoutError
+
+    async def bind() -> str:
+        return "the on-loop subscription"
+
+    bind_task = asyncio.ensure_future(bind())
+    monkeypatch.setattr(asyncio, "wait_for", grace_expires_after_the_bind_landed)
+    assert await runtime._bind_with_grace(bind_task) == "the on-loop subscription"
+    assert bind_task.done() and not bind_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_still_parked_past_the_grace_hands_off_and_leaves_the_task_running() -> None:
+    """``None`` means HAND OFF, and the shielded task survives to land later.
+
+    The second half is the premise the fallback rests on: if the grace cancelled
+    the task there would be nothing for ``_release_when_landed`` to release when
+    it lands, and the bind token's job — retiring a relay callback that arrives
+    after the fallback has already bound the connection — would have nothing to
+    retire.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+
+    async def bind() -> str:
+        await asyncio.sleep(30)
+        return "the on-loop subscription"
+
+    bind_task = asyncio.ensure_future(bind())
+    try:
+        assert await runtime._bind_with_grace(bind_task) is None
+        assert not bind_task.done(), "the grace cancelled the task it exists to shield"
+        assert not bind_task.cancelled()
+    finally:
+        bind_task.cancel()

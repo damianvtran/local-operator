@@ -21,7 +21,6 @@ from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.desktop_auth import DesktopAuth, LoginOperation
-from local_operator.tunnels import report
 
 router = APIRouter(tags=["Authentication"], dependencies=[Depends(require_desktop)])
 
@@ -218,6 +217,13 @@ async def account_status(host: DesktopAuth = Depends(get_desktop_auth)):
     #
     # `reachable=False`: this route is polled beside an interactive login form,
     # so it must not wait on a loopback socket to answer.
+    #
+    # Imported per request, not at module scope: ``tunnels.report`` pulls the
+    # tunnel gateway (PyJWT, httpx, starlette) and this router is imported by
+    # ``server.app``, so every ``lop serve`` boot paid for it (backend load
+    # report B-F10).
+    from local_operator.tunnels import report
+
     tunnel = await report.local_payload(reachable=False)
     return _reply(
         {"accounts": accounts, "radient_login": tunnel["login"], "tunnel_remedy": tunnel["remedy"]}

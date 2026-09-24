@@ -36,9 +36,16 @@ async def _noop(tool_call_id: str, *_args: object) -> ToolResult:
 
 
 def _fn(session_id="sess-1"):
+    # These recorder tests bypass __init__; preserve an ordinary root stream's
+    # default so they exercise recording without inventing fork activity.
     fn = object.__new__(SessionStreamFn)
     fn._session_id = session_id
+    fn._counts_as_child_request = False
     return fn
+
+
+def test_recorder_fixture_defaults_to_root_stream() -> None:
+    assert _fn()._counts_as_child_request is False
 
 
 def _request():

@@ -313,3 +313,80 @@ async def test_an_output_only_EXPOSURE_still_files_its_incident(
     assert notices, "an output-only exposure produced no live notice"
     assert notices[0].kind == "warning"
     assert "rotate" in notices[0].text, notices[0].text
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_the_publish_script_an_agent_authors_reaches_the_model_readable(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The operator's workflow end to end: author a script from what was displayed.
+
+    Reported 2026-09-22. ``lop secret run`` with a store NAME is how
+    ``guide://credentials`` hands a stored secret to a child, and an operator names
+    an entry after the SYSTEM it belongs to — the reported one ends in USERNAME,
+    which is not one of the credential words the pass used to require. So every tool
+    result masked that name, and the script the agent then authored from the text it
+    read asked the store for a secret literally named ``[redacted]``, which cannot
+    work. This drives the real loop over the real ``bash`` tool and reads what the
+    provider was handed, what the transcript holds, and what the file holds.
+
+    The control lives in a file the TEST seeds, so it is in the command's OUTPUT
+    while never being in the model's own call: a synthetic issuer token, which must
+    still be masked. That is what makes the NAME assertion evidence of a pass that
+    ran rather than of text nothing looked at.
+    """
+    directory = headless_tui_env / "sessions" / "name-e2e"
+    store_name = "_".join(("MINERVA", "UI", "NPROD", "USERNAME"))
+    control = "ghp" + "_AbCd1234EfGhIjKlMnOpQr"
+    # Assembled so no literal in this SOURCE is a flag followed by its argument.
+    command = "lop secret run " + "--" + "secret " + store_name + " -- npm publish"
+    script = "#!/bin/sh" + chr(10) + "# publish the UI package" + chr(10) + command + chr(10)
+    (workspace / "secrets.env").write_text("API_TOKEN=" + control + chr(10))
+
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="writing the publish script",
+                tool_name="bash",
+                tool_call_id="call-1",
+                arguments={
+                    "command": "cat > publish.sh <<'SH'" + chr(10) + script + "SH" + chr(10)
+                },
+            ),
+            tool_call_turn(
+                text="reading it back",
+                tool_name="bash",
+                tool_call_id="call-2",
+                arguments={"command": "cat publish.sh secrets.env"},
+            ),
+            text_turn("done"),
+        ]
+    )
+    session = build_session(directory, stream, tools=[build_bash_tool()], cwd=workspace)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    await session.async_init()
+    try:
+        await session.prompt("write the publish script and read it back")
+    finally:
+        await dispose_quietly(session)
+
+    # 1. The NAME survives where it is a NAME — the thing the agent has to copy.
+    assert store_name in _provider_saw(stream), "the store NAME never reached the model"
+    body = _transcript_text(directory)
+    assert store_name in body, "the store NAME was rewritten in transcript.jsonl"
+
+    # 2. The script on disk, as the next `cat` will render it.
+    assert store_name in (workspace / "publish.sh").read_text()
+
+    # 3. The control, in the SAME result: the pass ran, and it still masks a value.
+    assert control not in _provider_saw(stream), "the synthetic token reached the model"
+    assert control not in body, "the synthetic token reached the transcript"
+    assert "[redacted]" in body, "the control was not masked: the pass never ran"
+
+    # 4. A whole mask is the contained case, so nothing is indicated and nothing is
+    #    demanded: the failure this pins cost no incident, which is why only the
+    #    workflow found it.
+    assert not [event for event in events if isinstance(event, NoticeEvent)]
+    assert "session_incident" not in body

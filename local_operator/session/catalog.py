@@ -19,7 +19,12 @@ from typing import Any
 from local_operator.info.model import format_duration
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session.archived import archived_ids
-from local_operator.session.creation import session_category, session_created_at
+from local_operator.session.creation import (
+    CREATED_AT_NAME,
+    _stored,
+    session_category,
+    session_created_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -948,6 +953,86 @@ SUBAGENT_LAYER_CAP = 40
 #: caching a live fact would freeze the list.
 _ROW_CACHE: dict[Path, tuple[tuple[float, int], SessionRow]] = {}
 
+#: ``sessions root -> {session_id: ((st_ino, st_mtime_ns, st_size), birth)}`` for
+#: ``created_at.json``. WHY: ``load_catalog`` must stamp EVERY candidate's birth
+#: before ranking (the rank key is ``-created_at``, and no cheaper bound on it is
+#: sound: activity can precede a hand-edited, restored or ``st_birthtime``
+#: fallback birth, and a bounded selection then drops the row from the page --
+#: PR #1470 review round 1, F1/Q-1). The open+read+parse per candidate was
+#: 0.80 s of a 1.47 s desktop list at 9,400 directories (D-F7). The sidecar is
+#: write-once by contract (#800), so a birth read on one poll is still true on
+#: the next unless the file itself changed -- and one ``stat`` says whether it
+#: did. The value served is always ``session_created_at``'s own answer.
+#:
+#: THE KEY is the sidecar's inode, nanosecond mtime and size. The one writer
+#: (``creation.ensure_session_created_at``) publishes through a hard link of a
+#: fresh temp file, so every rewrite is a new inode; a hand edit or replacement
+#: moves mtime (and usually size and inode); a deleted-and-recreated directory
+#: gets a new inode; a renamed directory is a different id. The accepted blind
+#: spot is an in-place rewrite that keeps the same inode, the same size AND
+#: restores the same nanosecond mtime (``touch -r`` after editing) -- served
+#: stale until the process restarts or the file changes again.
+#:
+#: NOT CACHED: a directory with no readable sidecar -- absent, OR present but
+#: unparseable (``null``, a bare string, ``true``, torn JSON). Its birth then
+#: comes from ``origin.json`` or ``st_birthtime`` (``creation.session_created_at``),
+#: files this key does not watch, so it is read every time -- the same cost as
+#: before, for the ~0.4% of directories measured without one (39 of 9,725).
+#: Only a value parsed FROM the watched file is ever cached (PR #1470 review
+#: round 2, F2: caching the fallback served a stale ``origin.json`` birth, and
+#: missed a corrupt sidecar repaired in place to the same inode/size/mtime).
+#:
+#: BOUNDED: each ``load_catalog`` call prunes its root's map to that call's
+#: candidates, so a map holds at most one entry per visible session of the
+#: store (648 on the reporting store; 10,000 on a 10k store of visible
+#: sessions), and deleted or newly hidden sessions drop out on the next call.
+#: At most :data:`_BIRTH_MEMO_ROOTS` roots are kept, oldest evicted first, so a
+#: process that lists many stores (the test suite) cannot grow it without limit.
+_BIRTH_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], float]]] = {}
+_BIRTH_MEMO_ROOTS = 4
+
+
+def _memo_root(sessions: Path) -> dict[str, tuple[tuple[int, int, int], float]]:
+    """This store's birth memo, created (and the oldest root evicted) on first use."""
+    key = str(sessions)
+    memo = _BIRTH_MEMO.get(key)
+    if memo is None:
+        # ``pop(..., None)``: the desktop lists from worker threads, so two
+        # calls can evict the same root; losing a memo only costs a re-read.
+        while len(_BIRTH_MEMO) >= _BIRTH_MEMO_ROOTS:
+            _BIRTH_MEMO.pop(next(iter(_BIRTH_MEMO), ""), None)
+        memo = _BIRTH_MEMO.setdefault(key, {})
+    return memo
+
+
+def _memoized_birth(sessions: Path, session_id: str) -> float:
+    """``session_created_at`` for one candidate, re-read only when its sidecar changed.
+
+    STAT BEFORE READ, deliberately: a sidecar replaced between the two lands its
+    NEW value under the OLD key, so the next call's stat misses and re-reads --
+    the race resolves toward a re-read, never toward serving a stale birth.
+    """
+    memo = _memo_root(sessions)
+    session_dir = os.path.join(sessions, session_id)
+    try:
+        info = os.stat(os.path.join(session_dir, CREATED_AT_NAME))
+    except OSError:
+        memo.pop(session_id, None)
+        return session_created_at(Path(session_dir))
+    key = (info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = memo.get(session_id)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    # ``_stored`` is the sidecar half of ``session_created_at``'s own rule, so
+    # a parsed value is exactly what that function would have returned. When
+    # it does not parse, the answer is the fallback's, which is not cached.
+    born = _stored(Path(session_dir))
+    if born is None:
+        memo.pop(session_id, None)
+        return session_created_at(Path(session_dir))
+    memo[session_id] = (key, born)
+    return born
+
 
 def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
     """``(activity_mtime, size)`` for the transcript, or ``None`` if unreadable.
@@ -1040,7 +1125,9 @@ def cached_session_rows(
                 mtime,
                 session_name(session_dir),
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
-                created_at=session_created_at(session_dir),
+                # Through the memo ``load_catalog`` has just filled, so hydrating
+                # a page row does not read its birth a second time on a cold call.
+                created_at=_memoized_birth(directory / "sessions", session_id),
                 archived=archived,
             )
         rows.append(row)
@@ -1247,12 +1334,18 @@ def load_catalog(
     # Creation time is the immutable ordering key (#800), so every construction
     # site must stamp it. Rows left at the 0.0 default all tie and fall through
     # to the session-id tie-break, which silently reverses newest-first order.
+    # EVERY candidate, before ranking: see `_BIRTH_MEMO` for why no cheaper
+    # bound is sound, and why a warm call pays one stat here instead of a read.
+    sessions_root = directory / "sessions"
+    birth_memo = _memo_root(sessions_root)
+    for stale in birth_memo.keys() - {candidate[0] for candidate in candidates}:
+        birth_memo.pop(stale, None)
     rows = [
         SessionRow(
             session_id,
             mtime,
             "",
-            created_at=session_created_at(directory / "sessions" / session_id),
+            created_at=_memoized_birth(sessions_root, session_id),
             # Stamped from the scan's own read so a row that never reaches
             # ``cached_session_rows`` below (nothing here guarantees every
             # candidate is hydrated) still states its archive state honestly.
@@ -1370,7 +1463,13 @@ def load_catalog(
     if marker_rows_added and not include_archived:
         rows = [row for row in rows if row.id not in (archived_marker_rows or frozenset())]
     rows = decorate_rows(directory, rows, include_live=True, include_archived=include_archived)
-    identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
+    # The namespace is a property of the PARENT directory, and every row here
+    # shares one, so `conversation_identity` is asked once and its answer reused.
+    # Building a `Path` per row just to ask it was 0.56 s of a 1.9 s list at
+    # 10,000 visible sessions (pure `pathlib` construction). Still the one rule's
+    # own answer, never a second spelling of it.
+    namespace = conversation_identity(directory / "sessions" / "_").partition("/")[0]
+    identities = {row.id: f"{namespace}/{row.id}" for row in rows}
     attention: dict[str, dict[str, Any]] = {}
     try:
         attention = AttentionStore(directory / "attention.db").state_many(identities.values())

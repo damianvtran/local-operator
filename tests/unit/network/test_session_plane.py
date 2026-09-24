@@ -1510,9 +1510,14 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         assert opened["op"] == "ack", opened
         assert opened["detail"]["stream"].startswith("s")
 
-        # The owner's own welcome, forwarded with no translation.
+        # The owner's own welcome, forwarded with no translation. Its op is the
+        # OWNER's choice for this connection shape, and the pin proves the relay
+        # did not rewrite it: a connection that asked for events AND the
+        # canonical frontend (this one) is welcomed with the identity-only
+        # ``welcome`` frame (runtime/server.py ``_welcome_frame``, commit c69d04b2),
+        # which ``RemoteSessionClient.connect`` accepts beside ``projection``.
         welcome = client.recv()
-        assert welcome is not None and welcome["op"] == "projection", welcome
+        assert welcome is not None and welcome["op"] == "welcome", welcome
         assert welcome["data"]["session_id"] == SESSION
 
         client.send(

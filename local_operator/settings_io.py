@@ -479,7 +479,14 @@ SECTIONS: tuple[Section, ...] = (
         "runtime",
         "Runtime",
         Scope.LIVE,
-        "How sessions behave when you leave them.",
+        # WHERE THE CAVEAT ON THE TWO WARM-RUNTIME KEYS BELONGS (review round 1,
+        # F6): the Scope enum is a statement about the KEYS, and a per-key
+        # exception stated only in a code comment is a claim the user cannot
+        # read. Both are read when a drain window is drawn, so an edit is
+        # picked up by the next window — a runtime already inside one keeps
+        # the window it drew.
+        "How sessions behave when you leave them. The warm-runtime knobs are "
+        "read when a runtime next draws its window.",
     ),
     # LIVE: the session re-coerces its ``CompactionSettings`` on every change,
     # and all three trigger checks read that attribute at check time.
@@ -1922,6 +1929,43 @@ SETTINGS: tuple[Setting, ...] = (
             "keep the turn running in the background",
             "stop the turn when you leave the session",
         ),
+    ),
+    Setting(
+        # The two residency knobs of the keep-alive (design-runtime-prewarm §5).
+        # LIVE by construction and by the section's own scope: the reaper reads
+        # both at the moment it draws a drain window
+        # (``session/runtime/process.py:_drain_window_s``), so an edit applies to
+        # the NEXT window — a runtime already inside one keeps the window it
+        # drew, which is the qualification the section description carries.
+        # Neither key is a "new sessions" setting, which is why they are here.
+        #
+        # The consumer reads them through ``get_nested_value`` on the tuples
+        # below, which is the accessor the registry's own path pairs with; the
+        # round-trip test is what keeps the two spellings from drifting.
+        key="runtime.keep_alive_seconds",
+        path=("runtime", "keep_alive_seconds"),
+        section="runtime",
+        label="Keep closed conversations warm (s)",
+        kind=Kind.INT,
+        default=300,
+        help="Re-opening inside this window attaches to the live runtime. 0 keeps nothing warm.",
+        minimum=0,
+        maximum=3600,
+    ),
+    Setting(
+        key="runtime.keep_alive_max",
+        path=("runtime", "keep_alive_max"),
+        section="runtime",
+        label="Max warm conversations",
+        kind=Kind.INT,
+        default=4,
+        # "THIS INSTALL", not "this machine" (QA round 1, Q-5): the cap is
+        # enforced over the registry of the runtime's OWN config root, so two
+        # installs on one host hold up to two caps between them. See
+        # ``process._keep_alive_candidates``.
+        help="Cap on warm runtimes in this install; the least recently closed exits first.",
+        minimum=1,
+        maximum=64,
     ),
     # -- session cleanup policy ---------------------------------------------
     # The ONE way a session directory can be removed automatically, and it is
