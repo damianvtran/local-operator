@@ -73,6 +73,7 @@ from local_operator.compaction.marker import (
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.guard_area import source_is_exempt
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
@@ -95,7 +96,6 @@ from local_operator.harness.message_types import (
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
-from local_operator.harness.guard_area import source_is_exempt
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
 
 # Hoisted to the harness so the evaluation runner can render a transcript
