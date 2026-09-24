@@ -22,7 +22,15 @@ file pins both:
 * (a) no C-timer call may be MADE on a thread whose parking wedges the session --
   the event-loop thread, the plane thread that beat, or the sampler;
 * (b) while such a call is in flight, the watchdog's own gate must stay open, so
-  the sampler can still observe and the exit leg can still be re-read.
+  the sampler can still observe and the exit leg can still be re-read;
+* (c) and -- the finding that decides the fix, MEASURED HERE RATHER THAN ASSUMED --
+  moving the call off the loop is NOT sufficient on its own. The C call parks while
+  HOLDING THE GIL, so a dedicated worker thread parks holding it just the same and
+  the process wedges identically: a child that re-arms from a worker while its
+  dump channel cannot complete stops its ticker at the call and never reaches its
+  own ``MAIN-ALIVE`` print (recorded in the PR). (a) is therefore necessary and NOT
+  sufficient; (c) is the property a fix actually has to satisfy, and the last two
+  cells below assert it from both call sites.
 
 WHAT IS PROVEN DETERMINISTICALLY HERE, and what is not, stated plainly:
 
@@ -31,12 +39,19 @@ WHAT IS PROVEN DETERMINISTICALLY HERE, and what is not, stated plainly:
   own beat is driven through the real seams. This is the same shape
   ``test_store_maintenance_callbacks_run_off_the_event_loop_thread`` uses, and for
   the same reason (see AGENTS.md, "Prefer a structural invariant to a numeric one").
+  IT IS A NECESSARY CONDITION AND NOT A SUFFICIENT ONE: the child measurement in
+  the module docstring shows a dedicated worker thread wedging the process just as
+  the loop thread does, so a design that satisfies this cell alone still ships the
+  defect.
 * (b) is proven as a STATE fact in-process: ``_LOCK`` is the single gate every
   sample and every beat passes through, the field trace shows the sampler parked
   exactly there, and a parked timer call holds it -- so the cell asserts the gate
   is free while the call is in flight. The end-to-end form of (b) -- the process's
-  Python threads actually stopping -- is proven in the child cell below, against
-  the REAL C API, where it is observable at all only from outside the process.
+  Python threads actually stopping -- is proven in the child cells at the end of
+  this file, against the REAL C API, where it is observable at all only from
+  outside the process, once for a call made on the loop thread and once for a call
+  made on a dedicated one (the call site that a worker-shaped fix would move it to,
+  and which the same GIL defeats).
 * NOT proven here, and not claimed: WHY a field dump failed to finish. This file
   forces the precondition (a dump that cannot complete) rather than explaining it.
   The forcing is the rig's own substitution -- the dump is written to a channel
@@ -388,10 +403,19 @@ print("GO", flush=True)
 # THE CALL UNDER TEST, made on this process's loop thread (its main thread, which
 # is where the runtime's event loop runs) through the module's single spelling for
 # the C call. Each of these replaces the pending timer -> it must cancel the dump
-# in flight first.
-for i in range(20):
+# in flight first. In "worker" mode the same call is made on a FRESH THREAD, which
+# is the shape a fix that only moves the call off the loop would use.
+def callback(i):
     stall_watchdog._arm_timer(sink, 30.0, exit_leg=False)
     print(f"CALL {i} RETURNED", flush=True)
+
+
+for i in range(20):
+    if mode == "worker":
+        threading.Thread(target=callback, args=(i,), name=f"timer-{i}", daemon=True).start()
+        print(f"SUBMITTED {i}", flush=True)
+    else:
+        callback(i)
     time.sleep(0.05)
 print("LOOP-SURVIVED", flush=True)
 """
@@ -556,4 +580,55 @@ def test_a_timer_call_made_while_a_dump_is_in_flight_cannot_freeze_the_loop(
         f"after: {output.splitlines()[-4:]!r} -- TICK silent between two CALL lines is "
         f"the field signature: the loop thread parked inside the C timer call holding "
         f"the GIL, so no Python thread in the process can run"
+    )
+
+
+def test_the_same_call_from_a_dedicated_thread_leaves_the_process_alive(
+    tmp_path: Path,
+) -> None:
+    """PROPERTY (c): the call site is not the whole story -- the GIL travels with it.
+
+    THE MEASUREMENT THIS CELL EXISTS FOR, and the one that changes the fix's design
+    space: the same rig as the cell above, with the SAME real C API and the same
+    never-completing dump, but the re-arm is made on a FRESH THREAD per call. A
+    fix shaped "move the arming call off the event loop" satisfies the structural
+    cell and this shape -- and it does NOT fix the defect. Measured on the base ref
+    with a standalone child: the worker parks inside ``dump_traceback_later``
+    holding the GIL, the ticker thread stops at ``TICK 4``, and the main thread
+    never reaches its own ``MAIN-ALIVE`` print. Nothing else in the process runs,
+    because the GIL is a process-wide lock and the parked call never releases it.
+
+    WHAT A FIX THEREFORE HAS TO DO, stated as the property rather than as a
+    prescription: a call into the timer API must be harmless to the REST of the
+    process whatever thread makes it and whatever is already in flight. That is
+    satisfiable by not entering the cancel path while a dump may be in flight, or by
+    making the call without the GIL -- the design decision is the architect's.
+
+    THE RIG'S LIMIT, stated because it bounds what this cell can catch: the in-flight
+    dump here is armed by the child through the same C API the module uses, but not
+    through the module's own bookkeeping. A fix that only avoids re-arming when the
+    MODULE believes its own timer has fired is not exercised by this rig and would
+    leave this cell red; that is a narrower property than the two preserved
+    specimens demand, and it is the reason this cell is written against a dump in
+    flight rather than against the module's fire history.
+
+    MUTATION THIS CELL CATCHES: any arrangement in which a Python thread can be
+    parked inside the timer API while another thread needs the GIL -> red.
+    """
+    rig = _WedgeChildRun(tmp_path, "worker", keep_draining=False)
+    try:
+        assert rig.wait_for_fire_then_release(), (
+            "no dump was ever seen in flight, so this cell proved nothing about a call "
+            f"made while one is; output was {rig.wait_for('TICK', 1.0)!r}"
+        )
+        output = rig.wait_for("LOOP-SURVIVED", CHILD_CALL_BOUND_S)
+    finally:
+        pid = rig.process.pid
+        rig.close()
+    assert "LOOP-SURVIVED" in output, (
+        f"a call made on a dedicated thread froze the process anyway (child pid {pid} "
+        f"killed after {CHILD_CALL_BOUND_S}s). The child stopped after: "
+        f"{output.splitlines()[-4:]!r} -- a TICK line that stops at a SUBMITTED/CALL "
+        f"line is the GIL being held by a thread that is not the loop, which is why "
+        f"moving the call off the loop is not a fix by itself"
     )
