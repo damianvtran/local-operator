@@ -26,6 +26,7 @@ one reads the operator's live store, and a test must never do that.
 
 from __future__ import annotations
 
+import base64
 import http.server
 import json
 import re
@@ -1713,3 +1714,216 @@ async def test_r5_1_a_redirected_run_dump_is_refused_before_the_child_runs(
         assert not marker.exists(), f"the child ran anyway: {command}"
         assert _SYNTHETIC not in text
         assert _SYNTHETIC[::-1] not in text
+
+
+# -- round 6 ---------------------------------------------------------------
+# R6-1's class is "the stdout destination decision, and the devices that ARE a
+# descriptor". Every row below leaked (or, for the controls, would regress) on
+# `0e6bd482b`: `>/dev/null 1>&2` read as discarded because the redirects were
+# decided with sticky flags instead of applied in order, and `/dev/stderr` read
+# as an ordinary file because only `/dev/null` and the stdout devices were
+# recognised. Both put the raw value in the tool result's `--- stderr ---`
+# section through the real tool.
+
+
+def _assert_no_value(text: str) -> None:
+    """Fail for every spelling the value could come back in, not the literal.
+
+    A refusal that lets the value out reversed, upper-cased, hexed or base64'd
+    is the same leak, and a 12-character window is the smallest piece that is
+    still worth calling the value.
+    """
+    forms = {
+        "raw": _SYNTHETIC,
+        "reversed": _SYNTHETIC[::-1],
+        "upper": _SYNTHETIC.upper(),
+        "hex": _SYNTHETIC.encode().hex(),
+        "base64": base64.b64encode(_SYNTHETIC.encode()).decode(),
+    }
+    for name, form in forms.items():
+        assert form not in text, f"the value came back {name}: {form}"
+    for start in range(len(_SYNTHETIC) - 11):
+        piece = _SYNTHETIC[start : start + 12]
+        assert piece not in text, f"a 12-character piece of the value came back: {piece!r}"
+
+
+def _result_sections(result: object) -> tuple[str, str]:
+    """The tool result's `--- stdout ---` and `--- stderr ---` bodies.
+
+    Read apart rather than joined: the R6-1 shapes put the value in the STDERR
+    section while stdout was empty, so the section is part of the claim.
+    """
+    text = _result_text(result)
+    _, _, rest = text.partition("--- stdout ---\n")
+    stdout, _, stderr = rest.partition("--- stderr ---\n")
+    return stdout, stderr
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        # R6-1: the redirects, applied in the order the shell applies them. The
+        # first row is the incident: an earlier `>/dev/null` beat a later `1>&2`
+        # and the value went to stderr — which IS this tool result.
+        ("lop secret get NAME >/dev/null 1>&2", "shell.source-to-stderr"),
+        ("lop secret get NAME > $LOG 1>&2", "shell.source-to-stderr"),
+        ("lop secret get NAME 2>&1 1>/dev/stderr", "shell.bare-source-in-command-position"),
+        # R6-2: a fd-2 DEVICE, not a file — however it is spelled.
+        ("lop secret get NAME >/dev/stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME >/dev/fd/2", "shell.source-to-stderr"),
+        ("lop secret get NAME 1>/dev/fd/2", "shell.source-to-stderr"),
+        ("lop secret get NAME >/proc/self/fd/2", "shell.source-to-stderr"),
+        ("lop secret get NAME >>/dev/stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME >|/dev/stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME 1>&2", "shell.source-to-stderr"),
+        ("lop secret get NAME >&2", "shell.source-to-stderr"),
+        # `>&WORD` is bash's older `&>WORD`: both streams to the word, so the
+        # word decides — a fd-2 device is stderr, `/dev/null` is nothing.
+        ("lop secret get NAME >& /dev/stderr", "shell.source-to-stderr"),
+        ("lop secret get NAME &>/dev/stderr", "shell.source-to-stderr"),
+        # A redirect BEFORE the command word, and after the consumer word.
+        (">/dev/stderr lop secret get NAME", "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); echo "$v" >/dev/stderr', "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); echo "$v" >/dev/null 1>&2', "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); echo "$v" >/dev/fd/2', "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); echo "$v" 1>&2', "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); echo "$v" >&2', "shell.source-to-stderr"),
+        ('v=$(lop secret get NAME); printf "%s" "$v" > /dev/stderr', "shell.source-to-stderr"),
+        # Inside a subshell and inside a brace group.
+        ("(lop secret get NAME >/dev/stderr)", "shell.source-to-stderr"),
+        ("{ lop secret get NAME >/dev/stderr; }", "shell.source-to-stderr"),
+        # `tee` writes the value to EVERY operand, so a device operand is the
+        # same leak even when the stage's own stdout is a file or /dev/null.
+        ("lop secret get NAME | tee /dev/stderr >/dev/null", "shell.source-to-stderr"),
+        ("lop secret get NAME | tee /dev/fd/2 >/dev/null", "shell.source-to-stderr"),
+        ("lop secret get NAME | tee /tmp/r6-a /dev/stderr >/dev/null", "shell.source-to-stderr"),
+        ("lop secret get NAME | tee -- /dev/stderr >/dev/null", "shell.source-to-stderr"),
+        ("lop secret get NAME | tee /dev/stderr | rev", "shell.source-to-stderr"),
+        # `|&` is the same pipe with stderr folded in.
+        ("lop secret get NAME |& cat", "shell.pipe-of-source"),
+        # A here-string hands the value to a consumer's stdin: the consumer's
+        # own stdout — or its stderr — is where it goes.
+        ('v=$(lop secret get NAME); cat <<< "$v"', "shell.print-of-source"),
+        ('v=$(lop secret get NAME); cat <<< "$v" >/dev/stderr', "shell.source-to-stderr"),
+        # A stdout DEVICE is this result, so a redirect to one prints.
+        ("lop secret get NAME >/dev/fd/1", "shell.bare-source-in-command-position"),
+    ],
+)
+def test_r6_the_stdout_destination_is_the_last_redirect_and_a_device_is_its_fd(
+    command: str, label: str
+) -> None:
+    result = scan_command(command)
+    assert result.verdict == "printing", (command, result)
+    assert label in result.labels, (command, result.labels)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `>` on a GROUP: the redirect is the group's, and the source inside it
+        # inherits the group's stdout, so the value goes to stderr.
+        "(lop secret get NAME) >/dev/stderr",
+        "{ lop secret get NAME; } >/dev/stderr",
+        # `exec 1>…` rebinds the shell's stdout for every LATER stage. Redirects
+        # inside a stage are not followed across `;`, so the source stage below
+        # is judged as reaching this result — the safe side of a false refusal,
+        # and the bound is stated rather than left to look tracked.
+        ("exec 1>/dev/stderr; lop secret get NAME"),
+        "exec 1>/tmp/r6-o; lop secret get NAME",
+    ],
+)
+def test_r6_a_group_or_exec_redirect_refuses_rather_than_being_worked_out(command: str) -> None:
+    """Refused, but not under a rule this round claims.
+
+    These four are the conservative half: the test asserts the refusal, which is
+    what keeps the value out of the result, and deliberately does not pin a rule
+    label for a shape whose label the round did not choose.
+    """
+    assert scan_command(command).refused, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The controls: a redirect that drops the value, in both orders, and a
+        # `2>&1` whose value reaches no visible stream.
+        "lop secret get NAME >/dev/null",
+        "lop secret get NAME >/dev/null 2>&1",
+        "lop secret get NAME 2>&1 >/dev/null",
+        "lop secret get NAME 1>&2 >/dev/null",
+        "lop secret get NAME >/dev/null 2>&1 1>&2",
+        "lop secret get NAME 1>&2 2>&1 1>&2 >/dev/null",
+        "lop secret get NAME >/dev/null 3>&2",
+        # `/dev/stderr` is fd 2 AT THAT MOMENT, so a row that has already sent fd 2
+        # to /dev/null makes this target name /dev/null: bash discards the value
+        # (verified against bash itself) and so does the scan.
+        "lop secret get NAME 2>/dev/null >/dev/stderr",
+        "lop secret get NAME >&-",
+        "lop secret get NAME >& /dev/null",
+        "lop secret get NAME >&- 2>&1",
+        "lop secret get NAME >& /tmp/r6-both",
+        "lop secret get NAME &> /tmp/r6-both2",
+        "lop secret get NAME > /tmp/r6-c 2>&1",
+        "lop secret get NAME > /dev/null 2>/dev/null",
+        # A `2` that is an ARGUMENT, not a descriptor: bash reads a digit as one
+        # only when it touches the operator.
+        "echo 2 >/dev/null",
+        "echo a 2 b",
+        "lop secret run --secret NAME=TOK -- echo 2 >/dev/null",
+        # Containment that is not `/dev/null`: a file, a length, or a `tee`
+        # operand that is a file (`-` included — GNU tee writes a file named
+        # `-`, measured, so it is a contained write and not stdout).
+        "lop secret get NAME | wc -c",
+        "lop secret get NAME | tee /tmp/r6-t >/dev/null",
+        "lop secret get NAME | tee - >/dev/null",
+        "lop secret get NAME | tee /tmp/r6-t /dev/null >/dev/null",
+        ('v=$(lop secret get NAME); cat <<< "$v" >/dev/null'),
+        # `/dev/tty` is NOT a captured stream and NOT a leak here: the bash tool
+        # starts the child in its own session, so the device cannot be opened
+        # ("Device not configured", measured on the real child) and the write
+        # fails. The bound: a child WITH a controlling terminal would print, and
+        # the scan does not model one.
+        "lop secret get NAME >/dev/tty",
+    ],
+)
+def test_r6_the_ordered_walk_keeps_the_sanctioned_forms(command: str) -> None:
+    result = scan_command(command)
+    assert not result.refused, (command, result)
+
+
+@pytest.mark.asyncio
+async def test_r6_1_a_redirect_to_stderr_is_refused_before_the_child_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """R6-1 through the REAL tool: on `0e6bd482b` these returned the value raw.
+
+    The whole point of this round is the section the value came back in, so each
+    result's stdout and stderr are scanned SEPARATELY, in every spelling, and a
+    `touch` marker says whether a child ran at all.
+    """
+    commands = [
+        f"lop secret get {stored_secret} >/dev/null 1>&2",
+        f"lop secret get {stored_secret} >/dev/stderr",
+        f"lop secret get {stored_secret} >/dev/fd/2",
+        f"lop secret get {stored_secret} > $LOG 1>&2",
+        f'v=$(lop secret get {stored_secret}); echo "$v" >/dev/stderr',
+        f'v=$(lop secret get {stored_secret}); echo "$v" >/dev/null 1>&2',
+        f"lop secret get {stored_secret} | tee /dev/stderr >/dev/null",
+        f">/dev/stderr lop secret get {stored_secret}",
+    ]
+    for command in commands:
+        marker = tmp_path / "ran-r6"
+        if marker.exists():
+            marker.unlink()
+        result = await builtin.execute_bash(
+            "bash-r6",
+            {"command": f"touch {marker}; {command}"},
+            AbortSignal(),
+            None,
+            _context(tmp_path),
+        )
+        stdout, stderr = _result_sections(result)
+        assert result.is_error, (command, _result_text(result))
+        assert not marker.exists(), f"the child ran anyway: {command}"
+        _assert_no_value(stdout)
+        _assert_no_value(stderr)
