@@ -598,50 +598,92 @@ export function SessionListScreen() {
 		}
 		prevTops.current = nextTops;
 	});
-	/* THE ROWS DO NOT MOVE WHEN THE REFUSAL OPENS, if the list is scrolled (QA
-	   round 3, Q4; design round 6, D14). The band sits above the scroller, so
+	/* THE ROWS DO NOT MOVE WHEN THE REFUSAL OPENS OR CLOSES (QA round 3, Q4;
+	   design round 6, D14; QA round 4, Q5). The band sits above the scroller, so
 	   every pixel it grows moves `<main>`'s top down, and every visible row with
-	   it. That measured +42.8px at 100% root font and +120.4px at 200%: the
-	   pressed row slid out from under the reader's finger while they read the
-	   reason. CSS scroll anchoring cannot absorb this, because it corrects
-	   content that moves INSIDE a scroller, not a scroller that moves. So each
-	   frame of the band's `0fr`/`1fr` track is paid out of `scrollTop` instead:
-	   the list scrolls by exactly what the band took, and the rows hold still
-	   while the list's top edge slides under the band. The same applies in
-	   reverse when the band collapses.
+	   it (+42.8px at 100% root font, +120.4px at 200%, measured before any
+	   correction). CSS scroll anchoring cannot absorb this, because it corrects
+	   content that moves INSIDE a scroller, not a scroller that moves.
 
-	   At `scrollTop` 0 there is nothing above the rows to spend, so they ride the
-	   band's animated track down, which is the accepted D8 shape: animated, and
-	   the reason is on screen in the same frame. A ResizeObserver rather than a
-	   hook on `pinError`, because the track animates over 200ms, and one
-	   correction at the change would leave the rows to drift for the rest of it.
-	   `transcript.tsx` uses the same guard for the same observer. */
+	   THE PREVIOUS SCHEME WAS WRONG ON THE COLLAPSE, although its comment said
+	   the rows held still in both directions. It added each frame's change in
+	   band height to whatever `scrollTop` currently was. Near the bottom of the
+	   list that value had already moved: as the band collapses `<main>` grows,
+	   the browser clamps `scrollTop` into the smaller scroll range during
+	   layout, and that clamp alone pays some or all of the collapse. The carry
+	   then subtracted the whole delta again. QA measured the rows ending 34.2px
+	   lower at 100% and 103.1px at 200%, permanently, and 14.7px lower at 20px
+	   from the bottom.
+
+	   SO THE CORRECTION IS AN ANCHOR, NOT ARITHMETIC. What is held is the
+	   on-screen position of the list's content origin,
+	   `main.getBoundingClientRect().top - main.scrollTop`: each row's rendered
+	   top is that origin plus its fixed offset in the content, so holding the
+	   origin holds every row. It stands in for "the first row's rect" without
+	   being moved by the FLIP settle's transforms or by a pin lifting that row.
+	   On every resize of the band's track the origin is measured again and
+	   `scrollTop` moves by exactly the drift, read back from the page. A clamp
+	   the browser already applied shows up in that measurement, so it cannot be
+	   counted twice: if it put the rows back, the drift is zero and nothing is
+	   written. Every write is bounded by the scroller's own clamp, and whatever
+	   it (or whole-pixel rounding) refused to keep is still drift on the next
+	   frame, so the scheme corrects itself instead of carrying a remainder. On a
+	   list too short to scroll the clamp keeps `scrollTop` at 0 and the rows
+	   ride the band's own curve (the D8 shape).
+
+	   The held origin is re-read when something other than the band moves the
+	   list: the reader's scroll and the browser's scroll anchoring (both arrive
+	   as `scroll` events; this effect's own write is recognised and skipped, so
+	   a sub-pixel remainder is not locked in mid-transition), a viewport resize,
+	   and the end of the track's transition. An anchoring adjustment that lands
+	   in the same frame as a band frame is undone with it, which is what the
+	   list did with anchoring switched off, the state earlier rounds measured.
+
+	   A ResizeObserver rather than a hook on `pinError`, because the track
+	   animates over 200ms and a single correction at the change would leave the
+	   rows to drift for the rest of it. `transcript.tsx` uses the same guard for
+	   the same observer. */
 	useEffect(() => {
 		const band = pinErrorRef.current;
-		if (!band || typeof ResizeObserver === "undefined") return;
-		let last = band.getBoundingClientRect().height;
-		/* The track reports fractional heights and `scrollTop` keeps whole pixels,
-		   so a plain `+= delta` drops the fraction on every frame. Measured, that
-		   lost 6.8 of 42.8px over one expand, and the rows crept down by the
-		   difference. The remainder is carried and paid in whole pixels. */
-		let owed = 0;
-		const ro = new ResizeObserver((entries) => {
-			const height = entries[entries.length - 1]?.contentRect.height ?? last;
-			const main = mainRef.current;
-			owed += height - last;
-			last = height;
-			if (!main || main.scrollTop <= 0) {
-				owed = 0;
-				return;
-			}
-			const step = Math.trunc(owed);
-			if (step !== 0) {
-				main.scrollTop += step;
-				owed -= step;
-			}
-		});
+		const main = mainRef.current;
+		if (!band || !main || typeof ResizeObserver === "undefined") return;
+		const origin = () => main.getBoundingClientRect().top - main.scrollTop;
+		let held = origin();
+		/* The `scrollTop` this effect last left behind, so the `scroll` event its
+		   own write raises does not re-read the origin as the reader's choice. */
+		let written = Number.NaN;
+		const hold = () => {
+			/* Positive drift: the rows sit lower than held, so the list scrolls down
+			   by that much to lift them back. */
+			const drift = origin() - held;
+			if (drift === 0) return;
+			main.scrollTop = main.scrollTop + drift;
+			written = main.scrollTop;
+		};
+		const reread = () => {
+			held = origin();
+			written = Number.NaN;
+		};
+		const scrolled = () => {
+			if (main.scrollTop !== written) reread();
+		};
+		const settled = (event: TransitionEvent) => {
+			/* transitionend BUBBLES, and only the track's own transition is ours. */
+			if (event.target !== band) return;
+			hold();
+			reread();
+		};
+		const ro = new ResizeObserver(hold);
 		ro.observe(band);
-		return () => ro.disconnect();
+		band.addEventListener("transitionend", settled);
+		main.addEventListener("scroll", scrolled, { passive: true });
+		window.addEventListener("resize", reread);
+		return () => {
+			ro.disconnect();
+			band.removeEventListener("transitionend", settled);
+			main.removeEventListener("scroll", scrolled);
+			window.removeEventListener("resize", reread);
+		};
 	}, []);
 	useEffect(() => {
 		getDirectories()
@@ -681,10 +723,10 @@ export function SessionListScreen() {
 			    and for the caption's D8 reason: opening it takes height from `<main>`,
 			    so every visible row moves down by the band's height, and an unanimated
 			    insert would snap the list at the moment the reader is watching the row
-			    they pressed. On a scrolled list the observer on `pinErrorRef` pays that
-			    height out of `scrollTop`, so the rows do not move at all; at the top of
-			    the list they travel with the band's own curve, and the text that
-			    explains the move appears in that same frame. The
+			    they pressed. The observer on `pinErrorRef` holds the rows' rendered
+			    position by moving `scrollTop` instead, bounded by the scroller's own
+			    clamp; on a list too short to scroll they travel with the band's own
+			    curve, and the text that explains the move appears in that same frame. The
 			    list's FLIP settle measures from `<main>`'s own top, so moving `<main>`
 			    does not read to it as a reorder. The `<p>` stays mounted with empty
 			    text for the same reason a conditional child would not: the track would

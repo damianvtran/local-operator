@@ -375,14 +375,59 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		expect(errorBox().className).toContain("grid-rows-[1fr]");
 	});
 
-	it("pays the band's height out of scrollTop so a scrolled list does not move", () => {
-		/* The rows-hold-still half of D14 / Q4: the band sits ABOVE the scroller, so
-		   its growth would push every visible row down (+42.8px at 100% root font,
-		   measured) unless the list scrolls by the same amount. happy-dom has no
-		   layout and no ResizeObserver, so the observer is stubbed and fed the
-		   heights the band's animated track reports, fractions included, and the
-		   test asserts the scroll offset the screen writes back. */
-		type Resized = (entries: Array<{ contentRect: { height: number } }>) => void;
+	/* happy-dom lays nothing out and never clamps `scrollTop`, and the defect
+	   this guards (QA round 4, Q5) lives exactly in the clamp. So the scroller
+	   gets a small model of the column it sits in: `<main>`'s top is the band's
+	   height below a fixed header, its viewport shrinks by the same amount, and
+	   `scrollTop` rounds to whole pixels and is clamped into the scroll range
+	   whenever it is written OR the range shrinks under it, as a browser does
+	   during layout before any observer runs. What is asserted is where a row
+	   is DRAWN, not a class or a DOM order: the previous round's tests passed on
+	   a layout that moved the rows 34px. */
+	type Resized = (entries: Array<{ contentRect: { height: number } }>) => void;
+	const HEADER = 60;
+	const COLUMN = 800;
+	const CONTENT = 3000;
+
+	function modelTheColumn(list: HTMLElement) {
+		let band = 0;
+		let offset = 0;
+		const range = () => CONTENT - (COLUMN - HEADER - band);
+		const clamp = (value: number) => Math.min(Math.max(Math.round(value), 0), range());
+		Object.defineProperty(list, "scrollTop", {
+			configurable: true,
+			get: () => offset,
+			set: (value: number) => {
+				offset = clamp(value);
+			},
+		});
+		Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => CONTENT });
+		Object.defineProperty(list, "clientHeight", {
+			configurable: true,
+			get: () => COLUMN - HEADER - band,
+		});
+		list.getBoundingClientRect = () => new DOMRect(0, HEADER + band, 400, COLUMN - HEADER - band);
+		return {
+			/* The reader scrolls: the offset changes and the browser says so. */
+			scrollTo(value: number) {
+				offset = clamp(value);
+				fireEvent.scroll(list);
+			},
+			/* One layout of the band's track: the column re-flows, and a range that
+			   shrank below the offset clamps it, all before the observer is told. */
+			layOutBand(height: number) {
+				band = height;
+				offset = clamp(offset);
+			},
+			/* Where a row at content offset `at` is drawn, in viewport pixels. */
+			rowTop(at: number) {
+				return HEADER + band - offset + at;
+			},
+			bottom: range,
+		};
+	}
+
+	function observeTheBand() {
 		/* Only an OBSERVED element is reported, and to whom, so the test cannot pass
 		   on a callback that was built but never pointed at the band. */
 		const observed = new Map<Element, Resized>();
@@ -396,33 +441,71 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 				disconnect() {}
 			},
 		);
+		return observed;
+	}
+
+	/* Opens the band to 34.8px and closes it again over the track's frames,
+	   fractions included, starting `fromBottom` px above the end of the list,
+	   and returns how far a row under the reader's eye was drawn from where it
+	   started after each direction. */
+	function openAndClose(fromBottom: number) {
+		sessionList = longList();
+		render(<SessionListScreen />);
+		const list = scroller();
+		const onBandResize = observeTheBandCallbacks.get(errorBox());
+		expect(onBandResize).toBeDefined();
+		const column = modelTheColumn(list);
+		column.scrollTo(column.bottom() - fromBottom);
+		const row = column.bottom() - fromBottom + 300;
+		const before = column.rowTop(row);
+		const frame = (height: number) =>
+			act(() => {
+				column.layOutBand(height);
+				onBandResize?.([{ contentRect: { height } }]);
+			});
+		for (const height of [0.9, 1.8, 2.7, 3.6, 12.4, 34.8]) frame(height);
+		const opened = column.rowTop(row) - before;
+		for (const height of [22.1, 9.3, 2.7, 0.9, 0]) frame(height);
+		const closed = column.rowTop(row) - before;
+		return { opened, closed, list };
+	}
+
+	let observeTheBandCallbacks = new Map<Element, Resized>();
+
+	it("holds the rows still while the band opens and closes, whatever the scroll", () => {
+		/* At the top, mid-list, 60px and 20px from the bottom. The rows-hold-still
+		   half of D14 / Q4 / Q5: the band sits ABOVE the
+		   scroller, so its growth would push every visible row down (+42.8px at 100%
+		   root font, measured) unless the list scrolls by the same amount. */
+		observeTheBandCallbacks = observeTheBand();
 		try {
-			sessionList = longList();
-			render(<SessionListScreen />);
-			const list = scroller();
-			/* Chrome's own scroll anchoring would correct the same offset on its own
-			   schedule, which measured as a 127px drift at 200%, so the list opts out. */
-			expect(list.className).toContain("[overflow-anchor:none]");
-			const onBandResize = observed.get(errorBox());
-			expect(onBandResize).toBeDefined();
-			const feed = (height: number) => act(() => onBandResize?.([{ contentRect: { height } }]));
+			for (const fromBottom of [CONTENT - (COLUMN - HEADER), 1200, 60, 20]) {
+				const { opened, closed } = openAndClose(fromBottom);
+				/* Whole-pixel rounding may leave half a pixel mid-way; never more. */
+				expect(Math.abs(opened)).toBeLessThanOrEqual(0.5);
+				expect(Math.abs(closed)).toBeLessThanOrEqual(0.5);
+				cleanup();
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
 
-			list.scrollTop = 900;
-			/* Sub-pixel frames first, as the track's first frames are: truncating each
-			   one alone would pay 0 for all four and lose 3.6px. */
-			for (const height of [0.9, 1.8, 2.7, 3.6, 34.8]) feed(height);
-			/* Every whole pixel the band took, and none dropped to truncation: 34, the
-			   carried 0.8 still owed. */
-			expect(list.scrollTop).toBe(900 + 34);
-			feed(0);
-			/* The collapse pays it back, so the rows hold still in both directions. */
-			expect(list.scrollTop).toBe(900);
-
-			/* At the top there is nothing above the rows to spend: they ride the
-			   band's animated track instead, and the offset is left alone. */
-			list.scrollTop = 0;
-			feed(34.8);
-			expect(list.scrollTop).toBe(0);
+	it("does not pay a collapse twice when the browser already clamped it at the bottom (Q5)", () => {
+		/* THE REGRESSION. At the very bottom, the collapse grows `<main>` and the
+		   browser clamps `scrollTop` down by the band's height before the observer
+		   runs; that clamp alone keeps the rows still. The old carry subtracted the
+		   band's height again on top of it, and QA measured the rows ending 34.2px
+		   lower at 100% root font, permanently. Run against that carry, this model
+		   reproduces it: the row is drawn 14px lower after the collapse (the
+		   residual depends on the frame sequence; QA's real one gave 34.2px). */
+		observeTheBandCallbacks = observeTheBand();
+		try {
+			const { opened, closed, list } = openAndClose(0);
+			expect(Math.abs(closed)).toBeLessThanOrEqual(0.5);
+			expect(Math.abs(opened)).toBeLessThanOrEqual(0.5);
+			/* And the reader is still at the end of the list, not 34px short of it. */
+			expect(list.scrollTop).toBe(CONTENT - (COLUMN - HEADER));
 		} finally {
 			vi.unstubAllGlobals();
 		}
