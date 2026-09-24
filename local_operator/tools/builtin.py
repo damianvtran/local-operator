@@ -1945,8 +1945,11 @@ async def _run_with_abort(
     abandoned. A signal already aborted at entry STILL runs ``on_abort`` and
     closes the pending coroutine — the old early return skipped both, which
     leaked the spawned child and raised "coroutine was never awaited"
-    (RT-01). Callers that must not spawn at all should check
-    ``signal.aborted`` before creating the coroutine.
+    (RT-01). The same check runs again when the worker wins the race, for the
+    one-pass tie review round 2 (R2-1) reproduced: a worker that finishes on the
+    abort flag completes in the same pass the waiter wakes in, so the signal — not
+    the completion order — decides. Callers that must not spawn at all should
+    check ``signal.aborted`` before creating the coroutine.
     """
     if signal is not None and signal.aborted:
         on_abort()
@@ -1959,6 +1962,25 @@ async def _run_with_abort(
     work = asyncio.ensure_future(coro)
     done, _pending = await asyncio.wait({waiter, work}, return_when=asyncio.FIRST_COMPLETED)
     if work in done:
+        # The worker finishing and the signal firing land in the SAME loop pass
+        # once the worker is willing to stop early — which is exactly what the
+        # walkers' ``stop_requested`` made possible — and ``if work in done`` then
+        # reports a search the operator CANCELLED as one that completed. So the
+        # signal is consulted again here: a cancelled search must never be
+        # rendered as a finished one, and above all must not be rendered as a
+        # BUDGET stop ("the walk stopped at 30 s after N files"), which is the
+        # false reason review round 2 reproduced in 9 of 20 aborts (R2-1).
+        if signal.aborted:
+            on_abort()
+            # ``work`` is already done, so this only retrieves (or discards) its
+            # result and any exception — the cancellation the other branch sends
+            # has nothing left to cancel.
+            with contextlib.suppress(BaseException):
+                await work
+            waiter.cancel()
+            with contextlib.suppress(BaseException):
+                await waiter
+            return None, True
         waiter.cancel()
         with contextlib.suppress(BaseException):
             await waiter
@@ -9012,9 +9034,15 @@ class _SearchStop(NamedTuple):
     ``seconds`` is the wall-clock budget that stopped it, or None when a
     collector cap did; ``reached`` is how far that stage got, in the unit that
     stage actually counts — files for a filesystem walk or scan, matches for
-    ripgrep's stream. One noun per stage, and the count appears exactly ONCE in
-    the answer, which is what makes the two-number sentence of design review D8
-    impossible rather than merely fixed.
+    ripgrep's stream. One noun per stage, and each stage's count appears once,
+    labelled by the stage it came from, which is what makes the two-number
+    sentence of design review D8 impossible rather than merely fixed.
+
+    It is not the ONLY number in the answer, and the docstring should not pretend
+    otherwise (design review round 2, D2-4): a header states its own totals, and
+    on the ripgrep engine the stop's ``reached`` and the header's record total
+    ARE the same measure — both count the records rg produced — so they agree by
+    construction, which is what the design round verified in every frame.
     """
 
     stage: str
@@ -9068,16 +9096,24 @@ def _partial_details(
 ) -> dict[str, Any]:
     """``details`` for a result a stop made partial.
 
-    ``partial`` is what the TUI card reads to mark the COLLAPSED row (design
-    review D1): that row takes its structure from ``details`` and never from the
-    result text, so a disclosure the text leads with is still unreachable from
-    the state an operator scans unless the flag rides here. ``partial_stops``
+    ``partial_result`` is what the TUI card reads to mark the COLLAPSED row
+    (design review D1): that row takes its structure from ``details`` and never
+    from the result text, so a disclosure the text leads with is still unreachable
+    from the state an operator scans unless the flag rides here. ``partial_stops``
     carries the budget constant names for the transcript, the log and any agent
     reading the payload — the reader's clause keeps the plain words (D5).
+
+    The KEY is named for the payload rather than for the state on purpose: the
+    mobile projection writes a string under a bare ``partial``
+    (``mobile/projection.py``, a ToolRow expand payload's tail), which is truthy,
+    so a future path that forwarded those details into a card would paint ``◐`` on
+    an unrelated tool (review round 2, R2-5). A name nothing else writes removes
+    the collision instead of relying on the whitelist that happens to separate
+    them today.
     """
     return {
         **(spill_details or {}),
-        "partial": True,
+        "partial_result": True,
         "partial_stops": [
             {
                 "stage": stop.stage,
@@ -9700,9 +9736,16 @@ async def execute_glob(
                 f"Partial search: {_stop_clause(stops)}. No path matched pattern "
                 f"'{params.pattern}' in the part of the tree that was read, and the "
                 "rest was not — so this is not an absence of matches. Narrow the "
+                # Compact on purpose: this block is the longest of the four shipped
+                # disclosures (389 cells at an 11-cell pattern) and the promoted
+                # block's wrap budget is REASON_MAX_ROWS = 8, so a 60-column pane
+                # was dropping the closing clause of every other shorter wording
+                # (design review round 2, D2-1 measured a 411-cell one at 9 rows).
+                # The example keeps its agent, its `whereas` and its contrast; what
+                # it gives up is four words of prose the reader does not need.
                 "pattern and re-run: a literal directory prefix (for example "
                 "'src/*.py') makes the walk descend only that subtree, whereas a "
-                "leading '**' walks everything below the working directory.",
+                "leading '**' walks the whole tree.",
                 details=_partial_details(stops, None),
             )
         return _text(
@@ -9889,6 +9932,7 @@ def _python_grep_scan(
     regex: re.Pattern[str],
     include: str | None,
     context_lines: int,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> _GrepScan:
     """The pure-Python scan, run in a worker thread.
 
@@ -9899,6 +9943,14 @@ def _python_grep_scan(
     touching the loop, and because it can stop the scan mid-list it reports a
     stop record rather than letting a partial record set be rendered as an
     absence of matches.
+
+    ``stop_requested`` is the caller's abort flag, read here for the same reason
+    the walkers read it — this hop cannot be cancelled either, so without it an
+    aborted grep spent up to ``GREP_SCAN_DEADLINE_S`` scanning a file list whose
+    answer had already been decided (review round 2, R2-2: the walk got this in
+    round 1 and the scan did not). It records NO stop on that path: the caller
+    has already returned "Search aborted.", and a stop record here would be the
+    same false budget reason R2-1 removed from the walk.
     """
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     records: list[tuple[str, int, str, str]] = []
@@ -9906,6 +9958,8 @@ def _python_grep_scan(
     files_skipped = 0
     stops: tuple[_SearchStop, ...] = ()
     for file_path in files:
+        if stop_requested is not None and stop_requested():
+            break
         if time.monotonic() > deadline:
             stops = (
                 _SearchStop(
@@ -10290,7 +10344,12 @@ async def execute_grep(
         def _walk_and_scan() -> _GrepScan:
             file_set, scan_base = _grep_file_set(target, stop_requested=_stop_requested)
             scanned = _python_grep_scan(
-                file_set.files, scan_base, regex, params.include, params.context_lines
+                file_set.files,
+                scan_base,
+                regex,
+                params.include,
+                params.context_lines,
+                stop_requested=_stop_requested,
             )
             # One stop list, both hops: a file set the walk budget cut short makes
             # the scan's own completeness claim false, so the two stops are
@@ -10327,11 +10386,14 @@ async def execute_grep(
         says so: printing it bare would claim a total the walk never took.
         """
         if count_incomplete:
-            # No number at all, deliberately: a count the walk did not finish (it
-            # stopped, or a file it listed could not be sized) is a LOWER BOUND,
-            # and `0 file(s) skipped … a lower bound` reads as a total that
-            # happens to be zero — the same claim-the-total shape as `no matches`,
-            # one level down (design review Q-2, review N-3).
+            # A lower bound ABOVE zero is information the operator can use, and
+            # `at least N` cannot be read as a total — which `0 … a lower bound`
+            # could (design review round 1, Q-2), while dropping the number for
+            # every incomplete count threw away what the walk HAD established
+            # (review round 2, R2-4). Zero keeps the bare form: a count that only
+            # knows "none so far" has nothing to report as a floor.
+            if files_skipped:
+                return f" (at least {files_skipped} file(s) skipped over the 1MB cap)"
             return " (files over the 1MB cap not fully counted)"
         if not files_skipped:
             return ""
@@ -10385,22 +10447,24 @@ async def execute_grep(
         header += f" (use skip={params.skip + shown} for the next page)"
     if params.skip:
         header += f" (skipped {params.skip})"
-    text = header + _skipped_clause()
+    count_clause = _skipped_clause()
+    text = header + count_clause
     details = spill_details
     if stops:
         # Additive to the header contract above, never a replacement for it: the
         # non-truncated spellings ('N match(es)', 'of M', '(use skip=…)',
         # '(skipped N)', '(capped at 500)', '(ripgrep)') are unchanged, and this
-        # clause only ever appears when a stop actually happened. The claim LEADS
-        # the line and the skipped-count parenthetical FOLLOWS it, because the
-        # card crops the leading cells: an aside about the 1 MB cap was all a
-        # truncated ripgrep result used to show in them (design review D2, D3),
-        # and on this engine the header measured 329 cells with the first words
-        # about truncation at cell 99.
+        # clause only ever appears when a stop actually happened. Three positions
+        # are load-bearing and each has been measured on a frame: the claim LEADS
+        # (design review round 1, D2 — the card crops the leading cells), the
+        # skipped-count clause stays WITH THE COUNT it qualifies instead of
+        # trailing the advice, which read as a caveat on the advice (round 2,
+        # D2-2), and the disclosure keeps the cells before the remedy that the
+        # ripgrep header needed (round 1, D3: 329 cells, truncation first visible
+        # at cell 99).
         text = (
-            f"Partial results: {header} — {_stop_clause(stops)}; narrow "
+            f"Partial results: {header}{count_clause} — {_stop_clause(stops)}; narrow "
             "path=<subdirectory> or include=<glob> to search further"
-            f"{_skipped_clause()}"
         )
         details = _partial_details(stops, spill_details)
     return _text(tool_call_id, "grep", text + ":\n" + body_text + engine_note, details=details)

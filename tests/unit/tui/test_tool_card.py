@@ -3699,7 +3699,7 @@ def test_a_partial_result_is_marked_in_the_collapsed_row() -> None:
     error's cause is.
     """
     card = ToolCard("t", "grep", {"pattern": "needle_marker"})
-    card.mark_done(_PARTIAL_MATCHES, {"partial": True, "partial_stops": []})
+    card.mark_done(_PARTIAL_MATCHES, {"partial_result": True, "partial_stops": []})
     row = card._build_row(100)
 
     assert ICON_PARTIAL in row.plain
@@ -3736,7 +3736,7 @@ def test_a_partial_result_wraps_its_disclosure_in_the_body() -> None:
     the frame carried no signal that the line was the state).
     """
     card = ToolCard("t", "grep", {"pattern": "needle_marker"})
-    card.mark_done(_PARTIAL_MATCHES, {"partial": True})
+    card.mark_done(_PARTIAL_MATCHES, {"partial_result": True})
     card.toggle_expanded()
     lines = card._build_content(80).plain.splitlines()
     body = _collapsed("\n".join(lines))
@@ -3757,7 +3757,7 @@ def test_a_partial_result_wraps_its_disclosure_in_the_body() -> None:
     wide.mark_done(
         "Partial results: 1 match(es) for 'n' — the walk stopped at 30 s after 1 file;"
         " narrow path=<subdirectory> or include=<glob> to search further:\n" + "x" * 400,
-        {"partial": True},
+        {"partial_result": True},
     )
     wide.toggle_expanded()
     lines = wide._build_content(80).plain.splitlines()
@@ -3765,18 +3765,31 @@ def test_a_partial_result_wraps_its_disclosure_in_the_body() -> None:
     assert not any(len(line.strip()) > 80 for line in lines)
 
 
-def test_a_partial_flag_without_a_lead_line_promotes_nothing() -> None:
-    """A flag alone must not promote a line that is not the disclosure.
+def test_a_partial_flag_without_a_lead_line_still_names_the_state() -> None:
+    """The flag says the RESULT is partial, so the row must say so too (D2-3).
 
-    Both halves are required: ``details["partial"]`` says the RESULT is partial,
-    the lead prefix says THIS LINE is the claim. A card whose payload predates
-    the prefixes — or whose text leads with something else — keeps the ordinary
-    crop rather than growing a synthetic row that restates nothing.
+    A partial result whose text carries no disclosure promotes nothing — it must
+    not claim a sentence that is not the claim — but a bare `◐` with no words is a
+    state mark the operator cannot read, which design review round 2 caught in a
+    synthetic frame. The row therefore falls back to the label both shipped leads
+    open with. Both halves are required: ``details["partial_result"]`` says the
+    RESULT is partial, ``_PARTIAL_LEADS`` says whether THIS LINE is the claim.
     """
     card = ToolCard("t", "grep", {"pattern": "needle"})
-    card.mark_done("1 match(es) for 'needle':\nsrc/a.py:1:needle", {"partial": True})
-    assert ICON_PARTIAL in card._build_row(100).plain, "the state mark is the flag's"
+    card.mark_done("1 match(es) for 'needle':\nsrc/a.py:1:needle", {"partial_result": True})
+    row = card._build_row(100)
+    assert ICON_PARTIAL in row.plain, "the state mark is the flag's"
+    assert "Partial" in row.plain, "and the state is named, not only marked"
+    assert ICON_SUCCESS not in row.plain
+    _assert_fits(card)
+
     card.toggle_expanded()
-    body = card._build_content(80).plain
-    # No promoted row: the summary is not claimed, so no `◐` lead and no wrap.
-    assert ICON_PARTIAL not in body.splitlines()[2:][0]
+    lines = card._build_content(80).plain.splitlines()
+    body = "\n".join(lines[1:])
+    # Nothing is claimed, so nothing is promoted: no glyph lead on any body row
+    # and no row dropped from the captured output. Asserted over the WHOLE block
+    # rather than at an index, which is what made this brittle (review R2-7).
+    assert not any(
+        line.lstrip().startswith((f"{ICON_PARTIAL} ", f"{ICON_ERROR} ")) for line in lines[1:]
+    )
+    assert "src/a.py:1:needle" in body, "the ordinary result still paints"

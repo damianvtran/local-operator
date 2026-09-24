@@ -5038,6 +5038,60 @@ async def test_glob_respects_gitignore_unless_pattern_names_it(tools, context, t
 # ---------------------------------------------------------------------------
 
 
+class _UnstatableEntry:
+    """A listed file whose size cannot be read (review round 2, R2-3).
+
+    Only the surface ``_walk_entries`` uses is implemented, so a walk that starts
+    calling something else on an entry fails loudly here rather than silently
+    passing an entry the real ``DirEntry`` would have refused.
+    """
+
+    def __init__(self, real: os.DirEntry[str]) -> None:
+        self.name = real.name
+        self.path = real.path
+
+    def is_symlink(self) -> bool:
+        return False
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        return False
+
+    def is_file(self, *, follow_symlinks: bool = True) -> bool:
+        return True
+
+    def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+        raise OSError(5, "size unavailable")
+
+
+class _ScandirSwapping:
+    """``os.scandir``'s result with ONE named entry replaced by the shim."""
+
+    def __init__(self, ctx: Any, victim: str) -> None:
+        self._ctx = ctx
+        self._victim = victim
+
+    def __enter__(self) -> list[Any]:
+        entries = self._ctx.__enter__()
+        return [_UnstatableEntry(e) if e.name == self._victim else e for e in entries]
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._ctx.__exit__(*exc)
+
+
+def _make_one_file_unstatable(monkeypatch: pytest.MonkeyPatch, victim: str) -> None:
+    """Make ``victim`` the one listed file whose size the walk cannot read.
+
+    Applied to ``builtin.os`` rather than to a private name because that IS how
+    the walk reaches ``scandir``; monkeypatch restores it after the test.
+    """
+    real_scandir = os.scandir
+    monkeypatch.setattr(
+        builtin.os,
+        "scandir",
+        lambda path: _ScandirSwapping(real_scandir(path), victim),
+    )
+
+
 class _StubbornProc:
     """A ripgrep process whose reap never lands, for the review R-3 window.
 
@@ -5162,6 +5216,156 @@ def test_count_oversized_files_walks_the_tree_exactly_once(tmp_path, monkeypatch
     assert len(calls) == 1
 
 
+def test_a_file_whose_size_cannot_be_read_makes_the_count_incomplete(tmp_path, monkeypatch) -> None:
+    """N-3's second half, which review round 2 (R2-3) found untested.
+
+    The walk COUNTS a file it cannot size instead of dropping it quietly, and
+    that is what makes the footer's count a lower bound. Deleting the increment
+    used to leave the whole selection green — the same hole R-4 described — so
+    one listed file is made unreadable here and the counter has to notice.
+    """
+    (tmp_path / "small.py").write_text("needle\n")
+    (tmp_path / "unstatable.py").write_text("needle\n")
+    _make_one_file_unstatable(monkeypatch, "unstatable.py")
+
+    walked = builtin._walk_entries(tmp_path, count_oversized=True)
+    assert walked.truncated is False
+    assert walked.unsized == 1
+    # The count itself has nothing over the cap — but "nothing" here is only
+    # known-so-far, so it is reported as incomplete rather than as zero.
+    assert builtin._count_oversized_files(tmp_path) == (0, True)
+
+
+def test_python_grep_scan_stops_when_the_caller_aborts(tmp_path) -> None:
+    """The scan reads the abort flag, not only its own clock (review R2-2).
+
+    Round 1 gave the walkers a stop callback and left the Python scan reading
+    only its deadline, so an aborted grep still scanned the file list for up to
+    ``GREP_SCAN_DEADLINE_S`` with the answer already decided. The flag is checked
+    per file, before the read, and it records NO stop: the caller has already
+    returned "Search aborted.", and a budget record there would be the false
+    reason R2-1 removed from the walk.
+    """
+    for index in range(20):
+        (tmp_path / f"f{index:02d}.py").write_text("needle\n")
+    files = sorted(tmp_path.iterdir())
+    calls = {"n": 0}
+
+    def stop_requested() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 3
+
+    scan = builtin._python_grep_scan(
+        files, tmp_path, re.compile("needle"), None, 0, stop_requested=stop_requested
+    )
+
+    assert scan.files_searched == 3, "the scan kept reading after the abort"
+    assert len(scan.records) == 3
+    assert scan.stops == (), "an abort is the caller's business, not a budget stop"
+
+    # Control: the same call without the callback reads every file, so the three
+    # above are the abort's doing and not a short file list.
+    whole = builtin._python_grep_scan(files, tmp_path, re.compile("needle"), None, 0)
+    assert whole.files_searched == 20
+
+
+@pytest.mark.asyncio
+async def test_run_with_abort_reports_an_abort_the_finished_worker_raced() -> None:
+    """A worker that finishes ON the abort flag must not hide the abort (R2-1).
+
+    The walkers now return promptly when they see the flag, which puts the
+    worker's completion and the signal's wakeup in the SAME loop pass — and
+    ``if work in done`` then reported a cancelled search as a completed one, so
+    the walk's stop claimed a 30 s budget it had not spent and the operator got
+    an amber ``◐ Partial`` row instead of "Search aborted." (review round 2,
+    reproduced in 9 of 20 aborts). The state is reproduced structurally rather
+    than by racing a real thread: the worker aborts the signal itself before
+    returning, which is exactly the state that tie produces.
+    """
+    signal = AbortSignal()
+    aborted_calls: list[str] = []
+
+    async def work() -> str:
+        signal.abort("interrupted")
+        return "partial records"
+
+    result, aborted = await builtin._run_with_abort(
+        work(), signal, lambda: aborted_calls.append("on_abort")
+    )
+
+    assert aborted is True, "a cancelled search reported itself as a completed one"
+    assert result is None
+    assert aborted_calls == ["on_abort"]
+
+    # Control: an abort that arrives at entry already takes the same path, and an
+    # unaborted worker still returns its result.
+    pre = AbortSignal()
+    pre.abort("interrupted")
+    assert await builtin._run_with_abort(work(), pre, lambda: None) == (None, True)
+    quiet = AbortSignal()
+
+    async def untouched() -> str:
+        return "whole"
+
+    assert await builtin._run_with_abort(untouched(), quiet, lambda: None) == ("whole", False)
+
+
+@pytest.mark.asyncio
+async def test_grep_says_the_count_is_incomplete_when_a_size_cannot_be_read(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """The rendered footer, not only the counter (review round 2, R2-3)."""
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg count path cannot run")
+    (tmp_path / "hit.py").write_text("needle\n")
+    (tmp_path / "unstatable.py").write_text("needle\n")
+    _make_one_file_unstatable(monkeypatch, "unstatable.py")
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "hit.py:1:needle" in result.text, "the rg scan itself must still have matched"
+    assert "(files over the 1MB cap not fully counted)" in result.text
+    # The records are complete, so nothing is called partial for a count's sake.
+    assert "Partial" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_grep_keeps_a_non_zero_lower_bound_visible(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """A lower bound above zero is information, and it stays visible (R2-4).
+
+    Q-2's objection was to ``0 … a lower bound``, which reads as a total; dropping
+    the number for EVERY incomplete count also threw away what the walk had
+    already established. ``at least N`` cannot be read as a total and keeps the
+    count, and D8's one-count rule is intact because this is still the count
+    clause rather than a second number in the sentence.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+    if not builtin._use_ripgrep():
+        pytest.skip("ripgrep not on PATH; the rg count path cannot run")
+    (tmp_path / "hit.py").write_text("needle\n")
+    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    # Force a records stop too, so the assembled header carries the claim, the
+    # count clause and the remedy together — the arrangement D2-2 is about.
+    monkeypatch.setattr(builtin, "GREP_SCAN_DEADLINE_S", -1.0)
+
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+
+    assert "hit.py:1:needle" in result.text
+    assert "(at least 12 file(s) skipped over the 1MB cap)" in result.text
+    assert "not fully counted" not in result.text
+    # Placement, not just wording (design review round 2, D2-2): the count clause
+    # stays with the count it qualifies, the stop follows it, and the remedy comes
+    # last — so the aside cannot read as a caveat on the advice.
+    assert (
+        result.text.index("(at least 12 file(s) skipped")
+        < result.text.index("ripgrep stopped at")
+        < result.text.index("narrow path=<subdirectory>")
+    )
+
+
 @pytest.mark.asyncio
 async def test_ripgrep_grep_walks_the_tree_exactly_once(
     tools, context, tmp_path, monkeypatch
@@ -5234,7 +5438,7 @@ async def test_ripgrep_deadline_keeps_partial_records_and_skips_the_python_walk(
     assert "GREP_SCAN_DEADLINE_S" not in result.text
     stops = (result.details or {}).get("partial_stops")
     assert stops and stops[0]["constant"] == "GREP_SCAN_DEADLINE_S", result.details
-    assert (result.details or {}).get("partial") is True
+    assert (result.details or {}).get("partial_result") is True
 
 
 def test_ripgrep_keeps_the_records_a_stop_produced_even_with_no_returncode(
@@ -5321,7 +5525,7 @@ async def test_grep_with_a_stopped_walk_does_not_answer_no_matches(
     assert "path=<subdirectory>" in result.text and "include=<glob>" in result.text
     # And the stop is structured for the collapsed row (D1) with the constant in
     # the payload rather than in the sentence (D5).
-    assert (result.details or {}).get("partial") is True
+    assert (result.details or {}).get("partial_result") is True
     assert (result.details or {})["partial_stops"][0]["constant"] == "SEARCH_WALK_DEADLINE_S"
     assert "SEARCH_WALK_DEADLINE_S" not in result.text
 
@@ -5356,7 +5560,7 @@ async def test_grep_with_a_stopped_walk_marks_its_matches_partial(
     # The card marks the collapsed row from the payload, not from the text
     # (design review D1), and the stop's constant lives there rather than in the
     # operator's sentence (D5).
-    assert (result.details or {}).get("partial") is True
+    assert (result.details or {}).get("partial_result") is True
     assert (result.details or {})["partial_stops"][0]["constant"] == "SEARCH_WALK_DEADLINE_S"
     assert "SEARCH_WALK_DEADLINE_S" not in result.text
 
@@ -5389,7 +5593,7 @@ async def test_grep_skipped_count_from_a_stopped_walk_is_not_a_number(
     # The records are complete — the ripgrep scan finished — so the result is not
     # labelled partial, and the card does not mark it as one.
     assert "Partial" not in result.text
-    assert (result.details or {}).get("partial") is None
+    assert (result.details or {}).get("partial_result") is None
 
 
 @pytest.mark.asyncio
@@ -5516,7 +5720,7 @@ async def test_glob_with_a_stopped_walk_does_not_answer_no_paths_matched(
     assert "makes the walk descend only that subtree" in result.text
     assert "'src/*.py'" in result.text
     assert "SEARCH_WALK_DEADLINE_S" not in result.text
-    assert (result.details or {}).get("partial") is True
+    assert (result.details or {}).get("partial_result") is True
     assert (result.details or {})["partial_stops"][0]["constant"] == "SEARCH_WALK_DEADLINE_S"
 
 
