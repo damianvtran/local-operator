@@ -204,10 +204,28 @@ def _status_text(
         # the store's own bound rather than typed (agent review round 1, R2) — and the
         # escalation (UX round 1, U1: the window re-arms, so a deferral that keeps
         # returning is where a sign-in becomes the remedy).
-        window = f"about {self_clearing_window()}"
-        if window in connector["detail"]:
+        # The branch is decided by the REASON CODE, not by matching prose in a rendered
+        # sentence (agent review round 2, R4). The payload carries the structural fact,
+        # and it is exactly the condition under which the detail above IS this state's
+        # own sentence: `report.probe` composes the detail from
+        # `gateway.terminal_detail(reason, …)`, a parked tunnel carries the park's reason
+        # and sentence together, and a stopped or unreachable one carries no reason and
+        # no detail. Keying on the window's text instead let a copy edit that rewrote
+        # the sentence AROUND the window silently flip which line a user sees, and flip
+        # the duplication UX round 1 (U2) back in with it; the sentence still has to
+        # carry the window, and that is pinned where the copy lives.
+        #
+        # The two branches exist because the screen varies: with a reason above, that row
+        # already states the window and the escalation, so this line adds only the state;
+        # with no reason above (a STOPPED tunnel, or a gateway that never answered) there
+        # is no such row and this line is the only carrier, so it names the window —
+        # derived from the store's own bound rather than typed (R2) — and the escalation
+        # (U1: the window re-arms, so a deferral that keeps returning is where a sign-in
+        # becomes the remedy).
+        if connector["reason"] == gateway.AUTHORIZATION_DEFERRED:
             lines.append("Login: refresh deferred — retried automatically.")
         else:
+            window = f"about {self_clearing_window()}"
             lines.append(
                 f"Login: refresh deferred — it clears by itself within {window}; "
                 "sign in again only if it persists."
