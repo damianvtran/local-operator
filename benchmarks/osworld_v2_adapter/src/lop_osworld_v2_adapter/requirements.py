@@ -85,6 +85,9 @@ _OPTIONAL_INFRA = (
     "OSWORLD_ENABLE_PROXY",
     "OSWORLD_INPUTS_ROOT",
     "OSWORLD_TTL_SECONDS",
+    # The runner always pins the effective policy; optional preserves older
+    # invocation compatibility while making adapters reject silent omissions.
+    "OSWORLD_ACTION_SETTLE_POLICY",
 )
 
 # The LLM judge. OSWorld's ``model_client`` resolves the key from the

@@ -163,6 +163,10 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         "already_local",  # --to local for a session that is already here
         "third_device",  # a move asked for by a device that is neither end
         "no_replica",  # --from-replica with nothing synced
+        # This slice's fourth, and it is a data-integrity refusal rather than a
+        # protocol one: the source holds an entry the copy set does not carry, so
+        # moving it would delete that entry with nothing to copy it from (B-M2).
+        "unlisted_content",
     }
 )
 
@@ -572,13 +576,59 @@ def _unreachable(peer: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _manifest_digest(plan_id: str, transcript_digest: str) -> str:
-    """What the destination proves it copied, in one value (§6.3 step 12).
+def _staging_content_digest(server: "RelayServer", session_id: str, staging: Path) -> str:
+    """The digest of the bytes a copy holds, as the adopting device sees them.
 
-    Both halves are the owner's own: ``plan_id`` covers the whole copy set and
-    ``transcript_digest`` covers the served region. The owner recomputes both from
-    its disk and compares, so a destination cannot commit a copy it did not verify
-    and cannot commit one taken from a source that has since changed.
+    ``sync.copy_content_digest`` over the staging directory and this install's
+    shared attachment store: the SAME function the owner runs over its own session
+    directory, so the two values are comparable and the owner can commit on their
+    equality (review round 1, M-2).
+    """
+    from local_operator.network import sync as sync_mod
+
+    return sync_mod.copy_content_digest(staging, session_id, Path(server.root))
+
+
+def _verify_staging(
+    server: "RelayServer", session_id: str, staging: Path, ready: dict[str, Any]
+) -> str:
+    """Re-hash a staged copy against what ``ready.json`` recorded, before adopting.
+
+    THE LAST CHECK BEFORE THE ONLY ``os.replace`` INTO ``sessions/``. The
+    destination re-derives the digest of the bytes it is about to promote and
+    compares it with the value it wrote when it verified the copy; a mismatch — a
+    truncation between the two moments, a disk that reported the write and kept
+    less, a staging directory somebody edited — refuses the promote and leaves
+    ``sessions/`` untouched. Returning the sentence rather than raising keeps the
+    callers' two refusal shapes (result/refusal documents) intact.
+
+    A ``ready.json`` with no ``content_digest`` is a copy from a build that did not
+    record one, and it is refused rather than trusted: the whole point of the field
+    is that the adopting device has a value to check against.
+    """
+    expected = str(ready.get("content_digest") or "")
+    if not expected:
+        return (
+            "the copy of that conversation was staged before this build recorded what it "
+            "verified, so it was not adopted; asking again evaluates it from scratch"
+        )
+    if _staging_content_digest(server, session_id, staging) != expected:
+        return (
+            "the staged copy of that conversation no longer matches the bytes that were "
+            "verified, so it was not adopted and nothing was deleted"
+        )
+    return ""
+
+
+def _manifest_digest(plan_id: str, transcript_digest: str) -> str:
+    """The plan-and-transcript digest, for the handoff journal's own record.
+
+    NOT EVIDENCE, and deliberately no longer the value a commit decides on. It is
+    computed from the OWNER's own manifest and (before this round) echoed back by
+    the destination unchanged, so comparing it proved only that the destination
+    could copy a string it was handed — a zeroed digest and a truncated copy both
+    committed through it (review round 1, M-2). What the owner decides on is
+    ``sync.copy_content_digest``: a digest each end derives from its OWN bytes.
     """
     import hashlib
 
@@ -713,8 +763,16 @@ def _destination_move(
             ask=transport.ask,
             owner_device=owner_device,
             into=staging,
-            attachments_root=Path(server.root) / "attachments",
+            # THE STORE ROOT, NOT THE BLOB DIRECTORY. ``_destination_for`` appends
+            # the store-relative name (``attachments/<d>.bin``) to whatever it is given,
+            # so handing it ``<config>/attachments`` put every blob at
+            # ``<config>/attachments/attachments/<d>.bin`` — a path nothing reads,
+            # which is why images in a moved conversation did not load on the device
+            # they moved to (review round 1, M-1).
+            attachments_root=Path(server.root),
             write_cursor=False,
+            # A MOVE'S DESTINATION IS NOT A REPLICA HOLDER: see ``sync._plan``.
+            purpose="move",
         )
     except sync_mod.SyncRefused as refusal:
         # A ROLLBACK, not a failure (§6.3 step 12): the source still holds an intact
@@ -730,8 +788,13 @@ def _destination_move(
             "",
         )
 
-    transcript = (manifest.get("transcript") or {}).get("digest") or ""
-    digest = _manifest_digest(str(manifest.get("plan_id") or ""), str(transcript))
+    # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
+    # holds over the same function the owner uses (``sync.copy_content_digest``),
+    # and the value the owner commits on (review round 1, M-2). Computed HERE,
+    # before the stamp and the origin marker land, and again before the promote
+    # below: the two names the adopting device writes itself are skipped by the
+    # function, so the value is stable across both moments.
+    content_digest = _staging_content_digest(server, target_id, staging)
     # THE STAMP GOES INTO THE STAGING DIRECTORY, before the promote, so the
     # session, its ownership and its lineage become visible in ONE step and no
     # scanner ever sees a half-promoted session (design §6.3 step 16).
@@ -775,7 +838,10 @@ def _destination_move(
     ready = {
         "version": 1,
         "lease_epoch": lease_epoch,
-        "manifest_digest": digest,
+        # THE VALUE THE OWNER CHECKS. It is a digest of THIS device's bytes (not of
+        # the owner's manifest, which used to be echoed back unchanged and proved
+        # nothing), so the move commits only when the copy is complete.
+        "content_digest": content_digest,
         "plan_id": str(manifest.get("plan_id") or ""),
         "mode": "keep" if keep else "move",
         "owner_device": owner_device,
@@ -796,6 +862,13 @@ def _destination_move(
                 "role": "destination",
                 "phase": HANDOFF_PHASE_HANDING_OFF,
                 "from_device": owner_device,
+                # THE SOURCE'S NAME TOO, because this entry's refusal sentence has to
+                # name the device the conversation is coming FROM: with only
+                # ``to_device`` (which is this device) an engage here was refused
+                # with "being received from <this device's own id>" — a sentence
+                # that names the wrong end and reads as nonsense to the person
+                # reading it (review round 1, M-3/NIT 5).
+                "from_name": owner_name,
                 "to_device": me,
                 "lease_epoch": lease_epoch,
                 "mode": "move",
@@ -812,7 +885,10 @@ def _destination_move(
                     "phase": "ready",
                     "session_id": session_id,
                     "lease_epoch": lease_epoch,
-                    "manifest_digest": digest,
+                    # WHAT THIS DEVICE HOLDS, so the owner can compare it against the
+                    # digest of its own bytes before it deletes anything.
+                    "content_digest": content_digest,
+                    "plan_id": str(manifest.get("plan_id") or ""),
                 }
             )
         except Moved as refusal:
@@ -824,6 +900,28 @@ def _destination_move(
         # evidence the owner agreed, and a phase that ran ahead of the protocol
         # would tell a front end to open a session nobody has handed over.
         note("handing_off")
+    # LAST CHECK BEFORE THE ONLY ``os.replace`` INTO ``sessions/``: the staged bytes
+    # are re-hashed against what this device recorded when it verified them, so a
+    # copy damaged between the two moments is never presented as a session (M-2's
+    # destination half, and the structural form of M-5's "never a partial copy").
+    damaged = _verify_staging(server, target_id, staging, ready)
+    if damaged:
+        # THE STAGING DIRECTORY IS KEPT, deliberately: by now the owner may already
+        # have deleted its copy, so sweeping it would destroy the only one left. The
+        # id is released and the sentence names where the bytes are.
+        clear_handoff_entry(server.root, session_id)
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                "digest_mismatch",
+                f"{damaged} (the copy is still under {staging}, and this device's "
+                "``lop sessions sync`` cannot replace it)",
+                phase_reached="handing_off",
+                changed=not keep,
+            ),
+            "",
+        )
     promoted = _promote(server, staging, target_id)
     if not promoted:
         clear_handoff_entry(server.root, session_id)
@@ -908,6 +1006,24 @@ def _finish_from_tombstone(
             "",
         )
     ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    # THE SAME RE-HASH AS THE LIVE PATH, and for the same reason: this is a promote
+    # into ``sessions/`` driven by a file, and after a crash the file is the only
+    # thing that says the bytes were ever verified (M-2). A ``ready.json`` whose
+    # digest no longer describes the staged bytes refuses here, keeping the
+    # staging directory so the bytes are not lost with the id.
+    damaged = _verify_staging(server, session_id, staging, ready)
+    if damaged:
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                "digest_mismatch",
+                f"{damaged} (the copy is still under {staging})",
+                phase_reached="handing_off",
+                changed=True,
+            ),
+            "",
+        )
     if not _promote(server, staging, session_id):
         return (
             None,
@@ -1099,6 +1215,20 @@ def _source_prepare(
         # The destination mints its own id and copies; the source keeps running, so
         # this is a read of the copy set with a lease still held (hence the copy's
         # torn-tail tolerance, §7.4).
+        #
+        # THE ``--keep`` WINDOW, STATED EXPLICITLY (review round 1 asked for this to
+        # be documented or removed). There is no grace period and no fence in this
+        # branch, and nothing that could be removed to make one: the copy is served
+        # from a LIVE runtime, so a turn that lands while the copy is in flight may
+        # be absent from the copy while present on the source. The window is
+        # therefore the COPY'S OWN DURATION — ~1 s for a session of a few hundred KB
+        # over loopback on this workstation, and bounded by the transfer rather than
+        # by a timer. (``_require_current_plan`` refuses a plan the source has moved
+        # past and ``sync_from`` re-plans up to ``SYNC_REPLAN_ATTEMPTS`` times, so a
+        # source that keeps writing produces a refusal rather than a splice.) What
+        # makes the result safe is that the copy is a FORK by construction: the
+        # destination stamps ``origin: fork`` and writes ``fork-boundary.json``, so
+        # an off-by-one row boundary is a divergence point, not a corruption (§7.4).
         manifest = sync_mod.build_manifest(server.root, session_id, have=frame.get("have") or {})
         _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="keep", keep=True)
         return {
@@ -1107,6 +1237,20 @@ def _source_prepare(
             "lease_epoch": "",
             "mode": "keep",
             "manifest": manifest,
+            "session_id": session_id,
+        }
+    # BEFORE ANY WORK AND BEFORE THE RETIRE: does this directory hold anything the
+    # copy set cannot carry? Asking here costs a directory listing and refuses a
+    # move that would delete unaccounted-for content without stopping the
+    # conversation or copying a byte; the commit asks again, because a file can
+    # appear in between (B-M2).
+    try:
+        sync_mod.assert_complete(Path(server.root) / "sessions" / session_id)
+    except sync_mod.SyncRefused as incomplete:
+        return {
+            "result": "refused",
+            "code": incomplete.code,
+            "message": incomplete.message,
             "session_id": session_id,
         }
     outcome = _retire_local_runtime(server.root, session_id)
@@ -1119,7 +1263,6 @@ def _source_prepare(
         }
     lease_epoch = new_lease_epoch()
     manifest = sync_mod.build_manifest(server.root, session_id, have=frame.get("have") or {})
-    transcript = (manifest.get("transcript") or {}).get("digest") or ""
     write_handoff_entry(
         server.root,
         session_id,
@@ -1132,8 +1275,14 @@ def _source_prepare(
             "mode": "move",
             "requester": link.device_id,
             "plan_id": str(manifest.get("plan_id") or ""),
-            "manifest_digest": _manifest_digest(
-                str(manifest.get("plan_id") or ""), str(transcript)
+            # WHAT THE SOURCE WILL COMPARE THE DESTINATION'S COPY AGAINST, recorded
+            # now and recomputed at the commit. ``sync.copy_content_digest`` derives
+            # it from THIS device's own bytes, which is the property that makes the
+            # comparison mean something: the destination reports a digest it
+            # computed from ITS bytes over the same function, and the two are equal
+            # only if the copy is complete (review round 1, M-2).
+            "content_digest": sync_mod.copy_content_digest(
+                Path(server.root) / "sessions" / session_id, session_id, Path(server.root)
             ),
             # WHICH RELAY WROTE THIS (see ``reconcile``): without it an entry is
             # indistinguishable from one a crashed process left, and the reconcile
@@ -1206,20 +1355,72 @@ def _source_commit(
             "session_id": session_id,
         }
     current = sync_mod.plan_id(server.root, session_id)
-    transcript = str(frame.get("manifest_digest") or "")
-    if current != str(entry.get("plan_id") or "") or not transcript:
+    directory = Path(server.root) / "sessions" / session_id
+    # WHAT THE DESTINATION SAYS IT HOLDS, and what this device's own bytes hash to
+    # over the SAME function. Both are needed: ``plan_id`` is the SOURCE-state
+    # digest (has the source moved on since it was prepared?), the content digest is
+    # derived from a directory's bytes on each end and is therefore the only value
+    # that can prove the copy is complete (review round 1, M-2).
+    reported = str(frame.get("content_digest") or "")
+    expected = sync_mod.copy_content_digest(directory, session_id, Path(server.root))
+    refusal_code = ""
+    refusal_cause = ""
+    refusal_message = ""
+    if current != str(entry.get("plan_id") or ""):
         # A DIGEST MISMATCH IS A ROLLBACK, NOT A FAILURE (§6.3 step 12): this device
         # still holds an intact directory and no writer, so `prepared` is cleared
         # and the session simply stays here.
+        refusal_code = "digest_mismatch"
+        refusal_cause = "source_changed"
+        refusal_message = (
+            "the copy did not verify against what this device served: the conversation "
+            "changed while it was being copied, so nothing was moved"
+        )
+    elif not reported or reported != expected:
+        # M-2: THE OWNER COMPARES CONTENT IT CAN RE-DERIVE, NOT A STRING IT HANDED
+        # OUT. The old check accepted any non-empty value, so a zeroed digest and a
+        # copy truncated to 100 of 2,580 bytes both committed and deleted the source.
+        refusal_code = "digest_mismatch"
+        refusal_cause = "destination_content"
+        refusal_message = (
+            "the copy the destination holds does not match the bytes this device "
+            "served, so nothing was moved and this device still holds the conversation"
+        )
+    else:
+        # B-M1, AND IT IS THE POINT OF THE WHOLE COMMIT: ``prepare`` checked the
+        # lease, and a process can take it in between — every way the product opens
+        # a session (``lop -r``, ``lop exec``, the TUI's in-process open, a booting
+        # runtime) acquires it directly, so the engage guard alone cannot stop them.
+        # This is the LAST check before the only delete, and it fails closed: a
+        # holder that cannot be PROVEN dead refuses the move and is named.
+        from local_operator.mobile.attach_client import find_runtime_record
+
+        _record, record_pid = find_runtime_record(server.root, session_id)
+        busy = _lease_refusal(server.root, session_id, record_pid)
+        if busy:
+            refusal_code = "busy"
+            refusal_cause = "lease_taken_after_prepare"
+            refusal_message = busy
+        else:
+            # THE COPY SET HAS TO ACCOUNT FOR WHAT IS ABOUT TO BE DELETED (B-M2).
+            # A name neither list covers is a file type the copy set has never been
+            # taught, and "not copied, then deleted" is data loss with nothing to
+            # recover it from — which is how ``scratchpad/`` and ``created_at.json``
+            # were destroyed. Refusing is the only answer that cannot lose it.
+            try:
+                sync_mod.assert_complete(directory)
+            except sync_mod.SyncRefused as incomplete:
+                refusal_code = incomplete.code
+                refusal_cause = "unlisted_content"
+                refusal_message = incomplete.message
+    if refusal_code:
         clear_handoff_entry(server.root, session_id)
         progress_for(server).note(session_id, "prepared")
-        _audit(server, AUDIT_ROLLED_BACK, session_id, to_device, cause="source_changed")
+        _audit(server, AUDIT_ROLLED_BACK, session_id, to_device, cause=refusal_cause)
         return {
             "result": "refused",
-            "code": "digest_mismatch",
-            "message": (
-                "the copy did not verify against what this device served; nothing was moved"
-            ),
+            "code": refusal_code,
+            "message": refusal_message,
             "session_id": session_id,
         }
     entry = dict(entry)
@@ -1676,6 +1877,15 @@ def _reconcile_destination(
     if not (staging / "ready.json").is_file():
         # Nothing verified was ever written here, so a rollback is free — and the
         # source's own reconcile reaches the same conclusion from its side.
+        #
+        # THE ONE CASE WHERE STAGING IS ABSENT AND THE SESSION EXISTS ANYWAY (§6.5
+        # row 5, and M-3's second half): a promote that reached ``os.replace`` and
+        # died before ``_promote`` could delete its own boot marker leaves
+        # ``ready.json`` INSIDE the session directory. That marker is not content
+        # (``sync.EXCLUDED_ENTRIES`` says so) and this is the only moment anything
+        # still knows it is ours, so it goes here rather than lingering in a
+        # conversation the user will open.
+        (Path(root) / "sessions" / session_id / "ready.json").unlink(missing_ok=True)
         clear_handoff_entry(root, session_id)
         return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
     if server is None:
@@ -2352,6 +2562,16 @@ def install(server: "RelayServer") -> None:
     record to go, far past the 10 s inline budget. ``net_session_lifecycle`` is
     slow too: the owner's delete runs an in-use probe that forks ``ps`` and
     ``lsof`` before it removes anything.
+
+    AND IT REGISTERS A START HOOK. Recovery existed and was correct and NOTHING
+    CALLED IT: the crash tests passed only because they invoked ``reconcile`` by
+    hand, so in the product a stale ``prepared`` entry left by a dead relay blocked
+    the owner's own conversation until somebody happened to run another move, and a
+    destination that died just after its rename stayed stuck (review round 1,
+    M-3). A relay starting on a root a previous relay died in is the one moment
+    guaranteed to happen, so the hook runs the table there: ``sweep_staging`` for
+    abandoned copies, then ``reconcile`` scoped away from this instance's own
+    in-flight entries.
     """
     server.register_ops(
         make_handler(server),
@@ -2363,4 +2583,25 @@ def install(server: "RelayServer") -> None:
             "net_session_move": MOVE_OP_DEADLINE_S,
             "net_session_lifecycle": LIFECYCLE_OP_DEADLINE_S,
         },
+        on_start={"mobility-recovery": lambda: recover_on_start(server)},
     )
+
+
+def recover_on_start(server: "RelayServer") -> list[dict[str, Any]]:
+    """``reconcile`` + ``sweep_staging`` for a relay that has just started.
+
+    Runs on the relay's own start-hook thread (never inline in ``start()``): the
+    destination branch asks the owner over a link, and a relay whose start-up
+    waited for another machine would make every ``lop`` command's cost depend on
+    that machine. Nothing here is on the critical path of a move — an entry it
+    cannot settle stays in the journal and the next attempt picks it up.
+    """
+    try:
+        swept = sweep_staging(server.root)
+        report = reconcile(server.root, server=server)
+    except Exception:  # noqa: BLE001 — housekeeping is never worth a dead relay
+        logger.debug("mobility: recovery at relay start failed", exc_info=True)
+        return []
+    if swept or any(str(row.get("action")) not in ("in_flight",) for row in report):
+        logger.info("mobility: recovery at relay start: swept=%s %s", swept, report)
+    return report

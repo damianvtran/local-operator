@@ -171,14 +171,26 @@ class SessionLine:
     #: row. A drain will not take a message; a window already has it and will run it
     #: one second later, which is the difference between "send it again" and "wait".
     updating: str = ""
-    #: The runtime SURVIVED its own stall bound: the bound fired, wrote every thread's
-    #: stack to its dump, found work in flight and did NOT end the process
-    #: (``stall_watchdog.held_pids``). The third state beside "the bound ended it" and
-    #: "no bound fired", and the ONE that needs the operator: a held runtime is stalled
-    #: with the turn still inside it, it will not resolve on its own, and the way out is
-    #: ``lop stop`` (design review round 1, D1 — before this the fact reached the JSON
-    #: row and no screen).
+    #: The runtime is STALLED WITH WORK IN FLIGHT: its bound fired, wrote every thread's
+    #: stack to its dump, was still holding work at that moment, and did NOT end the
+    #: process (``stall_watchdog.held_pids``, whose marker only a fire over work can
+    #: carry — finding B of the 2026-09-23 convergence round). The state beside "no bound
+    #: fired", and the ONE that needs the operator: it will not resolve on its own, and
+    #: the way out is ``lop stop`` (design review round 1, D1 — before this the fact
+    #: reached the JSON row and no screen). The same dump's OTHER reading — a fire over
+    #: nothing, which is every idle, recovered or GIL-held observation — is deliberately
+    #: not this one.
     stall_held: bool = False
+    #: The runtime's OWN STALL DUMP: the path the search found for this life, or
+    #: ``None``. Fenced like :attr:`stall_held`, and published as the FILE rather than
+    #: as a path composed from the reader's own log directory — for a fire in another
+    #: store the composed path names a file that does not exist (review round 1,
+    #: MAJOR-1 / QA round 1, Q-1).
+    stall_dump: str | None = None
+    #: When this runtime's life began (``SessionRecord.started_at``), carried so a
+    #: reader can fence a leftover artifact against it without holding the record.
+    #: ``0.0`` on a ``stored`` row, which has no runtime at all.
+    started_at: float = 0.0
 
     #: A window that FAILED — the pair it could not move to (``SessionRecord.update_failed``),
     #: or ``""``. Its own field rather than a value of the one above, because the two

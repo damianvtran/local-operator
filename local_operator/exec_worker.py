@@ -190,6 +190,13 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
         yolo=parsed.yolo,
         train=bool(getattr(parsed, "train", False)),
         resume=parsed.resume,
+        # The DETACHED half of the same field ``exec_mode`` fills for the
+        # foreground path: the worker is spawned with `--workstream` when the
+        # front end was given it (``STARTUP_FIELDS``), and this is what carries
+        # it the last hop to the session factory. Dropped here, a
+        # `--background --workstream` run would come back hidden while the
+        # operator's own command said otherwise.
+        workstream=bool(getattr(parsed, "workstream", False)),
     )
     # config_dir(), not ``Path.home() / ".local-operator"``: a missed copy of the
     # hardcoded root that ``exec_mode._make_default_session_factory`` already

@@ -226,10 +226,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        help="Model to use (e.g., gpt-4o, claude-3-5-sonnet-latest, deepseek-chat, "
-        "grok-3, glm-5.3, gemini-2.0-flash-001, qwen-plus, moonshot-v1-32k, "
-        "mistral-large-latest, deepseek/deepseek-chat). Optional: when omitted, "
-        "the provider's default model is used.",
+        help="Model to use (e.g., gpt-6-astra, claude-opus-5-5, deepseek-flash, "
+        "grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, "
+        "mistral-medium-latest, anthropic/claude-opus-5.5). Optional: when omitted, "
+        "the provider's suggested model is used.",
     )
     parser.add_argument(
         "--run-in",
@@ -4316,11 +4316,42 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     why = {
         row["session_id"]: (
-            outcome_summary(str(row.get("completion_reason") or ""))
-            # A ``complete`` row has no why: its reason is a success sentence,
-            # and a column that explains every healthy session says nothing.
-            if row.get("completion_kind") not in ("", "complete")
-            else ""
+            ""
+            # A STORED OUTCOME IS NOT A LIVE ONE, and this row is the case where
+            # the difference is the whole message. ``completion_kind`` is the
+            # last outcome the attention store RECORDED — the previous turn's
+            # end — while ``pending`` and ``busy`` come from the runtime's own
+            # record and describe what it is doing NOW. A session that was
+            # stopped, then resumed, and is now parked on an approval carries
+            # both: an ``interrupted`` receipt from before the resume, and a
+            # live parked gate.
+            #
+            # Printed together they contradict each other. The observed row read
+            # ``NEEDS approval`` beside ``WHY the session was stopped by the
+            # user`` — for a runtime that had been alive and working for six
+            # hours since that stop, and was at that moment holding a turn open
+            # waiting for the operator to answer a card. The WHY column is the
+            # one place a shell reader learns why a session is not progressing,
+            # and it was spending its width on a superseded receipt while the
+            # actual answer ("it is waiting for you") was a column away.
+            #
+            # So the receipt is suppressed exactly when the row's own live state
+            # has already overtaken it, on the precedent ``catalog.status`` set
+            # for the picker: ``pending`` and the live states outrank an unread
+            # completion mark there for this same reason, and the two surfaces
+            # describing one session must not disagree. Nothing is invented and
+            # no width is added — ``NEEDS`` already says which gate it is, and
+            # ``--json`` still carries ``completion_kind``/``completion_reason``
+            # verbatim for anything parsing the outcome rather than reading the
+            # table.
+            if _live_state_supersedes_outcome(row)
+            else (
+                outcome_summary(str(row.get("completion_reason") or ""))
+                # A ``complete`` row has no why: its reason is a success sentence,
+                # and a column that explains every healthy session says nothing.
+                if row.get("completion_kind") not in ("", "complete")
+                else ""
+            )
         )
         for row in rows
     }
@@ -5838,6 +5869,54 @@ def _state_cell(state: str) -> str:
     where the process is still there.
     """
     return "not answering" if state == "wedged" else state
+
+
+def _live_state_supersedes_outcome(row: dict[str, Any]) -> bool:
+    """Has this row's CURRENT state overtaken its last stored outcome?
+
+    The WHY column explains a session the reader cannot otherwise account for,
+    and its source (``completion_kind``/``completion_reason``) is the attention
+    store's record of how a turn ENDED. That is the right source for a row that
+    is over — a stale record, a crash, a stop — and the wrong one for a row that
+    has since been resumed and is now doing something, because the store is not
+    rewritten when a session comes back: the old receipt simply stays until the
+    next turn completes.
+
+    Three live states outrank it, and they are the three ``catalog.status``
+    already ranks above an unread completion mark for the picker:
+
+    * a parked gate (``pending``) — somebody is blocked on this row right now,
+      and the NEEDS column beside it already names which gate;
+    * ``wedged`` — not answering NOW, which a receipt from a turn that did
+      finish must not hide;
+    * ``busy`` — a turn is running, so the previous turn's ending is history.
+
+    Keeping this in step with that ranking is the point: the picker and this
+    table describe the same sessions, and a user who sees "Approval needed" in
+    one and "stopped by the user" in the other has to work out for themselves
+    which surface is behind. Stored rows are untouched — they have no live state
+    to supersede anything, and their outcome is the only thing they can say.
+    """
+    # STORED AND STALE ROWS HAVE NO LIVE STATE, and stale is the one that has to
+    # be said out loud. A stored row obviously carries none — nothing is
+    # running. A STALE row looks like it does: ``registry.scan`` classifies it
+    # stale because the pid is GONE, but the record on disk is the last one the
+    # dead runtime published, so the ``busy``/``pending`` flags in it are frozen
+    # at whatever was true the instant before it died. Reading those as "this
+    # session is working" would suppress the receipt on exactly the row the WHY
+    # column was added for — a killed runtime publishes nothing further, and its
+    # reason survives only in the attention store (see the column's note above,
+    # and the 2026-09-13 kill wave it names).
+    #
+    # It is also where the ``catalog.status`` precedent this rule follows draws
+    # the same line: ``catalog`` drops stale records from its live map outright
+    # (``if session_id and state != "stale"``), so a stale row there has no live
+    # state to outrank its completion mark and the receipt shows. Excluding it
+    # here is what keeps the two surfaces agreeing rather than inverting on the
+    # one row whose whole story is the outcome.
+    if row.get("state") in ("stored", "stale"):
+        return False
+    return bool(row.get("pending")) or bool(row.get("busy")) or row.get("state") == "wedged"
 
 
 #: Width of `lop sessions`' trailing WHY column, in display CELLS.
@@ -9211,6 +9290,16 @@ def main() -> int:
                 # getattr, like the additive flags above it: `exec` is not the
                 # only subcommand routed through this Namespace in tests, and a
                 # missing attribute must read as "off", never raise.
+                # NOT implied by ``--workstream``, deliberately. Every exec run
+                # already publishes its discovery record and serves the control
+                # socket (``exec_control`` — publication and gate installation
+                # are separate), so a workstream row is followable and steerable
+                # without this flag. What ``--control`` adds is an APPROVAL
+                # POSTURE: gates park for up to a day instead of being denied,
+                # and a ``--tools`` declaration stops standing as the approval.
+                # Implying it silently parked the fan-out shape
+                # (`--workstream --background --tools bash,write`) on its first
+                # write (PR #1436 agent review round 1, F1).
                 control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
                 # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
@@ -9224,6 +9313,12 @@ def main() -> int:
                 # handoff`), which is why that cell exists rather than an in-process
                 # probe (agent review round 6, R6-5).
                 supervisor_fd=getattr(args, "supervisor_fd", None),
+                # THE OPERATOR'S OWN REQUEST THAT THIS RUN BE A WORKSTREAM
+                # (`lop exec --workstream`), carried to `session_factory._prepare`
+                # through the narrow namespace: absent, the run is ephemeral and
+                # hidden exactly as before. In `STARTUP_FIELDS`, so the detached
+                # worker is told the same thing.
+                workstream=bool(getattr(args, "workstream", False)),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast
@@ -9473,7 +9568,10 @@ def main() -> int:
 
                 from local_operator.harness.types import ModelSpec
                 from local_operator.mobile.attach_client import find_runtime_record
-                from local_operator.session.attached import AttachedSession
+                from local_operator.session.attached import (
+                    AttachedSession,
+                    frontend_attach_refusal,
+                )
                 from local_operator.session_factory import resolve_hosting_model
 
                 config_directory = config_manager.config_dir
@@ -9535,6 +9633,36 @@ def main() -> int:
                         find_runtime_record, config_directory, session_id
                     )
                 degraded_reason = ""
+                paint_first_cwd = ""
+                # PAINT FIRST, ATTACH BEHIND for a live owner whose conversation
+                # is on disk: the cold facade below paints it, and the TUI's eager
+                # engage binds it to that owner after the first paint (the bind
+                # replays whatever the owner wrote in between). The blocking
+                # `connect` held `lop --resume` on the owner's canonical sync —
+                # 15 s against a busy one — before anything was drawn. A model
+                # override is still sent through the live attach below, which is
+                # the one path that can hand it to an existing owner; a cold
+                # viewer's override is consumed by its bind.
+                #
+                # A STATICALLY REFUSED record (an owner on an older build) keeps
+                # the dial below, mirroring the TUI's `/resume` branch: `connect`
+                # raises that refusal, and it is the only thing that sets
+                # `degraded_reason`, i.e. the "opened without live session state
+                # — needs protocol >= N" sentence. Painting first there would
+                # open an inert conversation with no word about why (review
+                # round 1, F1), and the dial costs nothing: it refuses before
+                # any socket is opened.
+                if (
+                    record is not None
+                    and frontend_attach_refusal(record) is None
+                    and not (initial_model is not None and (birth_args.hosting or birth_args.model))
+                    and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
+                ):
+                    # The owner's directory, not this terminal's: the band paints
+                    # it before the bind lands, and a live conversation's cwd is
+                    # the one it is working in.
+                    paint_first_cwd = str(record.cwd or os.getcwd())
+                    record = None
                 if record is not None:
                     try:
                         attached = await AttachedSession.connect(
@@ -9581,7 +9709,7 @@ def main() -> int:
                 viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
-                    cwd=os.getcwd(),
+                    cwd=paint_first_cwd or os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,
                     # Only a RESOLVED spec can be a deliberate override. Setup
@@ -9594,6 +9722,12 @@ def main() -> int:
                 )
                 if degraded_reason:
                     viewer.degraded_reason = degraded_reason
+                if paint_first_cwd:
+                    # Tells the TUI that a live owner is being attached behind
+                    # this paint, so it narrates and bounds that wait rather than
+                    # leaving `starting…` as the only account of it (UX round 1,
+                    # U1).
+                    viewer.attach_behind = True
                 return viewer
 
             async def session_factory():

@@ -3861,3 +3861,34 @@ async def test_at_the_24_cell_floor_the_position_yields_and_the_chip_survives():
         footer = sidebar.render().plain.splitlines()[-1]
         assert footer.strip() == "f9 focus · ⌥1k+", f"{footer!r} ({context})"
         assert "…" not in footer, f"the chip cropped instead of the position yielding: {footer!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_hover_text_names_who_opened_an_agent_opened_row():
+    """Design round 1, D2: the row is width-bound, so its opener rides the hover text.
+
+    `opened by <role>` when the marker names one, the certain `agent-opened` when
+    it does not (the desktop flyout's vocabulary, #448), and nothing added for the
+    operator's own row, which keeps its three lines exactly.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        now = time.time()
+        named: dict[str, str | None] = {
+            "agent": "coder",
+            "label": "1428 review",
+            "session": "req000000001",
+        }
+        unknown: dict[str, str | None] = {"agent": None, "label": None, "session": None}
+        entries = [
+            CatalogEntry(SessionRow("ws0000000001", now, "Fan-out audit", opened_by=named)),
+            CatalogEntry(SessionRow("ws0000000002", now - 1, "Harden secrets", opened_by=unknown)),
+            CatalogEntry(SessionRow("own000000001", now - 2, "My own work")),
+        ]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        described = [(sidebar._describe(entry) or "").splitlines() for entry in entries]
+    assert described[0][2:] == ["opened by coder", "ws0000000001"]
+    assert described[1][2:] == ["agent-opened", "ws0000000002"]
+    assert len(described[2]) == 3 and described[2][2] == "own000000001"
+    assert not any("opened" in line for line in described[2])

@@ -910,8 +910,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.rename",
         "temp FILE -> state, dir_fd-bound to an evidence root",
     ),
-    ("local_operator/mcp/config.py::_write_json_atomic", "os.replace", "temp FILE -> mcp json"),
-    ("local_operator/mcp/config.py::_write_json_atomic", "os.unlink", "temp FILE -> mcp json"),
+    # The mcp config writer: a temp file BESIDE its target and ``os.replace`` onto
+    # it. Its two call sites are the ``add_key`` header bind and the rollback that
+    # undoes a refused one, and both take the scope FILE ``_scope_path`` resolved
+    # for a server this module owns — the replaced path is a file it just read,
+    # never a directory, so no session DIRECTORY is removed, renamed or replaced.
+    (
+        "local_operator/mcp/config.py::_write_bytes_atomic",
+        "os.replace",
+        "temp FILE -> the mcp.json scope file this module resolved",
+    ),
+    (
+        "local_operator/mcp/config.py::_write_bytes_atomic",
+        "os.unlink",
+        "that temp FILE, only while the write above is failing",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     (
@@ -1234,6 +1247,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/resume.py::write_session_attachment",
         "<path>.replace",
         "temp FILE -> attachment.json",
+    ),
+    (
+        "local_operator/resume.py::write_goal_record",
+        "<path>.replace",
+        "temp FILE -> goal.json",
     ),
     (
         "local_operator/resume.py::write_session_title",
@@ -1752,9 +1770,44 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "marker exempts one, because those bytes may be the last copy alive); never "
         "a path under sessions/",
     ),
+    # THE MOVE'S OWN BOOT MARKER, removed from a session directory a promote already
+    # adopted. This is the one call in the move that touches a file INSIDE
+    # ``sessions/``, and it removes exactly one name — ``ready.json``, which
+    # ``sync.EXCLUDED_ENTRIES`` classifies as the move's own bookkeeping rather than
+    # content. It exists because a promote that reached ``os.replace`` and then died
+    # leaves the marker behind, and carrying it forward would put a file every reader
+    # has to learn to ignore into a conversation the user opens.
+    (
+        "local_operator/network/mobility.py::_reconcile_destination",
+        "<path>.unlink",
+        "Removes the move's own ready.json boot marker from an already-promoted "
+        "session: a bookkeeping FILE the move wrote, never session content",
+    ),
     # A replica lives at network/replicas/<id>/ — outside the session store, so it
     # can never be a second directory for an id the owner holds (INV-1). Its cursor
     # is written through a temp in that same directory.
+    # THE FETCH THAT STAGES, THEN REPLACES (review round 1, M-5). ``_fetch_item``
+    # writes every file into ``.<name>.<pid>.fetch`` beside its target and adopts it
+    # with ONE ``os.replace``, so a killed append can never leave a truncated
+    # conversation where a complete one was. The target is ``dest_dir / name``, where
+    # ``dest_dir`` is the move's STAGING directory or a replica directory — both
+    # outside ``sessions/`` — plus the shared attachment store; the only path into a
+    # session directory is ``_promote`` above, which is allow-listed by name. The two
+    # unlinks are that attempt's own staging file (before the attempt, and on the way
+    # out of a failed one), and the replace is the adoption itself.
+    (
+        "local_operator/network/sync.py::_fetch_item",
+        "os.replace",
+        "Adopts a fully VERIFIED staged file into its destination (staging dir, "
+        "replica dir or the attachment store); never renames a session directory",
+    ),
+    (
+        "local_operator/network/sync.py::_fetch_item",
+        "<path>.unlink",
+        "Removes this attempt's own .<name>.<pid>.fetch staging file, beside its "
+        "target rather than inside a session",
+        2,
+    ),
     (
         "local_operator/network/sync.py::write_replica_cursor",
         "os.replace",
@@ -1956,6 +2009,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
     {
         "local_operator/resume.py::write_session_title",  # tmp -> title.json
         "local_operator/resume.py::write_session_attachment",  # tmp -> attachment.json
+        "local_operator/resume.py::write_goal_record",  # tmp -> goal.json
         "local_operator/resume.py::_write_origin_scan_sentinel",  # tmp -> origin-scan.json
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE

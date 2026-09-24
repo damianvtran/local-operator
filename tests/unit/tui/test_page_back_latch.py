@@ -265,9 +265,32 @@ async def test_finish_history_mount_refuses_a_stale_generation(tmp_path) -> None
         # window is thread-scheduling-wide and completes in microseconds, so
         # the test holds the flag open exactly as a slow disk read would (the
         # same technique the in-flight latch test above uses).
+        # Drain the page's OWN work before holding the flag open. The retarget
+        # starts a live load, its mount re-raises the flag for the prepend and
+        # schedules a settle bound to the id CURRENT at that moment -- and that
+        # settle clears the flag BY DESIGN, so a hold that begins before it
+        # lands asserts that the page stayed parked rather than that the stale
+        # settle was refused. Measured before this drain: 4 failures in 40 runs
+        # at the PR head and 5 in 40 on origin/main (this file is byte-identical
+        # to main's, so the flake is not this diff's), with a stack probe naming
+        # `_reconcile_current_body` -> `on_settled` -> `_finish_history_mount`
+        # as the clearer. The flag is clear only once a mount has settled and no
+        # read is in flight, which is exactly the state the hold needs.
+        for _ in range(50):
+            if not view._history_loading and not [
+                worker for worker in view.workers if worker.group == "subagent-history"
+            ]:
+                break
+            await pilot.pause()
         view._history_loading = True
-        # The stale settle lands NOW, after the retarget.
+        # The stale settle lands NOW, after the retarget. Its refusal is
+        # SYNCHRONOUS -- the guard compares ids before touching the flag -- so
+        # the first assertion needs no frame to be meaningful.
         view._finish_history_mount(stale)
+        assert view._history_loading, "a stale settle must not clear the new job's in-flight read"
+        # And it stays refused: the frame the old version of this test spent
+        # waiting now lands on a page with nothing of its own in flight, so a
+        # clear here can only be one the stale settle queued.
         await pilot.pause()
         assert view._history_loading, "a stale settle must not clear the new job's in-flight read"
         assert "loading earlier" in view._history_state_text()

@@ -176,6 +176,21 @@ class SessionDraft:
 
 
 @dataclass
+class GoalInteraction:
+    """This source's judged-goal bookkeeping (see ``app._maybe_judge_goal_turn``)."""
+
+    #: Whether THIS source's standing-goal judge is already running. It lives on
+    #: the source rather than on the app because the app can replace its session
+    #: MID-JUDGE (``/reload``, ``/resume``): an app-level flag let a judgement
+    #: still in flight for the OLD session swallow the NEW session's first turn
+    #: end, so that goal was skipped once — judged only at its next turn end,
+    #: which a session with no further turns never reaches (agent review round 2,
+    #: MINOR-1). Same scoping as ``retired``, and for the same reason: it is a
+    #: fact about one binding's own work, not about the terminal.
+    judge_in_flight: bool = False
+
+
+@dataclass
 class SessionInteraction:
     session: SessionProtocol | None
     token: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -183,6 +198,7 @@ class SessionInteraction:
     loop: LoopInteraction = field(default_factory=LoopInteraction, repr=False)
     shell: ShellInteraction = field(default_factory=ShellInteraction, repr=False)
     compaction: CompactionInteraction = field(default_factory=CompactionInteraction, repr=False)
+    goal: GoalInteraction = field(default_factory=GoalInteraction, repr=False)
     accounting: SessionAccounting = field(default_factory=SessionAccounting, repr=False)
     draft: SessionDraft = field(default_factory=SessionDraft, repr=False)
     naming: SessionNaming = field(default_factory=SessionNaming, repr=False)
@@ -268,6 +284,18 @@ class SessionInteraction:
     #: refresh: those are the app talking to itself, and a clock they reset
     #: never fires. See `app.SIDEBAR_IDLE_RELEASE_S`.
     parked_at: float | None = field(default=None, repr=False)
+    #: The account a paint-first attach OWES this conversation: its one row and
+    #: the last thing that row said (``app._AttachBehindAccount``).
+    #:
+    #: On the SOURCE rather than on the attempt that produced it, because the
+    #: attempt ends the moment a carrier binds and the account must not end with
+    #: it (agent review round 4 on #1474, F-1; UX round 4, U14): a message whose
+    #: own bind fails AFTER another carrier landed still has to be accounted
+    #: for, and a row the conversation's view carried is lost with that view
+    #: when the switch back's connect re-commits a fresh replay — so the claim
+    #: lives with the conversation and is re-posted into whatever view it has
+    #: in front. ``None`` when nothing is owed.
+    attach_behind_account: Any = field(default=None, repr=False)
 
     @property
     def unsent(self) -> list[SessionDraft]:

@@ -15,12 +15,58 @@ import uvicorn
 
 from local_operator.mcp.manager import McpManager
 from local_operator.server.app import app
+from local_operator.session.aside import ASIDE_PROMPT
+from local_operator.session.goal_loop import LOOP_GOAL_PROMPT, LOOP_JUDGE_PROMPT
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.slash_commands import SLASH_COMMANDS
-from tests.e2e.harness import ScriptedStream, build_session, text_turn
+from tests.e2e.harness import (
+    ScriptedStream,
+    build_session,
+    provider_call_kinds,
+    text_turn,
+    user_turns,
+)
 
 pytestmark = pytest.mark.e2e
+
+#: The standing goal this cell drives, named once: the tape below, the goal
+#: judge's question and the census all key off it.
+STANDING_GOAL = "Complete two steps"
+
+#: The goal-mode loop's own text, so its prompt is labelled rather than
+#: counted as a user turn.
+LOOP_GOAL_TEXT = "Verify the fixture goal"
+
+
+def _census(stream: ScriptedStream) -> list[str]:
+    """The kinds of provider call this session has made, in call order.
+
+    A total could not answer this cell's question any more: `/goal` now
+    drives the judged goal beside its own turn (the owner's turn end forks a
+    judge, which may fork a continuation), and `/loop` has its own driver +
+    judge. The property the three censuses below keep is that every call is
+    ATTRIBUTABLE — one per user message, plus a named harness call each —
+    which is a census of kinds rather than of how many there happened to be
+    (see ``provider_call_kinds``).
+    """
+    return provider_call_kinds(
+        stream.requests,
+        goal=STANDING_GOAL,
+        extra={
+            # The goal-mode loop drives its OWN goal text, so both of its
+            # questions are parameterised by that text rather than by the
+            # standing goal: its working turn and its judge, which asks the same
+            # LOOP_JUDGE_PROMPT question about a different objective.
+            LOOP_GOAL_PROMPT.format(goal=LOOP_GOAL_TEXT): "loop-goal",
+            LOOP_JUDGE_PROMPT.format(goal=LOOP_GOAL_TEXT): "judge",
+            # The aside arrives WRAPPED: the remote seam composes
+            # ``ASIDE_PROMPT`` around the question (#1488), and that wrapper is
+            # the last user row the call asks with. Labelling the raw question
+            # left this call unlabelled, so it counted as a user turn.
+            ASIDE_PROMPT.format(question="Private question"): "aside",
+        },
+    )
 
 
 class ControlledStream(ScriptedStream):
@@ -154,6 +200,17 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                     # standing objective is stored AND its argument is submitted,
                     # so it consumes a provider turn before the loop starts.
                     text_turn("Goal turn answered"),
+                    # ...and then the judged goal's CHAIN, which this turn's end
+                    # forks on the OWNER's host: the judge, the continuation its
+                    # CONTINUE verdict admits, and the judge whose ACHIEVED
+                    # settles the goal. The tape is POSITIONAL, so these three
+                    # entries are what keep every answer below attached to the
+                    # call it was written for — without them the judge consumes
+                    # the loop's answers and reads plain prose as an unreadable
+                    # verdict, and the whole cell drifts.
+                    text_turn("VERDICT: CONTINUE\nOne step verified"),
+                    text_turn("First goal step"),
+                    text_turn("VERDICT: ACHIEVED\nBoth steps verified"),
                     text_turn("First loop step"),
                     text_turn("Second loop step"),
                     text_turn("Private aside answer"),
@@ -294,12 +351,31 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # turn fails here rather than passing as a proportional difference.
             goal_stored = await command("goal", "Complete two steps")
             assert goal_stored["admission"]["status"] == "admitted"
+            # WAIT for the goal's chain to settle before driving anything else.
+            # The chain runs in the BACKGROUND from the goal turn's end, and the
+            # tape is positional: without this the loop's turns could take the
+            # judge's slots and vice versa, which is flake dressed as a census.
+            # `done` is the judge's ACHIEVED landing on the record — the chain's
+            # last step — and it is also what stops the goal judge from firing
+            # again (`GoalJudge._enabled` reads the status).
+            await until(lambda: session.goal_status == "done")
             loop_id = request_id()
             started = await command("loop", "2", loop_id)
             assert started["data"]["status"] == "running"
             await until(lambda: handle._goal_loop.state["status"] == "completed")
             await command("loop", "2", loop_id)
-            assert len(stream.requests) == 4
+            kinds = _census(stream)
+            assert user_turns(kinds) == 2, (
+                "the seed turn and the goal command's ONE turn, and nothing else a"
+                f" person typed: {kinds}"
+            )
+            assert (
+                kinds.count("judge") == 2
+            ), f"the goal is judged on its owner, twice, before it settles: {kinds}"
+            assert (
+                kinds.count("continuation") == 1
+            ), f"exactly the one continuation its CONTINUE verdict admitted: {kinds}"
+            assert kinds.count("loop") == 2, f"the count loop ran two actual model turns: {kinds}"
             snapshot = (await client.get(target)).json()["result"]["payload"]["frontend"][
                 "snapshot"
             ]
@@ -406,7 +482,15 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             await command("loop", "Verify the fixture goal")
             await until(lambda: handle._goal_loop.state["status"] == "achieved")
             assert session.goal == "Complete two steps"
-            assert len(stream.requests) == 7
+            kinds = _census(stream)
+            assert (
+                user_turns(kinds) == 2
+            ), f"the goal-mode loop adds no user turn of its own: {kinds}"
+            assert kinds.count("loop-goal") == 1, f"the goal-mode loop's own working turn: {kinds}"
+            assert kinds.count("judge") == 3, (
+                "the goal's two judges plus the loop driver's own: the SAME"
+                f" question, one policy, two triggers: {kinds}"
+            )
             stream.block = True
             await command("loop", "3")
             await asyncio.wait_for(stream.started.wait(), 15)
@@ -429,7 +513,14 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             cancelled = await command("loop", "cancel")
             assert cancelled["data"]["status"] == "cancelled"
             await until(lambda: not session.is_streaming and not handle._prompt_queue)
-            assert len(stream.requests) == 8
+            kinds = _census(stream)
+            assert (
+                user_turns(kinds) == 2
+            ), f"no turn of the cancelled loop became a user turn: {kinds}"
+            assert kinds.count("loop") == 3, (
+                "the two completed iterations plus the blocked third the cancel"
+                f" aborted, and no next iteration after it: {kinds}"
+            )
             print(
                 (
                     "Goal loop judged ACHIEVED off-record without replacing standing "

@@ -296,6 +296,35 @@ LOOP_GOAL_PROMPT = (
     "advanced and what remains. If the goal is already fully met, say so plainly."
 )
 
+#: The fixed edges of :data:`LOOP_GOAL_PROMPT`, DERIVED from the template rather
+#: than restated: the recogniser below must not drift when the wording changes —
+#: the same pair (and the same reason) as ``goal_judge.GOAL_CONTINUATION_HEAD``.
+LOOP_GOAL_HEAD, LOOP_GOAL_TAIL = LOOP_GOAL_PROMPT.split("{goal}", 1)
+
+
+def is_loop_goal_instruction(text: str) -> bool:
+    """Whether ``text`` is the goal-mode loop's own working turn, for ANY goal.
+
+    A producer-side recogniser for a FAMILY, exactly as
+    :func:`local_operator.session.goal_judge.is_goal_continuation_instruction` is
+    for the judge's continuation — and for the same reason: the goal is
+    interpolated per goal, so this family has no fixed string to list in
+    ``harness_chrome_prompts()``. It needs one all the same, because
+    ``LOOP_GOAL_PROMPT`` is ALSO not in that tuple and matches no other
+    recogniser: the row was recognised by nothing at all, so every surface that
+    folds by the text match painted the loop's own words as the operator's — the
+    half the structural ``harness_injected`` stamp on the same row cannot cover
+    on a build that predates the stamp.
+
+    Matched on the fixed head and the fixed tail, never as a substring search
+    over the goal: a message that merely OPENS with the head, or that quotes the
+    template inside a sentence of its own, is the user's own words and must paint
+    — the same inherent limit ``is_goal_continuation_instruction`` documents.
+    """
+    stripped = text.strip()
+    return stripped.startswith(LOOP_GOAL_HEAD.strip()) and stripped.endswith(LOOP_GOAL_TAIL.strip())
+
+
 LOOP_JUDGE_PROMPT = (
     "You are judging whether a standing goal has been fully achieved, based on "
     "the conversation above (the work done so far).\n\n"
@@ -306,8 +335,8 @@ LOOP_JUDGE_PROMPT = (
     "Then, on the next line, one short sentence of reason. Judge strictly: "
     "answer ACHIEVED only if the goal is fully and verifiably met, not merely "
     "in progress. If unsure, answer CONTINUE. Answer in text only and do not "
-    "call any tool: this is a verdict on the conversation above, and a tool "
-    "call here is discarded unread."
+    "call any tool: this is a verdict on the conversation above, and a tool or "
+    "function call here is rejected and returned to you as an error."
 )
 
 MAX_LOOP_JUDGE_FAILURES = 3

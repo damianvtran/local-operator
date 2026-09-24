@@ -22,7 +22,10 @@ import httpx
 
 from local_operator.mobile.auth import load_password
 from local_operator.procstate import install_loop_signal_handlers
-from local_operator.providers.auth_store import CredentialInvalidError
+from local_operator.providers.auth_store import (
+    CredentialInvalidError,
+    RefreshUnconfirmedError,
+)
 from local_operator.tunnels import config, state
 from local_operator.tunnels.api import RadientTunnels
 from local_operator.tunnels.errors import (
@@ -31,6 +34,7 @@ from local_operator.tunnels.errors import (
     ReenrolmentRequired,
 )
 from local_operator.tunnels.gateway import (
+    AUTHORIZATION_DEFERRED,
     LOCAL_PREREQUISITE,
     LOGIN_REQUIRED,
     REENROLMENT_REQUIRED,
@@ -247,6 +251,27 @@ def _is_a_dead_login(failure: BaseException) -> bool:
     )
 
 
+def _is_a_deferred_refresh(failure: BaseException) -> bool:
+    """Whether the credential store DEFERRED the refresh instead of failing it.
+
+    Read off the chain, like `_is_a_dead_login` and for the same reason: the
+    store's verdict belongs to the store, and the client is only its reporter.
+    `RadientTunnels.request` raises one `ValueError` for every refresh failure it
+    cannot name itself, with the store's exception as its cause, so the
+    distinction survives only in the chain.
+
+    The state is TRANSIENT and the connector must keep retrying it: the store is
+    holding the refresh off because the token's last exchange is unsettled, which
+    clears by itself (120 s at the longest), and parking the connector for it
+    would withdraw remote access until a person acted on a state that needed
+    nobody. It is still an `AuthStoreError`, so without this arm it would reach
+    `authorization_failure_reason`'s `REFUSED` fallback and every surface would
+    blame the login — which is exactly the misreport the phone read as "the
+    authentication expired".
+    """
+    return any(isinstance(link, RefreshUnconfirmedError) for link in _failure_chain(failure))
+
+
 def authorization_failure_reason(failure: BaseException) -> str:
     """Name why the poller could not renew the relay authorization lease.
 
@@ -269,6 +294,12 @@ def authorization_failure_reason(failure: BaseException) -> str:
         # An httpx failure that is not a transport error still means no answer
         # came back from Radient.
         return UNREACHABLE
+    if _is_a_deferred_refresh(failure):
+        # The store answered; it simply will not present the token yet. AFTER the
+        # transport arms, because a failure that never reached Radient is a network
+        # fault whatever it is chained to, and BEFORE the `REFUSED` fallback, which
+        # would blame the login for a wait.
+        return AUTHORIZATION_DEFERRED
     return REFUSED
 
 
@@ -311,6 +342,13 @@ def classify_failure(failure: BaseException) -> Failure:
         return Failure("transient", UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE])
     if _is_a_dead_login(failure):
         return Failure("terminal_login", LOGIN_REQUIRED, TERMINAL_DETAIL[LOGIN_REQUIRED])
+    if _is_a_deferred_refresh(failure):
+        # TRANSIENT, deliberately: the store is waiting out an exchange whose
+        # outcome is unsettled and the state clears by itself, so a park here would
+        # withdraw remote access until a person acted — against this function's own
+        # asymmetry. It is named all the same, because "transient" without a cause
+        # is the flat refusal that sent a working machine to a sign-in page.
+        return Failure("transient", AUTHORIZATION_DEFERRED, TERMINAL_DETAIL[AUTHORIZATION_DEFERRED])
     if isinstance(failure, LocalPrerequisite):
         # The sentence is the failure's own, and that is safe: every ValueError
         # this package raises is a fixed module literal (see `main`), and these
@@ -323,6 +361,23 @@ def classify_failure(failure: BaseException) -> Failure:
     # once the operator tops up credit or reactivates it (see the poller below),
     # so parking it would delete a self-heal rather than remove a retry loop.
     return Failure("transient", REFUSED, TERMINAL_DETAIL[REFUSED])
+
+
+def _retry_detail(verdict: Failure, failure: BaseException) -> str:
+    """The trailing sentence of the retrying-exit line.
+
+    `failure`'s own text is ``RadientTunnels.request``'s deliberately SHARED literal
+    for every refresh failure it cannot name itself, so a deferral arrives here
+    saying "The tunnel's Radient login could not be refreshed." — the login blamed
+    for a wait, on the one line a support thread reads, a few rows under a sentence
+    that says nothing about the login changed (QA round 1, Q2). The verdict that has
+    its own vocabulary entry says that entry instead. Every other kind keeps the
+    failure's own text: it is what carries the transport detail an operator debugs
+    with, and for those the shared literal is not a misreport.
+    """
+    if verdict.reason == AUTHORIZATION_DEFERRED:
+        return verdict.detail
+    return str(failure)
 
 
 def _park(verdict: Failure) -> None:
@@ -669,7 +724,7 @@ def main() -> int:
         # and a stale park left beside a retrying connector would have the
         # terminal nagging about a login for a machine already trying on its own.
         _withdraw_park(because="the connector is retrying")
-        _announce(f"connector stopped reason={verdict.reason}: {failure}")
+        _announce(f"connector stopped reason={verdict.reason}: {_retry_detail(verdict, failure)}")
         return 1
     except (OSError, httpx.HTTPError) as failure:
         # These carry text this module did not author: httpx echoes the full

@@ -1032,14 +1032,28 @@ depends on exactly this).
     `origin: {kind: "moved", source_device: O, source_session_id: <id>}`) **into the
     staging directory**, fsyncs, then writes `ready.json`
     `{lease_epoch, manifest_digest, promoted: false}` beside it.
-11. `D → O: move.ready {lease_epoch, manifest_digest}`.
+11. `D → O: move.ready {lease_epoch, content_digest, plan_id}`, where
+    `content_digest` is **a digest `D` derives from its own staged bytes** with
+    `sync.copy_content_digest` — the copy set's names, the scratchpad tree's files
+    and the referenced blobs with their sidecars, in a fixed order, minus the two
+    names an adopting device writes itself (`origin.json`, `fork-boundary.json`).
 
 **Phase 3 — commit (the owner decides, and only the owner).**
 
-12. `O` verifies `manifest_digest` matches what it served. Mismatch → refuse
-    (`{result: "refused", detail: "…copy did not verify; nothing was moved"}`) and
-    leave phase `prepared`. A refusal here is a **rollback**, not a failure: `O`
-    still holds an intact directory and no writer.
+12. `O` re-derives **its own** `copy_content_digest` from its session directory and
+    requires an exact match, and re-derives `plan_id` against the journal's. Mismatch
+    — including a zeroed, absent or partial digest — → refuse
+    (`{result: "refused", detail: "…the copy did not verify…"; "nothing was moved"}`)
+    and leave phase `prepared`. A refusal here is a **rollback**, not a failure: `O`
+    still holds an intact directory and no writer. (Review round 1, M-2: the field
+    used to be the owner's own manifest digest echoed back and only checked for being
+    NON-EMPTY, so a `sha256:000…` digest and a copy truncated to 100 bytes of 2,580
+    both committed and deleted the source.)
+    Before the journal advances, `O` also **re-reads the transcript lease and the
+    runtime record** — the window between `prepare` and here is where a process that
+    opens the session takes ownership (§6.6) — and **re-runs the copy-set
+    completeness check**, then refuses (failing closed, naming the holder or the
+    entry) if either fails. Review round 1, B-M1/B-M2.
 13. `O` atomically advances the journal to `"phase": "handing-off"`. **From this
     instant a rollback is impossible by rule** (§6.5), and `O`'s own `engage_runtime`
     refuses the id (§6.6).
@@ -1091,6 +1105,26 @@ session's own idle horizon"* — capped at 30 min by the CLI.
 
 ### 6.5 Failure at every step, and the recovery
 
+**When recovery RUNS, and why that had to be said.** The table below was correct and
+unreachable in the product: nothing called `reconcile` except a test, so a `prepared`
+entry left by a relay that died blocked the owner's own conversation until somebody
+happened to run another move of the same id, and a destination stopped just after its
+`os.replace` could not be opened at all (review round 1, M-3). It now runs on three
+automatic points — a relay STARTING on a root (`mobility.recover_on_start`, the
+relay's `on_start` slice hook: `sweep_staging`, then `reconcile`), the first ENGAGE of
+the id (`launch.recover_stale_handoff`, and again from `session_factory._prepare`),
+and the first MOVE attempt (`session_move`, which already did) — each scoped by the
+INSTANCE RULE below.
+
+**The instance rule is the difference between recovery and sabotage.** An entry is
+not evidence of a crash: `prepared` is the normal state of a move whose copy is being
+made right now. So recovery SKIPS an entry written by the relay currently running on
+that root, and also an entry that names no writer at all while a relay is running
+(the fail-closed direction: the writer cannot be established, and rolling a live
+handoff back is the failure this rule exists to prevent). Only an entry whose writer
+is provably not this root's relay is applied; with no live relay there can be no live
+move, because every phase of one is driven from a relay.
+
 The safety argument in one sentence: **`O` deletes only after `D` has a durable,
 verified, complete copy (`ready`), and after `ready` `O` never rolls back** — so at
 every instant at least one device holds a complete copy, and the promote decision is
@@ -1133,14 +1167,28 @@ ever needs to ask.
 
 ### 6.6 The two guards that make "two live writers" impossible
 
-1. **`engage_runtime` refuses a handing-off session.** `O`'s reconcile-exempt
-   journal is consulted **inside `launch.engage_runtime`** (`launch.py`, the one
-   entry point every engage path uses — *"every path that has something for a
-   session to do … calls this"*), which raises
-   `RuntimeStartupError("this session is being handed to <device>")`. One guard, all
-   callers: a local TUI on `O`, the phone daemon's `messaging`, a wake, `lop exec`,
-   and the relay's own `net_session_engage`. Without it, an idle `O` with a cold viewer
-   would spawn a successor during the window and `D` would promote a second owner.
+1. **`engage_runtime` refuses a handing-off session, and the open path refuses
+   before it takes the lease.** `O`'s journal is consulted **inside
+   `launch.engage_runtime`** (`launch.py`, the one entry point every engage path uses
+   — *"every path that has something for a session to do … calls this"*), which
+   raises `RuntimeStartupError("this conversation is being handed to <device>")`; a
+   destination's entry names the device it is being received FROM (`from_name`, not
+   the `to_device` that is this device). One guard, all callers: a local TUI on `O`,
+   the phone daemon's `messaging`, a wake, `lop exec`, and the relay's own
+   `net_session_engage`. Without it, an idle `O` with a cold viewer would spawn a
+   successor during the window and `D` would promote a second owner.
+   **AND the same refusal runs in `session_factory._prepare`, immediately before
+   `acquire_session_lease`** — review round 1, B-M1: every way the product opens a
+   session (`lop -r`, `lop exec`, the TUI's in-process open, a booting runtime) takes
+   the transcript lease at that boundary and none of them consults the engage guard
+   on the way in, so an opener arriving between `prepare` and `commit` used to take
+   the claim and have its directory deleted under it. Refusing *before* the acquire
+   is also what keeps a refusal from leaving a lease claim behind for a runtime that
+   never started (a claim naming a process that holds no transcript is what `O`'s
+   retire reads as "open in another process" — one refused resume was enough to
+   block the move that refused it).
+   **Both of those consult the recovery first** (§6.5's triggers), so an entry left
+   by a relay that is GONE is settled instead of bricking the conversation.
 2. **`D` cannot promote without an epoch.** Promotion requires a `ready.json` whose
    `lease_epoch` the owner has acknowledged (`handing-off`/tombstone), so a
    destination that was never told to go ahead cannot claim the id by simply having
@@ -1205,15 +1253,40 @@ resume needs):
 | `fork-boundary.json` (`fork.py:86`) | required in `--keep` mode; carried when the source is itself a fork |
 | the desktop marker (`retention.DESKTOP_MARKER_NAME`) | the cwd and the draft's model choice (`server/utils/desktop_sessions.py:335` `write_desktop_marker`) |
 | the `mesh_credential_binding.v1` row | It lives **in the transcript**, so it travels with the copy and needs no separate treatment — but the assertion is explicit and belongs to `mesh-credentials.md` §5.5: after a move (either mode) the destination's binding is byte-identical, its resolve picks the same `owner_device`, and the source's `AuthStore` sees no refresh as a result of the move |
+| `created_at.json` (`session/creation.py:16`) | the session's birth time. **Not derivable on the destination**: `session_created_at` falls back to the directory's `st_birthtime`, so without it a moved conversation reads as newly created *and the real date is gone with the source*. Measured on the operator's store: 10,840 of 10,841 session directories hold one |
+| `scratchpad/`, as a **tree** | the files the session's own agent wrote for it (`scratchpad.py`: `scratchpad://notes.md`, downloads, scripts, logs). One plan item per regular file, verified byte-for-byte like the transcript, so a tree needs no second code path — and it is carried because the commit DELETES the source. Measured: 3,017 of 10,841 directories hold one (median 0 bytes, p99 221 MB), and it was in neither list before review round 1 (B-M2) |
 | **referenced attachment blobs** | `attachments/<digest>.bin` are content-addressed and shared per install (`session/attachments.py:1-30`) — a transcript that references a digest the destination lacks renders a broken image, so the plan includes every digest the transcript references that the destination does not already hold |
+| **each blob's `.json` sidecar** | `attachments/<digest>.json` carries the mime type the reference resolves through (`session/attachments.py:16`). A blob that arrives without it is a download of the wrong type, and it was missing from every earlier copy and every replica recovery (review round 1, M-1) |
 
-**Never copied:** `.session.pid` (the liveness marker — `fork.py:127` states the
-failure: the destination would report the *source's* pid as the owner), the
-`archived-sessions.json` **index** (an install-level fact, not session state, and
-`--keep` of an archived session must not make the copy archived — the same reason
-`session/archived.py` refuses a per-session sidecar), `subagent-roster.v1.json`
-(parent-owned jobs, `fork.py:128-132`), the scan sentinels
-(`fork.py:133-136`), and any machine-local cache or claim DB.
+**Never copied, each with its reason** (`sync.EXCLUDED_ENTRIES` is the
+authoritative list; `sync.NEVER_COPIED` is the tuple the code branches on):
+`.session.pid` (the liveness marker — `fork.py:127` states the failure: the
+destination would report the *source's* pid as the owner), `mesh.json` (the
+ownership stamp, rewritten by whoever adopts the copy), `sync.json` (a replica
+cursor: about the copy, not the session), the `archived-sessions.json` **index** (an
+install-level fact, not session state, and `--keep` of an archived session must not
+make the copy archived — the same reason `session/archived.py` refuses a
+per-session sidecar), `subagent-roster.v1.json` (parent-owned jobs,
+`fork.py:128-132`), the scan sentinels (`fork.py:133-136`), the two halves of the
+transcript lease (`.execution-lease` / `.execution-lease.recovery`: a claim copied
+with a session would name the SOURCE's pid as the copy's writer, and the destination
+could not open the conversation it just adopted), `.wake-write.lock` (a per-device
+lock), `.browser-resource.json` (a browser-bridge ownership record minted by THIS
+device's bridge generation), `origin-verdicts.json` (a recomputable cache),
+`ready.json` (the move's own boot marker; the promote deletes it, and recovery
+removes a stray one), and any machine-local cache or claim DB.
+
+**The lists are checked against the product, and a gap FAILS CLOSED.** Two tests and
+one runtime guard, because a file list cannot notice a file type nobody told it
+about: `tests/unit/network/test_sync_copy_set.py` imports each entry name from the
+module that creates it (and separately enumerates the names measured in a real
+store), `test_mobility_integrity.py::test_a_move_carries_the_scratchpad_and_the_birth_time`
+copies a directory holding every one of them, and
+`sync.assert_complete` refuses a DELETING move whose source directory holds anything
+neither list accounts for — at `prepare` (before the retire and before a byte is
+copied) and again at the commit (an entry can appear in between). ``--keep`` copies
+what it knows and leaves the source alone, so it has nothing to lose by skipping an
+entry it cannot carry.
 
 ### 7.3 The cursor, and how a destination merges or replaces
 
@@ -1271,6 +1344,19 @@ merged by row id with the same generation rule applied to its own row count.
      and a cross-device copy cannot use `Session.request_fork`'s in-process boundary,
      so it uses the boundary *marker* instead.
 
+**The `--keep` window, stated explicitly** (review round 1 asked for this to be
+documented or removed). There is no grace period and no fence in the `--keep` branch,
+and nothing that could be removed to make one: the copy is served from a LIVE runtime,
+so a turn that lands while the copy is in flight may be absent from the copy while
+present on the source. **The window is therefore the copy's own duration** — measured
+on the operator's workstation at ~1 s for a session of a few hundred KB over loopback,
+and bounded by the transfer rather than by a timer. Two mechanisms make the result an
+honest snapshot rather than a splice: the plan guard (`_require_current_plan`) refuses
+a plan the source has moved past, with `sync_from` re-planning up to
+`SYNC_REPLAN_ATTEMPTS` times — so a source writing continuously produces a refusal,
+never a splice — and the copy is a FORK by construction (`origin: fork` +
+`fork-boundary.json`), so an off-by-one row boundary is a divergence point.
+
 ### 7.5 Cadence (R22)
 
 | Trigger | Who | Cost |
@@ -1279,6 +1365,21 @@ merged by row id with the same generation rule applied to its own row count.
 | after a turn settles, **debounced** (≥ 30 s apart, ≥ 1 new turn, per destination) | the owner relay pushes `sync.available {session_id, generation, frontier}`; the destination decides whether to pull | one push per turn (bounded by event rate, not by frames) |
 | **the final flush before idle/power-off** | the device that is going away: its relay runs `flush` for every session it holds before `lop network drain` / its shutdown handler completes | one plan + the delta per session |
 | at destination attach (`--keep` copy being viewed) | the destination, if its last sync is older than 10 min | one plan |
+
+**The push is a WAKE-UP, and the holder owns the pull** (review round 1, M-4). The
+owner's watcher sends `sync.available`; the holder's `ReplicaRefresher` — one per
+relay, started lazily by the first push, one tick per `network.sync.tick_s` — pulls
+every marked replica from its recorded owner over the link the push came in on. That
+split is what keeps the link's reader thread out of a request it is serving, and it
+is why a burst of pushes for one session costs ONE copy rather than one per frame: a
+push that arrives while a pull for that id is running sets a flag, so the later change
+is not lost and the next tick picks it up. A replica is therefore at most one tick
+behind the owner's last change. Two things had to be fixed for this to happen at all:
+the `available` handler's ack was the ENTIRE effect of a push (nothing anywhere pulled
+on one), and the holder's chokepoint refused the push itself with *"session … does not
+live on this device"* — a holder by definition does not own the id, so the carve-out
+admits exactly one frame, `net_sync {phase: "available"}`, and only from the device
+that replica was synced from.
 
 The flush is *not* a new mechanism: `lop network drain` (the pod's own `sync.flush`
 loop, then the pool spins the instance down) is `net_sync {phase: "flush"}`

@@ -41,6 +41,7 @@ from local_operator.secrets.crypto import (
     open_record,
     seal,
     validate_name,
+    value_fingerprint,
 )
 from local_operator.secrets.errors import (
     IncompatibleStore,
@@ -882,6 +883,169 @@ class SecretStore:
         with closing(self._open(for_write=False)) as connection:
             record, _ = self._decode(self._row_for(connection, canonical))
         return record
+
+    def describe_identity(
+        self,
+        name: str,
+        *,
+        with_length: bool = True,
+        with_fingerprint: bool = True,
+        role: str = "agent",
+        session_id: str | None = None,
+    ) -> tuple[SecretRecord, int, str]:
+        """Metadata, the value's byte length, and its stable fingerprint.
+
+        The inspection surface that answers "which secret is this?" without
+        answering "what is it?". Three properties make that true, and all three
+        are load-bearing:
+
+        * **The value never leaves this method.** Only its length and a keyed,
+          truncated digest are returned; no flag anywhere turns either back
+          into bytes.
+        * **The fingerprint is keyed, not a bare hash.** See
+          :func:`~local_operator.secrets.crypto.value_fingerprint` for why a
+          plain digest of a secret is a search rather than an identity.
+        * **Nothing about it is stored.** No column, no meta row: the digest is
+          computed on demand from the same ciphertext :meth:`describe` already
+          decrypts, so a stolen store carries no value-derived artifact to
+          brute-force, and adding this needed no schema migration.
+
+        **This is a decrypting call, and saying otherwise would be the easy
+        lie.** The name and description live inside the ciphertext
+        (:func:`_payload`), so ``describe`` has always opened the record to
+        answer at all. What changes here is only that the plaintext is *used* —
+        for two derived fields — rather than discarded, which is why it appends
+        its own audit row instead of looking like a metadata read.
+
+        **The two fields are requested separately, and the audit says which.**
+        ``with_length``/``with_fingerprint`` are the caller's flags, and the row
+        is labelled from them — ``length``, ``fingerprint`` or
+        ``length+fingerprint`` — because an operator asking "who fingerprinted
+        this value?" must not be shown a run that only asked for its size. The
+        digest is not even computed when only the length was asked for.
+
+        A plain ``describe`` (no field requested) does not come here at all: it
+        reads no value field, writes no row, and behaves exactly as it did
+        before.
+
+        ``last_used_at`` is deliberately NOT moved. It answers "when was this
+        value last handed to a consumer", and an identity hands it to nobody;
+        bumping it here would make an identity check look like a use in the one
+        field an operator watches for unexpected access.
+        """
+        fields = [
+            label
+            for label, wanted in (("length", with_length), ("fingerprint", with_fingerprint))
+            if wanted
+        ]
+        if not fields:
+            raise ValueError("describe_identity needs at least one of length/fingerprint")
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
+        now = time.time()
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                record, value = self._decode(self._row_for(connection, canonical))
+                audit.append(
+                    connection,
+                    event="describe",
+                    ts=now,
+                    outcome="+".join(fields),
+                    secret_id=record.record_id,
+                    session_id=session_id,
+                    pid=os.getpid(),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        fingerprint = value_fingerprint(self._master_key, value) if with_fingerprint else ""
+        return record, len(value), fingerprint
+
+    def note_reveal(self, name: str, *, role: str = "agent", session_id: str | None = None) -> None:
+        """Append the audit row for a reveal whose bytes are about to be printed.
+
+        The value does NOT come from here. It is fetched by
+        ``handlers._reveal`` through
+        :func:`~local_operator.secrets.access.retrieve_secret` — the
+        ANNOUNCEMENT seam — so the owning session has registered it for
+        redaction, and the retrieval-tier gate has applied, before any byte
+        exists. This method only records that a reveal happened, which is why it
+        writes an audit row and nothing else: no second decrypt, no
+        ``last_used_at`` bump (the retrieval already made it a *use*), and no
+        copy of :meth:`get`'s transaction body to drift out of step with it.
+
+        **Audited as ``reveal``/``tty``, distinct from the retrieval that fed
+        it.** A permitted reveal therefore leaves TWO rows, and that is the
+        honest shape rather than a duplicate: the retrieval row says the value
+        was fetched (and carries the session id when the broker announced it),
+        while this one says the bytes were printed at a terminal. ``lop secret
+        audit`` can answer "was a value fetched?" and "was one revealed?"
+        separately, and neither row pretends the other did not happen.
+
+        The record ID is resolved from the ROW (the blind index finds it) rather
+        than by decrypting: a value read to write a row about a value read is a
+        cost with no purpose, and it would make this method's own audit entry
+        indistinguishable in kind from the retrieval's.
+
+        ``role`` re-asserts the namespace rule, because a reveal is a VALUE
+        read: a reveal of a ``LOP_PROVIDER_*`` row would hand a provider
+        credential to the same surface the prefix exists to keep out of it.
+        """
+        canonical = validate_name(name)
+        _validate_role(canonical, role)
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                secret_id = str(self._row_for(connection, canonical)[0])
+                audit.append(
+                    connection,
+                    event="reveal",
+                    ts=time.time(),
+                    outcome="tty",
+                    secret_id=secret_id,
+                    session_id=session_id,
+                    pid=os.getpid(),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+
+    def note_reveal_refusal(self, *, outcome: str, session_id: str | None = None) -> None:
+        """Append the audit row for a reveal this process REFUSED.
+
+        No value is read and no record is resolved — a refusal is precisely the
+        case where the store was not consulted for bytes — so ``secret_id`` is
+        left NULL. Recording the targeted NAME instead is not possible by
+        design: names are blind-indexed, and resolving one would be a decrypt of
+        that record's payload, i.e. a value read in the very path whose purpose
+        is that no value was read. The name is in the command line the operator
+        can see, and this row's job is "a reveal attempt happened, from this
+        pid, and was denied".
+
+        ``outcome`` is the caller's because the two refusals mean different
+        things and the operator's question about them differs: ``refused`` is
+        "nobody could be asked" — the shape an agent's non-interactive call
+        takes — while ``cancelled`` is a human at a terminal declining the
+        prompt they were shown.
+        """
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                audit.append(
+                    connection,
+                    event="reveal",
+                    ts=time.time(),
+                    outcome=outcome,
+                    session_id=session_id,
+                    pid=os.getpid(),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
 
     def list(self) -> list[SecretRecord]:
         """Every readable record's metadata, name-sorted. Never returns values.

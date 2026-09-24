@@ -100,8 +100,20 @@ class _AdapterSupervisorShim:
     async def terminate(self) -> None:
         self.terminated = True
 
-    async def _call_raw(self, method: str, params: Any, result_type: Any, *, timeout: float) -> Any:
-        del timeout
+    async def _call_raw(
+        self,
+        method: str,
+        params: Any,
+        result_type: Any,
+        *,
+        timeout: float,
+        # Accepted for signature parity with ``AdapterSupervisor._call_raw`` and
+        # deliberately unused: this double calls the adapter IN PROCESS, so there
+        # is no RPC deadline for the per-action overhead to fund. Dropping the
+        # keyword would be a TypeError the moment a caller sets a rate.
+        execution_overhead_seconds_per_action: float = 0.0,
+    ) -> Any:
+        del timeout, execution_overhead_seconds_per_action
         handler = getattr(self._adapter, method)
         try:
             return await handler(params)

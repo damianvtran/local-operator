@@ -25,7 +25,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
 from local_operator.mobile.auth import COOKIE_NAME, verify_cookie
-from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.auth_store import (
+    AuthStore,
+    RefreshUnconfirmedError,
+    self_clearing_window,
+)
 from local_operator.tunnels import config, state
 from local_operator.tunnels.arguments import add_parser
 from local_operator.tunnels.cli import (
@@ -35,6 +39,7 @@ from local_operator.tunnels.cli import (
     dispatch,
 )
 from local_operator.tunnels.gateway import (
+    AUTHORIZATION_DEFERRED,
     CONSOLE_URL,
     LEASE_PENDING,
     LOGIN_REQUIRED,
@@ -872,6 +877,27 @@ def _synthetic_port() -> int:
         return probe.getsockname()[1]
 
 
+def _deferral_from_an_unsettled_exchange() -> ValueError:
+    """The shape the tunnel client refuses with while the store is WAITING OUT a send.
+
+    A ``ValueError`` with ``RefreshUnconfirmedError`` on its chain, which is the pair
+    `RadientTunnels.request` produces for a deferred refresh (it chains, it never
+    flattens). The prose it carries is the client's deliberately SHARED sentence, so
+    a surface that prints the exception's own text prints a login failure for a wait
+    — which is the whole reason `service._retry_detail` exists (QA round 1, Q2).
+    """
+    try:
+        try:
+            raise RefreshUnconfirmedError(
+                "OAuth refresh for 'radient' was deferred: the stored refresh token was "
+                "presented by an exchange whose outcome is not settled"
+            )
+        except RefreshUnconfirmedError as unsettled:
+            raise ValueError("The tunnel's Radient login could not be refreshed.") from unsettled
+    except ValueError as refusal:
+        return refusal
+
+
 def _refusal_from_an_unreachable_control_plane() -> ValueError:
     """The shape the tunnel client refuses with when its refresh cannot connect.
 
@@ -1194,6 +1220,81 @@ def test_duplicate_key_identifier_in_the_pinned_jwks_is_rejected(connection, sig
         OriginVerifier(connection["origin_auth"], Mock())
 
 
+def test_the_deferral_window_is_one_number_for_the_copy_and_the_header(
+    connection,
+) -> None:
+    """The gateway's number, the store's derived bound, and the `Retry-After` agree.
+
+    `gateway` declares its own literal on purpose — it imports neither the store nor
+    `report`, because it is the one tunnel module the desktop server must not pull on
+    boot (`tests/unit/test_import_graph.py` pins that) — so the equality is asserted
+    HERE rather than enforced by an import, and the sentences are asserted against
+    the store's own SPELLING of the bound instead of the phrase "two minutes": a
+    later edit that moves the bound (design §2.3's remedy, budget 120 s ⇒ bound
+    ≥180 s) must land as a copy change, not as a test change (design round 1, D5 /
+    R2; QA round 1, Q1).
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels.gateway import (
+        AUTHORIZATION_DEFERRED,
+        DEFERRAL_WINDOW_S,
+        REFUSED,
+        RELAY_DETAIL,
+        TERMINAL_DETAIL,
+        Gateway,
+    )
+
+    assert DEFERRAL_WINDOW_S == int(auth_store.UNCONFIRMED_SEND_TTL_S)
+    window = auth_store.self_clearing_window()
+    assert window == "two minutes"  # guards the assertion below from going vacuous
+    for sentence in (RELAY_DETAIL[AUTHORIZATION_DEFERRED], TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]):
+        assert f"about {window}" in sentence
+
+    upstream = AsyncMock()
+    gateway = Gateway(connection, upstream, mobile_password="pw")
+    gateway.authorized_until = 0
+    gateway.note_authorization_failure(AUTHORIZATION_DEFERRED)
+    assert gateway.refusal_headers() == {"Retry-After": str(DEFERRAL_WINDOW_S)}
+    # No header for a refusal with no honest number to give: a withdrawal is not a
+    # wait, and inventing a wait for it would be the promise the copy refuses.
+    gateway.note_authorization_failure(REFUSED)
+    assert gateway.refusal_headers() == {}
+
+
+@pytest.mark.asyncio
+async def test_the_deferral_503_tells_a_client_how_long_to_wait(connection) -> None:
+    """The header on the wire, from the real app, and only for the deferral.
+
+    The body IS the page a phone is left holding and nothing refreshes it (design
+    round 1, D1; UX round 1, U3), so the response has to carry the one thing that
+    lets a client wait correctly instead of guessing — and it must agree with the
+    sentence, which is why it comes from one constant.
+    """
+    from local_operator.tunnels.gateway import (
+        AUTHORIZATION_DEFERRED,
+        DEFERRAL_WINDOW_S,
+        REFUSED,
+    )
+
+    origin = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()), base_url="https://" + HOST
+        ) as client:
+            gateway.authorized_until = 0
+            gateway.note_authorization_failure(AUTHORIZATION_DEFERRED)
+            deferred = await client.get("/api/sessions")
+            assert deferred.status_code == 503
+            assert deferred.headers["retry-after"] == str(DEFERRAL_WINDOW_S)
+            assert deferred.json()["reason"] == AUTHORIZATION_DEFERRED
+
+            gateway.note_authorization_failure(REFUSED)
+            refused = await client.get("/api/sessions")
+            assert refused.status_code == 503
+            assert "retry-after" not in refused.headers
+
+
 @pytest.mark.asyncio
 async def test_the_relay_names_a_lost_network_instead_of_one_flat_refusal(connection, signing_key):
     """The response a phone gets must name the cause, not only the state.
@@ -1499,6 +1600,488 @@ async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
     assert TERMINAL_DETAIL[REFUSED] not in receipt
 
 
+async def _status_receipt_with_a_deferred_refresh(tmp_path, monkeypatch, connection) -> str:
+    """`lop tunnel status` for a row whose refresh the store is WAITING OUT.
+
+    The state itself is set up on the row rather than provoked through a failing
+    endpoint: it is a marker an exchange left behind (see
+    `auth_store.REFRESH_SEND_UNCONFIRMED_KEY`), and a live marker plus a spent
+    bearer is exactly what the store defers on. The refresh fn is stubbed to a
+    transport failure so that a regression here cannot reach Radient from a test.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stored-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+        store._arm_send_marker(row.id, "rotating-token")
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def refresh(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise httpx.ConnectError("the refresh must never be attempted here")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    return await dispatch(parser.parse_args(["tunnel", "status"]))
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_says_a_deferral_is_self_clearing(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """A state the store is waiting out is printed as that wait — and offers nothing.
+
+    This case used to arrive as `unknown` and print "Login: could not be checked (a
+    refresh could not reach Radient)", which was wrong twice: the check DID run
+    (from the row, in this build) and no network had anything to do with it. It is
+    the outage's own state, so the line names the state, says it is retried without
+    anyone acting, and offers no sign-in — signing in for it is advice to fix
+    something that is not broken — while still naming the escalation for the case it
+    persists (UX round 1, U1: the window re-arms, so "nothing else is ever needed"
+    is not a claim this state supports).
+
+    The WINDOW appears exactly once on the screen, on the connector's own sentence
+    (UX round 1, U2): that sentence is the one the desktop callout and the park file
+    get, so it has to carry the number, and the `Login:` line repeating it printed
+    the same fact twice and buried the state a reader needs.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+    from local_operator.tunnels.gateway import AUTHORIZATION_DEFERRED, TERMINAL_DETAIL
+
+    receipt = await _status_receipt_with_a_deferred_refresh(tmp_path, monkeypatch, connection)
+
+    login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
+    assert len(login_lines) == 1, receipt
+    assert "refresh deferred" in login_lines[0]
+    assert "sign in again only if it persists" in login_lines[0], "the escalation is named"
+    assert "sign-in expired" not in login_lines[0]
+    assert "could not be checked" not in login_lines[0]
+    assert "nothing else" not in login_lines[0] and "needed" not in login_lines[0]
+    assert "run lop login radient" not in receipt, "a self-clearing state offers no command"
+    assert "sign-in expired" not in receipt
+    window = auth_store.self_clearing_window()
+    assert receipt.count(f"about {window}") == 1, "the window is stated once, on the connector row"
+    assert f"about {window}" in TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]
+
+    # ...and `remedy()` returns None for it for free, because it only ever offers
+    # the command for `login_required` — asserted rather than assumed, since it is
+    # what the desktop renders as a callout.
+    assert report.remedy({"stopped": False}, {"remedy": None}, {"state": "deferred"}) is None
+
+
+@pytest.mark.asyncio
+async def test_the_deferral_window_is_printed_once_when_the_gateway_answered(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """With a gateway detail on screen the window lives there, not on the `Login:` line.
+
+    Both branches exist because the screen genuinely varies: a gateway that answered
+    prints the connector's own sentence, which carries the window (the desktop callout
+    and the park file get that sentence and nothing else), while a STOPPED tunnel
+    prints no detail at all and the `Login:` line is the only carrier left. In both,
+    the window appears exactly once — the duplication UX round 1 (U2) found was one
+    fact printed on two rows — and a changed bound moves whichever copy is on screen.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import cli, report
+    from local_operator.tunnels.gateway import AUTHORIZATION_DEFERRED, TERMINAL_DETAIL
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stored-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+        store._arm_send_marker(row.id, "rotating-token")
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def refresh(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise httpx.ConnectError("the refresh must never be attempted here")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): ...
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, **kwargs):
+            # A gateway that answered, refusing for the deferral's own reason.
+            return httpx.Response(
+                200,
+                json={
+                    "ok": False,
+                    "connected": True,
+                    "reason": AUTHORIZATION_DEFERRED,
+                    "detail": TERMINAL_DETAIL[AUTHORIZATION_DEFERRED],
+                },
+            )
+
+    fake = SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
+    monkeypatch.setattr(cli, "httpx", fake)
+    monkeypatch.setattr(report, "httpx", fake)
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+
+    window = self_clearing_window()
+    assert f"about {window}" in TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]
+    assert receipt.count(f"about {window}") == 1, receipt
+    login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
+    assert login_lines == ["Login: refresh deferred — retried automatically."], receipt
+    assert TERMINAL_DETAIL[AUTHORIZATION_DEFERRED] in receipt, "the sentence, on the connector row"
+
+
+def test_a_deferral_keeps_the_retry_and_its_log_line_blames_no_login(
+    tmp_path, monkeypatch, connection, capsys
+):
+    """The retrying-exit line, through the real `main()`, for the deferral (QA R1 Q2).
+
+    The reason code was already the deferral's; the trailing sentence was `api.py`'s
+    shared "could not be refreshed" literal, which blamed the login on the one line a
+    support thread reads — and contradicted the sentence the same screen prints above
+    it. This drives the process launchd actually executes (`main()`, synchronous) with
+    the real chain that produces the state, so the line asserted here is the line the
+    log file gets.
+    """
+    from local_operator.tunnels import service
+    from local_operator.tunnels.gateway import AUTHORIZATION_DEFERRED, TERMINAL_DETAIL
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
+    config.save(_stored(connection, gateway_port=_free_port()))
+    api = AsyncMock()
+    api.request.side_effect = _deferral_from_an_unsettled_exchange()
+    monkeypatch.setattr(service, "RadientTunnels", lambda *args: api)
+
+    assert service.main() == 1, "a self-clearing state keeps the 10-second retry"
+    assert state.read() is None, "a deferral must never park a connector"
+    logged = capsys.readouterr().out
+    assert f"reason={AUTHORIZATION_DEFERRED}" in logged
+    assert TERMINAL_DETAIL[AUTHORIZATION_DEFERRED] in logged
+    assert "could not be refreshed" not in logged, "the shared literal blamed the login"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "detail", "expected"),
+    [
+        # The deferral's own reason: the row above already states the window and the
+        # escalation, so the Login line carries the state alone.
+        (AUTHORIZATION_DEFERRED, TERMINAL_DETAIL[AUTHORIZATION_DEFERRED], "retried automatically"),
+        # THE DISCRIMINATING CASE (agent review round 2, R4): the same reason with a
+        # detail that does NOT contain the window still takes the short line — the old
+        # `window in connector["detail"]` form fails here, which is how the prose
+        # coupling is kept from coming back.
+        (
+            AUTHORIZATION_DEFERRED,
+            "a connector detail with no window in it",
+            "retried automatically",
+        ),
+        # Every other shape this surface can print from: no other reason means the
+        # window is already on screen, so the Login line has to carry it.
+        (UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE], "clears by itself"),
+        (REFUSED, TERMINAL_DETAIL[REFUSED], "clears by itself"),
+        # No terminal entry for this one, so the probe falls back to the relay sentence —
+        # which is what the CLI really prints for it (and it carries no window either).
+        (NOT_AUTHORIZED, RELAY_DETAIL[NOT_AUTHORIZED], "clears by itself"),
+        (LEASE_PENDING, TERMINAL_DETAIL[LEASE_PENDING], "clears by itself"),
+        (LOGIN_REQUIRED, TERMINAL_DETAIL[LOGIN_REQUIRED], "clears by itself"),
+        # A STOPPED tunnel, and a gateway that never answered: no reason and no detail,
+        # so there is no row above and this line is the only carrier left.
+        ("", "", "clears by itself"),
+    ],
+)
+async def test_the_deferred_login_line_is_selected_by_the_reason_code(
+    tmp_path, monkeypatch, connection, reason: str, detail: str, expected: str
+) -> None:
+    """Which deferral line prints is a REASON-CODE decision, not a prose match (R4).
+
+    `_status_text` deduplicates the self-clearing window: the connector's own sentence
+    carries it, so the `Login:` line repeats it only when nothing above did. That
+    "nothing above" was decided by searching the rendered sentence for the window's
+    text, which made a copy edit capable of silently flipping which line a user sees.
+    This pins the pairing reason -> line for every shape the surface can produce, and
+    the second case pins it against the substring form directly.
+
+    The payloads are synthesized rather than fetched, deliberately: the question here
+    is which line a given (reason, detail, verdict) produces, and a real gateway can
+    only produce the deferral reason WITH the deferral sentence — it cannot build the
+    case that discriminates. The real gateway path is covered by
+    `test_the_deferral_window_is_printed_once_when_the_gateway_answered`.
+    """
+    from local_operator.tunnels import cli, report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection, credential_id=1))
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+
+    async def connector_state(value):  # noqa: ANN001 — the probe's own signature
+        return {
+            "state": "not serving" if reason else "stopped",
+            "reason": reason,
+            "detail": detail,
+            "since": None,
+            "remedy": None,
+        }
+
+    async def login_verdict(value):  # noqa: ANN001
+        # The state the whole branch is about, held constant while the connector varies.
+        return {"credential_id": 1, "state": "deferred"}
+
+    monkeypatch.setattr(report, "connector_state", connector_state)
+    monkeypatch.setattr(report, "login_verdict", login_verdict)
+
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
+    assert len(login_lines) == 1, receipt
+    assert expected in login_lines[0], receipt
+    assert "sign-in expired" not in login_lines[0]
+    assert "could not be checked" not in login_lines[0]
+    if reason != AUTHORIZATION_DEFERRED:
+        assert f"about {self_clearing_window()}" in login_lines[0], "the only carrier"
+        assert "sign in again only if it persists" in login_lines[0], "the escalation"
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_reports_a_deferral_in_the_machine_shape_too(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The JSON surface carries the state and no remedy, so the desktop can tell
+    "wait this out" from "sign in" without parsing a sentence."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _status_receipt_with_a_deferred_refresh(tmp_path, monkeypatch, connection)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+
+    assert payload["login"] == {
+        "credential_id": config.load()["credential_id"],
+        "state": "deferred",
+    }
+    assert payload["remedy"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_memoised_verdict_cannot_mask_a_deferral(tmp_path, monkeypatch, connection) -> None:
+    """A marker write does not move `updated_at`, so the memo must not answer for it.
+
+    `report._verdict_key` is the row's write stamp, and a send-marker write is
+    deliberately stamp-free (`_update_payload(..., moves_write_stamp=False)`), so a
+    verdict memoised BEFORE a marker appeared shares its key with the deferral that
+    marker now describes. Reading the deferral out of the row ahead of the memo is
+    what keeps that from masking it — this is the test that fails if the early
+    return is folded back into the memo, which is the shape the same `unknown`
+    answer used to have for a whole `VERDICT_TTL_S`.
+
+    The first call's failure is a post-send one on purpose: it leaves the marker
+    armed, which is the state a memo composed in that window would have to describe.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def post_send(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise httpx.ReadTimeout("the request was written and no answer came back")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: post_send)
+
+    first = await report.login_verdict({"credential_id": row.id})
+    assert first["state"] == "unknown", "the first call's own result, not the row's state"
+    # The unsuccessful exchange left its marker behind, and the row is now deferred
+    # while its write stamp — the memo's key — is unchanged.
+    with closing(AuthStore()) as store:
+        assert store.refresh_deferred(row.id) is True
+
+    second = await report.login_verdict({"credential_id": row.id})
+    assert second == {"credential_id": row.id, "state": "deferred"}
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_login_check_leaves_the_exchange_and_its_lease_alone(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The read that gives up must not cancel the exchange, nor free its lease.
+
+    `login_verdict` is the caller this PR is about, so it is driven HERE rather
+    than through a hand-made bounded caller: the regression to look for is the
+    `wait_for` around the exchange itself, and it is this test that fails when that
+    shape comes back (measured by re-applying it). The lease half is asserted from a
+    SECOND store on the same database, which is what a peer process would see — the
+    caller-side `_release_refresh_lease` that this PR deletes cannot fail here,
+    because it is inert against the supervisor's holder (that inertness is asserted
+    directly in `test_auth_store.py`), and a test that claimed otherwise would be
+    describing a line rather than a property. What a peer must not be able to do
+    while the POST is on the wire is take that lease: presenting the same refresh
+    token twice concurrently is the reuse-detection POST that revokes the family.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # Only the WAIT is shortened; the exchange is gated on an event below, so it
+    # cannot complete early whatever this bound is.
+    monkeypatch.setattr(report, "REFRESH_WAIT_S", 0.25)
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stalling(credentials):  # noqa: ANN001 — the store's own refresh fn
+        entered.set()
+        await release.wait()
+        return {"access": "fresh-access", "refresh": "rotated", "expires": 4_000_000_000}
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: stalling)
+
+    verdict = await report.login_verdict({"credential_id": row.id})
+    await asyncio.wait_for(entered.wait(), 5)
+    # The caller reported the bound it hit, not a verdict about the login...
+    assert verdict == {"credential_id": row.id, "state": "unknown"}
+
+    # ...and the exchange it stopped waiting for is still on the wire, holding the
+    # lease and the marker, which is all a peer needs to be told to wait.
+    with closing(AuthStore()) as peer:
+        assert peer._try_refresh_lease(row.id) is False, "the lease was freed under it"
+        assert peer.send_unconfirmed(row.id, "rotating-token") is True
+
+    # Let it finish: the exchange's own exit resolves the row (rotation persisted)
+    # and is the only thing that releases the lease.
+    release.set()
+    awaited = list(auth_store._DETACHED_REFRESHES)
+    assert awaited, "the supervisor holds no reference to the exchange it started"
+    await asyncio.gather(*awaited, return_exceptions=True)
+    with closing(AuthStore()) as store:
+        settled = store.get_credential(row.id)
+        assert settled is not None
+        assert settled.data.get("access") == "fresh-access"
+        assert settled.data.get("refresh") == "rotated"
+        assert auth_store.REFRESH_SEND_UNCONFIRMED_KEY not in settled.data
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_exchange_that_fails_logs_nothing_at_the_loop(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The shipped bound leaves the exchange alone — and SILENTLY so.
+
+    The obvious spelling, ``wait_for(asyncio.shield(task), bound)``, is the same
+    intent one stdlib layer up and costs a loop-level error on Python 3.14: when the
+    outer future is cancelled, `shield` installs a callback that reports the inner
+    task's later failure as "AuthStoreError exception in shielded future", with a
+    traceback, through the loop's exception handler (measured on 3.14.3: shield ⇒ 1
+    loop-level error, `asyncio.wait` ⇒ 0). That fires on this change's ORDINARY
+    path — a 5xx, a stalled read, an answer that never arrived — so what a reader of
+    the connector's or the desktop server's log would find during the outage is a
+    crash that never happened. `asyncio.wait` bounds the wait, leaves the task
+    uncancelled, and reports nothing; this test records the loop's own exception
+    handler and holds it to that.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(report, "REFRESH_WAIT_S", 0.25)
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def failing(credentials):  # noqa: ANN001 — the store's own refresh fn
+        entered.set()
+        await release.wait()
+        raise httpx.ConnectError("the exchange fails after the caller walked away")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: failing)
+
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context["message"]))
+    try:
+        verdict = await report.login_verdict({"credential_id": row.id})
+        await asyncio.wait_for(entered.wait(), 5)
+        assert verdict == {"credential_id": row.id, "state": "unknown"}
+        release.set()
+        pending = list(auth_store._DETACHED_REFRESHES)
+        assert pending, "the exchange was not supervised"
+        # The exchange's failure lands here, with the caller long gone.
+        await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert reported == [], f"the abandoned exchange logged at the loop level: {reported}"
+
+
 @pytest.mark.asyncio
 async def test_tunnel_status_names_a_refused_grant_as_a_dead_login(
     tmp_path, monkeypatch, connection
@@ -1583,6 +2166,211 @@ async def test_the_real_connector_client_classifies_its_own_failures(
         # what sent an offline computer to /login radient.
         assert reached == []
         assert "log in again" not in str(failure.value)
+
+
+def test_a_short_lived_cli_loop_cancels_the_exchange_and_the_marker_is_bounded(
+    tmp_path, monkeypatch, connection, capsys
+) -> None:
+    """The CLI's own shape: the loop dies with the command, and the marker is bounded.
+
+    `lop tunnel status` runs under `asyncio.run` (`tunnels/cli.py`), so a caller that
+    gave up at its bound leaves a PENDING exchange that the loop's teardown cancels.
+    That is not the defect this PR removed, and not a bug to engineer around (agent
+    review round 1, R1; design §6.1): a cancelled POST cannot land, no drain can
+    complete a request whose process is gone, and draining here would put the measured
+    30.9 s poll latency back. What this test pins is the CONSEQUENCE, so it is recorded
+    rather than assumed:
+
+    * the marker is armed and COMPLETE (`shape: unknown`) — the row is honest about an
+      exchange that was on the wire when the process ended;
+    * the lease is NOT leaked (a cancelled exchange still runs its own `finally`);
+    * the store closes cleanly — no "cannot operate on a closed database" and no
+      unretrieved-task noise on the way out;
+    * the next caller reports `deferred` and does not post again;
+    * the derived bound is what ends it: past it, the marker is not believed.
+
+    The refresh fn never returns, so what ends the exchange is the loop and not a
+    clock. The row assertions are the real proof that nothing half-wrote: an
+    unrotated `refresh` plus a complete marker cannot come from a store that was
+    closed underneath a live exchange.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import cli, report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(report, "REFRESH_WAIT_S", 0.25)
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    posts: list[str] = []
+
+    async def never_answers(credentials):  # noqa: ANN001 — the store's own refresh fn
+        posts.append(str(credentials.get("refresh")))
+        await asyncio.Event().wait()  # only the loop's teardown can end this
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: never_answers)
+    # The cloud read too: the real client would run its own (unbounded) refresh and hold
+    # this test on the store's 60 s per-operation budget, and a test must not build a real
+    # client toward the real API in the first place (the helper above stubs it for the
+    # same two reasons).
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    # The CLI's real shape: one command per loop, and the loop dies with the command.
+    first = asyncio.run(dispatch(parser.parse_args(["tunnel", "status"])))
+    assert "Login: could not be checked" in first, "this caller's own bounded verdict"
+    assert posts == ["rotating-token"], "the POST was on the wire when the loop went"
+    assert auth_store._DETACHED_REFRESHES == set(), "the cancelled exchange was retired"
+
+    captured = capsys.readouterr()
+    assert "closed database" not in captured.err + captured.out
+    assert "never retrieved" not in captured.err
+
+    with closing(AuthStore()) as store:
+        now = store.get_credential(row.id)
+        assert now is not None
+        marker = now.data.get(auth_store.REFRESH_SEND_UNCONFIRMED_KEY)
+        assert isinstance(marker, dict), "no marker for a send that was on the wire"
+        assert marker["shape"] == auth_store.SEND_SHAPE_UNKNOWN
+        assert now.data.get("refresh") == "rotating-token", "a cancelled POST cannot rotate"
+        # `<= bound`, measured on the row rather than asserted of the constant.
+        assert store._now_ms() - marker["at"] <= auth_store.UNCONFIRMED_SEND_TTL_S * 1000
+        assert store.refresh_deferred(row.id) is True
+        assert store._conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    # The lease is free: a cancelled exchange still runs its own `finally` — and the probe
+    # is closed on its way out, because a bare `AuthStore()` inside an assertion held a
+    # sqlite connection open for the rest of the session and took a real lease as a side
+    # effect of an `assert` (agent review round 2, R5).
+    with closing(AuthStore()) as probe:
+        assert probe._try_refresh_lease(row.id) is True
+
+    second = asyncio.run(dispatch(parser.parse_args(["tunnel", "status"])))
+    assert "Login: refresh deferred" in second
+    assert posts == ["rotating-token"], "the deferral was read from the row, not re-posted"
+
+    # The bound is what ends it: past it, the marker is no longer believed.
+    real_now = AuthStore._now_ms
+    expired_after = int(auth_store.UNCONFIRMED_SEND_TTL_S * 1000) + 1_000
+    monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: real_now() + expired_after))
+    with closing(AuthStore()) as store:
+        assert store.refresh_deferred(row.id) is False
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_refresh_is_reported_as_a_deferral_not_an_expired_login(
+    tmp_path, monkeypatch, connection
+):
+    """A store that will not present the token yet is not a login that has expired.
+
+    This is the phone's own sentence. `RadientTunnels.request` raises ONE `ValueError`
+    for every refresh failure it cannot name itself, so the distinction has to be read
+    off the chain, and the real client is what raises it here — a hand-made chain
+    would prove nothing about what the connector actually sees.
+
+    The row is set up in the state the store DEFERS on rather than failing an
+    endpoint: a live in-doubt marker for the token it holds, and a bearer that is
+    spent. That is the outage's shape (the marker is armed before a POST, so the
+    state survives a process that died mid-exchange), and the reason it deserves its
+    own answer is that nothing about the login has changed.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import gateway, service
+    from local_operator.tunnels.api import RadientTunnels
+    from local_operator.tunnels.gateway import AUTHORIZATION_DEFERRED, REFUSED
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "only",
+                "access": "stored-access",
+                "refresh": "rotating-token",
+                "expires": 1,
+            },
+        )
+        store._arm_send_marker(row.id, "rotating-token")
+
+    reached: list[str] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        reached.append(request.url.path)
+        return httpx.Response(200, json={"result": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        with pytest.raises(ValueError) as failure:
+            await RadientTunnels(row.id, client).request("GET")
+
+    # The store's own verdict is in the CHAIN, which is where every classifier here
+    # reads it — the prose is deliberately the same for every refresh failure.
+    assert isinstance(failure.value.__cause__, auth_store.RefreshUnconfirmedError)
+    assert reached == [], "a deferred refresh must not reach the tunnel API"
+
+    assert service.authorization_failure_reason(failure.value) == AUTHORIZATION_DEFERRED
+    verdict = service.classify_failure(failure.value)
+    assert verdict.kind not in service.PARKING_KINDS, "a self-clearing state must not park"
+    assert verdict.kind == "transient"
+    assert verdict.reason == AUTHORIZATION_DEFERRED
+
+    # What the copy may and may not say, on both surfaces: no command (this
+    # sentence travels to readers that cannot run one), no expired login, no
+    # billing, and the self-clearing window named. `REFUSED` is asserted alongside
+    # as the contrast — it is the sentence a phone used to render for this state.
+    #
+    # Two things round 1 added, both about what the sentence may still NOT say: an
+    # ABSOLUTE that only one deferral is true for ("nothing here needs signing in
+    # again" / "no local command is needed" — UX U1: the marker is armed before every
+    # POST, so a repeating stall re-arms a fresh window), and a promise that the
+    # reader's page will change on its own (design D1: this body IS the page). The
+    # escalation is asserted instead, because the store's own two messages carry one.
+    from local_operator.providers.auth_store import self_clearing_window
+
+    relay = gateway.RELAY_DETAIL[AUTHORIZATION_DEFERRED]
+    terminal = gateway.TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]
+    for sentence in (relay, terminal):
+        assert "lop " not in sentence
+        assert "/login" not in sentence
+        assert "billing" not in sentence
+        assert "expired" not in sentence
+        assert f"about {self_clearing_window()}" in sentence, "the window, derived"
+        assert "sign in again" in sentence, "the escalation for the persisting case"
+        assert "nothing here" not in sentence and "no local command" not in sentence
+    assert "reload this page" in relay, "the phone's own action: nothing refreshes it"
+    assert "persists" in terminal, "the terminal's escalation, command-free"
+    assert "expired" in gateway.RELAY_DETAIL[REFUSED], "the contrast this copy exists for"
+    assert gateway.TERMINAL_REMEDY[AUTHORIZATION_DEFERRED] == "lop tunnel status"
+    assert "sign-in refresh" in gateway.REASON_LABEL[AUTHORIZATION_DEFERRED]
+    # A code with a `RELAY_DETAIL` entry is one a phone can be handed, so the
+    # vocabulary must also have a terminal sentence and a label for it.
+    assert gateway.REASON_LABEL[AUTHORIZATION_DEFERRED] != AUTHORIZATION_DEFERRED
+
+    # The retrying-exit LOG LINE, which is the one a support thread reads (QA round
+    # 1, Q2): the reason code is this module's, and the trailing sentence must not be
+    # `api.py`'s shared "could not be refreshed" literal — that blames the login for
+    # a wait and contradicts the sentence the same screen prints above it.
+    retry = service._retry_detail(verdict, failure.value)
+    assert retry == gateway.TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]
+    assert "could not be refreshed" not in retry
+    assert "login" not in retry.lower(), "the word the shared literal blames it with"
+    # ...and every OTHER kind still carries the failure's own text, which is the
+    # transport detail an operator debugs with.
+    assert service._retry_detail(service.Failure("transient", REFUSED, "x"), failure.value) == str(
+        failure.value
+    )
 
 
 @pytest.mark.asyncio

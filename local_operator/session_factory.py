@@ -558,8 +558,8 @@ def _no_model_message(hosting: str) -> str:
     return (
         f"Model name is not configured for hosting '{hosting}', and no default "
         "is known for it. Set one with `local-operator config edit model_name "
-        "<model>` or the --model flag (e.g. gpt-4o, claude-3-5-sonnet-latest, "
-        "deepseek-chat)."
+        "<model>` or the --model flag (e.g. gpt-6-astra, claude-opus-5-5, "
+        "deepseek-flash)."
     )
 
 
@@ -2878,6 +2878,12 @@ def _make_system_blocks_provider(
             knowledge_block = ""
         date_str = datetime.now().strftime("%Y-%m-%d")
         goal = goal_state.text if goal_state is not None else ""
+        # The goal block is withheld once the goal is DONE: `mark_done` keeps the
+        # text so the surfaces can strike through what was achieved, and a block
+        # gated on the text alone kept handing the model a finished objective as
+        # the standing one to pursue. Read beside the text so the cache key below
+        # moves with it.
+        goal_status = goal_state.status if goal_state is not None else ""
         team_brief = goal_state.team_brief if goal_state is not None else ""
         agent_brief = goal_state.agent_brief if goal_state is not None else ""
         names = (
@@ -2906,6 +2912,7 @@ def _make_system_blocks_provider(
             knowledge_block,
             date_str,
             goal,
+            goal_status,
             team_brief,
             agent_brief,
             tuple(names),
@@ -2922,6 +2929,7 @@ def _make_system_blocks_provider(
             environment,
             date_str,
             goal=goal,
+            goal_status=goal_status,
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
             credentials=names,
@@ -3470,6 +3478,39 @@ async def _prepare(
     from local_operator.session.retention import claim_session
     from local_operator.session_lease import acquire_session_lease
 
+    if transcript_dir.parent.name == "sessions":
+        # B-M1'S OTHER HALF: A SESSION MID-HANDOFF IS NOT OPENED HERE EITHER.
+        #
+        # Ownership is acquired at this boundary, and this boundary is where every
+        # open path in the product meets: ``lop -r <id>``, ``lop exec``, the TUI's
+        # in-process open and a booting runtime all reach the lease through here,
+        # NOT through the relay's engage guard. So an opener arriving between a
+        # move's ``prepare`` and its commit took the lease, and the commit — which
+        # only looked at ``prepare`` — deleted the directory out from under it
+        # (review round 1, B-M1). Two consequences, both fixed by refusing BEFORE
+        # the acquire: the move's commit now finds no live holder, and a refusal
+        # here cannot leave a lease claim behind for a runtime that never started
+        # (which is what made a move fail with "open in another process" after a
+        # single refused resume).
+        #
+        # Recovery runs first, so a journal entry left by a relay that died does not
+        # brick the conversation (M-3).
+        from local_operator.session.placement import handoff_guard_refusal
+        from local_operator.session.runtime.launch import (
+            RuntimeStartupError,
+            recover_stale_handoff,
+        )
+
+        # The ROOT the journal actually lives under, derived from the directory
+        # itself rather than from the registry: a relocated store (``--config-dir``,
+        # an isolated test root, a scratch clone) writes its journal beside its own
+        # ``sessions/``, and asking the registry would read another install's.
+        handoff_config_dir = transcript_dir.parent.parent
+        recover_stale_handoff(handoff_config_dir, transcript_dir.name)
+        handed_off = handoff_guard_refusal(handoff_config_dir, transcript_dir.name)
+        if handed_off:
+            raise RuntimeStartupError(handed_off)
+
     # Sole-writer ownership is acquired at the shared construction boundary,
     # before transcript creation. Edge checks remain useful UX, but only O_EXCL
     # can make two simultaneous cold resumes safe. Agent training directories
@@ -3509,9 +3550,20 @@ async def _prepare(
         # promised it (review round 2, F1). ``fresh_directory`` keeps
         # `--resume` honest: adopting the operator's own conversation must not
         # hide their chat.
+        #
+        # ``workstream`` chooses WHICH machine-started value is written: the
+        # operator asked for this one as a long-lived parallel workstream
+        # (`lop exec --workstream`), so it is listed with its opener recorded
+        # rather than hidden. ``getattr`` because this namespace is the narrow
+        # one each entry point builds, and the interactive path has no such
+        # field — an absent field reads as "off", never as an error.
         from local_operator.agent_shell import stamp_agent_shell_session
 
-        stamp_agent_shell_session(transcript_dir, created_here=fresh_directory)
+        stamp_agent_shell_session(
+            transcript_dir,
+            created_here=fresh_directory,
+            delegated_workstream=bool(getattr(args, "workstream", False)),
+        )
 
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the

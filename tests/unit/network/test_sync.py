@@ -92,6 +92,14 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         json.dumps({"version": FORK_BOUNDARY_VERSION}), encoding="utf-8"
     )
     (directory / DESKTOP_MARKER_NAME).write_text(json.dumps({"cwd": "/tmp"}), encoding="utf-8")
+    # THE BIRTH TIME and a SCRATCHPAD with a file in it: the two entries whose
+    # absence from the copy set let a move delete them for good (review round 1,
+    # B-M2). In the fixture because every copy test should see them.
+    (directory / "created_at.json").write_text("1758230400.5", encoding="utf-8")
+    (directory / "scratchpad").mkdir(exist_ok=True)
+    (directory / "scratchpad" / "notes.md").write_text("the operator's notes", encoding="utf-8")
+    (directory / "scratchpad" / "logs").mkdir(exist_ok=True)
+    (directory / "scratchpad" / "logs" / "run.txt").write_text("nested", encoding="utf-8")
     # A file that must NEVER travel: the liveness marker names a pid.
     (directory / ".session.pid").write_text("4242", encoding="utf-8")
     (directory / "subagent-roster.v1.json").write_text("[]", encoding="utf-8")
@@ -123,6 +131,11 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
     module at CONSTRUCTION and those are session-engine modules. A duplicated
     literal is only safe with a test that fails when the two come apart — which is
     this one, and it is the reason the duplication is allowed.
+
+    IT IS AN ALLOW-LIST OF WHOLE ENTRY TYPES, so the two lists together have to
+    cover everything the product can put in a session directory; the enumeration
+    half of that is ``test_sync_copy_set.py``, which imports the entry names from
+    the modules that create them.
     """
     from local_operator.fork import FORK_BOUNDARY_NAME
     from local_operator.resume import (
@@ -130,6 +143,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         ORIGIN_NAME,
         TITLE_SIDECAR_NAME,
     )
+    from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
     from local_operator.session.runtime.registry import (
@@ -147,13 +161,23 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         INBOX_NAME,
         FORK_BOUNDARY_NAME,
         DESKTOP_MARKER_NAME,
+        # The session's birth time: without it a moved conversation reads as
+        # newly created on the destination (``session_created_at`` falls back to
+        # ``st_birthtime``) and the real date is gone with the source (B-M2).
+        CREATED_AT_NAME,
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping
-    # them out.
+    # them out — and every one of them states WHY, because the next name added here
+    # is a decision somebody has to be able to review (see
+    # ``test_sync_copy_set.py`` for the enumeration that makes the decision
+    # unavoidable).
     assert ".session.pid" in sync.NEVER_COPIED
     assert "subagent-roster.v1.json" in sync.NEVER_COPIED
+    assert set(sync.EXCLUDED_ENTRIES) == set(sync.NEVER_COPIED)
+    assert all(reason.strip() for reason in sync.EXCLUDED_ENTRIES.values())
     assert not (set(sync.NEVER_COPIED) & set(sync.COPY_SET_NAMES))
+    assert not (set(sync.NEVER_COPIED) & set(sync.COPY_SET_TREES))
 
 
 # ---------------------------------------------------------------------------
@@ -178,13 +202,25 @@ def test_a_copy_transfers_the_whole_set_byte_for_byte_and_verifies_it(tmp_path: 
         if name == "transcript.jsonl":
             continue
         assert (dest / name).is_file(), name
+    # THE SCRATCHPAD TREE TRAVELS, per file, byte for byte — including a nested
+    # directory. This is the half of B-M2 that was destroyed outright: the tree was
+    # not in the copy set and the commit deleted the source.
+    assert (dest / "scratchpad" / "notes.md").read_text(encoding="utf-8") == (
+        "the operator's notes"
+    )
+    assert (dest / "scratchpad" / "logs" / "run.txt").read_text(encoding="utf-8") == "nested"
+    assert result["items"] >= 2, "the tree's files are items like any other"
     # THE FILES THAT MUST NOT TRAVEL. A copied `.session.pid` would name the
     # SOURCE's process as the owner of the destination's copy, which is how a
     # viewer refuses to open a session that is not running there.
     assert not (dest / ".session.pid").exists()
     assert not (dest / "subagent-roster.v1.json").exists()
-    # The referenced blob came with it, into the replica's own store.
+    # The referenced blob came with it, into the replica's own store — AND ITS
+    # SIDECAR, without which the store cannot resolve the mime type and an image
+    # downloads as the wrong type (review round 1, M-1).
     assert (dest / "attachments" / f"{'0' * 32}.bin").is_file()
+    assert (dest / "attachments" / f"{'0' * 32}.json").is_file()
+    assert result["attachments"] == 2, "the blob and its sidecar are both items"
 
 
 def test_the_cursor_records_the_verified_prefix_not_a_hopeful_offset(tmp_path: Path) -> None:
@@ -282,20 +318,28 @@ def test_a_torn_tail_row_is_not_served(tmp_path: Path) -> None:
     assert grown["transcript"]["total_bytes"] > len(complete)
 
 
-def test_an_interrupted_copy_resumes_from_a_verified_prefix(tmp_path: Path) -> None:
-    """The design's "resumable by construction", made checkable.
+def test_an_interrupted_copy_never_leaves_a_partial_file_behind(tmp_path: Path) -> None:
+    """THE COST OF STAGING, STATED: a cut-off copy is not reused, and no partial file shows.
 
     The interrupted attempt is modelled the way a dropped link models it: the
-    transport stops answering mid-file. What must NOT happen is the retry splicing
-    unverified bytes — so the resume asks the owner to verify the prefix it finds
-    on disk, and continues only when the owner agrees.
+    transport stops answering mid-file, with a transcript big enough to need several
+    chunks. Under the old in-place write the destination was left holding a PARTIAL
+    transcript — the file a reader opens, and the file the reviewer's probe watched
+    a recovery promote as a session ending mid-row. The attempt is now staged and
+    replaced atomically, so what the destination holds afterwards is either nothing
+    or the previous COMPLETE copy, never a prefix presented as the conversation.
+
+    WHAT IT COSTS, said plainly because it is a real trade: the interrupted file is
+    re-sent from its start on the next attempt, where the old design could reuse the
+    partial bytes. The resumption the design actually depends on is the APPEND one
+    and it is untouched — an adopted copy plus a longer source transfers only the
+    delta, from a prefix the OWNER verified
+    (``test_the_second_sync_sends_only_the_append_region`` and
+    ``test_a_resume_never_takes_the_destination_s_word_for_it``).
     """
     source = tmp_path / "owner"
     source.mkdir()
     directory = seed(source, "abc123")
-    # A transcript big enough to need several chunks, so "interrupted" means a
-    # PARTIAL file rather than no file: one chunk that lands whole would test the
-    # success path with an exception bolted on.
     with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
         for index in range(200, 2600):
             handle.write(_row(index, "x" * 400))
@@ -312,21 +356,66 @@ def test_an_interrupted_copy_resumes_from_a_verified_prefix(tmp_path: Path) -> N
 
     with pytest.raises(ConnectionError):
         sync.sync_from(source, "abc123", ask=flaky, into=dest)
-    partial = (dest / "transcript.jsonl").stat().st_size
-    assert 0 < partial < (directory / "transcript.jsonl").stat().st_size
+    assert delivered["chunks"] == 3
+    assert not (dest / "transcript.jsonl").exists(), "a partial copy was left as the session"
+    assert list(dest.glob(".*.fetch")) == [], "the attempt's staging file was left behind"
 
-    resumes = {"asked": 0}
-    verifying = _ask(source)
-
-    def watching(frame: dict[str, Any]) -> dict[str, Any]:
-        if frame.get("phase") == "verify":
-            resumes["asked"] += 1
-        return verifying(frame)
-
-    result = sync.sync_from(source, "abc123", ask=watching, into=dest)
+    # And the retry is a clean, complete copy.
+    result = sync.sync_from(source, "abc123", ask=_ask(source), into=dest)
     assert result["ok"] is True
-    assert resumes["asked"] == 1, "a partial file must be verified before it is resumed"
-    assert result["resumed_bytes"] == partial
+    assert (dest / "transcript.jsonl").read_bytes() == (directory / "transcript.jsonl").read_bytes()
+    assert list(dest.glob(".*.fetch")) == []
+
+
+def test_an_interrupted_append_leaves_the_previous_complete_copy_alone(tmp_path: Path) -> None:
+    """The M-5 defect as the reviewer measured it: a killed append must not truncate.
+
+    The destination already holds a complete copy — the state a REPLICA is in when a
+    refresh is cut off, and the copy a recovery promotes when the owner is gone. An
+    append interrupted midway leaves that file byte-identical to what it was, and
+    the next attempt re-verifies it with the owner and carries the delta.
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = seed(source, "abc123")
+    dest = tmp_path / "holder"
+    sync.sync_from(source, "abc123", ask=_ask(source), into=dest)
+    complete = (dest / "transcript.jsonl").read_bytes()
+
+    appended = "".join(_row(index, "y" * 400) for index in range(3000, 3200))
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(appended)
+    real = _ask(source)
+    delivered = {"chunks": 0}
+
+    def flaky(frame: dict[str, Any]) -> dict[str, Any]:
+        if frame.get("phase") == "fetch":
+            delivered["chunks"] += 1
+            # THE FIRST fetch IS THE TRANSCRIPT'S OWN REGION (``pull`` always does
+            # the transcript first), which is the append under test.
+            if delivered["chunks"] >= 1:
+                raise ConnectionError("the link dropped mid-append")
+        return real(frame)
+
+    with pytest.raises(ConnectionError):
+        sync.sync_from(source, "abc123", ask=flaky, into=dest)
+    assert (
+        dest / "transcript.jsonl"
+    ).read_bytes() == complete, "an interrupted append truncated the copy it was extending"
+    # The retry carries ONLY the appended region, from the prefix the owner
+    # verified: count the bytes that actually crossed for the transcript.
+    held = {"bytes": 0}
+    inner = _ask(source)
+
+    def counting(frame: dict[str, Any]) -> dict[str, Any]:
+        out = inner(frame)
+        if frame.get("phase") == "fetch" and frame.get("name") == "transcript.jsonl":
+            held["bytes"] += int(out.get("bytes") or 0)
+        return out
+
+    resumed = sync.sync_from(source, "abc123", ask=counting, into=dest)
+    assert held["bytes"] == len(appended.encode())
+    assert resumed["ok"] is True
     assert (dest / "transcript.jsonl").read_bytes() == (directory / "transcript.jsonl").read_bytes()
 
 
@@ -357,7 +446,13 @@ def test_a_resume_never_takes_the_destination_s_word_for_it(tmp_path: Path) -> N
     result = sync.sync_from(source, "abc123", ask=_ask(source), into=dest)
 
     assert result["ok"] is True
-    assert result["resumed_bytes"] == 0, "divergent bytes must not be treated as a prefix"
+    # EVERY byte of the file was sent again: the destination's 128 bytes were not
+    # treated as a prefix (they hash to something the owner does not have), so the
+    # copy is a full replace rather than a splice. (The store's blob and its sidecar
+    # are identical on both ends, so ``held`` filters them out of the plan entirely
+    # and they contribute nothing here either way.)
+    assert result["resumed_bytes"] == 0
+    assert result["bytes"] == len(whole)
     assert b"LINE 1" not in (dest / "transcript.jsonl").read_bytes()
     assert (dest / "transcript.jsonl").read_bytes() == whole
     assert (dest / "transcript.jsonl").read_bytes() == (directory / "transcript.jsonl").read_bytes()
@@ -463,6 +558,100 @@ def test_a_replica_is_recovered_as_a_new_id_fork(tmp_path: Path) -> None:
     assert (root / "attachments" / f"{'0' * 32}.bin").is_file()
     # No liveness claim was left behind: it would name the promoting process.
     assert not (target / ".session.pid").exists()
+
+
+def test_a_damaged_replica_is_never_recovered_as_a_session(tmp_path: Path) -> None:
+    """Recovery verifies the replica against its CURSOR before it promotes anything.
+
+    Measured before the fix (``p5c``): the reviewer cut a replica off partway through
+    a replace — what an in-place ``"wb"`` leaves after a kill — and the recovery
+    produced a session of **8,969 bytes ending mid-row**, while the cursor still
+    reported **26,886** verified bytes. This is the path used when the OWNER is gone,
+    so that copy was the last one and it was adopted as a conversation.
+
+    The cursor is the replica's own proof of completeness (``sync_from`` writes it
+    only after every byte verified), so it is what recovery has to check. The damaged
+    bytes are NOT swept: they are the only copy left, and a refusal that deletes them
+    turns a recoverable conversation into a lost one.
+    """
+    root = tmp_path / "owner"
+    root.mkdir()
+    directory = seed(root, "abc123", rows=200)
+    sync.sync_from(
+        root,
+        "abc123",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "abc123"),
+    )
+    replica = sync.replica_dir(root, "abc123")
+    whole = (replica / "transcript.jsonl").read_bytes()
+    cursor = sync.read_replica_cursor(root, "abc123")["cursor"]
+    assert cursor["prefix_bytes"] == len(whole)
+
+    damaged = whole[: len(whole) // 3 + 7]
+    (replica / "transcript.jsonl").write_bytes(damaged)
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.promote_replica(root, "abc123")
+
+    assert refusal.value.code == "incomplete_replica", refusal.value
+    assert str(len(damaged)) in refusal.value.message
+    assert str(len(whole)) in refusal.value.message, "the refusal names the length it expected"
+    assert (replica / "transcript.jsonl").read_bytes() == damaged, "the last copy was swept"
+    # NOTHING WAS PROMOTED: the only directory under sessions/ is the fixture's own.
+    assert sorted(child.name for child in (root / "sessions").iterdir()) == ["abc123"]
+    assert directory.is_dir()
+
+
+def test_a_replica_with_no_cursor_is_never_recovered_as_a_session(tmp_path: Path) -> None:
+    """A directory of bytes nobody verified is not a conversation.
+
+    The cursor is written only after a full verified pull, so its ABSENCE means these
+    bytes were never checked against the owner's. Promoting them would present an
+    unverified copy as the session, which is what "never a partial copy as a session"
+    means in its strongest form.
+    """
+    root = tmp_path / "owner"
+    root.mkdir()
+    replica = sync.replica_dir(root, "abc123")
+    replica.mkdir(parents=True)
+    (replica / "transcript.jsonl").write_text('{"id": "e1", "type": "user"}\n', encoding="utf-8")
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.promote_replica(root, "abc123")
+
+    assert refusal.value.code == "incomplete_replica", refusal.value
+    assert not (root / "sessions").exists() or not list((root / "sessions").iterdir())
+
+
+def test_a_replica_is_never_recovered_under_the_owner_s_id(tmp_path: Path) -> None:
+    """``new_id=<the original>`` is refused by the function, not left to its caller.
+
+    Measured before the fix (``p1d``): with the local directory absent,
+    ``promote_replica(..., new_id="abc123")`` happily produced a session under the
+    OWNER's id. The only caller mints a fresh id, so the product could not reach it —
+    and that is exactly why the rule belongs here: a rule enforced in the caller is
+    one the next caller inherits by accident, and two devices holding one id is the
+    ambiguity the whole design exists to prevent.
+    """
+    root = tmp_path / "owner"
+    root.mkdir()
+    seed(root, "abc123")
+    sync.sync_from(
+        root,
+        "abc123",
+        ask=_ask(root),
+        owner_device="d_owner",
+        into=sync.replica_dir(root, "abc123"),
+    )
+    (root / "sessions" / "abc123").rename(tmp_path / "away")
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.promote_replica(root, "abc123", new_id="abc123")
+
+    assert refusal.value.code == "in_progress", refusal.value
+    assert not (root / "sessions" / "abc123").exists()
 
 
 def test_recovery_refuses_when_there_is_nothing_synced(tmp_path: Path) -> None:

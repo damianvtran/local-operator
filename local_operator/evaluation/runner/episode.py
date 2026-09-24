@@ -28,6 +28,7 @@ Run-level budget aggregation across episodes is deliberately out of scope.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -192,6 +193,9 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # Network policy changes comparability too: older adapters must refuse
         # this request rather than seal a disabled-policy claim while enabling it.
         "OSWORLD_ENABLE_PROXY": "osworld_enable_proxy_override",
+        # The settle frequency changes the benchmark's action pacing. The
+        # companion metadata is derived from this value by the run script.
+        "OSWORLD_ACTION_SETTLE_POLICY": "osworld_action_settle_policy",
     }
 )
 _DISCLOSED_INFRA_VALUES = frozenset(DISCLOSED_INFRA_METADATA_KEYS)
@@ -305,7 +309,10 @@ class EpisodeConfig:
     ``step_timeout`` and ``cleanup_timeout`` are FLOORS, not ceilings, for the
     two calls whose own request declares a duration. ``execute`` is funded for
     every ``wait`` its batch asked for and ``cleanup`` for the selected
-    actions' declared timeouts and attempts, both plus a fixed headroom; the
+    actions' declared timeouts and attempts, both plus a fixed headroom. An
+    evaluation-only ``execution_overhead_seconds_per_action`` can additionally
+    fund paper-settle time for mutating actions; its default of zero leaves every
+    ordinary caller's deadline unchanged.
     effective deadline is the greater of that and the value set here
     (``evaluation.deadlines``). Every other timeout is the whole deadline,
     because nothing in those requests declares how long their work takes. Read
@@ -332,6 +339,17 @@ class EpisodeConfig:
     max_decision_retries: int = 2
     observation_retry_attempts: int = 3
     observation_retry_delay: float = 5.0
+    execution_overhead_seconds_per_action: float = 0.0
+
+    def __post_init__(self) -> None:
+        rate = self.execution_overhead_seconds_per_action
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or not math.isfinite(rate)
+            or rate < 0.0
+        ):
+            raise ValueError("execution_overhead_seconds_per_action must be finite and nonnegative")
 
 
 @dataclass(frozen=True)
@@ -544,6 +562,9 @@ class EpisodeRunner:
             verifier,
             rescue_required=self._mark_rescue_required,
             answer_owner=self._answer_owner,
+            execution_overhead_seconds_per_action=(
+                self._config.execution_overhead_seconds_per_action
+            ),
         )
         self._session = session
 
@@ -1340,6 +1361,14 @@ class EpisodeRunner:
         for attempt in range(attempts + 1):
             try:
                 if attempt == 0:
+                    if self._config.execution_overhead_seconds_per_action:
+                        return await session.execute(
+                            params,
+                            timeout=self._config.step_timeout,
+                            execution_overhead_seconds_per_action=(
+                                self._config.execution_overhead_seconds_per_action
+                            ),
+                        )
                     return await session.execute(params, timeout=self._config.step_timeout)
                 # Each attempt is its own operation: the worker's replay cache
                 # is keyed by operation_id and would hand back the cached
