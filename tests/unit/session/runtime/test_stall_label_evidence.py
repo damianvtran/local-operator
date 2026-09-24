@@ -65,6 +65,12 @@ def _held_line(fired_mono: float, *, local: str = "2026-09-24 03:23:34") -> str:
     )
 
 
+def _arm_header(pid: int, at: float | None = None) -> str:
+    """``arm``'s first line, as origin/main writes it too: ``… armed for <s>s at <epoch> …``."""
+    at = time.time() - 1 if at is None else at
+    return f"[stall watchdog] pid {pid} armed for {BOUND_S:g}s at {at:.0f} (boot)\n"
+
+
 def _held_dump(
     logs: Path,
     pid: int,
@@ -83,6 +89,8 @@ def _held_dump(
     logs.mkdir(parents=True, exist_ok=True)
     dump = stall_watchdog.dump_path(pid, logs)
     dump.write_text(
+        # The arm header every real dump opens with (the life the sibling is fenced on).
+        f"{_arm_header(pid)}"
         f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n  File x, line 1\n"
         + _held_line(fired_mono)
         + extra,
@@ -307,6 +315,10 @@ def _real_writer(
     logs = tmp_path / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     dump = stall_watchdog.dump_path(pid, logs)
+    # ``arm``'s header, which every real dump opens with and the sibling is fenced on
+    # (agent review round 2, m-A). Real time, because the fence compares it with the
+    # sibling's real mtime.
+    dump.write_text(_arm_header(pid), encoding="utf-8")
     handle = dump.open("a", encoding="utf-8")
     armed = stall_watchdog._Armed(dump, handle, BOUND_S, pid, busy=lambda: True)
     # Both planes beat at arm; then the WORKLOAD loop parks and only SERVING beats on.
@@ -582,6 +594,156 @@ async def test_a_slow_drain_inside_the_stall_bound_is_still_skipped(
         assert no_signals[0] == []
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent review round 2 (M-A, m-A, m-B), on the formats origin/main writes.
+# ---------------------------------------------------------------------------
+
+
+def _main_format_held_dump(logs: Path, pid: int, *, sibling_epoch: float) -> Path:
+    """A held dump and sibling EXACTLY as a pre-PR build (origin/main) writes them.
+
+    Spelled as literals copied from main's writer — the arm header, main's held marker
+    (local time only, no monotonic stamp) and the two-field ``<epoch> <leg>`` sibling —
+    so the cell reads what a runtime started before this fix really leaves on disk.
+    """
+    logs.mkdir(parents=True, exist_ok=True)
+    dump = stall_watchdog.dump_path(pid, logs)
+    dump.write_text(
+        _arm_header(pid, time.time() - 6 * 3600)
+        + "Timeout (0:05:00)!\n  File x, line 1\n"
+        + "[stall watchdog] bound held: the bound fired at 2026-09-24 03:23:34 and did "
+        "NOT end this runtime. Work was in flight when the fire was observed, so the "
+        "runtime is stalled with it. Every thread's stack is above. Inspect this dump "
+        "and stop the runtime explicitly if it remains stuck.\n",
+        encoding="utf-8",
+    )
+    stall_watchdog.deadline_path(pid, logs).write_text(
+        f"{sibling_epoch:.3f} serving\n", encoding="utf-8"
+    )
+    return dump
+
+
+def test_an_old_format_held_marker_is_still_labelled_held(tmp_path: Path) -> None:
+    """M-A, the LABEL half: cannot tell → ``bound held``, for a person to look at.
+
+    A pre-PR marker carries no monotonic stamp, so nothing can show a recovery, and
+    the label keeps the conservative reading. Passes on cae367569 too: a pin that the
+    ladder's narrower reading did not leak into the listing.
+    """
+    logs = tmp_path / "logs"
+    _main_format_held_dump(logs, 65820, sibling_epoch=time.time() + 290)
+    assert stall_watchdog.held_fire(65820, logs) is True
+    assert 65820 in stall_watchdog.held_pids(logs)
+
+
+@pytest.mark.asyncio
+async def test_an_old_format_held_drain_with_a_fresh_beat_is_still_skipped(
+    no_signals,
+) -> None:
+    """M-A, the LADDER half: a pre-PR runtime that held, recovered and is draining.
+
+    The reviewer's ``oldfmt_ladder.py`` shape, end to end through ``stop_session``: fire
+    5 h ago in main's format, sibling beating at now + 290 s, heartbeat 5 s old,
+    ``leaving`` set, ``started_at`` before the dump. The ladder takes the held arm only
+    on complete new-format evidence, so this is judged on its heartbeat, which is
+    fresh: skipped. REPRODUCTION: cae367569 returned ``socket`` — the turn was cut.
+    """
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(
+        record,
+        busy=True,
+        leaving=LEAVING_FOR_BUILD,
+        heartbeat_at=time.time() - 5,
+        started_at=time.time() - 7 * 3600,
+    )
+    dump = _main_format_held_dump(
+        stall_watchdog.dump_path(target.pid).parent, target.pid, sibling_epoch=time.time() + 290
+    )
+    try:
+        assert control._drain_stalled(target) == "", "an unproven held reading cut a drain"
+        outcome = await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert handle.stops == []
+    finally:
+        server.close()
+        dump.unlink(missing_ok=True)
+        dump.with_suffix(stall_watchdog.DEADLINE_SUFFIX).unlink(missing_ok=True)
+
+
+def test_an_old_format_held_drain_falls_back_to_the_heartbeat(tmp_path: Path) -> None:
+    """M-A: with unproven evidence the ladder still cuts a drain whose BEAT is past the bound.
+
+    Old-format marker AND a heartbeat older than the stall bound — pid 42983's shape on
+    a pre-PR build — so the heartbeat arm alone decides, and it says stalled. Passes on
+    cae367569 as well (its held arm answered first); pinned so the M-A narrowing cannot
+    turn into "old-format drains are never cut".
+    """
+    pid = os.getpid()
+    logs = stall_watchdog.dump_path(pid).parent
+    dump = _main_format_held_dump(logs, pid, sibling_epoch=time.time() - 5 * 3600)
+    try:
+        record = _bare_record(
+            pid=pid,
+            heartbeat_at=time.time() - 5.6 * 3600,
+            started_at=time.time() - 7 * 3600,
+        )
+        assert control._drain_stalled(record).startswith("it has not reported for")
+    finally:
+        dump.unlink(missing_ok=True)
+        dump.with_suffix(stall_watchdog.DEADLINE_SUFFIX).unlink(missing_ok=True)
+
+
+def test_a_sibling_from_before_this_lifes_arm_is_not_a_recovery(tmp_path: Path) -> None:
+    """m-A: a reboot, a recycled pid, and an old ``.deadline`` the arm failed to unlink.
+
+    This life fired held early in its boot (small monotonic stamp); the surviving
+    sibling is the PREVIOUS boot's, with a large monotonic deadline — "re-armed long
+    after the fire" if believed. Its mtime predates this dump's arm header, so it is
+    not this life's evidence and the reading stays held. The control: the same sibling
+    written after the arm is a recovery. REPRODUCTION: cae367569 read ``held=False``.
+    """
+    logs = tmp_path / "logs"
+    dump = _held_dump(logs, 4103, fired_mono=100.0, deadline_mono=900_000.0)
+    sibling = dump.with_suffix(stall_watchdog.DEADLINE_SUFFIX)
+    before_arm = time.time() - 2 * 3600
+    os.utime(sibling, (before_arm, before_arm))
+    assert stall_watchdog.held_fire(4103, logs) is True, "a previous life's sibling unheld it"
+    assert stall_watchdog.held_reading(dump, dump.read_text("utf-8")) == (
+        stall_watchdog.HELD_UNPROVEN
+    )
+    os.utime(sibling, None)
+    assert stall_watchdog.held_fire(4103, logs) is False
+
+
+@pytest.mark.asyncio
+async def test_the_drain_check_runs_off_the_event_loop(
+    no_signals, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-B: ``_drain_stalled`` may fork ``ps`` and read dumps; the TUI calls this ladder on
+    its loop, so the check hops to a thread. REPRODUCTION: ran on the loop on cae367569.
+    """
+    import threading
+
+    seen: list[threading.Thread] = []
+
+    def spy(record: Any) -> str:
+        seen.append(threading.current_thread())
+        return ""
+
+    monkeypatch.setattr(control, "_drain_stalled", spy)
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    target = _record_for(record, busy=True, leaving=LEAVING_FOR_BUILD, heartbeat_at=time.time())
+    try:
+        await control.stop_session(target, timeout_s=3.0, _root=config_dir())
+    finally:
+        server.close()
+    assert seen and seen[0] is not threading.main_thread(), seen
 
 
 def test_the_stalled_probe_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:

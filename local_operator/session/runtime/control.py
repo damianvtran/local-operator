@@ -1315,7 +1315,10 @@ async def stop_session(
     # nothing to do" — a promise no evidence supported. ``stalled`` is the reason the
     # drain can no longer be trusted to finish, and a stalled drain falls through to
     # the ordinary ladder instead of being skipped.
-    stalled = _drain_stalled(record) if leaving and not force else ""
+    # OFF THE LOOP (agent review round 2, m-B): ``classify`` can fork ``ps`` for a quiet
+    # record and ``held_now`` reads dump text across every log store, and the TUI runs
+    # this ladder on its event loop — the same reason the identity probes below hop.
+    stalled = await asyncio.to_thread(_drain_stalled, record) if leaving and not force else ""
     if stalled and on_wait is not None:
         # Said BEFORE the ladder runs, because the ladder that follows can take the
         # whole signal grace, and the reader has just been told by every other
@@ -1598,9 +1601,13 @@ def _drain_stalled(record: SessionRecord) -> str:
       the stall bound is the number this codebase sized ABOVE those measurements to
       mean "stopped, not slow". A drain in the 45 s-to-bound band is still skipped,
       exactly as before; the incident runtimes were 5.6 h and 5.9 h stale.
-    * ``stall_watchdog.held_now`` — its own bound fired with work in flight and it has
-      not re-armed since. The same predicate behind the listing's ``bound held`` cell,
-      and the arm that covers a parked workload loop behind a fresh serving beat.
+    * ``stall_watchdog.held_now(..., proven=True)`` — its own bound fired with work in
+      flight and it has not re-armed since, on COMPLETE new-format evidence. The same
+      predicate behind the listing's ``bound held`` cell, and the arm that covers a
+      parked workload loop behind a fresh serving beat. The listing also paints "held"
+      when the evidence cannot tell (an old-format marker from a pre-fix build); this
+      arm does not act on that (agent review round 2, M-A), so such a runtime is judged
+      on its heartbeat alone, against the stall bound above.
 
     THE BOUND IS READ IN THIS PROCESS, which is a stated limit rather than a proof: the
     knob is an environment variable and the runtime may have been started with another
@@ -1627,7 +1634,7 @@ def _drain_stalled(record: SessionRecord) -> str:
             from local_operator.wakes.display import format_age
 
             return f"it has not reported for {format_age(verdict.heartbeat_age_s)}"
-        if stall_watchdog.held_now(record.pid, record.started_at):
+        if stall_watchdog.held_now(record.pid, record.started_at, proven=True):
             return "its stall bound fired with work in flight and it has not re-armed since"
     except Exception:  # noqa: BLE001 — the ladder never raises over a probe
         return ""
