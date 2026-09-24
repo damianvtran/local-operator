@@ -15,7 +15,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from local_operator.info.model import format_duration
 from local_operator.resume import SessionRow
@@ -1231,12 +1231,20 @@ def _memoized_birth(sessions: Path, session_id: str) -> float:
 #: BOUNDED exactly as the birth memo is: pruned to this call's candidates, at
 #: most :data:`_BIRTH_MEMO_ROOTS` roots.
 #:
-#: THE SHAPE BOTH MEMOS SHARE, as one type: ``{session_id: ((ino, mtime_ns, size), value)}``.
-_StoreMemo = TypeVar("_StoreMemo")
+#: THE SHAPE BOTH MEMOS SHARE: ``{session_id: ((ino, mtime_ns, size), value)}``
+#: with ``value`` deliberately UNTYPED here.
+#:
+#: A type variable was the first spelling and the type gate refused it: the two
+#: memos carry different value types (a birth float, a ``(team, agent)`` pair),
+#: and a variable made this helper's own ``setdefault`` un-inferable. The value
+#: type is annotated at the two CALL SITES (``_memo_root``, ``_memoized_binding``),
+#: which is where it actually matters; the shared part is the bound and the
+#: eviction order, and neither depends on what is stored.
+_BIRTH_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], float]]] = {}
 _BINDING_MEMO: dict[str, dict[str, tuple[tuple[int, int, int], tuple[str, str]]]] = {}
 
 
-def _memo_for(memo: dict[str, _StoreMemo], sessions: Path) -> _StoreMemo:
+def _memo_for(memo: dict[str, dict[str, Any]], sessions: Path) -> dict[str, Any]:
     """One memo's map for this store, created (and the oldest root evicted) on first use.
 
     The one implementation of "which map answers for this store, and how many
@@ -1439,7 +1447,7 @@ def _ranked_candidates(
     include_subagents: bool = False,
     include_archived: bool = False,
     pinned_hidden_ids: Sequence[str] = (),
-) -> tuple[list[CatalogEntry], dict[str, tuple[str, float, str, bool]], list[str]]:
+) -> tuple[list[CatalogEntry], dict[str, tuple[str, float, str, bool]], set[str]]:
     """Scan, decorate and rank: the catalogue's MIDDLE, and its only implementation.
 
     Extracted from :func:`load_catalog` WITHOUT a behaviour change -- the proof is

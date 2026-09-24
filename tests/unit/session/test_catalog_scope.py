@@ -436,10 +436,9 @@ class TestTheCensusMatchesAnIndependentWalk:
         cached name, would keep reporting the old group forever.
         """
         directory = _session(tmp_path, "chat00000001", team="lopdev")
-        assert [
-            (tally.name, tally.total)
-            for tally in catalogue_page(tmp_path, limit=50, with_counts=True).counts.scopes
-        ] == [("lopdev", 1)]
+        first = catalogue_page(tmp_path, limit=50, with_counts=True).counts
+        assert first is not None
+        assert [(tally.name, tally.total) for tally in first.scopes] == [("lopdev", 1)]
 
         write_session_attachment(directory, team="", agent="reviewer", goal="")
 
@@ -467,9 +466,10 @@ class TestTheCensusMatchesAnIndependentWalk:
             _session(tmp_path, f"bbb{index:04d}", team="bbb", created=4_000.0 + index)
         _session(tmp_path, "ccc0000", agent="ccc")
 
-        scopes = catalogue_page(tmp_path, limit=50, with_counts=True).counts.scopes
+        counts = catalogue_page(tmp_path, limit=50, with_counts=True).counts
+        assert counts is not None
 
-        assert [(tally.kind, tally.name, tally.total) for tally in scopes] == [
+        assert [(tally.kind, tally.name, tally.total) for tally in counts.scopes] == [
             ("team", "aaa", 3),
             ("team", "bbb", 2),
             ("agent", "ccc", 1),
