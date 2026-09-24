@@ -670,6 +670,17 @@ class LoopContext:
     messages: list[AgentMessage] = field(default_factory=list)
     tools: list[AgentTool] = field(default_factory=list)
     tool_context: ToolContext | None = None
+    # R3-1: the ORIGINAL arguments of every call the loop actually dispatched,
+    # keyed by ``tool_call_id``. ``messages`` cannot serve this: the assistant
+    # turn the loop stores there is the SCRUBBED copy (``_scrub_history_
+    # arguments``), kept for persistence/replay, while the tool that ran saw
+    # the ORIGINAL -- so a guard reading the arguments back out of ``messages``
+    # is handed a different string than the reader resolved. Recorded at the
+    # dispatch point and consumed (popped) by ``_call_arguments`` when the
+    # result is redacted one step later, so a long session does not retain every
+    # call's arguments -- a ``write`` carries whole file contents -- alive for
+    # the length of that session.
+    original_call_args: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -976,14 +987,35 @@ def _session_cwd(context: "LoopContext") -> str | None:
 
 
 def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]:
-    """The arguments of the call a result belongs to, for the redaction hook.
+    """The ORIGINAL arguments of the call a result belongs to, for the redaction hook.
 
-    Searched in ``context.messages`` rather than kept beside the result: a
-    ``ToolResult`` carries the call's ID and name but not what it was asked to
-    do, and the assistant message that holds the arguments is the message the
-    loop appended one step earlier. ``reversed`` because the result being
-    appended belongs to the most recent batch.
+    Recorded at DISPATCH by ``_runner_result``, where ``item.args`` -- what the
+    tool is actually run with -- is in hand, and CONSUMED here (popped) so the
+    recording does not outlive the result it belongs to.
+
+    ``context.messages`` is deliberately NOT the source. The assistant turn the
+    loop stores there is the SCRUBBED copy (``_scrub_history_arguments``), kept
+    for persistence/replay, while the tool that ran -- and the reader inside it
+    -- saw the ORIGINAL. Searching ``messages`` therefore hands this hook a
+    different string than the reader resolved, and the two disagree exactly where
+    it matters: a credential-SHAPED path segment makes the guard resolve
+    ``[redacted]/../...`` while the reader resolved ``<shape>/../...``. Those are
+    identical bytes after scrubbing, so the control sees a guard-area read
+    (escalation ``[True]``) while the attack is silently cleared (``[]``) -- in
+    both ``read`` and ``grep``. R3-1 against PR #1502.
+
+    The ``messages`` search remains as a FALLBACK only for calls that never
+    dispatched -- a planning failure, or a synthetic result the loop invented --
+    where nothing was recorded and the stored arguments are all there is. It is
+    reached only when ``config.redact_tool_result`` is set, and the record is
+    only written under that same condition, so an unconfigured hook leaves this
+    empty either way.
     """
+    recorded = context.original_call_args.pop(tool_call_id, None)
+    if recorded is not None:
+        return recorded
+    # ``reversed`` because the result being appended belongs to the most recent
+    # batch.
     for message in reversed(context.messages):
         # ``AgentMessage`` is ``Message | CustomMessage`` and only the former
         # carries tool calls; a notice parked beside the batch is skipped rather
@@ -3193,6 +3225,15 @@ class AgentLoop:
                             )
                         )
                         raise
+                    finally:
+                        # ``_runner_result`` records the ORIGINAL arguments for
+                        # the redaction hook (R3-1). This bridge redacts with
+                        # ``planned.args`` directly below and never reaches
+                        # ``_call_arguments`` to consume it, so drop the record
+                        # here or an eval-heavy session accumulates one entry per
+                        # nested call. ``finally`` because the cancellation path
+                        # raises out before the redaction runs.
+                        context.original_call_args.pop(nested.id, None)
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
@@ -3227,6 +3268,16 @@ class AgentLoop:
                 execution_context = execution_context.model_copy(
                     update={"dispatch_tool": dispatch_tool}
                 )
+            # R3-1: the guard's view of this call is recorded HERE, where
+            # ``item.args`` -- the ORIGINAL the tool is about to run with -- is
+            # in hand, and the reader inside ``tool.execute`` resolves the same
+            # value. ``_call_arguments`` would otherwise find only the stored,
+            # scrubbed copy in ``context.messages`` and hand the guard a
+            # different string (see its docstring). Guarded by the same config
+            # as the redaction that consumes it, so an unconfigured hook pays
+            # no copy at all.
+            if config.redact_tool_result is not None:
+                context.original_call_args[call.id] = item.args
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
             raise
