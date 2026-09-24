@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -218,6 +220,102 @@ async def test_delete_yes_removes_the_session_and_lands_on_a_fresh_one(root: Pat
         # through the identical path a cold launch takes. Without this the app
         # would be standing on a conversation whose directory is gone.
         assert boots == [None], boots
+
+
+@pytest.mark.asyncio
+async def test_the_confirmed_delete_runs_off_the_ui_thread(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 2, R2-3: a delete that can WAIT must not block the interface.
+
+    The confirmed call may ask a warm runtime to leave and wait up to
+    ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` (~2 s) for it, so calling it inline
+    froze the event loop the app paints on for the whole wait — on a keypress.
+    The property is measured rather than argued: the call's own thread identity
+    is recorded and it must not be the thread this test (i.e. the app's loop) is
+    running on. On the pre-fix head the two are the same thread and this fails.
+    """
+    from local_operator.session import cleanup as cleanup_mod
+
+    real = cleanup_mod.delete_session
+    seen: list[int] = []
+
+    def spy(
+        config_dir: Path,
+        session_id: str,
+        *,
+        actor: str,
+        now: float | None = None,
+        dry_run: bool = False,
+    ):
+        seen.append(threading.get_ident())
+        return real(config_dir, session_id, actor=actor, now=now, dry_run=dry_run)
+
+    monkeypatch.setattr(cleanup_mod, "delete_session", spy)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        ui_thread = threading.get_ident()
+        await _submit(pilot, app, "/delete yes")
+        for _ in range(40):
+            await pilot.pause()
+            if seen:
+                break
+
+    assert seen, "the delete never ran"
+    assert seen[0] != ui_thread, "the delete ran on the UI thread"
+
+
+@pytest.mark.asyncio
+async def test_the_ui_keeps_running_while_a_confirmed_delete_waits(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-3's user-visible half: the interface is not frozen by the wait.
+
+    The thread-identity cell above pins the mechanism; this one pins what a user
+    would feel — that the app keeps painting while the removal is in flight. The
+    delete is made to take 2 s (the shape of the preempt wait) and the assertion
+    is that message-queue drains KEEP COMPLETING while it runs.
+
+    A COUNT, NOT A DURATION, and that is what makes it a measurement rather than
+    a coincidence: an interface that is free answers many drains in those two
+    seconds, while a blocked loop answers none — the timing goes into the one
+    drain that spans the call, wherever in the loop it happens to land. Two
+    earlier cuts of this cell measured an individual drain's latency and passed
+    on the broken code, because the block landed inside the drain BEFORE the
+    measurement window had opened (the submit's own pauses). The count cannot be
+    fooled that way, and it needs no calibrated ceiling (AGENTS.md, "Prefer a
+    structural invariant to a numeric one").
+    """
+    from local_operator.session import cleanup as cleanup_mod
+
+    real = cleanup_mod.delete_session
+    finished = threading.Event()
+
+    def slow(
+        config_dir: Path,
+        session_id: str,
+        *,
+        actor: str,
+        now: float | None = None,
+        dry_run: bool = False,
+    ):
+        time.sleep(2.0)
+        finished.set()
+        return real(config_dir, session_id, actor=actor, now=now, dry_run=dry_run)
+
+    monkeypatch.setattr(cleanup_mod, "delete_session", slow)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/delete yes")
+        deadline = time.monotonic() + 10.0
+        drains = 0
+        while not finished.is_set() and time.monotonic() < deadline:
+            await pilot.pause()
+            drains += 1
+        assert finished.is_set(), "the delete never finished"
+        assert drains >= 5, f"the loop completed only {drains} drains during a 2s delete"
 
 
 @pytest.mark.asyncio

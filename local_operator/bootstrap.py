@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any, Optional
 from local_operator.agents import AgentData, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.logger import get_logger
 from local_operator.model.configure import ModelConfiguration, configure_model
@@ -106,7 +105,6 @@ def resolve_hosting_model(
 
 def resolve_model_configuration(
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     env_config: EnvConfig,
     request_hosting: Optional[str] = None,
     request_model: Optional[str] = None,
@@ -155,7 +153,7 @@ def resolve_model_configuration(
         model_configuration = configure_model(
             hosting=hosting,
             model_name=model_name,
-            credential_manager=credential_manager,
+            config_dir=config_manager.config_dir,
             env_config=env_config,
             # The configured birth-default effort, so the spec the SERVER REPORTS
             # agrees with the one the session will actually run (design D3).
@@ -204,7 +202,6 @@ def build_session_args(
 async def initialize_operator(
     operator_type: OperatorType,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
     # Values are Optional because a model whose family policy is to OMIT
@@ -248,7 +245,6 @@ async def initialize_operator(
     )
     _, hosting, model_name = resolve_model_configuration(
         config_manager,
-        credential_manager,
         env_config,
         request_hosting=request_hosting,
         request_model=request_model,
@@ -273,7 +269,6 @@ async def initialize_operator(
     session = await session_factory.create_session(
         session_args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=False,
     )

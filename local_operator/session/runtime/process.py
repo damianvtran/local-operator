@@ -74,6 +74,7 @@ from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
@@ -98,6 +99,67 @@ REAP_CHECK_S = 0.25
 #: Idle runtimes are disposable once their durable session state is
 #: quiescent. This is a drain for newly arriving work, not a reconnect grace.
 DEFAULT_GRACE_S = 3.0
+
+#: HOW LONG A RUNTIME A VIEWER HAS LEFT STAYS RESIDENT (``runtime.keep_alive_seconds``).
+#:
+#: The 3 s drain above is deliberately NOT a reconnect grace, and that is the gap
+#: this fills: closing a conversation and opening it a minute later paid a cold
+#: spawn (measured 1.1-1.5 s of wall time and ~0.9-1.0 s of CPU on this fleet)
+#: for session state that was already in a live process's memory. With this
+#: window the re-open is a live attach (measured 16/22 ms p50/p95 on a 0.56 MB
+#: session and 55/101 ms on a 48 MB one at load ~98). The policy it states: a
+#: runtime that has been LOOKED AT is a runtime that will be looked at again.
+#:
+#: IT APPLIES ONLY WHERE A VIEWER HAS LEFT, never to a runtime nobody watched —
+#: an ``exec``, a wake delivery, a phone-only session — because that population
+#: is exactly what the 3 s drain was written for. That is why the window is keyed
+#: on the record's ``detached_at`` (:func:`_detached_at`) rather than on "is this
+#: runtime idle": the two are the same question only for a runtime a person has
+#: looked at.
+#:
+#: 0 DISABLES IT. That is the escape hatch for an operator who would rather pay a
+#: cold start than hold memory, and it is not a special case in the arithmetic: a
+#: window of 0 simply leaves the ordinary drain.
+DEFAULT_KEEP_ALIVE_SECONDS = 300
+
+#: HOW MANY IDLE CLIENTLESS RUNTIMES ONE INSTALL KEEPS WARM
+#: (``runtime.keep_alive_max``).
+#:
+#: The window above is per process and unbounded in aggregate, so a user who
+#: visits eight conversations would hold eight resident processes for five
+#: minutes each. This is the machine-wide bound: a runtime inside its keep-alive
+#: window that is NOT among the ``keep_alive_max`` most recently detached idle
+#: records leaves at once, so the fleet settles at the cap rather than at
+#: "however many the user happened to open". The cost it bounds is measured at
+#: ~73-130 MB of RSS per idle runtime, in ``test_runtime_keep_alive``.
+#:
+#: WHY AN LRU AND NOT A CLOCK OR A QUEUE. The runtime cannot know which
+#: conversation the user will open next, but detach ORDER is the best proxy
+#: available: the session just left is the one most likely to be returned to, and
+#: the one left twenty minutes ago is the least. Oldest-first or FIFO would evict
+#: exactly the wrong one, which is why the record carries WHICH MOMENT a runtime
+#: became detached (``SessionRecord.detached_at``) and not merely that it is.
+#:
+#: ONLY IDLE, CLIENTLESS RECORDS COUNT — "no attach client is connected", the
+#: same term the reaper's own viewer predicate is built on — and that is the
+#: cap's scope rather than an oversight: a runtime someone is looking at, or one
+#: held by work in flight, is not kept alive by this policy and must not be
+#: charged to it, or a busy fleet would evict the very windows this exists to
+#: create. (A record's ``detached`` bit is *visibility*, not attachment, so it is
+#: deliberately NOT the test: see ``_keep_alive_candidates``.)
+#:
+#: A RACE LEAVES N±1 BRIEFLY, deliberately: two runtimes can each scan before
+#: either sees the other's decision, so one extra idle process can exist for one
+#: scan interval. It is self-correcting on the next tick and costs at most the
+#: memory of one idle runtime on a host that can hold it.
+DEFAULT_KEEP_ALIVE_MAX = 4
+
+#: How often a runtime inside its keep-alive window re-reads the registry to
+#: check its own place in the LRU above. Chosen against the 0.25 s reaper tick,
+#: not against the window: a bound that lands a few seconds late still bounds the
+#: fleet, while a scan on every tick would put a directory read plus a JSON parse
+#: per record on a loop that is otherwise sleeping.
+KEEP_ALIVE_SCAN_S = 5.0
 
 #: HOW LONG A BUSY PROBE THAT CANNOT BE EVALUATED MAY PIN A RUNTIME.
 #:
@@ -225,6 +287,59 @@ def _grace_seconds() -> float:
     except ValueError:
         return DEFAULT_GRACE_S
     return value if value > 0 else DEFAULT_GRACE_S
+
+
+def _keep_alive_seconds() -> float:
+    """``runtime.keep_alive_seconds``: the post-viewer residency window.
+
+    A value at or below 0 — or one this process cannot read at all — means NO
+    keep-alive, which leaves the ordinary drain in charge. Zero is therefore a
+    real answer rather than a bad one (see :data:`DEFAULT_KEEP_ALIVE_SECONDS`),
+    and an unreadable setting resolves the same way as an explicit 0 because the
+    alternative is holding a process on the strength of a config file nobody can
+    parse.
+
+    Read through ``get_nested_value`` on the registry's OWN tuple: that is the
+    accessor ``settings_io``'s declared path pairs with, and a consumer reading
+    the flat dotted key instead is the #576 failure (a key nothing ever writes,
+    looking like success from every angle).
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        raw = ConfigManager(config_dir()).get_nested_value(
+            ("runtime", "keep_alive_seconds"), DEFAULT_KEEP_ALIVE_SECONDS
+        )
+        seconds = float(raw)
+    except Exception:  # noqa: BLE001 — an unreadable setting must not pin a runtime
+        logger.debug("could not read runtime.keep_alive_seconds", exc_info=True)
+        return float(DEFAULT_KEEP_ALIVE_SECONDS)
+    return seconds if seconds > 0 else 0.0
+
+
+def _keep_alive_max() -> int:
+    """``runtime.keep_alive_max``: the machine-wide LRU cap, floored at 1.
+
+    A cap below 1 would evict every runtime the instant it detached — the
+    keep-alive window would exist and never be usable — so 0 (and any
+    unusable value) is read as the floor instead. An operator who wants today's
+    residency sets ``keep_alive_seconds`` to 0, which is the honest spelling of
+    "do not keep anything warm": it says so once, rather than making a count of
+    zero silently mean the same thing.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        raw = ConfigManager(config_dir()).get_nested_value(
+            ("runtime", "keep_alive_max"), DEFAULT_KEEP_ALIVE_MAX
+        )
+        cap = int(raw)
+    except Exception:  # noqa: BLE001 — an unreadable setting must not pin a runtime
+        logger.debug("could not read runtime.keep_alive_max", exc_info=True)
+        return DEFAULT_KEEP_ALIVE_MAX
+    return cap if cap > 0 else 1
 
 
 def _idle_for_refresh(handle: object) -> bool:
@@ -659,6 +774,224 @@ def _viewer_attached(runtime: object) -> bool:
         logger.debug("attach_clients failed; treating as no viewer", exc_info=True)
         return False
     return isinstance(live, int) and live > 0
+
+
+def _detached_at(runtime: object) -> float | None:
+    """When this runtime's LAST viewer left, or ``None`` if none ever has.
+
+    Term 3 above asks whether a viewer is attached NOW; this asks whether one
+    ever was, which is the question the keep-alive window is keyed on. The stamp
+    is written by ``RuntimeServer._republish_detached`` at the 1->0 transition
+    and cleared at 0->1, so it is NOT "when this runtime last became idle": a
+    runtime nobody has watched carries ``None`` for its whole life and keeps the
+    ordinary 3 s drain, which is the population that drain was written for.
+
+    Read off the server's own record object, which is where the stamp is
+    written; a reduced runtime (an older host, a test double) has no record and
+    reads as "no viewer ever", which is the conservative direction — it keeps
+    the existing residency behaviour rather than inventing a five-minute window
+    for a process nobody looked at. A non-numeric value is read the same way,
+    for the reason the record's own readers refuse foreign types: arithmetic on
+    a field a foreign writer filled is where cosmetic damage stops being
+    cosmetic.
+    """
+    stamp = getattr(getattr(runtime, "_record", None), "detached_at", None)
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return None
+    return float(stamp)
+
+
+def _keep_alive_candidates() -> list[tuple[float, int]]:
+    """This install's idle, clientless runtimes as ``(detached_at, pid)`` pairs.
+
+    THE POPULATION IS THE REAPER'S OWN, and the ``watching`` term is what makes
+    it so (review round 1, F1). A record used to be charged on ``detached``
+    alone, which is *visibility*: a multiplexing TUI that has switched to
+    another session emits ``viewer_watch displaying=False``, so its runtime read
+    as detached while still holding a viewer — a slot charged to a runtime the
+    policy can never evict, and therefore a cap that a machine with more
+    switched-away sessions than the cap can spend entirely. ``watching`` is "no
+    attach client is connected", the fact term 3 of ``_should_exit`` is built
+    on, so a chargeable record is now one the policy could also have let go.
+
+    ``detached`` STAYS BESIDE IT rather than being replaced, and the pair is not
+    redundant: visible always implies attached, so for a record this build wrote
+    the two agree, but ``watching`` defaults to False on a record an OLDER
+    runtime published — and such a record with a viewer on screen would be
+    charged without the visibility term. Both, then: a slot is charged only to a
+    record that is neither visible nor attached.
+
+    THE SCOPE IS ONE CONFIG ROOT, not the host (QA round 1, Q-5): this scans
+    ``registry.scan()`` with the default root, i.e. the store the runtime itself
+    belongs to. Every isolated install — a test rig, a second config dir — gets
+    its own cap, which is what makes the bound a bound on *this* install's
+    memory. Two installs on one machine hold up to two caps between them.
+
+    The one reader of the registry this policy needs, kept separate from the
+    comparison so a test can hand :func:`_keep_alive_victim` a population
+    without a run directory full of live pids.
+
+    ``reap=False`` ON PURPOSE: this runs at 5 s cadence inside every keep-alive
+    runtime, and a sweep would delete another process's unparseable record and
+    move its dead one aside — a READER has no business doing either (the same
+    reason the desktop feed passes ``False``). The classification is still
+    asked for and still used: a record whose owner is gone is not resident and
+    must not hold a slot in the cap.
+
+    ``wedged`` records COUNT. The verdict says the owner is not ANSWERING, not
+    that it is gone (a long turn or a starved scheduler reads the same way), and
+    the process is still resident holding the memory this cap exists to bound —
+    so counting it is the reading that keeps the bound honest. Only ``stale``,
+    where the pid is proven gone, is dropped.
+    """
+    from local_operator.session.runtime import registry
+
+    out: list[tuple[float, int]] = []
+    for record, state in registry.scan(reap=False):
+        if state == "stale" or getattr(record, "watching", False):
+            continue
+        if not getattr(record, "detached", False):
+            continue
+        if getattr(record, "busy", False):
+            continue
+        stamp = getattr(record, "detached_at", None)
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        out.append((float(stamp), record.pid))
+    return out
+
+
+#: HOW LONG AN EXIT REQUEST MAY ACT, in seconds (review round 2, R2-2/R2-5).
+#:
+#: The write and the withdrawal are not atomic with this reader, and the
+#: requester's bound is ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` = 2 s. So a file can
+#: be read here a moment BEFORE it is withdrawn — the runtime then leaves after
+#: the delete has already given up, which is a lost optimisation rather than a
+#: wrong exit — and a requester that dies between the two leaves its file behind
+#: for good. Both are bounded by age: past this window a request is a statement
+#: about an act that is over, and the NEXT runtime for that conversation ignores
+#: it. Sixty seconds is 30x the tolerance the requester needs (its own wait, plus
+#: a reaper tick) and short enough that a leftover stops mattering within one
+#: user-visible minute.
+_EXIT_REQUEST_FRESH_S = 60.0
+
+#: Clock tolerance for a request whose stamp reads slightly in the future. Same
+#: clock, so this only has to absorb microsecond jitter; anything beyond it is a
+#: junk stamp, and ``registry``'s own readers treat a future stamp as expired
+#: rather than immortal (``_unreadable_expired``, review round 3 MINOR 1).
+_EXIT_REQUEST_SKEW_S = 5.0
+
+
+def _exit_requested(runtime: object) -> bool:
+    """Has an EXPLICIT DELETE asked THIS run to leave?
+
+    WHO ASKS: ``cleanup.delete_session``, when the only thing keeping a
+    conversation's directory alive is a runtime this policy itself is holding
+    warm (QA round 1, Q-1 — a user who closes a conversation and deletes it was
+    refused for up to ``keep_alive_seconds`` with a sentence telling them to
+    stop a session they had just closed).
+
+    WHY IT IS HONOURED ONLY HERE, in the drain loop: the loop is reached only
+    with ``_should_exit`` holding, i.e. with no work, no viewer and no wake due,
+    so honouring the request cannot cut anything. That is the whole safety
+    property, and it is why this is a request the runtime grants rather than a
+    signal it obeys — see ``registry.EXIT_REQUEST_NAME`` for what the signal
+    alternatives cost.
+
+    ADDRESSED TO THIS RUN **AND TO THIS MOMENT**, like ``control``'s stop marker:
+    a request naming another pid or another conversation is not ours to honour,
+    and one older than ``_EXIT_REQUEST_FRESH_S`` is a statement about an act that
+    is over — so neither a leftover from a failed attempt nor the 2 s race
+    between the requester's withdrawal and this read can end a runtime that has
+    no claim to it. A request with no readable stamp is ignored for the same
+    reason.
+    A malformed or unreadable file reads as no request at all, because a failed
+    read on a 250 ms tick must not be a decision.
+    """
+    record = getattr(runtime, "_record", None)
+    session_id = str(getattr(record, "session_id", "") or "")
+    pid = getattr(record, "pid", None)
+    if not session_id or not isinstance(pid, int):
+        return False
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import registry
+
+        request = registry.read_exit_request(config_dir() / "sessions" / session_id)
+    except Exception:  # noqa: BLE001 — a read that fails is not a request
+        logger.debug("could not read the exit request", exc_info=True)
+        return False
+    if not isinstance(request, dict):
+        return False
+    if request.get("session_id") != session_id or request.get("pid") != pid:
+        return False
+    requested_at = request.get("requested_at")
+    if isinstance(requested_at, bool) or not isinstance(requested_at, (int, float)):
+        return False  # unattributable in time: not a request this reader acts on
+    age = time.time() - float(requested_at)
+    return -_EXIT_REQUEST_SKEW_S <= age <= _EXIT_REQUEST_FRESH_S
+
+
+def _keep_alive_victim(runtime: object, cap: int) -> bool:
+    """Is this runtime outside the machine-wide keep-alive LRU?
+
+    True means: another ``cap`` runtimes were detached more recently than this
+    one, so this one gives up its window and exits now. The comparison is on
+    ``detached_at`` descending, with the pid breaking ties so the ordering is
+    total — a tie at the boundary therefore resolves by pid, which is arbitrary
+    but STABLE, and the design accepts the resulting N±1 (see
+    :data:`DEFAULT_KEEP_ALIVE_MAX`).
+
+    EVERY FAILURE TO ANSWER KEEPS THE RUNTIME, including the important one: a
+    scan that does not contain OUR OWN record cannot say we are outside the cap,
+    so it says nothing and we stay. The instrument being blind is not evidence of
+    guilt, and the cost of that direction is bounded — the peers that can see
+    themselves still preempt themselves — while the other direction is a runtime
+    exiting because its record was momentarily unreadable.
+    """
+    mine = _detached_at(runtime)
+    if mine is None:
+        return False
+    try:
+        candidates = _keep_alive_candidates()
+    except Exception:  # noqa: BLE001 — a registry that will not read keeps the runtime
+        logger.debug("keep-alive LRU scan failed; keeping runtime", exc_info=True)
+        return False
+    own_pid = getattr(getattr(runtime, "_record", None), "pid", None)
+    if own_pid is None or all(pid != own_pid for _stamp, pid in candidates):
+        # We are not in the population we just read, so it is not a population we
+        # can be placed in. See the docstring.
+        return False
+    candidates.sort(reverse=True)
+    return own_pid not in {pid for _stamp, pid in candidates[:cap]}
+
+
+def _drain_window_s(base_s: float, runtime: object) -> tuple[float, int]:
+    """``(window_seconds, lru_cap)`` for a drain that is about to start.
+
+    ``base_s`` is the ordinary drain (``DEFAULT_GRACE_S``, or the operator's
+    ``LOP_SESSION_GRACE_S``). It is replaced by the keep-alive window for a
+    runtime a viewer has LEFT, and never shortened by it: an operator who
+    widened the drain gets the wider of the two, because the runtime a person was
+    just looking at is the LAST one that should leave sooner than an unwatched
+    one.
+
+    ``lru_cap`` of 0 means "no LRU check" and is returned exactly when the
+    keep-alive does not apply (no viewer ever left, or the window is disabled),
+    which is what keeps the registry scan off every runtime that has no claim to
+    a window in the first place.
+
+    THE POLICY IS READ HERE, AT THE MOMENT THE WINDOW IS DRAWN, and that is the
+    whole reason this is a function rather than a value captured at reaper
+    start: ``detached_at`` does not exist until a viewer leaves, so a policy
+    read at boot would be a policy about a runtime nobody had looked at yet.
+    """
+    if _detached_at(runtime) is None:
+        return base_s, 0
+    keep_alive_s = _keep_alive_seconds()
+    if keep_alive_s <= 0:
+        return base_s, 0
+    return max(base_s, keep_alive_s), _keep_alive_max()
 
 
 class _ProbeDefers:
@@ -1109,17 +1442,88 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         if not _should_exit(handle, runtime):
             continue
-        deadline = time.monotonic() + grace_s
+        # THE WINDOW IS DRAWN HERE, not once at reaper start: for a runtime a
+        # viewer has LEFT it is the keep-alive window rather than the ordinary
+        # drain, and ``detached_at`` does not exist until that viewer leaves —
+        # see ``_drain_window_s``. An ineligible runtime gets the old grace and
+        # an ``lru_cap`` of 0, which keeps the registry scan off it entirely.
+        window_s, lru_cap = _drain_window_s(grace_s, runtime)
+        deadline = time.monotonic() + window_s
+        next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
         drained = False
+        preempted = False
+        requested = False
+        idle_since = time.monotonic()
+        #: The detach stamp this window was drawn from. A DIFFERENT one means a
+        #: viewer attached and left again inside this drain, and the window then
+        #: has to be drawn again from that departure (see the tick).
+        drawn_from = _detached_at(runtime)
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
                 return True
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
+            if _exit_requested(runtime):
+                # AN EXPLICIT DELETE ASKED THIS RUNTIME TO GO (``cleanup``'s
+                # preempt, QA round 1 Q-1). It is honoured HERE, inside the
+                # drain, which is the one place that PROVES nothing is in
+                # flight: the loop is reached only with ``_should_exit``
+                # holding, so the exit cannot cut a turn, a job, a wake or a
+                # viewer — the requester gets a runtime that leaves if it is
+                # idle and a refusal if it is not, with no path to destruction.
+                logger.info(
+                    "session runtime: an explicit delete asked this runtime to leave; "
+                    "exiting cleanly (idle-exit)"
+                )
+                # NOT ``drained``: this drain did not run its window to the end,
+                # and the exit line below reports the SECONDS IT ACTUALLY IDLED —
+                # the same misstatement review round 1 (F4) caught on the LRU's
+                # path, which would otherwise print "idle for 300.0s" for a 0.15 s
+                # stay (review round 2, R2-4).
+                requested = True
+                break
+            stamp = _detached_at(runtime)
+            if stamp is not None and stamp != drawn_from:
+                # A VIEWER THAT CAME AND WENT INSIDE ONE TICK, or a second
+                # attach/detach later in the same drain, leaves this drain
+                # holding a window drawn BEFORE the departure it is meant to
+                # serve: the tick that would have cancelled the drain saw a
+                # viewer, and by the next one the viewer is gone, so
+                # ``_should_exit`` never went false and the window was never
+                # drawn again. Measured: a bench whose viewer attaches and
+                # disposes inside 0.25 s took the cold spawn ~1 run in 8, and QA
+                # round 1 measured the second-detach case leaving on the FIRST
+                # window instead of the newer one. The contract is about the
+                # STATE ("a viewer was here and left"), so it must not depend on
+                # a viewer outliving the sampling interval, nor on there being
+                # only one departure per drain. Re-drawing only when the stamp
+                # MOVED keeps the config read off every runtime that has no
+                # claim to a window, and a drain that nothing touches pays
+                # exactly what it paid before.
+                drawn_from = stamp
+                window_s, lru_cap = _drain_window_s(grace_s, runtime)
+                deadline = time.monotonic() + window_s
+                idle_since = time.monotonic()
+                next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
+            if next_lru_check is not None and time.monotonic() >= next_lru_check:
+                next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S
+                if _keep_alive_victim(runtime, lru_cap):
+                    # NOT A FAILURE AND NOT A DEADLINE: the machine has ``lru_cap``
+                    # more recently detached runtimes, so this window is the one to
+                    # give up. The exit that follows is the ordinary idle exit
+                    # (the predicate still holds and nothing is in flight); only
+                    # the reason it stopped waiting is different.
+                    logger.info(
+                        "session runtime: not among the %d most recently detached idle "
+                        "runtimes; giving up the keep-alive window",
+                        lru_cap,
+                    )
+                    preempted = True
+                    break
         else:
             drained = True
-        if not drained:
+        if not (drained or preempted or requested):
             continue
         # The LAST instant before the exit, and the reason it is a latch rather
         # than another ``_should_exit`` sample: the grace loop's condition can
@@ -1154,10 +1558,20 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         # THE REASON NAMES THE TERM THAT ACTUALLY HELD; see ``_idle_exit_reason``.
         reason = _idle_exit_reason()
+        # WHAT WAS MEASURED, not what was allowed (review round 1, F4). On the
+        # ordinary path the two agree — the drain ran its window to the end — so
+        # this prints the window. On a preemption (the LRU gave the slot up) the
+        # runtime idled for a fraction of it, and printing the window made a
+        # reader sizing residency from the log off by 60x; the LRU line above
+        # names the reason, and this line now names the elapsed time.
         logger.info(
             "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
             "exiting cleanly (%s)",
-            grace_s,
+            # WHAT WAS MEASURED for EVERY reason the drain can end early — the
+            # LRU giving the slot up and an explicit delete asking are both
+            # "stopped waiting", and only a drain that expired may claim its
+            # window (review round 1 F4, review round 2 R2-4).
+            window_s if drained else time.monotonic() - idle_since,
             WARM_WINDOW_S,
             reason,
         )
@@ -1524,12 +1938,25 @@ async def _pump_update_heartbeat(handle: object, *, interval: float) -> None:
 async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: float) -> None:
     """The half every arm that KEEPS the build this runtime loaded has in common.
 
-    Two steps, and they are the same two wherever a handover gives up: the messages
-    the departure queued come back IN — they run here, on the build the operator
-    still has, rather than leaving a receipt for a successor that is not coming —
-    and the failure is PUBLISHED, on the record and as an incident row carrying
-    ``types.UPDATE_FAILED_CAUSE`` (the operator's own requirement: "indicate that
-    the update failed so that it can be reported as an issue and addressed").
+    Two steps, and they are the same two wherever a handover gives up: the failure is
+    PUBLISHED, on the record and as an incident row carrying ``types.UPDATE_FAILED_CAUSE``
+    (the operator's own requirement: "indicate that the update failed so that it can be
+    reported as an issue and addressed"), and the messages the departure queued come back
+    IN — they run here, on the build the operator still has, rather than leaving a receipt
+    for a successor that is not coming.
+
+    PUBLISH FIRST, AND THAT ORDER IS THE REPAIR RATHER THAN A TIDY (QA round 1, Q-2). The
+    re-admission can run the spooled owner prompts — real turns, measured at 27-37 s — and
+    the reaper may find the work done ONE TICK after it lands (``REAP_CHECK_S``), at which
+    point this runtime exits and the record is withdrawn with it. Published second, the
+    failure was therefore observable on the fleet row for as little as a second, or not at
+    all, which is the operator's requirement failing in exactly the state it was written
+    for. The two steps touch DISJOINT state — one delivers the inbox, the other writes the
+    record and an incident row — so neither can read the other's output, no invariant is
+    ordered by it, and the publish is strictly more reliable here: it no longer depends on
+    the drain returning at all (:func:`_drain_inbox_into` is best-effort per row and
+    swallows its own failures, but nothing about that should be able to take the record's
+    account down with it).
 
     FACTORED OUT rather than written twice because the two callers are the two
     shapes of the same decision — the update window that ran out of its bound
@@ -1540,13 +1967,13 @@ async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: 
     The runtime is never killed here. That is the whole contract of this module's
     give-up arms: a failed update leaves a working session on the build it loaded.
     """
-    await _drain_inbox_into(handle)
     note = getattr(runtime, "note_update_failed", None)
     if callable(note):
         try:
             await cast("Callable[..., Awaitable[None]]", note)(pair, bound)
         except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
             logger.warning("could not publish the failed update", exc_info=True)
+    await _drain_inbox_into(handle)
 
 
 async def _abandon_update_window(handle: object, runtime: object, pair: str, bound: float) -> None:
@@ -1557,14 +1984,18 @@ async def _abandon_update_window(handle: object, runtime: object, pair: str, bou
     1. the window CLOSES — the lock is released and the record's ``updating`` is
        cleared, so no admission is queued against a handover that is not coming
        and no surface keeps reading "updating";
-    2. the messages the window QUEUED are drained back IN, so they run here, on
-       the build the operator still has — the alternative is a receipt for a
-       successor that never boots;
+    2. the handle REMEMBERS the pair, so the automatic rung does not re-open the
+       same window on its next check and burn the bound again forever;
     3. the failure is PUBLISHED, on the record and as an incident row carrying
        ``types.UPDATE_FAILED_CAUSE``, which is what makes it reportable instead
-       of silent (the operator's "so that it can be reported as an issue");
-    4. the handle REMEMBERS the pair, so the automatic rung does not re-open the
-       same window on its next check and burn the bound again forever.
+       of silent (the operator's "so that it can be reported as an issue") —
+       BEFORE the queued messages come back in, for the reason
+       :func:`_keep_loaded_build` states: the re-admission can run real turns,
+       and a runtime that exits a tick after it lands would take the record's
+       account of the failure with it;
+    4. the messages the window QUEUED are drained back IN, so they run here, on
+       the build the operator still has — the alternative is a receipt for a
+       successor that never boots.
 
     The runtime is never killed here — that is the whole contract. A failed
     update leaves a working session on the build it loaded.
@@ -1951,22 +2382,35 @@ class _DrainProgress:
     measured against. Nothing here is advanced by the caller's own cadence, and
     that is what makes this a bound on the WORK rather than a second timeout: a
     runtime whose turn is stepping, whose lane is reporting, whose jobs are
-    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a
-    hold that is moving is never cut however long it runs.
+    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a hold
+    that is moving is never cut BY THIS CLOCK, however long it runs — the hold has a
+    second clock (``latched_at``, below) and that one is not moved by the work.
 
     ``abandoned`` is the drain's own record that its hold was ended by the bound —
     the runtime kept the build it loaded rather than being cut — and it is also the
     guard that keeps the give-up from running twice.
+
+    ``latched_at`` is the instant this clock was opened, i.e. the drain's first
+    tick, and it is deliberately NOT the movement clock: it advances only when the
+    drain object is new, so it measures the HOLD while ``moved_at`` measures the
+    work. It feeds :data:`types.BUILD_DRAIN_DWELL_S`, the bound that exists
+    precisely because the movement clock can be pushed forward forever by a lane
+    that keeps stepping (see that constant for the measurement). The first tick is
+    used rather than the latch's own instant because the reaper is what owns the
+    latch-to-tick gap (``REAP_CHECK_S``, quarter-second), and taking the clock the
+    runtime actually reads keeps every assertion in the suite on one number instead
+    of two that differ by up to a tick.
     """
 
     motion: "tuple[Any, ...]" = ()
     moved_at: float = 0.0
     abandoned: bool = False
+    latched_at: float = 0.0
 
     @classmethod
     def started(cls, handle: object, at: float) -> "_DrainProgress":
         """Open the clock on the drain's first tick, already sampled."""
-        return cls(motion=_work_motion(handle), moved_at=at)
+        return cls(motion=_work_motion(handle), moved_at=at, latched_at=at)
 
     def sample(self, handle: object, at: float) -> bool:
         """One observation. True when the work moved since the last one."""
@@ -1980,6 +2424,15 @@ class _DrainProgress:
     def stalled_s(self, at: float) -> float:
         """How long this drain's work has shown no movement, in seconds."""
         return at - self.moved_at
+
+    def dwell_s(self, at: float) -> float:
+        """How long this drain has been HELD, in seconds, movement or not.
+
+        The other half of the pair, and the one the movement clock cannot answer:
+        ``stalled_s`` is reset by anything the work reports, so a hold that keeps
+        reporting is unbounded by it (``types.BUILD_DRAIN_DWELL_S``).
+        """
+        return at - self.latched_at
 
 
 #: The handle of the runtime this process is currently running, for the stall
@@ -2015,7 +2468,36 @@ def _tool_batch_in_flight(session: object) -> bool:
     feeds a predicate that ends the process, so a state we cannot read must not be
     the thing that fires it, and a session with no context has nothing running.
     (The opposite direction is right for :func:`_work_motion`, whose docstring
-    argues it: that tuple decides when to stop WAITING.)
+    argues it: that tuple decides when to stop WAITING.) The scan itself is
+    :func:`_unanswered_tail_step`, which RAISES, so the callers that ask about
+    different processes can answer the one rule in opposite directions instead of
+    carrying a copy of it each.
+    """
+    try:
+        return _unanswered_tail_step(session)
+    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
+        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        return False
+
+
+def _unanswered_tail_step(session: object) -> bool:
+    """The scan behind :func:`_tool_batch_in_flight`, RAISING on a failed read.
+
+    ONE RULE, TWO DIRECTIONS, and which one applies is the CALLER's question
+    because the callers ask about different processes: this session's own tail
+    answers "no batch" when its read fails (:func:`_tool_batch_in_flight`, whose
+    docstring argues that direction), while a CHILD LANE's answers "in flight"
+    (:func:`_lane_step_in_flight`) — a lane whose state cannot be read is a lane
+    whose work cannot be ruled out, and the standing preference in this module is
+    to spare a process past a bound rather than cut one that is working.
+
+    SPLIT RATHER THAN DUPLICATED deliberately: this module has already paid once
+    for a hand-copied version of ``unanswered_tail_call_ids``' rule drifting from
+    it (agent review round 1 on :func:`_tool_batch_in_flight`), and a second copy
+    of the scan is how that gets paid for twice.
+
+    AN ABSENT CONTEXT IS NOT A FAILED READ: a session with no context has nothing
+    open, which is this function's ``False``. Only a RAISE means "unreadable".
     """
     context = getattr(session, "_context", None)
     messages = getattr(context, "messages", None)
@@ -2025,11 +2507,157 @@ def _tool_batch_in_flight(session: object) -> bool:
     # child's boot path, and ``protocol`` pulls the session graph in.
     from local_operator.session.protocol import unanswered_tail_call_ids
 
+    return bool(unanswered_tail_call_ids(messages))
+
+
+#: The class ``record.child`` holds, resolved on FIRST USE rather than at import
+#: time: this module is the child runtime's own boot path, and a lane read happens
+#: long after any ``Session`` exists, so by then the import is a ``sys.modules``
+#: lookup. Cached because ``_lane_step_in_flight`` runs once per live lane per
+#: sample, where a repeated import statement is a real cost.
+_LANE_CLASS: "type | None" = None
+
+
+def _lane_step_in_flight(lane: object) -> bool:
+    """Is one IN-PROCESS child lane executing a step of its own?
+
+    THE SAME QUESTION :func:`_step_in_flight` ASKS THE PARENT, one layer out, and
+    the parent's own terms cannot answer it: a lane's tool batch and a lane's
+    on-demand compaction are the LANE's state, not this session's. The shape it
+    closes is a manager whose own loop burns CPU walking the roster projection
+    while its lanes hold steps — no motion (nothing bumps
+    ``_subagent_roster_generation`` while a step is merely OPEN), nothing in
+    flight by the parent's own reading, CPU advancing — so all three progress legs
+    held and the process was cut while it was working (``stall_watchdog`` names
+    that shape and the O(N^2) walk behind it).
+
+    WHY THE LANE'S PROVIDER REQUEST IS NOT READ HERE: it does not need to be.
+    Every in-process lane takes its stream from ``SessionStreamFn.fork``
+    (``harness.subagent._construct_child_session``), the forks share ONE counter,
+    and :func:`_step_in_flight` already reads that counter at O(1) for the whole
+    tree. Reading each lane's own counter would read the same scalar N times.
+    What no counter can express is a step OPEN with no provider call outstanding —
+    a tool batch whose results have not landed, a compaction rewriting history —
+    and that is exactly and only what this adds.
+
+    THE NARROW QUESTION IS DELIBERATE. ``lane._is_streaming`` would be cheaper
+    still and is refused: it is true for the whole of a lane's turn, so one lane
+    parked in a gate, or in a provider call that never returns, would spare its
+    parent's spin for as long as it lived — the maximally-inclusive trap
+    :func:`_step_in_flight` refuses for ``is_busy``. ITS OWN RESIDUAL IS STATED in
+    ``stall_watchdog``: a step that never CLOSES (a wedged in-process tool, a hung
+    compaction) holds this answer "in flight" for the life of the lane, which is
+    the same property reached through the narrow question.
+
+    FAIL CLOSED ON A SHAPE IT CANNOT READ, and it is stated rather than implied
+    because the alternative is silent. THE GATE IS AN ``isinstance``, ON THE CLASS,
+    and what it excludes is precise: any object on ``record.child`` that is not a
+    ``Session`` — a test double, a lane class built on another base — is HELD rather
+    than judged idle, with the hold announced at WARNING. A ``Session`` SUBCLASS
+    passes that gate and is then judged by its own flags and its tail, so a subclass
+    whose ``_compacting`` reads a real ``False`` with no tail to scan is spent as
+    "not in flight" — the same answer a settled lane gives. The flag itself is read
+    as plain truthiness, not as a ``bool``. (Both clauses were stated more widely
+    than the code does before agent review round 2, MINOR 1; nothing reachable
+    changes, because ``Session`` sets ``_compacting`` from ``True``/``False`` only and
+    ``attach`` is always handed a ``Session``.)
+
+    Plain truthiness was the defect (agent review round 1, MINOR 3), in BOTH of its
+    directions: a ``MagicMock``'s attribute
+    is truthy for the life of the process, so it answered "in flight" forever with
+    nothing recording that the read never worked, and a shape whose attribute read a
+    real ``False`` while having no tail to scan was spent as "not in flight" — the
+    same answer a settled lane gives. The consequence for the probe is stated so a
+    reader does not have to infer it: while such a record is attached,
+    ``_step_in_flight`` answers "in flight" at EVERY sample, so the progress leg
+    DEFERS — it never closes a window (the three outcomes are named in
+    ``stall_watchdog``) — and the liveness leg is the only one left that can end the
+    run, on a frozen frame. That is this module's standing preference (spare rather
+    than cut), and the warning is what keeps the deferral from being silent.
+
+    UNREADABLE HOLDS, the opposite direction from the parent's own tail, and
+    :func:`_unanswered_tail_step` states why the two differ.
+    """
     try:
-        return bool(unanswered_tail_call_ids(messages))
-    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
-        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        global _LANE_CLASS
+        lane_class = _LANE_CLASS
+        if lane_class is None:
+            from local_operator.session.session import Session
+
+            lane_class = _LANE_CLASS = Session
+        if not isinstance(lane, lane_class):
+            logger.warning(
+                "stall watchdog: a child lane of unrecognised shape (%s) cannot be read; "
+                "holding the process rather than judging it idle",
+                type(lane).__name__,
+            )
+            return True
+        if getattr(lane, "_compacting", False):
+            return True
+        return _unanswered_tail_step(lane)
+    except Exception:  # noqa: BLE001 — an unreadable lane must not authorise a cut
+        logger.debug("stall watchdog: could not read a child lane's step", exc_info=True)
+        return True
+
+
+def _child_lanes_in_flight(session: object) -> bool:
+    """Is any LIVE in-process child lane of this session executing a step?
+
+    WHERE THE LANES COME FROM, and the private read is on purpose.
+    ``SubagentComms`` keeps one record per lane and holds the live child session
+    on ``record.child`` (set by ``attach``, cleared by ``detach``), and it
+    publishes no reader for those sessions: ``roster``/``nodes`` are DISPLAY
+    projections that sort, settle and describe every record, which is the
+    O(N^2) walk this read must not pay per sample. The public
+    ``session.subagent_comms`` property is refused for a sharper reason — it is
+    MINTED ON FIRST USE and the mint SUBSCRIBES a frontend projector — so reading
+    it from the sampler's foreign thread could construct comms state as a side
+    effect of a diagnostic. ``_subagent_comms`` is the side-effect-free
+    attribute, and ``serving.py`` reads it the same way.
+
+    ONE FLAT SCAN IS THE WHOLE TREE, so this does not recurse: a lane's own lane
+    is constructed against the comms instance it inherited from the root
+    (``harness.subagent._construct_child_session`` hands the PARENT's
+    ``subagent_comms`` down), so every lane in the process is a record on this one
+    instance, with the lineage on ``parent_job_id``.
+
+    FAILS CLOSED, and the asymmetry with this session's own tail is deliberate. A
+    missing roster is the ordinary case — a session that never delegated, or a
+    reduced host/double — and answers ``False``. A roster that EXISTS but cannot
+    be read is a different fact and answers ``True``: the lanes are known to be
+    there, so "I could not read them" must not be spent as "no lane holds work".
+    The values are copied into a tuple before iterating because the event loop
+    mutates this map while the sampler looks at it.
+
+    COST, measured rather than assumed, because the module this feeds once refused
+    this read as "not cheap" before there was a number for it: the cost table at
+    N = 0/1/8/64/256 live lanes is in ``stall_watchdog``'s docstring (0.75-1.3 µs of
+    CPU per lane, ~1.2 ms per minute at the width measured on this fleet), and the
+    structural half of the claim is pinned in
+    ``tests/unit/session/runtime/test_child_lane_progress.py``. Two facts keep the
+    walk bounded: each live lane is asked once per sample, and a lane holding a
+    step is answered by the FIRST message the tail scan reaches, so the in-flight
+    case is the CHEAP one.
+
+    N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``. ``_evict_overflow`` evicts only
+    records with no live child and no running job, so the cap bounds the map's
+    evictable tail rather than lane concurrency (300 attached lanes measured 300
+    records). The other half of the cost is the LANE's own tail length, because the
+    scan is linear in the rows it walks: see ``stall_watchdog``'s cost section,
+    which states that dependence with its figures rather than quoting one number.
+    """
+    try:
+        records = getattr(getattr(session, "_subagent_comms", None), "_records", None)
+        if not records:
+            return False
+        for record in tuple(records.values()):
+            lane = getattr(record, "child", None)
+            if lane is not None and _lane_step_in_flight(lane):
+                return True
         return False
+    except Exception:  # noqa: BLE001 — an unreadable roster must not fire a bound
+        logger.debug("stall watchdog: could not read the child-lane roster", exc_info=True)
+        return True
 
 
 def _step_in_flight(handle: object) -> bool:
@@ -2042,21 +2670,45 @@ def _step_in_flight(handle: object) -> bool:
     incident this leg exists for had four running lanes that had produced
     nothing for seven minutes. Reusing ``is_busy`` here would have spared the
     very state the leg is for, so what it asks is narrower and about THIS
-    process: is a tool batch running, or a compaction rewriting history. Both
-    burn CPU with no transcript movement while they last, which is exactly what
-    the other two legs would otherwise read as a spin.
+    process: is a tool batch running, a compaction rewriting history, a
+    delegated child stream awaiting its provider, or an in-process CHILD LANE
+    holding any of those of its own. The stream's counter is child-only, so this
+    does not mistake the manager's own provider request for child work. If
+    reading the counter, the tail or the lane roster fails, preserve the process
+    rather than letting an unreadable active-work signal trigger the watchdog.
 
-    A subagent lane's OWN in-process tool is not covered here, and the module
-    docstring says so rather than leaving a reader to infer coverage. A lane that
-    is stepping is covered from the other end: its step boundaries move
-    ``_work_motion``'s roster generation, so the NO MOTION leg fails first.
+    WHAT STILL IS NOT REPRESENTED, named so the next reader does not assume
+    coverage: a step that is open in no sense this module can read — a lane (or
+    the manager) burning CPU inside one synchronous call, with no tool batch
+    open, no compaction and no provider request outstanding. For a LANE that is
+    also invisible to the liveness leg's frame observation, which watches only
+    the two threads that beat (the planes' own loops), so such a lane is cut with
+    its parent. Closing that means reading a lane's frames, which is a different
+    change from this one. THE MIRROR CASE, named in ``stall_watchdog``, is the
+    price of this widening: a lane's step that never CLOSES makes this leg defer
+    for as long as the lane lives, so a reader who finds a runtime alive past its
+    bound with a lane holding a step is looking at the one leg that cannot see it
+    and should stop the process by hand.
     """
     session = getattr(handle, "_session", None)
     if session is None:
         return True
     if getattr(session, "_compacting", False):
         return True
-    return _tool_batch_in_flight(session)
+    try:
+        stream = getattr(session, "_stream_fn", None)
+        if bool(getattr(stream, "child_model_requests_in_flight", False)):
+            return True
+    except Exception:  # noqa: BLE001 — an unreadable child-work signal must not fire a bound
+        logger.debug("stall watchdog: could not read child provider request state", exc_info=True)
+        return True
+    # THE PARENT'S OWN BATCH IS TESTED BEFORE THE LANES FOR COST, never for
+    # precedence: it is one scan against the roster's N, and its failure
+    # direction (``False`` on an unreadable context) must not be allowed to mask
+    # a lane that holds a step, so it can only be an early return on a TRUE.
+    if _tool_batch_in_flight(session):
+        return True
+    return _child_lanes_in_flight(session)
 
 
 def _progress_probe() -> "tuple[object, bool]":
@@ -2368,18 +3020,31 @@ async def _drain_for(
     idle instant arrives. Nothing in flight is aborted: the wait is bounded by
     the work.
 
-    AND ONLY BY THE WORK THAT IS STILL MOVING — see :func:`_abandon_move`, the
-    one rung here that draws a bound at all. It reads no clock of the drain: the
-    clock it reads is reset by every observable sign that the work advanced
-    (:func:`_work_motion`), so it cannot fire on a turn that is merely long, and
-    what it bounds is not the hold but STALENESS. The state it exists for has no
-    other exit: ``is_busy()`` counts a gate parked on a user and a lane parked
-    behind a child process, both of which can hold for hours, and a drain that
-    holds forever takes its session with it (measured: 2 h and still refusing,
+    AND ONLY BY THE WORK, OR BY THE HOLD ITSELF — see :func:`_abandon_move`, the
+    one rung here that draws a bound at all, and it draws two. The FIRST is the
+    staleness bound (:data:`types.BUILD_DRAIN_PROGRESS_S`): it reads no clock of
+    the drain — the clock it reads is reset by every observable sign that the work
+    advanced (:func:`_work_motion`), so it cannot fire on a turn that is merely
+    long, and what it bounds is not the hold but STALENESS. The state it exists for
+    has no other exit: ``is_busy()`` counts a gate parked on a user and a lane
+    parked behind a child process, both of which can hold for hours, and a drain
+    that holds forever takes its session with it (measured: 2 h and still refusing,
     ``state=wedged``, three lanes stalled behind a 23-minute bash child). And a
     stale hold that cannot be waited out is now RECORDED rather than cut: the
     bound abandons the handover, publishes the failure, and leaves the session
     running on the build it loaded.
+
+    THE SECOND BOUND IS THE DWELL, and it exists because the first one cannot be
+    reached by the state that wedged this host: ``_work_motion`` is reset by the
+    very reports a stepping lane makes, so work that KEEPS reporting bounds nothing
+    at all and the drain holds for the runtime's whole life (measured: EIGHT HOURS
+    on the reporting session, and the staleness bound only fired once the lanes
+    stopped). The dwell
+    (:data:`types.BUILD_DRAIN_DWELL_S`) is measured from the drain's first tick and
+    ignores the work entirely, so it is the arm that ends a handover which is
+    progressing and merely long; it is checked SECOND, because an expired staleness
+    clock is the sharper observation of the two and 15 min is inside 30, so a silent
+    hold never reaches it.
 
     The viewer term of :func:`_should_exit` is deliberately absent, exactly as
     it is absent from ``may_refresh``. The ``retiring`` frame went out at drain
@@ -2398,9 +3063,9 @@ async def _drain_for(
     waits for hours of work, and a reason that names the build pair of the
     latch asserts a transition the install left long ago.
 
-    ``now`` is the caller's clock, injectable for the one test that has to cross
-    a fifteen-minute bound without waiting it out — the same convention
-    ``_BuildWatch.poll`` uses.
+    ``now`` is the caller's clock, injectable for the tests that have to cross a
+    fifteen-minute bound — or the half-hour dwell above it — without waiting it
+    out: the same convention ``_BuildWatch.poll`` uses.
     """
     at = time.monotonic() if now is None else now
     if drain.progress is None:
@@ -2416,6 +3081,20 @@ async def _drain_for(
     if not _idle_for_refresh(handle):
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
             await _abandon_move(drain, handle, runtime, at=at)
+            return False
+        # THE DWELL, and it is the SECOND question because it is the WEAKER
+        # observation: an expired staleness clock names what the runtime saw the
+        # work NOT do, while an expired dwell says only that the hold is old. A
+        # hold that has been SILENT FOR the staleness bound is therefore always
+        # diagnosed by the arm above (15 min is inside 30), and what reaches this
+        # line is every other hold: a handover whose work keeps reporting, AND one
+        # whose work went quiet inside the staleness bound and is merely younger
+        # than 15 min of silence — which is why nothing here says anything about
+        # the work (see the log line below). Ordered, not folded into one
+        # comparison, so the log and the published bound say which of the two the
+        # runtime actually ran out of.
+        if drain.progress.dwell_s(at) >= BUILD_DRAIN_DWELL_S:
+            await _abandon_move(drain, handle, runtime, at=at, dwell=True)
             return False
         return False
     begin_retire = getattr(handle, "begin_retire", None)
@@ -2435,8 +3114,23 @@ async def _abandon_move(
     runtime: object,
     *,
     at: float,
+    dwell: bool = False,
 ) -> None:
     """The drain could not reach idle: ABANDON the move and KEEP SERVING.
+
+    TWO BOUNDS REACH THIS, and which one did is a keyword rather than a re-read of
+    the clock, because the two say different things to a reader and the log line and
+    the PUBLISHED BOUND are the only places that can say them:
+
+    * the STALENESS bound (:data:`types.BUILD_DRAIN_PROGRESS_S`), the default — the
+      work has reported nothing for fifteen minutes, so what the runtime saw is
+      stated as silence;
+    * the DWELL bound (``dwell=True``, :data:`types.BUILD_DRAIN_DWELL_S`) — the drain
+      has been HELD for half an hour with work STILL IN FLIGHT. Nothing is claimed
+      about that work here, and that is deliberate: the dwell decides on the hold
+      alone, so it reaches a hold whose lanes keep reporting AND one that went quiet
+      less than the staleness bound ago — the state a lane that steps can hold for as
+      long as it likes, and the one the eight-hour measurement came from.
 
     Replaces a force-cut that ended the runtime and its turn together after
     :data:`types.BUILD_DRAIN_PROGRESS_S` of no movement from the work in flight.
@@ -2479,6 +3173,18 @@ async def _abandon_move(
     is already latched as a commitment (the record still says it is leaving for the
     build on disk when its turn ends, which is still true).
 
+    THAT RETRY IS ALSO WHAT MAKES THE DWELL ARM SAFE TO FIRE EARLY, which is the
+    half a reader of the dwell bound needs: on the STALENESS arm the work has stopped
+    reporting, so releasing the latch cannot make the hold longer; on the DWELL arm
+    the work is still going, and a released latch ADMITS MORE WORK — so a dwell that
+    fires on a handover which would have converged in the next minute delays that
+    handover rather than losing it. Nothing is discarded by doing so: the departure
+    is retried at every tick, so it lands at the first idle instant the session
+    reaches, and the newer build is asked about again rather than forgotten. This is
+    the trade the bound exists to make — an operator who can use the session now,
+    and a build move that happens later, in place of a session nobody can write to
+    for as long as a lane keeps stepping.
+
     THE RECORD KEEPS ``LEAVING_FOR_BUILD`` THROUGH THE ABANDON, and that is deliberate
     rather than a leftover (agent review round 1, MINOR-2; design round 1, D4 read the
     same pair from the rendered frame): the COMMITMENT is what survives — the drain
@@ -2502,31 +3208,65 @@ async def _abandon_move(
     truth (``update_failed`` plus the build still running), which is the same split
     the update window's abandon already relies on.
     """
-    stalled = drain.progress.stalled_s(at) if drain.progress is not None else BUILD_DRAIN_PROGRESS_S
-    if drain.progress is not None:
+    progress = drain.progress
+    if progress is not None:
         # ONCE PER DRAIN, and the flag is the guard rather than a caller's check:
         # the reaper ticks every ``REAP_CHECK_S`` and a released latch does not
         # stop ``_drain_for`` being called with the SAME drain object, so without
         # this a runtime that cannot reach idle would publish its failure four
         # times a minute.
-        if drain.progress.abandoned:
+        if progress.abandoned:
             return
-        drain.progress.abandoned = True
-    logger.warning(
-        "session runtime: the build drain for %s held with no movement for %.0fs "
-        "(bound %.0fs); ABANDONING the handover and keeping %s",
-        drain.reason,
-        stalled,
-        BUILD_DRAIN_PROGRESS_S,
-        _loaded_build_label(runtime),
-    )
+        progress.abandoned = True
+    if dwell:
+        # The dwell arm's own two numbers. ``at`` is the caller's instant, so the
+        # spent figure is read from the same clock the bound was compared against.
+        spent = progress.dwell_s(at) if progress is not None else BUILD_DRAIN_DWELL_S
+        bound = BUILD_DRAIN_DWELL_S
+        # A WARNING OF ITS OWN, because the two arms have to be separable from a
+        # log alone: this one fired while the runtime was still observing progress,
+        # so a reader must not be told the work went quiet (it did not) and must be
+        # told the build pair the abandoned handover was for, or the line cannot be
+        # matched to the update it abandoned.
+        logger.warning(
+            "session runtime: the build drain for %s was latched for %.0fs with work "
+            "still in flight (dwell bound %.0fs, handover to %s, pid %d); ABANDONING the "
+            "handover, releasing the latch and keeping %s — the work continues and this "
+            "runtime keeps serving it",
+            drain.reason,
+            spent,
+            bound,
+            drain.to or "<unnamed>",
+            # THE PID, as every latch and exit line in this module carries it: this is
+            # the line an operator greps for in a shared, rotated runtime log, where
+            # session ids repeat across builds and a bare pair does not identify the
+            # process whose drain was given up (QA round 1, Q-3).
+            os.getpid(),
+            _loaded_build_label(runtime),
+        )
+    else:
+        spent = progress.stalled_s(at) if progress is not None else BUILD_DRAIN_PROGRESS_S
+        bound = BUILD_DRAIN_PROGRESS_S
+        logger.warning(
+            "session runtime: the build drain for %s held with no movement for %.0fs "
+            "(bound %.0fs, pid %d); ABANDONING the handover and keeping %s",
+            drain.reason,
+            spent,
+            bound,
+            # THE PID, as the dwell arm's line carries it and as every latch and exit line
+            # in this module does: this is the line an operator greps for in a shared,
+            # rotated runtime log, and the arm that fires FIRST of the two abandon bounds
+            # was the one a pid-filtered scan could not find (QA round 1, Q-5).
+            os.getpid(),
+            _loaded_build_label(runtime),
+        )
     end = getattr(handle, "end_drain", None)
     if callable(end):
         try:
             end()
         except Exception:  # noqa: BLE001 — a failed release must not stop the report
             logger.debug("could not release the drain latch", exc_info=True)
-    await _keep_loaded_build(handle, runtime, drain.to, BUILD_DRAIN_PROGRESS_S)
+    await _keep_loaded_build(handle, runtime, drain.to, bound)
 
 
 async def _hand_wakes_to_successor(handle: object) -> int:
@@ -3564,6 +4304,19 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # ``_progress_probe``.
     global _live_handle
     _live_handle = handle
+    # AND THE BOUND MOVES WITH IT: from here the runtime is one something can judge, so
+    # the stall bound stops being the BOOT bound measured from the entry point and
+    # becomes the steady one measured from NOW, with BOTH planes stamped at this
+    # instant. The two halves are one mechanism — the boot bound above buys this line
+    # the time to arrive, and this line is what makes the steady bound mean what it was
+    # sized for — and the placement is the same boundary the lines below already draw:
+    # everything before the handle is published is boot (the probe answers "judge
+    # nothing" there), everything after it is a running runtime. It is NOT reached by the
+    # paths that return above — a lost lease, a failed construction — which is right:
+    # those never engaged, so a fire in their window still carries the boot bound, and
+    # the boot bound is the bound that covers a boot. Every in-process host reaches it
+    # too, where it is a documented no-op because ``arm`` never ran.
+    stall_watchdog.engage()
     _bind_boot_instrumentation(handle, session_id=resume or "", cwd=cwd)
 
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the

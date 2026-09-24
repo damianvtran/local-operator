@@ -62,6 +62,44 @@ schema objects initialize in one transaction; readers of a positively identified
 empty, not-yet-initialized database see no published completion. Corrupt bytes or
 missing tables in an established schema remain errors, never a false read state.
 
+**A publication that lost to a busy store is retried IN THIS PROCESS, not only at
+the next boot.** This store keeps SQLite's default rollback journal, so a reader
+holds a lock that blocks a writer's `COMMIT`, and under the machine-wide
+contention of many concurrent sessions a `publish` can exhaust its bounded retry
+budget and be DEFERRED — the outcome is durable in the transcript journal from
+before the publish, which is what makes deferring honest. What used to follow was
+nothing: the next boot's `bootstrap_transcript` re-imports the journal, and a
+session that finishes a turn and then sits idle — which is what a finished
+session is — never boots again. The completion therefore never reached the store,
+and since that row is what raises the notification and draws the sidebar's
+unread mark, both stayed silent for a turn that had in fact completed. The owning
+session now runs a bounded REPUBLISH LADDER (four rungs, ~86 s of exposure) that
+republishes the journal's LATEST marker, and an attached viewer FIRES THE PARKED
+RUNG early on its next tick (the tick itself never touches the store, so the
+attempt count stays the ladder's four), so the ordinary repair lands within about
+a second of the store clearing.
+
+**A republish of a token the store ALREADY holds is a no-op; a republish of a
+DEFERRED one is a new row with a new `sequence`.** `publish` is
+`INSERT OR IGNORE` keyed on the token, so a token already in `completions`
+inserts nothing — no second row, no second `sequence`, no duplicate banner
+(`claim_delivery` dedupes on that sequence). But a DEFERRED completion is one
+that never reached the store, so its first successful insert IS a new row taking
+a fresh `sequence` — which matters, because `sequence` is INSERT order and
+`state_many` reports `MAX(sequence)` as the conversation's newest completion. A
+rung that read the journal and then lost the store to a NEWER turn of the same
+session would therefore insert the OLDER completion on top, leaving the newer one
+never unread again once a client acknowledged the highest sequence. The session
+serialises its own journal-read-then-insert against its own turn-end publication
+with one lock, so a newer completion cannot be outranked by an older one; neither
+`receipts` nor `deliveries` is touched either way, so an already-read completion
+is never revived.
+
+If the whole ladder is exhausted (and no newer marker arrived while its last rung
+was trying, which would restart the budget) the latch is cleared and the journal
+left to the next boot, as it was before, said once in the log rather than once per
+poll.
+
 ## Read APIs and transports
 
 `AttentionStore.state_many(conversations)` returns a consistent map keyed by

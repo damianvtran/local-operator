@@ -880,6 +880,28 @@ must be able to say so: `503` with `{"detail": {"code": "runtime_unreachable",
 from a `503` that is the server not answering at all. Clients key on the `code`; the sentence rides along
 for the ones that do not.
 
+A control call against an owner that IS reachable but does not answer inside
+the desktop control envelope (`DESKTOP_CONTROL_ATTACH_S`, 3 s over the whole
+dial + sync) is answered `503` with `{"detail": {"code": "runtime_busy",
+"message": <the same sentence>, "retryable": true, "retry_after_ms": 2000}}` and
+a `Retry-After: 2` header, instead of spending 15 s on the welcome and answering
+`runtime_unreachable`. `runtime_busy` means the runtime is alive and busy (a loop
+mid-turn, a long synchronous step): resending the SAME request id is safe
+(admissions are at-most-once by the receipt journal) and will very likely
+succeed shortly. `runtime_unreachable` keeps its meaning — nothing could be
+dialled — and carries no retry fields. Every field is additive: a client that
+predates them reads the unchanged sentence.
+
+The 3 s is PER CALL, and it starts once the call holds the facade's bind lock.
+Control calls to one conversation still dial one at a time, so a second call
+issued while the first is waiting on the same silent owner is refused after
+about twice the envelope (measured: 3,034 ms then 6,046 ms, both
+`runtime_busy`), and N concurrent calls stack to about N × 3 s. Reads are not
+part of this queue. `retry_after_ms` (2 s) is deliberately shorter than the
+envelope: it is the pause before the next attempt, and the retry spends its own
+3 s waiting for the owner, so refuse + pause cycles keep three attempts inside
+a 20 s client deadline.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -929,9 +951,30 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    Because nothing is cut, the snapshot can no longer report
    `cursor_missing: true` — an evicted or replaced cursor is not a state this
    frame can be in. An EMPTY page still means "reconcile through `/history`":
-   that is now exactly the case where the paired state carries no `history_cursor`
-   at all (no frontend refresh or checkpoint yet), and readers depend on that
-   signal, so it is preserved deliberately rather than inferred.
+   that is now exactly the case where a LIVE owner's paired state carries no
+   `history_cursor` at all (no frontend refresh or checkpoint yet), and readers
+   depend on that signal, so it is preserved deliberately rather than inferred.
+   A COLD frame (`cold: true`) carries the filled page too — the same tail
+   `/history` serves — so first paint of a conversation with no live runtime
+   needs no second round trip. A non-empty page beside a `cold_reason` is how a
+   renderer knows this backend fills it and may skip the duplicate `/history`.
+   Key that on the PRESENCE of `cold_reason`, never on its value. The FIRST
+   cold frame for a live-but-busy owner usually carries `cold_reason:
+   "no-runtime"`, not `owner-silent`: the attempt that classifies the owner
+   queues behind any control dial on the same facade (4/4 frames measured while
+   a `/warm` or send was in flight), and the frame goes out before it records
+   the classification. `no-runtime` beside `attaching: true` therefore means
+   "not classified yet", not "no pid holds this conversation". The
+   `frontend.replace` that follows carries the classified token or `cold:
+   false`. A cold snapshot's `cursor_missing` is always `false`: the page is
+   the unanchored tail (no `before_id`, no `through_id`), and only an anchored
+   read can find its cursor missing. This holds whether the page is empty or
+   not.
+   A read waits at most `READ_FIRST_FRAME_GRACE_S` (50 ms) for its attach to an
+   existing owner; a busy owner is painted cold with `attaching: true` and the
+   attach carries on behind the frame, ending in a `frontend.replace` whose
+   `cold` flag is the verdict (`false` once it lands, or the classified
+   `cold_reason` if it does not).
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
@@ -1111,22 +1154,25 @@ build 200 cold facades and 200 SQLite poll loops, and would take the
 
 The envelope's SHAPE is the session stream's (`epoch`, `seq`, `type`, `payload`,
 plus `session_id` on the types that concern one session) so the relay needs no
-new parser. `session_id` is absent on `open` and `catalogue`: the feed is not a
-session, and a fabricated id would make `observe(sessionId, frame)` look like it
-had one to attribute a catalogue event to.
+new parser. `session_id` is absent on `open`, `catalogue` and `authoring`: the
+feed is not a session, and a fabricated id would make
+`observe(sessionId, frame)` look like it had one to attribute a catalogue event
+to.
 
 ```jsonc
 {"epoch":"…","seq":12,"type":"open",
  "payload":{"subscription_id":"…","heartbeat_seconds":15,"lease_seconds":45,
             "watch_ttl_seconds":45,"catalogue_revision":98123,
+            "authoring_revision":7,
             "attention":{"session/<id>":{ /* AttentionState */ }}}}
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
-{"epoch":"…","seq":16,"type":"session_status","session_id":"<12 hex>",
+{"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
+{"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
-{"epoch":"…","seq":17,"type":"heartbeat","payload":{"ts":1699999999.5}}
-{"epoch":"…","seq":18,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
+{"epoch":"…","seq":18,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
 - **`notification.payload` is the per-session payload**, built by the SAME
@@ -1241,6 +1287,37 @@ had one to attribute a catalogue event to.
   fleet starting, a batch finishing — costs one refetch, not N: the causes
   collapse into a single bump per tick and anything arriving later in the same
   tick is carried by the next one (~100 ms).
+- **`authoring`** is the same shape for the two AUTHORING registries —
+  `agents/<id>/agent.yml` (the profiles and roles the `agent` tool writes) and
+  `teams/<id>/team.yml` — on the same 1 s cadence, with the same monotone
+  `revision` that `open` reports as `authoring_revision`. It exists because
+  nothing in this feed used to mention either: a session could create a team or a
+  profile and the sidebar's Teams/Agents lists kept showing the state they were
+  mounted with until a refresh or a tab switch re-mounted them. As with
+  `catalogue`, the frame says only "your lists are stale" — the client's existing
+  fetch is the answer — and at most one frame is published per tick, so four
+  profiles authored by one plan cost one refetch.
+
+  **Its trigger is the CONTENT of the rows, projected onto the lines a user
+  AUTHORED.** The token is the row name set of each registry plus a `crc32` of
+  each row's authored lines; the per-turn keys an ordinary turn rewrites in place
+  (`last_message`, `last_message_datetime`, `current_working_directory`) are
+  dropped before the digest. That projection is load-bearing rather than tidy:
+  `update_agent_state` dumps the whole row to `agent.yml` on every turn, so a
+  digest of the raw bytes would publish on every turn of every chat and refetch
+  the sidebar's two lists once a turn — the exact defect this channel removes.
+  Pinned both ways in `tests/unit/server/test_desktop_feed.py`: a turn that
+  rewrites `agent.yml`, and a `save_agent_state` that rewrites `system_prompt.md`
+  with identical bytes, must publish NOTHING; an edit to what a row SAYS must
+  publish exactly one frame. A profile's `system_prompt.md` — where the `agent`
+  tool keeps its instructions — is deliberately not a term, since it is not what
+  either list renders.
+
+  **A same-size in-place edit whose `mtime_ns` does not move is missed** — the
+  per-row term is guarded by a stat, exactly like the catalogue token, and the
+  refetch on window focus and on mount is the backstop for both. What a row's
+  file being READ costs is bounded the same way: a probe re-reads a row only when
+  that row's stat moved.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
@@ -1288,6 +1365,24 @@ app's first `GET /v1/desktop/sessions` creates `run/mobile` 0700 on a machine th
 has never run a session. That is pre-existing at the base commit and unchanged
 here, and it is why an absent run directory is not a statement that no runtime has
 ever published.
+
+### The cost of the authoring probe, stated rather than discovered
+
+The `authoring` token is the one term on this feed whose cost is **O(profiles +
+teams)**, and saying so here is deliberate: a reader who finds an O(n) probe
+unstated will read it as a regression of the four-stat tick and "fix" it by
+deleting the per-row term — re-opening the defect the channel closes.
+
+The shape of the cost is one `readdir` per registry plus **one `os.stat` per
+row**; a row's metadata file is READ only when that row's stat moved, so an idle
+probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
+is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
+its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
+on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
+other probe here. The projection is a line filter rather than a YAML parse for
+the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,
+which is not affordable once a second beside the doorbell.
 
 ### The burst ceiling
 
@@ -1437,6 +1532,22 @@ eligible.
    question, and using it to suppress meant "this machine can banner" read as "a
    human is reading X": with the panel on X and the window behind another app,
    every OS surface went quiet while nobody was looking.
+
+   This rung reads ATTENTION ("a person is looking right now") and must keep
+   reading it. The runtime also publishes `RuntimeServer.attached_surfaces()` —
+   "an interface could PRESENT a question", with no focus in it and the desktop
+   clause reduced to the LEASE ("a pane holds this conversation"), which is what
+   keeps that answer from moving when a window is raised — and that is a
+   different question serving
+   different consumers: the model's `<interactivity>` block and the gate's park
+   decision, never suppression. Routing on it here would silence the banner for
+   a conversation nobody is looking at, which is what this rung exists to catch
+   (see `docs/design/attached-interface-signal.md`).
+
+   A record whose `session_id` is EMPTY is absence of evidence, not evidence
+   against the session: the publisher blanks the field whenever it cannot vouch
+   for which conversation the window shows, so `_desktop_visible` falls through
+   to the connection's own per-session flag rather than denying.
 2. **A notify-capable desktop app** on this host claims the completion kind —
    the feed above composes it, so the runtime and the TUI stay silent.
 3. **A TUI is running anywhere on this machine** — its 1 s background announcer

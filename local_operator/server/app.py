@@ -26,7 +26,6 @@ from local_operator import buildwatch
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.console import VerbosityLevel
-from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
@@ -153,7 +152,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Set up the subprocess environment for accessing shell commands
     setup_cross_platform_environment()
 
-    app.state.credential_manager = CredentialManager.readonly(config_dir=config_dir)
     app.state.config_manager = ConfigManager(config_dir=config_dir)
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
@@ -169,7 +167,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler_service = SchedulerService(
         agent_registry=app.state.agent_registry,
         config_manager=app.state.config_manager,
-        credential_manager=app.state.credential_manager,
         env_config=app.state.env_config,
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
@@ -362,7 +359,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.desktop_receipts = None
         await app.state.scheduler_service.shutdown()
 
-        app.state.credential_manager = None
         app.state.config_manager = None
         app.state.agent_registry = None
         app.state.job_manager = None

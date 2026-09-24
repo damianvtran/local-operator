@@ -104,6 +104,7 @@ coverage, where under-masking is still a leak and over-masking is still a defect
 
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, replace
 from typing import (
@@ -1022,8 +1023,8 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     if name.startswith("_") and re.fullmatch(r"[a-z]+(?:-[a-z]+)+", value):
         return True
     # A CLASS or TYPE name is a reference, whatever the name beside it says:
-    # ``refresh_token: RefreshFn | None = None``, ``_credentials:
-    # CredentialManager``, ``reasoning_tokens: SafeCount``, ``refresh_token:
+    # ``refresh_token: RefreshFn | None = None``, ``_store:
+    # AuthStore``, ``reasoning_tokens: SafeCount``, ``refresh_token:
     # SecretStr``. CamelCase and single-capital identifiers are how a TYPE is
     # spelled; a credential value is lowercase or random, and the mixed-case
     # secrets that do exist carry a symbol (``wJalrXUtnFEMI/K7MDENG``).
@@ -1272,42 +1273,129 @@ _ENV_NAME_SHAPED = re.compile(r"[A-Z][A-Z0-9_]*")
 #: :func:`_is_a_credential_flags_argument`.
 _ARGUMENT_BOUNDARIES = frozenset(" \t\r\n|;&")
 
+#: The flag names that carry a credential, in ONE place. Three readers depend
+#: on this vocabulary — the ``cli-credential-flag`` shape's own pattern, the
+#: flag-before-an-argument check and the ``--flag=VALUE`` check — and three
+#: copies of it drift, so a spelling added to one and not the others is a hole
+#: nobody is looking at.
+_CREDENTIAL_FLAG_WORDS = (
+    r"(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
+    r"client[-_]?secret|auth[-_]?token|access[-_]?token)"
+)
+
 #: A credential FLAG immediately before the argument under test, built from the flag
 #: rule's own vocabulary rather than retyped, in either separator spelling. The
 #: joined spelling is deliberately absent: it puts the whole argument inside the flag
 #: token, so an assignment can never begin inside it.
-_CLI_CREDENTIAL_FLAG_BEFORE = re.compile(
-    r"(?:^|[\s|;&])(?i:--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
-    r"client[-_]?secret|auth[-_]?token|access[-_]?token))\s+$"
-)
+_CLI_CREDENTIAL_FLAG_BEFORE = re.compile(r"(?:^|[\s|;&])(?i:--" + _CREDENTIAL_FLAG_WORDS + r")\s+$")
+
+#: The same flag read as an ASSIGNMENT's NAME. ``--secret=NAME`` binds the flag to
+#: its argument with ``=``, so the assignment rules read ``--secret`` as the name
+#: and the store's entry as the value; recognising the flag there is what gives the
+#: ``=`` spelling the verdict the space spelling gets from
+#: :func:`_flag_value_guard`.
+_CLI_CREDENTIAL_FLAG_NAME = re.compile(r"(?i)^--" + _CREDENTIAL_FLAG_WORDS + r"$")
+
+
+def _is_a_name_in_the_store_grammar(token: str) -> bool:
+    """Whether ``token`` is spelled the way a stored secret's NAME is spelled.
+
+    Caps, digits and underscores, with **at least one underscore**. That is the spelling
+    :func:`local_operator.variables.normalize_credential_key` collapses a MULTI-WORD
+    operator-typed key to — ``github token``, ``github-token`` and ``GITHUB_TOKEN`` are
+    one entry named ``GITHUB_TOKEN`` — and the spelling ``lop secret run`` exports into a
+    child's environment.
+
+    **A ONE-WORD store name is left masked, and that residual is stated rather than
+    implied** (agent review R1-4). ``normalize_credential_key("prod")`` is ``PROD``: one
+    word collapses to a single run of capitals, which is exactly the spelling the next
+    paragraph refuses, so ``lop secret run --secret prod`` is still masked and the
+    operator who names an entry with one word does not get the release this change is
+    for. ``PROD`` is pinned in the corpus as that residual, in the half that asserts the
+    MASK, so a later round narrowing or widening it has a row to argue against. Case
+    does not rescue it: a lower-case ``prod`` is refused for the separate reason below,
+    and admitting a bare run of capitals released the five real credential values in
+    this paragraph's next sentence.
+
+    **The underscore is the measured floor, not a stylistic preference.** A single run
+    of capitals is a credential someone chose, and agent review R1-1 measured that
+    dropping the separator released ``--password PASSWORD``, ``--token TOKEN``,
+    ``--api-key KEY``, ``--api-key APIKEY`` and ``--secret DBPASSWORD`` — silently,
+    with no mask and no notice, because no hit means no labels and no exposure.
+
+    Lower case is deliberately NOT admitted, and that is the arm this judgement refuses
+    to widen: ``PASSWORD=correct_horse_battery`` is pinned in the corpus as a credential
+    that must stay masked (the identifier arm's R1-1 class), and a lowercase identifier
+    in a flag position is not distinguishable from it. The cost is a false positive on a
+    store entry named in lower case — the store permits one, because
+    :func:`local_operator.secrets.crypto.normalize_name` keeps case so ``token`` and
+    ``TOKEN`` can coexist — and masking it is the direction this pass errs in.
+    """
+    return "_" in token and _ENV_NAME_SHAPED.fullmatch(token) is not None
 
 
 def _value_is_a_reference_to_a_credential(value: str) -> bool:
     """Whether a flag's argument is the NAME of a stored credential, not one.
 
-    Two spellings, both of them a NAME: the store's own (``--secret
-    OS_PROD2_ADMIN_PASSWORD``) and the two-part one ``guide://credentials`` teaches
-    for handing that secret to a child under a different name
-    (``--secret NPM_TOKEN=NODE_AUTH_TOKEN``). A NAME is all caps, digits and
-    underscores and carries no lower case; the two-part form additionally requires
-    the RIGHT half — the one the child will read — to end in a credential word.
+    Two spellings, both of them a NAME: the store's own
+    (``--secret OS_PROD2_ADMIN_PASSWORD``) and the two-part one ``guide://credentials``
+    teaches for handing that secret to a child
+    under a different name (``--secret NPM_TOKEN=NODE_AUTH_TOKEN``).
+
+    **Why a NAME no longer has to END in a credential word.** The previous predicate
+    asked for that, and it is the defect this function no longer has. The judgement
+    belongs to the argument's POSITION, not to the name's last word:
+    :func:`local_operator.secrets.handlers._run` reads every token after ``--secret``
+    as a key in the store (``retrieve_secret(name)`` is the lookup,
+    ``environment[variable or name]`` the exported variable), and an operator names a
+    store entry after the SYSTEM it belongs to rather than after the credential word —
+    ``MINERVA_UI_NPROD_USERNAME`` names an account whose password lives elsewhere. Requiring
+    ``PASSWORD``/``TOKEN``/``KEY`` at the tail masked that name in every tool result,
+    and the masked text is what an agent copies: the operator authored a publish script
+    from the displayed output and the script asked the store for a secret literally
+    named ``[redacted]`` (2026-09-22, the reported failure; the guide's own command is
+    pinned in the corpus's negative half).
+
+    **The two-part form's right half is a NAME for the same reason.** The flag's grammar
+    is ``NAME[=VAR]`` (``secrets/cli.py``'s ``metavar``), so both halves are references
+    and neither has to end in a credential word. The halves are judged by the env-name
+    SHAPE alone rather than by :func:`_is_a_name_in_the_store_grammar`, because a
+    run-together name is the conventional spelling of the CHILD's variable — ``--secret
+    OS_PROD2_ADMIN_PASSWORD=PGPASSWORD`` hands the store's entry to a ``pg_dump`` under the one name
+    that tool reads.
 
     **One predicate, two rules** (agent review R1-1). It is factored out because the
     assignment rule sees the same text from inside: ``--secret NPM_TOKEN=NODE_AUTH_TOKEN``
-    is also an assignment whose name is ``NPM_TOKEN`` and whose value is the other
-    NAME, and a mask there files an ESCALATED rotation demand for the guide's own
-    documentation. Whichever rule sees it must reach the same verdict, so they share
-    the clause rather than each carrying a copy.
+    is also an assignment whose name is ``NPM_TOKEN`` and whose value is the other NAME, and a mask
+    there files an ESCALATED rotation demand for the guide's own documentation.
+    Whichever rule sees it must reach the same verdict, so they share the clause rather
+    than each carrying a copy.
+
+    **What this keeps masked, and the residual it accepts.** A real issuer token after
+    the flag (``--secret ghp_…``) carries lower case and stays masked; a value with no
+    separator (``--password hunter2xyz``) stays masked; a single run of capitals
+    (``--secret DBPASSWORD``) stays masked; and the digit-free lowercase phrase R1-1
+    pinned stays masked. The residual is a real credential spelled all-caps and
+    underscore-separated (``--token ABC_123_XYZ``-shaped): that spelling IS what a store
+    entry looks like and this arm cannot tell the two apart, so it is read as a NAME,
+    released, and pinned as a corpus negative carrying that reason rather than left to a
+    differential to discover.
+
+    **The two-part residual is WIDER than that one, and it is pinned too** (agent review
+    R1-3). Because the halves are read by the env-name shape ALONE, the two-part spelling
+    does not need a separator in either half: ``--token ABCDEF=ABCDEF`` was masked before
+    this change and is released by it, where the one-part ``--token ABCDEF`` is still
+    masked for want of an underscore. That asymmetry is the grammar rather than an
+    accident — the left half is a store entry's name, which need not carry a separator
+    (``prod`` is a legal entry), and the right half is the child's variable, which
+    conventionally does not (``PGPASSWORD``) — so it is stated and pinned as two corpus
+    negatives, one with a separator in each half and one with none, instead of being
+    narrowed into breaking ``--secret prod=PGPASSWORD``.
     """
-    if "_" in value and _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+    if _is_a_name_in_the_store_grammar(value):
         return True
     left, sep, right = value.partition("=")
-    return bool(
-        sep
-        and _ENV_NAME_SHAPED.fullmatch(left)
-        and _ENV_NAME_SHAPED.fullmatch(right)
-        and is_credential_name(right)
-    )
+    return bool(sep and _ENV_NAME_SHAPED.fullmatch(left) and _ENV_NAME_SHAPED.fullmatch(right))
 
 
 def _is_a_credential_flags_argument(match: Match[str]) -> bool:
@@ -1363,20 +1451,20 @@ def _flag_value_guard(match: Match[str]) -> bool:
     and filed an ESCALATED rotation demand naming no shape at all.
 
     **The SEPARATOR is required, and that is the whole of the narrowing.** Capitals
-    plus a credential-word tail is not enough on its own: it also describes exactly
-    the values this rule exists to catch — ``--password PASSWORD``, ``--token
-    TOKEN``, ``--api-key APIKEY``, ``--secret DBPASSWORD`` — and a first cut that
-    omitted the underscore stopped masking all four (agent review R1, reproduced
-    through the session hook: the values came back byte-identical with no mask and
-    no notice at all). Multi-segment capitals is what a NAME in a store or an
-    environment looks like; a single run of capitals is a credential someone chose,
-    and it stays masked. The residual is a real value spelled ``PROD_SECRET``-style,
-    and it is accepted deliberately — that spelling IS the shape of a stored
-    secret's name, which is the same judgement the rule already made for
-    ``--secret NAME[=VAR]``.
+    alone is not enough: it also describes exactly the values this rule exists to catch
+    — ``--password PASSWORD``, ``--token TOKEN``, ``--api-key KEY``, ``--api-key
+    APIKEY``, ``--secret DBPASSWORD`` — and a first cut that omitted the underscore
+    stopped masking all five (agent review R1, reproduced through the session hook: the
+    values came back byte-identical with no mask and no notice at all).
 
-    A value that could BE a credential — mixed case, any lower case, a single
-    unseparated token, or any token without a credential-word tail — is still masked.
+    **The credential-word TAIL is no longer required, and that requirement was the
+    reported failure.** It masked ``--secret MINERVA_UI_NPROD_USERNAME`` in every tool result — a
+    name that ends in the SYSTEM it belongs to rather than in a credential word — and
+    the masked text is what an agent then copies: the operator authored a publish script
+    from the displayed output and the script asked the store for a secret literally
+    named ``[redacted]`` (2026-09-22). See
+    :func:`_value_is_a_reference_to_a_credential` for the judgement that replaces it,
+    for the value-side cases it keeps masked, and for the residual it accepts.
     """
     value = match.group(2)
     if any(char in value for char in _EXPRESSION_CHARS):
@@ -1541,6 +1629,19 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     # see :func:`_is_a_credential_flags_argument`).
     if _is_a_credential_flags_argument(match):
         return False
+    # ...and a credential FLAG's argument is a NAME this rule must not judge: on
+    # ``--secret=NAME`` the text left of the ``=`` is the flag itself, so this rule
+    # reads ``--secret`` as the assignment's NAME and the store's entry as its VALUE.
+    # Refusing here — and only when the value is name-shaped — hands the ``=``
+    # spelling the verdict :func:`_flag_value_guard` reaches for the space spelling
+    # (one verdict per argument, whichever character binds it) and keeps a
+    # VALUE-shaped argument on this rule's own path, which is why a token after
+    # ``--token=`` still masks and still carries the flag rule's label. See
+    # :func:`_value_is_a_reference_to_a_credential` for the failure that motivated it.
+    if _CLI_CREDENTIAL_FLAG_NAME.match(name) and _value_is_a_reference_to_a_credential(
+        match.group(4)
+    ):
+        return False
     # The VALUE is read the way the NAME is: the rendering's line breaks are line
     # breaks for the judgement too, so what is judged is the run before the first
     # of them while the mask covers the whole run (see
@@ -1647,6 +1748,19 @@ def _tolerant(token_class: str) -> str:
 _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY")
 
 
+#: One NUMBERED unit of a tool's line numbering: an optional opening bracket, the digit
+#: run, an optional closing bracket, whitespace, and an optional separator.
+#:
+#: It is a NAMED fragment rather than inline text because the `-open` rule needs a second
+#: spelling of this unit (`_PEM_PREFIX_UNIT_MAX`, below), and a second hand-written copy
+#: of a grammar fragment is exactly how the shape table and the pipe's classifier drift
+#: apart — the defect Q9-F1/Q10-F1 recorded above, one level down.
+_PEM_PREFIX_UNIT = r"\[?\d+\]?[ \t]*(?:(?:[.)\]]|\.\]|->|[|:>-])[ \t]*)?"
+
+#: bat's boxed numbering (`│ 12 │`). Its digit run is delimited on BOTH sides, so it has
+#: no partial form to spell: no unit and no content can extend into it.
+_PEM_PREFIX_BOX_UNIT = r"\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
+
 #: The line-number prefix tools actually emit, as ONE definition shared by the shape
 #: table and the pipe's own body classifier (``tools/builtin.py`` imports these). A second
 #: hand-written allowance is what published the body for `cat -n` output after the shape
@@ -1654,41 +1768,259 @@ _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE
 #: between the two is a silent leak rather than a missed match.
 #:
 #: Covered: `12|`, `12:`, `12>`, `12->`, `12)`, `12.]`, `[12]`, `12<TAB>` (cat -n), bat's
-#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator.
+#: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator,
+#: and it is built from the two units above so that a third spelling (this rule's maximal
+#: one) cannot be written by hand beside it.
 LINE_PREFIX = (
     r"[ \t]*(?:(?:"
-    r"\[?\d+\]?[ \t]*(?:[.)\]]|\.\]|->|[|:>-])?[ \t]*"
-    r"|\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
-    r")+)?"
+    # THE SEPARATOR'S TRAILING WHITESPACE LIVES INSIDE THE OPTIONAL GROUP, and that
+    # is the difference from `[ \t]*(?:SEP)?[ \t]*`. Both accept exactly the same
+    # strings (`[ \t]*` | `[ \t]*SEP[ \t]*`), but this one consumes a run of
+    # whitespace in ONE place per unit instead of two, and that removes a whole
+    # family of partition paths: the old spelling could split a gap between two
+    # digit runs across the trailing and the leading `[ \t]*`, so 2**k paths for
+    # k digit runs on a line. Measured on the released fragment: one 65-character
+    # numeric table row (`%8d`-padded columns, i.e. a numpy row or a padded column
+    # dump) cost 1.34 s in `PEM_HEADER_LINE_RE.search` and 1.74 s in
+    # `PEM_BODY_LINE_RE.match`; 48 characters of space-separated 2-digit runs did
+    # not return in 190 s. This spelling: 12 ms and 14 ms for the same 65
+    # characters.
+    #
+    # IT DOES NOT REMOVE THE EXPONENTIAL, and the comment says so because the next
+    # reader will otherwise "simplify" one of two things back. The remaining paths
+    # are the DIGIT runs: a unit may end in the middle of `\d+` (nothing forbids it
+    # when no separator follows), and every split is live, so the engine still
+    # walks 2**k for k digit runs. THREE OTHER language-preserving spellings were
+    # measured alongside this one — whitespace made maximal with a `(?![ \t])`
+    # assertion, possessive `[ \t]*+`, and both together — and all four still grow
+    # by a factor per digit run. Two narrower spellings are NOT available: making `\d+`
+    # possessive or forbidding a unit to end before a digit both DROP matches
+    # (`12 34 MIIEowIBAAKCA` is a doubly-numbered body line that the second loses
+    # outright), and a dropped body line is a published key, which is the one
+    # failure this grammar must not have. The cost is therefore bounded by a
+    # number of partitions INHERENT to the language, and the fix for a caller that
+    # runs it over arbitrary text is a guard or a linear matcher, not a cheaper
+    # fragment: `local_operator/tools/builtin.py` shields its two hot call sites
+    # with necessary-condition gates and records the residual.
+    + _PEM_PREFIX_UNIT
+    + r"|"
+    + _PEM_PREFIX_BOX_UNIT
+    + r")+)?"
 )
 
 #: A line separator in either spelling: escaped (inside a JSON value) or real, CRLF
 #: included.
 LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
 
-#: One PEM body line with that prefix. Eight characters is the floor for a line that
-#: stands on its own; a SHORTER line counts only when a full one follows it (a truncated
-#: run) or when it is the block's last line before the closing quote or the end of the
-#: text — inside an open block nothing may be published, which is the block's whole point
-#: (Q10-F2: a sub-eight-character line in the MIDDLE published everything after it, and a
-#: short FINAL line published where the previous head masked).
-_PEM_FULL_LINE = r"[A-Za-z0-9+/=]{8,},?[ \t]*"
+#: The body grammar's FLOOR: how many class characters a body line needs to stand on its
+#: own. It is a NAME because three readers ask three different questions of it — the body
+#: grammar accepts at exactly this width, `tools/builtin.py` HOLDS a cap-forced cut back
+#: to the line boundary by at most `PEM_BODY_FLOOR - 1` bytes when a release can end in
+#: the MIDDLE of a line, and this branch's linear deciders
+#: (`pem_body_line` / `pem_end_line` / `pem_header_line_end`) read it for both arms of
+#: the grammar they decide. `#1445` landed the constant and the hold (#1445's own comment
+#: carried the note that this branch would be the third reader, spelling an `8` / `7`
+#: pair by hand); the deciders read `PEM_BODY_FLOOR` and `PEM_BODY_FLOOR - 1` now, because
+#: a decider a byte BELOW the hold's floor under-holds — the fragment is then read as
+#: PROSE, which closes the block and publishes what follows, which is the leak direction.
+PEM_BODY_FLOOR = 8
+
+#: The floor's two spellings, as the regexes need them and built from the number above:
+#: a MINIMUM run (a line that stands on its own) and a run bounded one below it (the
+#: truncated-line allowance). Not restated as a literal anywhere below.
+_PEM_FLOOR_MIN_RUN = "{" + str(PEM_BODY_FLOOR) + ",}"
+_PEM_FLOOR_SUB_RUN = "{1," + str(PEM_BODY_FLOOR - 1) + "}"
+
+#: One PEM body line with that prefix. `PEM_BODY_FLOOR` characters is the floor for a
+#: line that stands on its own; a SHORTER line counts only when a full one follows it (a
+#: truncated run) or when it is the block's last line before the closing quote or the end
+#: of the text — inside an open block nothing may be published, which is the block's
+#: whole point (Q10-F2: a sub-eight-character line in the MIDDLE published everything
+#: after it, and a short FINAL line published where the previous head masked).
+_PEM_FULL_LINE = r"[A-Za-z0-9+/=]" + _PEM_FLOOR_MIN_RUN + r",?[ \t]*"
 _PEM_SHORT_MID_LINE = (
-    r"[A-Za-z0-9+/=]{1,7},?[ \t]*(?=" + LINE_SEP + LINE_PREFIX + r"[A-Za-z0-9+/=]{8,})"
+    r"[A-Za-z0-9+/=]"
+    + _PEM_FLOOR_SUB_RUN
+    + r",?[ \t]*(?="
+    + LINE_SEP
+    + LINE_PREFIX
+    + r"[A-Za-z0-9+/=]"
+    + _PEM_FLOOR_MIN_RUN
+    + r")"
 )
 #: A short line is a body line when a full one FOLLOWS it, and the run may end with one
 #: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
 #: survive, which is why the end-of-run allowance is not a free-standing alternative.
 _PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
+
+#: The `-open` rule's OWN body grammar: the two fragments above with every digit run
+#: required to be MAXIMAL (`\d+(?!\d)`).
+#:
+#: WHY IT EXISTS. This is the one rule in the table that runs the prefix fragment
+#: over text nobody shaped — a tool result, a grep hit, a README quoting a banner —
+#: and `LINE_PREFIX`'s digit runs are ambiguous BY CONSTRUCTION (see the fragment's
+#: own comment: `12` is one unit or two, and every split is a live path). For the
+#: pipe's classifiers that ambiguity is bounded by the linear deciders; inside a
+#: PATTERN it is a backtracking walk of 2**(digits-1) paths per digit run, and the
+#: walk is EXHAUSTED rather than pruned whenever a body line does not parse — so the
+#: cost is not a constant factor away, it is unbounded in the input. Measured
+#: through the real `_PipeRedactor` (QA round 2, Q3 on #1427): an anchored
+#: `"private_key": ` spelling plus a header phrase plus ONE `%8d` row of four-digit
+#: columns costs 23 s of CPU at six columns and runs past a 60 s cap at eight, and
+#: the 140-row payload that `_release_point` hands this rule once a read exceeds the
+#: deferral cap is past 60 s at `bdf3b6cd` (past 45 s at the base revision, so the
+#: worst of it is pre-existing rather than this branch's). Nothing is masked in that
+#: shape, so the whole cost is pure.
+#:
+#: WHY IT SPELLS THE SAME LANGUAGE, which is the obligation a second spelling of a
+#: language takes on. A split inside a CONTIGUOUS digit run always has an equivalent
+#: one-unit parse: the characters between the two chunks are the unit's own `\]`,
+#: whitespace and separator, and all three are epsilon exactly when the next
+#: character is still a digit — so extending the run by one digit and re-parsing
+#: leaves the rest of the line untouched, and by induction every split collapses to
+#: the maximal run. What DOES drop strings is a restriction on the unit END (the
+#: fragment's comment cites `12 34 MIIEowIBAAKCA`, which needs a unit to end
+#: immediately before `34`), and that is a different change. Both directions are
+#: enumerated rather than argued:
+#: `test_the_digit_maximal_prefix_spells_the_released_fragment_language` sweeps the
+#: two fragment languages against each other in both directions, and
+#: `test_the_open_rule_matches_its_released_spelling_on_every_fixture` compares the
+#: two RULES' matches (start, end, group 1, group 2) over the corpus, the dense
+#: payloads and a generated sweep — a divergence either way is a released mask or a
+#: published body line, so neither direction may be sampled.
+#:
+#: SCOPE, and it is deliberately narrow: THIS rule only. `LINE_PREFIX` itself and the
+#: three `PEM_*_RE` patterns keep the released spelling, because the pipe's deciders
+#: (`_pem_prefix_end_flags`, and the three classifiers built on it) mirror THAT
+#: fragment and are pinned against those patterns, while those three patterns are
+#: the DEFINITION of their languages rather than a hot path — the deciders decide
+#: them. The other two block rules (`pem-private-key`, `gcp-service-account-key`) do
+#: not embed the fragment at all, and the fragment alone decides nothing here: it is
+#: the ambiguity's combination with this rule's unbounded body run that made the
+#: engine walk 2**(digits-1) partitions per digit run.
+#: The two units above with every digit run required to be MAXIMAL.
+#:
+#: The box unit is maximalised only for symmetry with the fragment it mirrors: its run is
+#: delimited by `│` on both sides, so it can never be split and the predicate changes
+#: nothing it matches.
+_PEM_PREFIX_UNIT_MAX = _PEM_PREFIX_UNIT.replace(r"\d+", r"\d+(?!\d)")
+_PEM_PREFIX_BOX_UNIT_MAX = _PEM_PREFIX_BOX_UNIT.replace(r"\d+", r"\d+(?!\d)")
+
+#: The `-open` rule's prefix: maximal units, THEN AT MOST ONE RELEASED UNIT — and that
+#: trailing unit is what makes this spelling the released LANGUAGE rather than a subset
+#: of it (agent review R3-1 on #1427).
+#:
+#: WHY A UNIT MUST BE ALLOWED TO STOP MID-RUN. `\d+(?!\d)` on EVERY unit is not the same
+#: language, because the released grammar lets a unit's tail be epsilon — `\]?`, the
+#: whitespace and the separator are all optional — exactly when the next character is
+#: still a digit, and the BODY CONTENT may then consume the rest of that run. The witness
+#: is a body line of `[` followed by nine `1`s under an anchored header: `origin/main`
+#: parses it as the unit `[1` plus the content `11111111` and masks the line (span
+#: `(0, 54)`); a fully maximal spelling must eat all nine digits as the unit's run, leaves
+#: no eight-character content behind it, and PUBLISHES the line — measured `(0, 43)`, i.e.
+#: a released mask lost, which is the one direction this table may never move.
+#:
+#: WHY EXACTLY ONE, AND WHY LAST. Any split of a CONTIGUOUS run into several units is
+#: redundant — collapsing it into one unit does not move where the prefix ENDS — so the
+#: only split that can matter is the one that decides where the content begins, and that
+#: split is by definition in the LAST unit's run: the released parse's prefix end is
+#: either a maximal-run end (those are `*` above) or a position strictly inside the run
+#: that the content immediately follows (this trailing unit). Allowing the released unit
+#: ONCE, at the END, is therefore the whole difference — and it is what keeps the walk
+#: linear: per run the engine has one maximal unit to try, and the trailing unit adds a
+#: bounded walk of the FINAL run only, instead of a partition of every run.
+#:
+#: The full enumeration of both directions is pinned by
+#: `test_the_open_rule_restores_the_released_rules_bracket_family` (the witness class and
+#: its neighbours, against the independently rebuilt released rule) and by
+#: `test_the_open_rule_matches_its_released_spelling_on_every_fixture` (the corpus and a
+#: generated sweep, whose alphabet carries `[`).
+_PEM_DIGIT_MAX_PREFIX = (
+    r"[ \t]*(?:(?:"
+    + _PEM_PREFIX_UNIT_MAX
+    + r"|"
+    + _PEM_PREFIX_BOX_UNIT_MAX
+    + r")*(?:"
+    + _PEM_PREFIX_UNIT
+    + r")?)?"
+)
+_PEM_DIGIT_MAX_LINE_CONTENT = (
+    _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE.replace(LINE_PREFIX, _PEM_DIGIT_MAX_PREFIX)
+)
+#: NIT-2 (agent review round 3): UNREFERENCED AT RUNTIME — this is the pipe's pre-decider
+#: block spelling, and the deciders (`pem_body_line` / `pem_end_line` / `pem_header_line_end`)
+#: replaced every caller, so nothing reaches it. Kept rather than deleted, and recorded
+#: rather than left implicit: #1445 rewrites the `{1,7}` in its last line, so a deletion
+#: here is a merge surface for no gain. Deleting it is a follow-up once both land.
 _PEM_RUN = (
     r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
-    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1,7},?)?"
+    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]" + _PEM_FLOOR_SUB_RUN + r",?)?"
 )
 PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$", re.MULTILINE)
+#: The ARMOUR TAIL: what may follow the closing run of dashes on a BEGIN/END armour
+#: line. Trailing space or TAB (an editor's, a wiki's, a CRLF file's carriage return),
+#: then that line's own end — the carriage return of a CRLF or bare-CR terminator, the
+#: line feed, or the end of the text.
+#:
+#: ONE DEFINITION, READ BY BOTH THE PATTERN AND THE DECIDER — and that is not tidiness.
+#: `#1445` landed this tail on the pattern (`$` alone cannot match in front of a `\r`, so a
+#: CRLF, bare-CR or trailing-whitespace armour line was not a header at all); this branch
+#: owns the DECIDER, and while a decider models a tail by hand the two can answer the same
+#: question differently — which is exactly what happened when the pattern widened and the
+#: decider kept `$`: the pipe then PUBLISHED the block's body (measured on the previous
+#: head through the real filter: 3 of 3 body lines out, no marker, for an unterminated CRLF
+#: block and for a trailing-whitespace one). A documentary obligation ("keep the tail in
+#: step with the pattern's") is what failed there, so the decider DECODES its two halves
+#: from this text below rather than restating them, and
+#: `test_the_header_deciders_tail_is_the_patterns_tail` holds the composition together.
+_PEM_ARMOUR_TAIL_RUN_TEXT = r" \t"
+_PEM_ARMOUR_TAIL_TERMINATOR_TEXT = (r"\r", r"\n")
+_PEM_ARMOUR_TAIL = (
+    "[" + _PEM_ARMOUR_TAIL_RUN_TEXT + "]*(?=" + "|".join(_PEM_ARMOUR_TAIL_TERMINATOR_TEXT) + "|$)"
+)
+#: The same two halves as the CHARACTERS the linear decider scans for, decoded from the
+#: text above — so a decider that could disagree with the pattern is not something a reader
+#: has to notice, it is something they would have to construct.
+_PEM_ARMOUR_TAIL_RUN = codecs.decode(_PEM_ARMOUR_TAIL_RUN_TEXT, "unicode_escape")
+_PEM_ARMOUR_TAIL_TERMINATORS = "".join(
+    codecs.decode(spelling, "unicode_escape") for spelling in _PEM_ARMOUR_TAIL_TERMINATOR_TEXT
+)
+
 PEM_HEADER_LINE_RE = re.compile(
     r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
-    r"-{1,4}[\x27\x22]?-{1,4}$",
+    # The NAMED tail below is the CRLF / CR / trailing-whitespace spelling
+    # of the armour line, and it is not cosmetic either: ``$`` alone cannot match in
+    # front of a ``\r``, so ``...KEY-----\r\n`` — an ordinary key file written on
+    # Windows, or quoted by a wiki, or left with a trailing space by an editor — was not
+    # a header here at all. The shape table's ``pem-private-key`` needs a COMPLETE
+    # BEGIN … END, so for an unterminated view the pipe's mask is the only layer that can
+    # hide the body, and for that spelling it never engaged: measured through the real
+    # tool, ``head -n 6`` on a complete CRLF key published 5 of its 25 body lines, and an
+    # unterminated CRLF block published 137 body lines on the transcript, 200 in the raw
+    # spill and 129 over ``read spill://`` (identical at the base — pre-existing, and
+    # this fix closes it for the ordinary spelling rather than licensing it).
+    #
+    # The terminator is TOLERATED BY LOOKAHEAD rather than consumed, which is the
+    # spelling that covers all three of them: a bare CR line ending (a key file that
+    # came off an old Mac, or through a filter that normalised to CR) satisfies ``\r``
+    # with nothing after it, where ``\r?$`` could not — the optional CR is backtracked
+    # away and ``$`` then has no ``\n`` to sit in front of. Leaving the terminator
+    # outside the match is also what the mask wants: its caller hands the bytes after
+    # the match to ``_PEM_LINE_BREAK``, which emits the separator verbatim.
+    #
+    # Widening the TAIL is the whole of the change, and it cannot open a block on text
+    # that is not an armour line: the phrase (``BEGIN `` … ``PRIVATE KEY``) and both
+    # dash runs are untouched, a line still has to be that WHOLE line (trailing prose
+    # after the dashes does not match), and the prefix grammar is unchanged. That is
+    # why the over-mask cost of this decision is measured at ZERO rather than asserted:
+    # across the 423-case shape corpus and all 648 of the repository's source and docs
+    # files, NOT ONE line is newly classified as a header (the corpus's own armour lines
+    # matched under the old tail too, and no repository file carries one at all), so no
+    # text changes its pipe output. The decision was still made in the mask-more
+    # direction — a real key file with CRLF endings masks now, and it published its body
+    # before.
+    r"-{1,4}[\x27\x22]?-{1,4}" + _PEM_ARMOUR_TAIL,
     # MULTILINE, and that is not cosmetic: the pipe layer SEARCHES a multi-line read for
     # this header, so without the flag it matched only when the read was exactly one
     # header line — which the release point's hold makes impossible — and the entire
@@ -1697,6 +2029,497 @@ PEM_HEADER_LINE_RE = re.compile(
     re.MULTILINE,
 )
 PEM_END_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}END ", re.MULTILINE)
+
+
+# --- the LINEAR decision procedures for the three patterns above -------------
+#
+# WHY THESE EXIST — and it is the one part of the pipe filter's cost that no
+# necessary-condition guard can reach. `LINE_PREFIX` is AMBIGUOUS BY
+# CONSTRUCTION: a unit's `\d+` may end in the middle of a digit run (`12` is one
+# unit or two, and every split is a live path), so a line with k digit runs
+# walks 2**k partitions, and `re` has no memoisation to cut them down. Measured
+# on this tree at the classifier call sites in `tools/builtin.py`: ONE
+# 65-character `%8d` table row (`%8d`-padded columns — a numpy row, a padded
+# column dump) costs 6.7 s in `PEM_BODY_LINE_RE.match` and 3.9 s in
+# `PEM_HEADER_LINE_RE.search`; a 3.3 KB read that merely QUOTES a banner costs
+# 1.86 s, of which 1814 ms is the body classifier; a 6.5 KB read runs past
+# 120 s. `tools/builtin.py` gates what it can, and the gates are what make
+# ordinary output free, but they cannot reach this: a read that carries the
+# literals OPENS the state, and the body classifier is then asked about lines it
+# genuinely MATCHES — `10000000 10000001` is a numbered body line — so no
+# cheaper test rejects the pathological line.
+#
+# WHAT THEY ARE. The same three languages, decided by an explicit mode-set
+# simulation of the prefix grammar — the modes are positions in the grammar, one
+# character moves the whole set on, and nothing is ever revisited — followed by
+# the rigid literal tail each pattern requires, whose candidate offsets are
+# ENUMERATED (the tail is at most nine characters, so there are at most a
+# handful) instead of searched. Cost is O(len) per call with a small constant,
+# for every input shape.
+#
+# THE EQUIVALENCE OBLIGATION, stated plainly because it is the whole risk of a
+# second spelling of a language that was already written once. A divergence has
+# two directions and only one of them survives review: a decider that ACCEPTS
+# where the pattern does not masks text the agent needed to read (a defect, per
+# the module docstring), while a decider that REJECTS where the pattern accepts
+# DROPS A BODY LINE — a published key, silently, because the line loop also
+# closes the state on it. So the deciders are pinned against the patterns
+# THEMSELVES rather than against hand-written expectations:
+# `tests/unit/secrets/test_credential_shapes.py` sweeps every character-KIND
+# sequence up to a bounded length (these languages are functions of the
+# character kind, which is what lets a bounded sweep stand for longer strings,
+# and one arm there pins that digit predicate against `\d` over the whole code
+# space) and then fuzzes the shapes a caller actually sees. `PEM_BODY_LINE_RE`,
+# `PEM_HEADER_LINE_RE` and `PEM_END_LINE_RE` REMAIN THE DEFINITION of the
+# language; the functions below are how the hot path decides it.
+
+_PFX_BETWEEN = 1 << 0  # between units: a unit may start, whitespace may run, the prefix may END
+_PFX_OPEN = 1 << 1  # after the `[` of a unit: a digit must follow
+_PFX_DIGITS = 1 << 2  # inside a unit's digit run
+_PFX_CLOSED = 1 << 3  # after digits + the closing `]`
+_PFX_DIGITS_WS = 1 << 4  # after digits (+ `]`) + whitespace
+_PFX_SEP = 1 << 5  # after a separator (and any whitespace that followed it)
+_PFX_SEP_DOT = 1 << 6  # after a `.` separator: `]` may extend it (the `.\]` spelling)
+_PFX_SEP_DASH = 1 << 7  # after a `-` separator: `>` may extend it (the `->` spelling)
+_PFX_BOX_OPEN = 1 << 8  # after the opening `│` of `│ 12 │`
+_PFX_BOX_WS = 1 << 9  # after `│` + whitespace
+_PFX_BOX_DIGITS = 1 << 10  # inside the box form's digit run
+_PFX_BOX_DIGITS_WS = 1 << 11  # after the box form's digits + whitespace
+_PFX_BOX_CLOSED = 1 << 12  # after the box form's closing `│`
+
+#: Modes in which a UNIT HAS JUST COMPLETED. From any of them the grammar allows
+#: the prefix to end, and it also allows a new unit to start on the very next
+#: character (`12` is two units as readily as one) — the epsilon edge that
+#: `_pem_prefix_end_flags` applies after every step, which is why the machine
+#: needs no separate "between units" transition per mode.
+_PFX_COMPLETE = (
+    _PFX_DIGITS
+    | _PFX_CLOSED
+    | _PFX_DIGITS_WS
+    | _PFX_SEP
+    | _PFX_SEP_DOT
+    | _PFX_SEP_DASH
+    | _PFX_BOX_CLOSED
+)
+
+#: THE MACHINE, as data: for each character kind, the `(mode, mode-after-it)`
+#: pairs. Written from the fragment rather than derived from it, and that is the
+#: point — a derivation would be the same expression rewritten, which is what
+#: the algebraic rewrites in this file's history were, and three of them were
+#: language-changing. `tools/builtin.py` does not use this machine; the patterns
+#: above stay the definition, and the test file pins the two together.
+_PFX_STEP_WS = (
+    (_PFX_BETWEEN, _PFX_BETWEEN),
+    (_PFX_DIGITS, _PFX_DIGITS_WS),
+    (_PFX_CLOSED, _PFX_DIGITS_WS),
+    (_PFX_DIGITS_WS, _PFX_DIGITS_WS),
+    (_PFX_SEP, _PFX_SEP),
+    (_PFX_SEP_DOT, _PFX_SEP),
+    (_PFX_SEP_DASH, _PFX_SEP),
+    (_PFX_BOX_OPEN, _PFX_BOX_WS),
+    (_PFX_BOX_WS, _PFX_BOX_WS),
+    (_PFX_BOX_DIGITS, _PFX_BOX_DIGITS_WS),
+    (_PFX_BOX_DIGITS_WS, _PFX_BOX_DIGITS_WS),
+    (_PFX_BOX_CLOSED, _PFX_BOX_CLOSED),
+)
+_PFX_STEP_DIGIT = (
+    (_PFX_BETWEEN, _PFX_DIGITS),
+    (_PFX_OPEN, _PFX_DIGITS),
+    (_PFX_DIGITS, _PFX_DIGITS),
+    (_PFX_BOX_OPEN, _PFX_BOX_DIGITS),
+    (_PFX_BOX_WS, _PFX_BOX_DIGITS),
+    (_PFX_BOX_DIGITS, _PFX_BOX_DIGITS),
+)
+_PFX_STEP_OPEN = ((_PFX_BETWEEN, _PFX_OPEN),)
+#: `]` is both the unit's closing bracket and one of the separators, so it lands
+#: in both (`1]2` is a bracketed unit then a new one, `1]` a unit whose separator
+#: is `]`), and it is the second half of the `.\]` spelling.
+_PFX_STEP_CLOSE = (
+    (_PFX_DIGITS, _PFX_CLOSED | _PFX_SEP),
+    (_PFX_CLOSED, _PFX_SEP),
+    (_PFX_DIGITS_WS, _PFX_SEP),
+    (_PFX_SEP_DOT, _PFX_SEP),
+)
+#: `.` and `-` carry their longer spelling as well as themselves: `1.]` and `1->2`
+#: are real, and the spelling that dropped them measured 146/1140 lost strings.
+_PFX_STEP_DOT = (
+    (_PFX_DIGITS, _PFX_SEP | _PFX_SEP_DOT),
+    (_PFX_CLOSED, _PFX_SEP | _PFX_SEP_DOT),
+    (_PFX_DIGITS_WS, _PFX_SEP | _PFX_SEP_DOT),
+)
+_PFX_STEP_DASH = (
+    (_PFX_DIGITS, _PFX_SEP | _PFX_SEP_DASH),
+    (_PFX_CLOSED, _PFX_SEP | _PFX_SEP_DASH),
+    (_PFX_DIGITS_WS, _PFX_SEP | _PFX_SEP_DASH),
+)
+#: `)`, `|` and `:` have no longer spelling; `>` has one, only after `-`.
+_PFX_STEP_SEP = (
+    (_PFX_DIGITS, _PFX_SEP),
+    (_PFX_CLOSED, _PFX_SEP),
+    (_PFX_DIGITS_WS, _PFX_SEP),
+)
+_PFX_STEP_GT = _PFX_STEP_SEP + ((_PFX_SEP_DASH, _PFX_SEP),)
+#: The box form has no separator and its digits are optional only in the sense
+#: that `│` may be followed by whitespace: `│ 12 │`, `│12│` and `│ 12│` all read.
+_PFX_STEP_BOX = (
+    (_PFX_BETWEEN, _PFX_BOX_OPEN),
+    (_PFX_BOX_DIGITS, _PFX_BOX_CLOSED),
+    (_PFX_BOX_DIGITS_WS, _PFX_BOX_CLOSED),
+)
+_PFX_WS = " \t"
+_PFX_SINGLE_SEP = ")|:"
+
+#: The two character classes the deciders check by name, spelled once here. They
+#: are the patterns' own classes (`[A-Za-z0-9+/=]` for a body token, `[A-Z0-9 ]`
+#: between a header's literals); a change to either pattern that this does not
+#: follow shows up as a divergence in the differential arms rather than as a
+#: quietly different answer on the hot path.
+_PEM_TOKEN_CLASS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+_PEM_HEADER_CLASS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+_PEM_BEGIN = "BEGIN "
+_PEM_KEY = "PRIVATE KEY"
+_PEM_END = "END "
+
+
+def _pem_prefix_end_flags(text: str) -> bytearray:
+    """`flags[i]` is 1 exactly when `text[:i]` is in the `LINE_PREFIX` language.
+
+    The whole decision in one left-to-right pass: `modes` is the set of grammar
+    positions the prefix could be in after `i` characters, and the prefix is in
+    the language exactly when `_PFX_BETWEEN` is in that set — nothing is pending,
+    so what was consumed is `[ \\t]*` followed by a complete `(unit)+`.
+
+    AN EMPTY MODE SET IS FINAL, which is what makes this cheap on ordinary text:
+    nothing in the fragment consumes a newline, a letter or a `#`, so a prose
+    line kills the set within a few characters and the loop stops — the flags
+    beyond that point are already zero. That is also why the flags array is
+    written by index instead of built positionally.
+    """
+    flags = bytearray(len(text) + 1)
+    modes = _PFX_BETWEEN
+    flags[0] = 1
+    for index, char in enumerate(text):
+        if char in _PFX_WS:
+            steps = _PFX_STEP_WS
+        elif char.isdecimal():
+            # `\d`, not `[0-9]`: the fragment's class is Unicode-decimal, and a
+            # hand-written ASCII class here would reject a body line the pattern
+            # accepts. `isdecimal()` is the same predicate `\d` uses (the test
+            # file checks the two against each other over the whole code space).
+            steps = _PFX_STEP_DIGIT
+        elif char == "]":
+            steps = _PFX_STEP_CLOSE
+        elif char == ".":
+            steps = _PFX_STEP_DOT
+        elif char == "-":
+            steps = _PFX_STEP_DASH
+        elif char == "\u2502":
+            steps = _PFX_STEP_BOX
+        elif char == ">":
+            steps = _PFX_STEP_GT
+        elif char == "[":
+            steps = _PFX_STEP_OPEN
+        elif char in _PFX_SINGLE_SEP:
+            steps = _PFX_STEP_SEP
+        else:
+            break
+        reached = 0
+        for mode, after in steps:
+            if modes & mode:
+                reached |= after
+        if reached & _PFX_COMPLETE:
+            reached |= _PFX_BETWEEN
+        modes = reached
+        if not modes:
+            break
+        if modes & _PFX_BETWEEN:
+            flags[index + 1] = 1
+    return flags
+
+
+def _pem_rigid_end_lengths(text: str, end: int) -> set[int]:
+    """Lengths 2..9 with which `-{1,4}['\\"]?-{1,4}` can END at `end`.
+
+    An enumeration rather than a scan, because the structure is a literal: four
+    dashes at most, an optional quote, four dashes at most, so every spelling is
+    nine characters or fewer and the candidate offsets of a header or END line
+    are a handful. `end` is exclusive and the structure must begin inside
+    `text`, so a caller passing a region that starts mid-string cannot be told
+    the region matched something in front of it.
+    """
+    lengths: set[int] = set()
+    dashes = 0
+    index = end - 1
+    while index >= 0 and dashes < 4 and text[index] == "-":
+        dashes += 1
+        index -= 1
+    for head in range(1, dashes + 1):
+        start = end - head
+        if start >= 1 and text[start - 1] in "\x27\x22":
+            quoted = 0
+            index = start - 2
+            while index >= 0 and quoted < 4 and text[index] == "-":
+                quoted += 1
+                index -= 1
+            lengths.update(head + 1 + tail for tail in range(1, quoted + 1) if head + 1 + tail <= 9)
+        closing = 0
+        index = start - 1
+        while index >= 0 and closing < 4 and text[index] == "-":
+            closing += 1
+            index -= 1
+        lengths.update(head + tail for tail in range(1, closing + 1) if head + tail <= 9)
+    return lengths
+
+
+def _pem_body_arm_span(piece: str, floor: int, ceiling: int | None) -> tuple[int, int] | None:
+    """Offsets a body line's base64 token may start at, as a low/high span.
+
+    The token is the piece's trailing run of `[A-Za-z0-9+/=]`, optionally
+    followed by one `,` and then whitespace to the piece end. Its width is a
+    RANGE rather than one number in both arms — the full arm is floored at
+    `PEM_BODY_FLOOR`, the short arm is a ceiling — and the PREFIX may enter the run as
+    well as start before
+    it, which is why this returns a span: `[112345678` is a prefix of `[1` with a
+    token of `12345678`. No span means no offset can work, and the common case —
+    `%8d` columns end in a short digit run, prose ends in a word — stops here
+    without touching the machine.
+
+    `floor` and `ceiling` are the width bounds of the arm being asked about;
+    `ceiling=None` is the full arm, whose token may take the whole run.
+    """
+    trimmed = piece.rstrip(" \t")
+    if trimmed.endswith(","):
+        trimmed = trimmed[:-1]
+    end = len(trimmed)
+    run = end - len(trimmed.rstrip(_PEM_TOKEN_CLASS))
+    if run < floor:
+        return None
+    low = max(0, end - (run if ceiling is None else min(run, ceiling)))
+    high = end - floor
+    if low > high:
+        return None
+    return low, high
+
+
+def _pem_prefix_leads_a_token(piece: str) -> bool:
+    """Is some prefix end in `piece` followed by eight body characters?
+
+    The short arm's lookahead, read the other way round: the separator is
+    consumed, a `LINE_PREFIX` follows it, and a full token must sit immediately
+    behind that prefix. Read this way the lookahead is an ordinary linear
+    question — every prefix end of the piece is already known from the flags, and
+    the eight characters behind each one are a slice.
+    """
+    flags = _pem_prefix_end_flags(piece)
+    for start in range(len(piece) - 7):
+        if flags[start] and all(char in _PEM_TOKEN_CLASS for char in piece[start : start + 8]):
+            return True
+    return False
+
+
+def pem_body_line(line: str) -> bool:
+    """`PEM_BODY_LINE_RE.match(line)`, in linear time, for any string.
+
+    `match` is ANCHORED AT POSITION 0, so the question is about the string's FIRST
+    line: neither the prefix nor a token can contain a newline, so no match can
+    start anywhere else, and the only thing the pattern reads past the first line
+    is the short arm's lookahead. That is why this asks the first piece, and the
+    second one only when the short arm is live — a run over every piece would
+    answer `search`'s question instead, which is a different question and is how
+    this decider first over-accepted a table row that follows a banner.
+
+    `$` under `MULTILINE` means "the end, or just before a newline", so each arm
+    ends at its piece's end: the full arm is a `PEM_BODY_FLOOR`-character token, and the
+    short arm is a sub-floor token (one to `PEM_BODY_FLOOR - 1` characters) followed by
+    a separator and then a full token behind a prefix. Both widths are read from
+    `PEM_BODY_FLOOR` and not restated, because this decider's floor and the pipe's own
+    hold are the same number on purpose — a decider a byte below the hold's floor
+    under-holds, and under-holding publishes (see the constant). The caller is the
+    pipe's line loop (`tools/builtin.py`),
+    which passes one line with its terminator stripped — where the short arm can
+    never fire — and this is exact for that input and for a whole multi-line read
+    alike, because the arms are the pattern's own rather than an in-domain
+    approximation of them.
+    """
+    pieces = line.split("\n", 1)
+    piece = pieces[0]
+    full = _pem_body_arm_span(piece, PEM_BODY_FLOOR, None)
+    short = _pem_body_arm_span(piece, 1, PEM_BODY_FLOOR - 1) if len(pieces) > 1 else None
+    if full is None and short is None:
+        return False
+    flags = _pem_prefix_end_flags(piece)
+    if full is not None and any(flags[full[0] : full[1] + 1]):
+        return True
+    return bool(
+        short is not None
+        and any(flags[short[0] : short[1] + 1])
+        and _pem_prefix_leads_a_token(pieces[1])
+    )
+
+
+def pem_end_line(line: str) -> bool:
+    """`PEM_END_LINE_RE.match(line)`, in linear time.
+
+    The pattern is not end-anchored: the line only has to START with the prefix
+    grammar and then `-{1,4}['\\"]?-{1,4}END `, so the decision is "is any
+    enumerated structure start also a prefix end". The enumeration is over the
+    occurrences of the literal `END `, which is a necessary condition of the
+    pattern itself, and this is exact for any string rather than only for a
+    single line: a separator or a newline outside the fragment's character set
+    empties the mode set, so a candidate after it can never be a prefix end.
+    """
+    if _PEM_END not in line:
+        return False
+    flags = _pem_prefix_end_flags(line)
+    offset = 0
+    while True:
+        at = line.find(_PEM_END, offset)
+        if at < 0:
+            return False
+        offset = at + 1
+        for length in _pem_rigid_end_lengths(line, at):
+            start = at - length
+            if start >= 0 and flags[start]:
+                return True
+
+
+def pem_header_line_end(text: str) -> int | None:
+    """Where `PEM_HEADER_LINE_RE.search(text)` ends, or None, in linear time.
+
+    Returns the offset the caller needs (`match.end()`) rather than a match:
+    the pipe uses it to split the read at the header's line end and re-enter the
+    body loop on the remainder, and that offset is what releases the output
+    ahead of the header.
+
+    The search is modelled as the pattern's own `MULTILINE` anchors: `^` matches
+    at the start of the text and after every `\\n`, `$` at the end and before
+    every `\\n` — so the text is cut at its `\\n`s and each piece is asked the
+    end-anchored question. A piece keeps any `\\r` of a CRLF terminator, and THAT is
+    where the tail matters rather than where it can be ignored: the pattern's tail is
+    `_PEM_ARMOUR_TAIL` (`[ \\t]*(?=\\r|\\n|$)`, read here as its two halves), so a
+    CRLF, bare-CR or trailing-whitespace header line matches BOTH the pattern and this
+    decider, and the offset returned is the position of that `\\r` — the same `end()`
+    the pattern's own lookahead gives. An earlier revision modelled the tail as `$`
+    alone and returned the piece's length, so it answered `None` for those spellings
+    while the widened pattern matched them — which on the pipe means the block's whole
+    body published.
+    `test_the_header_deciders_tail_is_the_patterns_tail` and the armour-spelling
+    differential beside it are what hold the two together now.
+
+    Both literals the tail needs are required before any of the work below, and
+    they are necessary conditions of the pattern (the fragment cannot consume a
+    letter, so the tail's own `BEGIN ` and `PRIVATE KEY` cannot be assembled out
+    of prefix characters).
+    """
+    offset = 0
+    for piece in text.split("\n"):
+        end = _pem_header_piece_end(piece)
+        if end is not None:
+            return offset + end
+        offset += len(piece) + 1
+    return None
+
+
+def _pem_armour_tail_stops(piece: str) -> list[tuple[int, set[int]]]:
+    """Every position the armour tail may end at, each with the rigid ends that reach it.
+
+    `_PEM_ARMOUR_TAIL` is `[ \\t]*(?=\\r|\\n|$)`: after the closing dashes there may be
+    trailing whitespace, and then that line's own end — a `\\r` (the CR of a CRLF file,
+    or a bare CR used as the terminator) or the end of the piece (the `\\n` was the
+    split). So a stop's rigid end is any position from which the tail's own run class,
+    `_PEM_ARMOUR_TAIL_RUN`, leads to that stop, and the terminators are read from
+    `_PEM_ARMOUR_TAIL_TERMINATORS` — both halves are the constants the PATTERN is built
+    from, so the pattern and this decider cannot drift apart (which is what #1445's
+    widening of the pattern did to the previous, `$`-only, model).
+
+    Ordered, and in the pattern's own order: the terminator stops by position, then the
+    piece's end. Bounded by the piece and allocation-free per candidate: a stop's run is
+    walked back over the run class only, so this is O(len(piece)).
+    """
+    stops = [index for index, char in enumerate(piece) if char in _PEM_ARMOUR_TAIL_TERMINATORS]
+    stops.append(len(piece))
+    out: list[tuple[int, set[int]]] = []
+    for stop in stops:
+        start = stop
+        while start > 0 and piece[start - 1] in _PEM_ARMOUR_TAIL_RUN:
+            start -= 1
+        out.append((stop, set(range(start, stop + 1))))
+    return out
+
+
+def _pem_header_piece_end(piece: str) -> int | None:
+    """One `^…$` line of `pem_header_line_end`: `LINE_PREFIX` + the whole tail.
+
+    Returns the offset the pattern's match would END at inside this piece, or None. The
+    tail is
+    `-{1,4}['\\"]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}['\\"]?-{1,4}` + the
+    armour tail, and every piece of it is local: a rigid structure, the `BEGIN `
+    literal, a run of `[A-Z0-9 ]`, the `PRIVATE KEY` literal, a rigid structure whose
+    end is pinned by the tail. So the candidates are enumerated from the literals and
+    each one is a constant-time question against the prefix machine's flags — no
+    search, and no partition to walk.
+
+    The answer is the EARLIEST stop an accepted structure can reach — the pattern's own
+    priority on the stops — and the scan below keeps that by taking the minimum over the
+    accepted candidates rather than returning from a loop. The tail's `[ \\t]*` is greedy,
+    so after the rigid structure it consumes the trailing whitespace and the lookahead
+    must hold THERE: the earliest reachable terminator, and the piece's end only when no
+    terminator precedes it. That is also why the returned offset is the stop and not the
+    piece's length: the pattern's lookahead does not consume its `\\r`.
+
+    The scan is hoisted out of the stop loop and the flags conjunct out of the per-key
+    test (`PR1427 D1`), because as written the two mechanisms MULTIPLIED: measured on this
+    box, a 40 KB line of `BEGIN ` literals cost 3.34 s of CPU and a 46 KB line of CR
+    terminators 2.71 s, against 2.1 ms and 6.3 ms after the correction. No answer moves:
+    the conjunct is independent of the key and a necessary condition of every acceptance
+    through its `at`, so asking it once per BEGIN only skips candidates that could not
+    have been accepted anyway.
+    """
+    if _PEM_BEGIN not in piece or _PEM_KEY not in piece:
+        return None
+    length = len(piece)
+    # (1) The endings map, built from the STOPS side: ONE O(len(piece)) walk, instead of a
+    # whole BEGIN/KEY scan per stop. A candidate's tail stop is the greedy run's own end,
+    # and where two stops could offer the same `key_end` the SMALLEST stop wins — that is
+    # what the ascending stop loop returned.
+    stop_of: dict[int, int] = {}
+    for stop, rigid_ends in _pem_armour_tail_stops(piece):
+        for end in rigid_ends:
+            for rigid in _pem_rigid_end_lengths(piece, end):
+                key_end = end - rigid
+                if key_end >= 0:
+                    previous = stop_of.get(key_end)
+                    if previous is None or stop < previous:
+                        stop_of[key_end] = stop
+    if not stop_of:
+        return None
+    flags = _pem_prefix_end_flags(piece)
+    best: int | None = None
+    at = piece.find(_PEM_BEGIN)
+    while at >= 0:
+        # (3) The flags conjunct is independent of the key and necessary for every
+        # acceptance through this `at`, so asking it here — before the run walk and the KEY
+        # window — cannot change an answer, and it keeps both off every BEGIN occurrence
+        # that cannot accept at all.
+        if any(
+            at - rigid >= 0 and flags[at - rigid] for rigid in _pem_rigid_end_lengths(piece, at)
+        ):
+            body = at + len(_PEM_BEGIN)
+            # The `[A-Z0-9 ]*` between the literals is a run, so its end bounds where
+            # `PRIVATE KEY` may begin — and a `PRIVATE KEY` that starts inside it and
+            # ends past it is still a match, which is why the search window is the
+            # run's end plus the literal's own length.
+            bound = body
+            while bound < length and piece[bound] in _PEM_HEADER_CLASS:
+                bound += 1
+            key = piece.find(_PEM_KEY, body, bound + len(_PEM_KEY))
+            while 0 <= key <= bound:
+                stop = stop_of.get(key + len(_PEM_KEY))
+                if stop is not None and (best is None or stop < best):
+                    best = stop
+                key = piece.find(_PEM_KEY, key + 1, bound + len(_PEM_KEY))
+        at = piece.find(_PEM_BEGIN, at + 1)
+    return best
 
 
 def _anchored_key_value_guard(match: Match[str]) -> bool:
@@ -1826,7 +2649,14 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # the SHORT-MID shape QA measured (`3| Qw9z` then `4| MIIE…`) — which also
             # keeps numbered prose safe: a prose line has no full body line after it, so
             # it can neither start nor continue the run.
-            r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")[ \t]*)+"
+            # THE DIGIT-MAXIMAL FRAGMENTS, not `LINE_PREFIX` / `_PEM_LINE_CONTENT`:
+            # this rule is the table's one unbounded walk over unshaped text, and the
+            # released fragment makes it exponential in the digits of a dense row (Q3
+            # on #1427). Both are substituted — the body unit AND the short arm's
+            # lookahead — because they carry the same ambiguity. Why that is the same
+            # language, why a restriction on the unit END is not, and what pins the
+            # equivalence: `_PEM_DIGIT_MAX_PREFIX` above.
+            r"(?:" + _PEM_DIGIT_MAX_PREFIX + r"(?:" + _PEM_DIGIT_MAX_LINE_CONTENT + r")[ \t]*)+"
             r"(?=" + LINE_SEP + r"|[\x27\x22]|$)"
             r")*)"
         ),
@@ -2106,13 +2936,11 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # easy to keep honest.
         #
         # The guard's NAME clause extends that judgement to the spelling real
-        # commands use — ``--secret OS_PROD2_ADMIN_PASSWORD``, where the token
-        # after the flag is a reference to a stored secret. See
-        # ``_flag_value_guard`` for the production incident that measured it.
-        re.compile(
-            r"(?i)(--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
-            r"client[-_]?secret|auth[-_]?token|access[-_]?token)(?:=|\s+))([^\s\"']{3,})"
-        ),
+        # commands use — ``--secret MINERVA_UI_NPROD_USERNAME``, where the token after the
+        # flag is the NAME of a stored secret rather than a value. See
+        # ``_flag_value_guard`` and ``_value_is_a_reference_to_a_credential`` for the
+        # production incident that measured it.
+        re.compile(r"(?i)(--" + _CREDENTIAL_FLAG_WORDS + r"(?:=|\s+))([^\s\"']{3,})"),
         None,
         2,
         guard=_flag_value_guard,
@@ -2744,6 +3572,87 @@ def _present_heads(text: str, values: Sequence[str]) -> set[str]:
     return found
 
 
+#: A bare English word: letters only, all lower case. What ordinary prose leaves in a
+#: credential flag's argument position, and the one class whose letters cannot be told
+#: from prose anywhere in the text (see :func:`_is_prose_after_a_flag`).
+_BARE_WORD = re.compile(r"[a-z]+")
+
+#: The LONGEST bare lowercase run in a flag's argument position that is still read as
+#: prose. Four, because that is the width of the two specimens the refusal was measured
+#: for (``when``, and the three-character word the suite pins) — and NO wider.
+#:
+#: It deliberately does not borrow :data:`_ASSIGNED_VALUE_MIN_CHARS` (eight), which it
+#: used to: that floor answers a different question (is a short value under a
+#: credential-shaped NAME a placeholder?), and borrowing it swallowed the escalation for
+#: every five-, six- and seven-character value printed a second time in the clear — the
+#: canonical short weak passwords, which is the case the survival question exists to
+#: catch (agent review R1-1). Measured: the 439-row corpus grades identically for every
+#: bound at or above four (four, five, six, seven, eight, eleven and fifteen were run),
+#: and differently only at three — so the wider bound bought nothing.
+_FLAG_PROSE_MAX_CHARS = 4
+
+
+def _is_prose_after_a_flag(hit: ShapeHit) -> bool:
+    """Whether this hit is the flag rule's over-mask of an English word.
+
+    **Measured 2026-09-22, on a documentation read.** A ``read`` of a project's
+    ``AGENTS.md`` — 33 KB of ordinary prose — escalated to a "rotate it" demand on ONE
+    hit: the sentence ``It also accepts --api-key [redacted] you need to override the
+    env-backed credential`` puts ``when`` in a credential flag's argument position, the
+    flag rule masked that word (deliberately, see
+    ``test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation``), and the
+    exposure question then answered YES — because a four-character English word occurs
+    again somewhere in 33 KB of prose. The rotation demand named the word ``when``.
+
+    **Why the MASK stays and the CLAIM goes.** Masking a word-shaped argument is a
+    deliberate over-mask: the cost is one unreadable English word, and the alternative —
+    letting a flag whose value really is a short word through — is unrecoverable. The
+    ESCALATION was never deliberate, and the module's own test says so in its name: this
+    shape "may never demand a rotation".
+
+    **Why the question cannot be answered rather than answered differently.** A value
+    that cannot be told from prose cannot be told from prose ANYWHERE in the text: the
+    whole-value half of :func:`_credential_fragments_survive` asks whether those letters
+    are present, and for a word the answer is yes for reasons that have nothing to do
+    with this mask. No amount of reading the text distinguishes the second ``when`` from
+    the first, so the claim is REFUSED rather than downgraded — the mask is complete,
+    which is what ``complete`` means, and ``exposed`` is the half that cannot be read
+    here. The ``vendor-prefixed-token`` arm took the same judgement in the other
+    direction (:data:`_VENDOR_TAIL_IS_A_NAME`: there the match is refused); keeping the
+    mask and refusing the claim is the protective half of that trade.
+
+    **The class, and the length bound on it.** A bare run of lowercase letters, no
+    longer than :data:`_FLAG_PROSE_MAX_CHARS` (four). The bound is the width of the two
+    specimens this refusal was written for — the four-character ``when`` above, and the
+    three-character word the suite pins — not the module's own masked-value floor it
+    first borrowed. :data:`_ASSIGNED_VALUE_MIN_CHARS` (eight) answers a DIFFERENT
+    question: whether a short value under a credential-shaped NAME is a placeholder or a
+    word. Applied here it read a judgement nobody made, and cost the escalation for
+    every five-, six- and seven-character value — the canonical short weak passwords,
+    printed twice in the text the model reads, which is the case the survival question
+    exists to catch (agent review R1-1). Measured on the 439-row corpus: the grading is
+    identical for every bound at or above four, so the wider bound bought nothing.
+    Nothing with a digit, a separator, a symbol or any upper-case letter is this class at
+    all.
+
+    **The stated limit, narrowed to four characters.** A credential-shaped value of
+    three or four lowercase characters that really IS printed a second time in the clear
+    is still graded contained, so it files no rotation demand: at that width a word
+    cannot be told from a credential ANYWHERE in the text, which is the whole of the
+    refusal, and it is the price of not manufacturing a rotation demand for every English
+    word that recurs in ordinary prose. It is pinned on BOTH sides of the boundary — the
+    four-character ``when`` row in the corpus has to stay contained, and the five-, six-
+    and seven-character cases in
+    ``test_the_flag_prose_refusal_stops_at_four_characters`` have to escalate again —
+    rather than left for a differential to find.
+    """
+    return (
+        hit.label == "cli-credential-flag"
+        and len(hit.value) <= _FLAG_PROSE_MAX_CHARS
+        and _BARE_WORD.fullmatch(hit.value) is not None
+    )
+
+
 def _credential_fragments_survive(hit: ShapeHit, index: _SurvivalIndex) -> bool:
     """Whether a readable piece of the CREDENTIAL survived in the masked text.
 
@@ -2785,6 +3694,12 @@ def _credential_fragments_survive(hit: ShapeHit, index: _SurvivalIndex) -> bool:
     """
     value = hit.value
     if not value or value == REDACTION_MARKER:
+        return False
+    if _is_prose_after_a_flag(hit):
+        # Not a downgrade of the answer but a refusal to ask: for a value that cannot
+        # be told from prose, the question has no discriminating power. See
+        # :func:`_is_prose_after_a_flag` for the measured escalation this refuses and
+        # for the limit it states.
         return False
     if index.whole_survives(value):
         return True
@@ -2857,7 +3772,28 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
         # Readable material is checked FIRST, so the truncated-PEM branch below
         # cannot swallow an exposure: a block that was masked is contained, and
         # one that left a fragment readable is not.
-        exposed = _credential_fragments_survive(hit, index)
+        #
+        # A PLACEHOLDER/REFERENCE value is never graded EXPOSED, and this consult is
+        # the whole of the false-positive fix rather than a wording change. The DSN
+        # rule masks the copy INSIDE the URL and deliberately leaves a bare second
+        # mention READABLE — the value is a ``$VAR`` reference, and
+        # ``is_placeholder_component`` is exactly what keeps it unmasked (it is the
+        # predicate ``_value_is_not_a_credential`` consults at the masking floor).
+        # The fragment test then found that deliberately-readable survivor under the
+        # hit's own value and read it as a partial mask, so a duplicated reference
+        # filed a rotation demand for a value that was never credential material:
+        # ``postgres://u:$VAR@host`` plus a later ``$VAR`` escalated, and the same
+        # line without the second mention did not. The exposed path was the ONE site
+        # that did not consult the predicate — the masking floor and the registration
+        # floor (:func:`is_registerable_component`) both do — and no word-list change
+        # can reach it, because the value is correctly on the list already.
+        #
+        # The conservative direction is unchanged for every real value: only a
+        # placeholder is excused, and a genuinely half-masked SECRET (or a duplicate
+        # of one) still escalates, because its own characters are genuinely readable.
+        exposed = not is_placeholder_component(hit.value) and _credential_fragments_survive(
+            hit, index
+        )
         if _is_truncated_pem(hit) or exposed:
             # A BEGIN with no END is a key whose LENGTH we cannot see: everything
             # visible is masked, and the claim is still withheld, because nothing

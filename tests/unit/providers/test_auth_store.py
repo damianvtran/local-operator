@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.providers.auth_store import (
     AuthStore,
     AuthStoreError,
@@ -119,9 +118,9 @@ async def test_cascade_resolves_a_provider_store_row_before_the_environment(
     from local_operator.providers.registry import store_provider_key
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    manager = CredentialManager.readonly(tmp_path / "config")
-    store_provider_key("OPENAI_API_KEY", "row-key", base=manager.config_dir)
-    auth = AuthStore(db_path=tmp_path / "auth.db", credential_manager=manager)
+    root = tmp_path / "config"
+    store_provider_key("OPENAI_API_KEY", "row-key", base=root)
+    auth = AuthStore(db_path=tmp_path / "auth.db", config_dir=root)
     try:
         assert await auth.get_api_key("openai") == "row-key"
         # Stored non-login keys rank AFTER the store row / env tier.

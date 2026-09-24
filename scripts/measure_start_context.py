@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from local_operator.harness.types import AgentTool  # noqa: E402
-from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.prompts_api import CHANNEL_ASK, build_system_blocks  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
 #: Measured billed-token rate for this prompt surface. See the module
@@ -59,6 +59,12 @@ def measure(*, with_browser: bool = True) -> dict[str, int]:
         skills_block="<skills/>",
         env_details="cwd: /tmp\nplatform: Darwin 25.6.0",
         date_str="2026-09-07",
+        # The same shape the enforced guard renders (``bench_context_budget``),
+        # so the two measurements stay comparable: an ATTACHED session with an ask
+        # hook is the host that carries the ``<interactivity>`` block, and leaving
+        # it unstated renders none at all (a host with no runtime probe).
+        interactive=True,
+        channel=CHANNEL_ASK,
     )
     return {
         "instructions": len(blocks[0]),

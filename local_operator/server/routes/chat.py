@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse
 from local_operator.agents import AgentRegistry
 from local_operator.compaction.tokens import count_text_tokens
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.helpers import parse_agent_action_xml, parse_replacements
 from local_operator.jobs import JobManager
@@ -25,7 +24,6 @@ from local_operator.prompts_api import render_template
 from local_operator.server.dependencies import (
     get_agent_registry,
     get_config_manager,
-    get_credential_manager,
     get_env_config,
     get_event_broker,
     get_job_manager,
@@ -96,7 +94,6 @@ EDIT_FILE_INSTRUCTIONS_TEMPLATE = "edit_file_instructions.md"
 )
 async def chat_endpoint(
     request: ChatRequest,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
@@ -118,7 +115,6 @@ async def chat_endpoint(
         operator = create_operator(
             request.hosting,
             request.model,
-            credential_manager,
             config_manager,
             agent_registry,
             env_config=env_config,
@@ -225,7 +221,6 @@ async def chat_endpoint(
 )
 async def chat_with_agent(
     request: AgentChatRequest,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
@@ -249,7 +244,6 @@ async def chat_with_agent(
         operator = create_operator(
             request.hosting,
             request.model,
-            credential_manager,
             config_manager,
             agent_registry,
             current_agent=agent_obj,
@@ -338,7 +332,6 @@ async def chat_with_agent(
 )
 async def chat_async_endpoint(
     request: ChatRequest,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
@@ -357,7 +350,6 @@ async def chat_async_endpoint(
 
     Args:
         request: The chat request containing prompt and configuration
-        credential_manager: Dependency for managing credentials
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
@@ -418,7 +410,6 @@ async def chat_async_endpoint(
                 processed_attachments,
                 request.model,
                 request.hosting,
-                credential_manager,
                 config_manager,
                 agent_registry,
                 env_config,
@@ -490,7 +481,6 @@ async def chat_async_endpoint(
 )
 async def chat_with_agent_async(
     request: AgentChatRequest,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
@@ -513,7 +503,6 @@ async def chat_with_agent_async(
 
     Args:
         request: The chat request containing prompt and configuration
-        credential_manager: Dependency for managing credentials
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
@@ -553,7 +542,6 @@ async def chat_with_agent_async(
                 request.model,
                 request.hosting,
                 agent_id,
-                credential_manager,
                 config_manager,
                 agent_registry,
                 env_config,
@@ -676,7 +664,6 @@ def _read_edit_workspace_file(workspace: str | None, file_path: str) -> tuple[Fi
 )
 async def edit_file_with_agent(
     request: AgentEditFileRequest,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
@@ -693,7 +680,6 @@ async def edit_file_with_agent(
 
     Args:
         request: The edit request containing file path and edit prompt
-        credential_manager: Dependency for managing credentials
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         env_config: Environment configuration
@@ -729,7 +715,6 @@ async def edit_file_with_agent(
         operator = create_operator(
             request.hosting,
             request.model,
-            credential_manager,
             config_manager,
             agent_registry,
             current_agent=agent_obj,

@@ -54,6 +54,7 @@ import re
 import shutil
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -129,6 +130,7 @@ from local_operator.procstate import (
 )
 from local_operator.redaction_shapes import (
     CREDENTIAL_SHAPES,
+    PEM_BODY_FLOOR,
     PEM_BODY_LINE_RE,
     PEM_END_LINE_RE,
     PEM_HEADER_LINE_RE,
@@ -137,6 +139,9 @@ from local_operator.redaction_shapes import (
     ShapeReport,
     credential_dump_notice,
     has_shape_anchor,
+    pem_body_line,
+    pem_end_line,
+    pem_header_line_end,
     scrub_secrets_with_hits,
     shape_report,
 )
@@ -2249,14 +2254,55 @@ MEMORY_EXCEEDED_FALLBACK = (
 # between the two classifiers is a silent leak — which is exactly what happened when the
 # table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
 # published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+#: The patterns, kept under their historical names: they are the DEFINITION of the three
+#: languages, and #1445's arms (`_pem_grammar_is_live`, the body-floor pin) read them
+#: through these names to check that a literal is still armour and that the grammar's floor
+#: is the hold's. Nothing at runtime reached them after the deciders landed, which is what
+#: these aliases say rather than leaving a reader to find out.
 _PEM_HEADER_LINE = PEM_HEADER_LINE_RE
 _PEM_BODY_LINE = PEM_BODY_LINE_RE
 _PEM_END_LINE = PEM_END_LINE_RE
 
-#: How many lines a streamed PEM block may mask before the state resets. A real
-#: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
-#: short of "the rest of the command's output".
-_PEM_STREAM_LINE_LIMIT = 512
+#: The SAME three languages, decided in linear time rather than by the patterns'
+#: own backtracking walk — the three call sites below are where that walk was
+#: measured, and the arms in `tests/unit/secrets/test_credential_shapes.py` pin each
+#: decider to its pattern. Bound at module level so a test can stand in for one, which
+#: is how "the classifier was not reached" is asserted as a fact rather than a duration.
+_pem_body_line = pem_body_line
+_pem_end_line = pem_end_line
+_pem_header_line_end = pem_header_line_end
+
+#: NECESSARY CONDITIONS of the header pattern above, checked BEFORE it wherever the
+#: pattern would otherwise run over text this filter did not shape. Both literals are
+#: required by the pattern, so the gate can only skip work — and the work it skips is
+#: expensive, because the shared prefix grammar is ambiguous by construction: a
+#: digit-dense line is seconds of backtracking before the engine can conclude that it
+#: is not a PEM line. This tuple carries the SAME NAME and the SAME CONTENTS as the gate
+#: #1427 puts in front of the mask's own search (``_PEM_HEADER_HINTS`` in that branch),
+#: so a merge of the two keeps ONE gate instead of two that can drift apart; on this
+#: branch the cap-split hold below is the reader.
+#: The other literal a classifier needs: `END `, a necessary condition of the END
+#: pattern, kept as a gate at the call site below because a line without it cannot
+#: be an END line and so must not run the prefix grammar at all.
+_PEM_END_HINT = "END "
+
+_PEM_HEADER_HINTS = ("BEGIN ", "PRIVATE KEY")
+
+#: The line terminator that ends a PEM header's own line. Consumed by the mask at
+#: the header hand-off so the line loop never classifies a bare separator as prose
+#: (see ``_PipeRedactor._mask_open_key_block``); the bytes are emitted verbatim.
+_PEM_LINE_BREAK = re.compile(r"\r\n|\n|\r")
+
+# There is deliberately NO line-count bound on the open block any more. One used to
+# stand here (``_PEM_STREAM_LINE_LIMIT``, 512 lines) so that a stream which never
+# terminates a block could not hold the state open for the rest of the command's
+# output; it made the state PUBLISH instead, which is the one direction this layer
+# may not fail in. Measured on a 2,000-line block with no END: 1,488 raw body lines
+# released verbatim. Masking a line drops it, so the state costs no memory of its
+# own (``pending`` is capped separately, by ``_PIPE_DEFERRAL_LIMIT``) and the state
+# now ends only at the END line, at a NON-BODY line, or at end of stream. The price
+# is real and is the correct direction: an unterminated block followed by
+# base64-SHAPED lines masks them, so an over-mask is possible where a leak was.
 
 
 class _BashOutput:
@@ -2472,12 +2518,12 @@ class _PipeRedactor:
         *,
         contain: Callable[[Sequence[ShapeHit]], None] | None = None,
     ) -> None:
-        #: An open PEM block, whether its marker is already out, and how many
-        #: lines it has covered (the bound that keeps a stream from holding the
-        #: state forever).
+        #: An open PEM block, and whether its marker is already out. No line bound
+        #: is kept: the block stays open until its END line, a non-body line, or the
+        #: end of the stream — see the module comment above `_PEM_LINE_BREAK` for why
+        #: bounding it published key material.
         self._in_key_block = False
         self._key_block_marker_sent = False
-        self._key_block_lines = 0
         #: Whether this filter has withheld its output after a fault.
         self._withheld = False
         #: The store's containment entry point, or ``None`` for a caller that has
@@ -2560,7 +2606,7 @@ class _PipeRedactor:
         the live view publishing key material when the block is larger than the
         cap — an 8192-bit RSA body is ~6.4 KiB against an 8 KiB cap.
 
-        Why it is written this way — three constraints, each paid for:
+        Why it is written this way — four constraints, each paid for:
 
         * only a PEM HEADER opens the state (``-----BEGIN [A-Z0-9 ]+-----``). A
           bare ``-----BEGIN`` in prose (``head -n 5 key.pem``, a doc quoting an
@@ -2570,24 +2616,80 @@ class _PipeRedactor:
         * a line is masked only when it is base64 BODY. Prose after a stray
           header is released verbatim and CLOSES the state, so no ordinary line
           can be eaten by it.
-        * the state is bounded by lines, so a stream that never terminates a
-          block cannot hold it open for the rest of the command's output.
+        * the header's OWN terminator is consumed here, before the line loop, and
+          emitted verbatim. It used to be the loop's first element, where the
+          prose test above read a bare separator as prose and closed the block one
+          line into itself — after which every later release, having no header to
+          reopen it, published the rest of the body. Measured (PR #1427's case:
+          header + 200x256 base64 chars, no END, one call): **143 raw body lines**,
+          the whole 8 KiB ``pending``; a chunk boundary landing after the header
+          reaches the same state. The separator belongs to the header line, so
+          classifying it was always the wrong question.
+        * an open block masks ALL of its body, with no line-count bound. The bound
+          that used to stand here released the body verbatim past 512 lines —
+          measured 1,488 raw lines of a 2,000-line block — and the settled pass
+          cannot repair that release, because ``pem-private-key`` needs a complete
+          ``BEGIN … END``: a >4 MiB stream whose retention window drops the BEGIN
+          line kept **1,420 raw body lines** in the call-site spill, served over
+          ``read spill://``. The state costs no memory (a masked line is dropped;
+          ``pending`` is capped separately), so it now ends only at the END line,
+          at a NON-BODY line, or at end of stream.
+
+        KNOWN AND RECORDED, pre-existing and in the OVER-MASK direction, so it is
+        recorded rather than patched in this change: once this loop CLOSES the state it
+        goes on classifying to the end of the RELEASE, so base64-shaped ORDINARY lines
+        that follow a terminated block in the same release are withheld —
+        `cat key.pem; base64 thing` in one read withheld 20 of 20, where the same text
+        in a later release is published (0 of 20). Re-checking the state per line is
+        what would fix it and it is not a line to slip in here: it would also publish
+        the body-shaped line that the stray-header arm pins as MASKED, so a close would
+        become a licence to publish, and that needs its own round with its own
+        over-mask evidence.
+
+        KNOWN AND RECORDED, at the layer boundary rather than patched here: a body
+        FRAGMENT that reaches the shape table with no header in front of it (a
+        truncated ``key.pem`` read directly, say) matches no rule, because the
+        table's ``pem-private-key`` spans BEGIN to END. Closing an unterminated
+        block at the MASK — what this routine does — is what keeps the pipe and the
+        retention copy free of raw body lines; teaching the table to mask a headerless
+        fragment is a separate change with its own over-mask evidence to gather.
         """
         if self._in_key_block:
             out: list[str] = []
             for line in ready.splitlines(keepends=True):
-                if self._key_block_lines > _PEM_STREAM_LINE_LIMIT:
-                    # Bound reached: stop masking, release, and reset.
-                    self._in_key_block = False
-                    out.append(line)
-                    continue
-                self._key_block_lines += 1
-                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                # Stripped ONCE: the gate and the classifier must see the same bytes.
+                stripped = line.rstrip("\r\n")
+                if _PEM_END_HINT in stripped and _pem_end_line(stripped):
                     self._in_key_block = False
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                if _pem_header_line_end(stripped) is not None:
+                    # A SECOND block's header inside an open block is armour, not prose.
+                    # The prose rule below closed the state on it, and because a header
+                    # is released with the body lines that follow it (the hold keeps a
+                    # header until its END or the cap) the close landed one release
+                    # early: the block's own body then went out raw past the cap —
+                    # measured on `header + 700 body lines + header + 200 body lines +
+                    # END`, where the second block's body is what leaked. Keeping the
+                    # state costs nothing and cannot eat ordinary text: prose that is
+                    # not armour still closes the block, which is the guard that rule
+                    # exists for.
+                    #
+                    # AND THE STATE IS CARRIED, not merely kept: this loop reaches the
+                    # arm with the state already CLOSED whenever the release that ends
+                    # here also carried an END (the arm above closes it on one), so
+                    # releasing the header without re-opening let the SECOND block's
+                    # body go out raw on the next release — measured on `header + 3
+                    # body lines + END + header + 200 body lines` (12,071 B, one read):
+                    # 138 raw body lines, the whole flush. A fresh marker goes with the
+                    # state, so a second block's body is announced like any other
+                    # block's rather than dropped silently under the first block's.
+                    self._in_key_block = True
+                    self._key_block_marker_sent = False
+                    out.append(line)
+                    continue
+                if _pem_body_line(stripped):
                     if not self._key_block_marker_sent:
                         self._key_block_marker_sent = True
                         out.append(REDACTION_MARKER + "\n")
@@ -2597,11 +2699,18 @@ class _PipeRedactor:
                 self._key_block_marker_sent = False
                 out.append(line)
             return "".join(out)
-        begin = _PEM_HEADER_LINE.search(ready)
+        # GATED SEARCH, and the gate is what makes an ORDINARY read free: this is
+        # the one place the ambiguous prefix grammar runs over arbitrary text, and
+        # both literals are necessary conditions of the pattern, so a read carrying
+        # neither skips the search entirely (see `_PEM_HEADER_HINTS`).
+        begin = (
+            _pem_header_line_end(ready)
+            if all(hint in ready for hint in _PEM_HEADER_HINTS)
+            else None
+        )
         if begin is None:
             return ready
         self._in_key_block = True
-        self._key_block_lines = 0
         self._key_block_marker_sent = False
         # Keep the rest of this chunk: it is the block's first lines, and they go
         # through the same line loop as everything else. Replacing it with a
@@ -2617,7 +2726,24 @@ class _PipeRedactor:
         # as an earlier round did) changes the bytes the shape table is about to read, and
         # a rewritten separator is a shape the table cannot match. The remainder is
         # passed through exactly as read.
-        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :])
+        # The DECIDER answers with the offset the pattern's match ENDS at (the same
+        # number `_PEM_HEADER_LINE.search(ready).end()` gave), so the split below is by
+        # an int and not by a match object.
+        tail = ready[begin:]
+        break_match = _PEM_LINE_BREAK.match(tail)
+        if break_match is None:
+            # The header is the last thing in this release: the terminator arrives
+            # with the next one, and the block is open across that boundary.
+            return ready[:begin]
+        # The terminator is emitted BYTE-IDENTICAL (no rewriting — see above) and
+        # never offered to the line loop, which read it as prose and closed the
+        # block. This is also where an escaped `\\n` (no real break) keeps its
+        # behaviour: it is not a separator, so it stays in the masked remainder.
+        return (
+            ready[:begin]
+            + break_match.group()
+            + self._mask_open_key_block(tail[break_match.end() :])
+        )
 
     def _release_point(self, text: str, *, final: bool) -> int:
         """Where the decidable prefix ends: after the last newline, capped."""
@@ -2632,20 +2758,32 @@ class _PipeRedactor:
         # the last newline: a PEM body is the credential and it spans lines, so
         # releasing up to the last newline would publish the key material and
         # hold back only the ``-----END`` line. The block is held until its END
-        # arrives (or the cap below forces it through, which is the documented
-        # residual for a block larger than the cap).
+        # arrives (or the cap below forces it through — and a cap-forced release of
+        # an OPEN block is masked, because the state carries across releases: the body
+        # used to go out verbatim once the cap cut through the block, which is the
+        # publish this mask closes).
+        block_open = False
         begin = text.rfind("-----BEGIN", 0, cut)
         if begin >= 0:
             end = text.find("-----END", begin)
             if end < 0 or end >= cut:
                 cut = begin
+                # Set WHERE THE HOLD FIRES rather than inferred afterwards from the
+                # cut's position: the cap below rewrites the cut, so an inference taken
+                # after it answers a different question — and the fragment rule at the
+                # end of this function needs this one, which is "the text carries a
+                # block the classifier accepted", because the cap can leave the block's
+                # own marker outside the release (see `_cut_past_a_split_header`).
+                block_open = True
         # The cap is applied LAST and wins over every hold above: bounded memory
         # is the property that must not depend on what the child prints, so a
         # command that opens a PEM block and never closes it cannot pin the
-        # buffer forever.
+        # buffer forever. ONE hold survives it, and only because the cap can destroy
+        # the very thing the hold above protects: a cut inside a header LINE splits a
+        # marker no later release can put back together.
         cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
         if cap_forced:
-            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+            cut = self._cut_past_a_split_header(text, len(text) - _PIPE_DEFERRAL_LIMIT)
         # Never cut through a KNOWN value. The newline rule above already
         # prevents that for any value without a newline in it, which is every
         # credential in practice; this keeps the guarantee for the ones with
@@ -2656,12 +2794,36 @@ class _PipeRedactor:
         # release the line rule does not cover, and it is the one that used to
         # publish a credential in two unmasked halves.
         spans = self._shape_safe_spans(text) if cap_forced else []
-        # ONE fixed point over BOTH rules, not a sequence of them: moving the cut
-        # for a shape can put it inside a value and vice versa, so the two have to
-        # be re-checked against each other until neither moves it. The reviewer of
-        # this change measured 0 violations from applying them in sequence across
-        # 2,232 buffer/phase combinations, so this is a latent hole being closed
-        # rather than a live one.
+        # ONE fixed point over ALL THREE rules, not a sequence of them: moving the cut
+        # for a shape can put it inside a value, a value move can put it inside a line,
+        # and the line hold can expose a value — so each is re-checked against the
+        # others until none of them moves it. The reviewer of this change measured 0
+        # violations from applying the shape and value rules in sequence across 2,232
+        # buffer/phase combinations, so that half is a latent hole being closed rather
+        # than a live one. The line hold is in the loop for a reason of its own: it
+        # moves the cut LEFT, and a known value ENDING within PEM_BODY_FLOOR bytes of
+        # the new cut would be split by it — which is the publish this filter exists to
+        # prevent, so the value rule has to get the last word.
+        #
+        # The hold itself: AN OPEN BLOCK'S RELEASE MUST END ON A LINE BOUNDARY. Any
+        # cut above can land inside a line (the cap always can; `_cut_outside` and the
+        # known-value rule move to a match start, which is not one), and a fragment
+        # shorter than the body grammar's floor (``PEM_BODY_FLOOR``) is then read as
+        # PROSE by the line loop — which CLOSES the block. Measured on the retention
+        # case a real reader reaches: a cap-forced cut left the four-character fragment
+        # `MIIE` at the end of a release, the block closed on it, and the NEXT release
+        # (all body, with no header left to reopen it) went out raw — 1,092 raw body
+        # lines of a 2,000-line block. Holding the cut back costs at most
+        # PEM_BODY_FLOOR - 1 bytes of latency, applies only while a block is open (in
+        # the state, or opened by this very text), and rewrites nothing: the fragment
+        # goes out whole with its line on the next release.
+        #
+        # IT DOES NOT APPLY TO THE FINAL RELEASE, and that is a decision rather than an
+        # oversight: ``final`` releases to the end of the buffer, so a fragment there is
+        # the END OF THE STREAM and nothing follows it for the line loop to misread —
+        # and holding bytes back at that point would DROP them, because ``pending`` is
+        # never flushed again. The invariant this hold exists for is not "no fragment is
+        # ever released"; it is "no fragment a LATER release will classify".
         while True:
             previous_cut = cut
             if spans:
@@ -2670,9 +2832,62 @@ class _PipeRedactor:
                 start = text.find(secret, max(cut - len(secret) + 1, 0))
                 if 0 <= start < cut < start + len(secret):
                     cut = start
+            if cut and (self._in_key_block or block_open):
+                break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
+                if 0 < cut - break_at < PEM_BODY_FLOOR:
+                    cut = break_at
             if cut == previous_cut:
                 break
         return cut
+
+    def _cut_past_a_split_header(self, text: str, cut: int) -> int:
+        """Extend a cap-forced cut to the end of a header LINE it would otherwise split.
+
+        WHY THIS EXISTS, and why it is the ONE hold the cap does not win over. The
+        release point finds a block by its opening literal and defers it to its END,
+        but the cap is applied after that hold and recomputes the cut from the buffer
+        length — so an alignment that puts the cap inside the header line splits the
+        MARKER: ``-----BEGIN RSA PRI`` goes out as a bare armour fragment and the rest
+        of the marker stays in ``pending``, where its line no longer STARTS with the
+        marker, so no header line can start there any more. The state never
+        opens, the carried-state masking below never engages, and every later release
+        is body that nothing masks. Measured on the shape of ``head -c 8210 key.pem``:
+        138 raw body lines published, and the alignment is fixed per stream — a session
+        that runs the same truncated read twice leaks both times.
+
+        The cut moves FORWARD to the end of that line rather than BACK to its start,
+        and both halves of that matter:
+
+        * the header line has to be inside ONE release for the mask to see it, so the
+          cut must not land in the middle of it — which a retreat also achieves;
+        * but a retreat HOLDS the block, and the held bytes are exactly what the cap
+          exists to bound: with a buffer that never grows past the cap, a retreat at a
+          header line that starts the buffer would answer every release with the same
+          offset and let ``pending`` grow without bound. Moving forward releases the
+          armour line, which is not the credential, and leaves ``pending`` SMALLER
+          than the cap allows — so no bound is weakened and nothing can stall.
+
+        Only a line that IS a header line opens this path — the same pattern the mask
+        classifies with, so the hold cannot disagree with the mask about what it split
+        — and only when that line's terminator has arrived, because the line has to be
+        complete to be released whole. The hint gate in front of the pattern is the
+        pattern's own necessary conditions: this runs per release, and the prefix
+        grammar is ambiguous enough that an ungated match on ordinary text is seconds.
+        """
+        line_start = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
+        if line_start >= cut:
+            return cut  # the cut is already a line boundary: nothing is split
+        break_match = _PEM_LINE_BREAK.search(text, cut)
+        if break_match is None:
+            # No terminator in the buffer yet: the line cannot be released whole, and
+            # the fragment rule below is the only hold that applies to it.
+            return cut
+        line = text[line_start : break_match.start()]
+        if not all(hint in line for hint in _PEM_HEADER_HINTS):
+            return cut
+        if _pem_header_line_end(line) is None:
+            return cut
+        return break_match.end()
 
     def _shape_safe_spans(self, text: str) -> list[tuple[int, int]]:
         """Every shape span a cap-forced release must not land inside.
@@ -6276,8 +6491,15 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
         # A target the shell has yet to expand does not NAME a path, and printing
         # its resolved form would invent one (``> /tmp/f$i`` is not
         # ``/private/tmp/f$i``). The directory is the honest subject there, and it
-        # is a directory that really exists.
-        unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
+        # is a directory that really exists. The two expansions first are the
+        # spellings that DO name a path: the home spelling, which only counts in
+        # the LEADING position, and ``$TMPDIR``, which rewrites anywhere. What still
+        # carries a ``$`` or a backtick after them is what this scan cannot
+        # resolve — ``~/rig-x/f$i`` names no file either.
+        unexpanded = (
+            _UNEXPANDED_SHELL.search(_expand_home_spellings(_expand_tmpdir_spellings(candidate)))
+            is not None
+        )
         return _temp_scratch_line(
             resolved.parent if unexpanded else resolved,
             why,
@@ -6382,17 +6604,82 @@ def _expand_tmpdir_spellings(candidate: str) -> str:
     return candidate
 
 
+#: The shell's two spellings of the home directory, longest first — the same
+#: ordering constraint as the temp spellings above, so `${HOME}` can never be
+#: rewritten to a leftover `${}`.
+_HOME_SPELLINGS = ("${HOME}", "$HOME")
+
+
+def _expand_home_spellings(candidate: str) -> str:
+    """``candidate`` with a LEADING ``~/``, ``$HOME`` or ``${HOME}`` expanded.
+
+    The shell channel's counterpart of ``Path.expanduser()``, which the
+    ``write``/``edit`` channel already applies in ``_resolve_workspace_path``. A
+    home path is NEITHER of the two shapes this scan refuses: it is not the bare
+    relative target that has no cwd to resolve against, and it is not a scheme.
+    ``~/workspace/…`` is how a session spells a home path all day, so leaving it
+    in the silent bucket is how the SAME write gets advised when spelled
+    absolutely and not when spelled with a tilde — measured on the released
+    v0.62.3, where ``> /Users/<u>/workspace/scratch-a/tmp/x.md`` fired and
+    ``> ~/workspace/scratch-a/tmp/x.md`` was silent.
+
+    Normalising in ONE place, before the absolute test both predicates share, is
+    what keeps a single rule for what names an absolute target: the temp-root arm
+    and the scratch-name arm then read the same expanded string, and neither
+    learns a second shape.
+
+    Three shapes only, and LEADING only: ``~/…``, ``~`` alone, and the two
+    variable spellings followed by ``/`` or standing alone. ``~other/tmp/x`` names
+    ANOTHER user's home, which this scan cannot resolve, so it is left alone — the
+    same refusal a relative path gets, and for the same reason. A ``~`` outside
+    the leading position (``/tmp/~/x``) is a literal directory name, and so is
+    ``$HOMEfoo``, whose expansion is the shell's business rather than this scan's.
+
+    A host the OS will not name a home directory for raises ``RuntimeError`` out
+    of ``expanduser``; the candidate is handed on UNCHANGED then, which leaves it
+    failing the absolute test and so silent, rather than inventing a path.
+    ``os.environ["HOME"]`` is deliberately not read directly: ``Path`` is what the
+    other channel resolves through, so the two cannot disagree about whose home
+    ``~`` means.
+
+    Quoting is not visible here — ``_bash_tokens`` has already dequoted the token,
+    so ``'~/x'`` (a literal name to the shell) expands like ``~/x``. The dequoting
+    is inherited from the temp spelling next door; what is NEW here is the REACH,
+    because ``'~/x'`` could not fire at all before this helper existed. It errs
+    toward one advisory line about a path the command did not create, never toward
+    a wrong subject or a refusal, and the GUIDE says so — a session reading the
+    line needs to know which spelling produced it.
+    """
+    if candidate == "~" or candidate.startswith("~/"):
+        try:
+            return str(Path(candidate).expanduser())
+        except RuntimeError:  # pragma: no cover - a host with no home directory
+            return candidate
+    for spelling in _HOME_SPELLINGS:
+        if candidate == spelling or candidate.startswith(spelling + "/"):
+            try:
+                home = str(Path.home())
+            except RuntimeError:  # pragma: no cover - a host with no home directory
+                return candidate
+            return home + candidate[len(spelling) :]
+    return candidate
+
+
 def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
 
     The root spellings a shell writes are the point of the expansion below:
     ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
     literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
-    shells on this fleet spell it. Every other form is left alone: a relative
-    path, a ``~`` path and anything carrying a scheme are not temp-root targets
-    and must not be guessed at.
+    shells on this fleet spell it. ``~`` and ``$HOME`` spellings are normalised
+    here too (:func:`_expand_home_spellings`) so ``~/…`` reaches this predicate
+    exactly as its absolute spelling does — the home arm of the same hole.
+
+    What is left alone is a RELATIVE path and anything carrying a scheme: neither
+    names a temp-root target, and the scan has no cwd to resolve the relative one
+    against.
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
@@ -6412,10 +6699,14 @@ def _scratch_dir_target(
     """``candidate`` resolved, when it sits DIRECTLY in a scratch-named directory.
 
     The shell side of the second arm, and the sibling of :func:`_temp_root_target`
-    above — same expansion, same refusals, a different predicate. The refusals are
-    shared for the same reason they exist there: a relative path, a ``~`` path and
-    anything carrying a scheme are not guessed at, because the scan has no cwd to
-    resolve them against and a path the command never names is worse than the miss.
+    above — same expansions, same refusals, a different predicate. The refusals are
+    shared for the same reason they exist there: a relative path and anything
+    carrying a scheme are not guessed at, because the scan has no cwd to resolve
+    them against and a path the command never names is worse than the miss. A home
+    spelling is not in that class — ``~``/``$HOME`` name a directory the OS can
+    resolve without a cwd, and the ``write``/``edit`` channel has always resolved
+    them — so :func:`_expand_home_spellings` normalises them rather than letting
+    the two channels disagree about the same path.
 
     That refusal is also the honest limit of this arm on the shell channel: a bare
     ``> tmp/x.md`` is RELATIVE and goes unnoticed, while the same write through
@@ -6425,7 +6716,7 @@ def _scratch_dir_target(
     states this, because it is the copy an agent reads before choosing where to
     write (round 1, R4).
     """
-    text = _expand_tmpdir_spellings(candidate.strip())
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
         return None
     if not text.startswith("/"):
@@ -13069,10 +13360,34 @@ async def _bridge_open(
     )
 
 
-#: await_access defaults and cap. The cap exists because each slice is a real
-#: RPC and the human may simply be away: 240 s is long enough for "walk back to
-#: the desk", short enough that the agent gets a turn to re-notify the user
-#: rather than sitting silent for the extension's whole 10-minute request TTL.
+#: await_access defaults and cap.
+#:
+#: THE CAP DELIBERATELY DOES NOT MOVE WITH THE 15-MINUTE RECOMMENDATION (design
+#: §5.4). Two measured reasons, either sufficient:
+#:
+#: 1. The ``browser`` tool is ``interruptible=False`` (see the tool builder
+#:    below): a call that sits for fifteen minutes cannot be cut by a steer, a
+#:    stop or an abort — the failure ``ask``'s builder documents. Raising the cap
+#:    without flipping that flag converts a bounded wait into a hang.
+#: 2. Each slice is a real RPC (``_BRIDGE_AWAIT_SLICE_MS``), so fifteen minutes
+#:    is ~45 round trips, and the extension's own request TTL is 10 minutes
+#:    (``extension/src/driver/access-queue.ts``, ``ACCESS_REQUEST_TTL_MS``): one
+#:    prompt cannot serve the wait anyway, so the extra cap would buy five
+#:    minutes of nothing at all.
+#:
+#: (A third reason used to stand here — that the remainder of the budget belongs
+#: to the ``wait`` tool, which is interruptible. It was wrong twice over: ``wait``
+#: awaits a background JOB and ``WaitParams.job_id`` is required, so a session
+#: with nothing running cannot call it at all, and the pending text that sent the
+#: model there was pointing at an unexecutable step. The budget is carried by
+#: REPEATED ``await_access`` calls, which is what the text now says; see
+#: ``_access_result_text``.)
+#:
+#: The DEFAULT therefore stays at 120s rather than rising to the cap (round 1,
+#: reviewer MINOR 4 / U6). An unsized ``await_access`` is the call the pending text
+#: tells the model to make, and moving the default to the cap would double an
+#: uninterruptible block for the commoner case, for nothing the deliverable needs —
+#: the 15 minutes are carried by repeated calls, each of which the model chooses.
 BROWSER_AWAIT_ACCESS_DEFAULT_S = 120.0
 BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 
@@ -13084,6 +13399,144 @@ BROWSER_AWAIT_ACCESS_MAX_S = 240.0
 _BRIDGE_AWAIT_SLICE_MS = 20_000
 
 
+def _attached_here(context: ToolContext | None) -> bool:
+    """Whether an interface is attached to the session this call runs in.
+
+    Reads the declared ``ToolContext.attached_probe`` — a live view of
+    ``RuntimeServer.attached_surfaces`` through the session's goal state. It is
+    called WHERE THE TEXT IS RENDERED, not once up front: an ``await_access``
+    that waited 240s must report the attachment at the end of that wait, not the
+    one it started with, or a surface that attached while the model waited is
+    told the session is unattached and advised to give up (round 1, MINOR 3).
+
+    ``True`` when the context carries no probe (a bare tool test, a host that
+    never wired one), which is the pre-existing default AND the direction every
+    uncertain answer falls here: a wrong "attached" costs a wait that is
+    re-checked, while a wrong "unattached" tells the agent to give up on a
+    question the operator was ready to answer — the incident this flow exists to
+    prevent.
+
+    This is NOT ``has_ui`` and NOT evidence that anyone is looking right now: an
+    attached pane holds a prompt a person answers when they return. See
+    ``docs/design/attached-interface-signal.md`` §5.
+    """
+    probe = getattr(context, "attached_probe", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe())
+    except Exception:  # noqa: BLE001 — an unreadable probe must not fail the flow
+        return True
+
+
+#: The width the TUI receipt can actually paint, and therefore the width every
+#: arm below is wrapped to. The card's lane is 76 cells at 80 columns and its
+#: text measure is 72; a raw line past the measure is clipped with an ellipsis,
+#: so whatever it carried is lost to the OPERATOR while the model still receives
+#: every byte. Measured twice: round 1 (D6) lost "proceed with what you have",
+#: "15 MINUTES" and "not a refusal"; round 2 (U8/D6r) still had three arms
+#: unwrapped and three lines at 74-78 cells, one losing exactly the notify
+#: clause it had just gained. Wrapping by hand cannot be right, because the
+#: interpolated clause (``{notify}``, ``{origin}``, the ``where`` sentence) is
+#: not in the string that was measured.
+_RECEIPT_WRAP = 72
+
+
+def _wrap_receipt(text: str) -> str:
+    """Wrap a receipt to the card's measure — ONE row per raw line is what the
+    card paints, so the raw line is the unit the operator sees.
+
+    Called with the arm's FINAL text, interpolations included, which is the
+    whole point: a hand-wrapped line containing ``{notify}`` can only be correct
+    for the expansion it was measured against (round 2, D6r).
+
+    ``break_long_words``/``break_on_hyphens`` stay OFF so a URL or an
+    ``action='await_access'`` token is never split into something the model
+    cannot hand back to the tool: an over-long token takes its own row and is
+    the one thing the card may still ellipsise.
+    """
+    lines: list[str] = []
+    for raw in text.split("\n"):
+        if not raw.strip():
+            lines.append("")
+            continue
+        # A bullet's continuation lines keep its two-space indent; nothing else in
+        # this flow is indented, so the rule stays this small on purpose. Branched
+        # rather than passed as ``**kwargs`` so the call stays fully typed.
+        if raw.startswith("- "):
+            wrapped = textwrap.wrap(
+                raw,
+                width=_RECEIPT_WRAP,
+                subsequent_indent="  ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        else:
+            wrapped = textwrap.wrap(
+                raw,
+                width=_RECEIPT_WRAP,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        lines.extend(wrapped or [""])
+    return "\n".join(lines)
+
+
+def _delegated_here(context: ToolContext | None) -> bool:
+    """Whether THIS run is a session delegated from another — a subagent child.
+
+    It exists to keep a false subject out of the browser text (round 3, D9). The
+    attachment probe is the PARENT's live view, installed on the child's holder
+    by ``harness/subagent.py``, so a child rendering "an interface is attached to
+    this session" claims the parent's pane as its own — the same claim the
+    ``<interactivity>`` block was fixed for, one string over, read by the same
+    child in the same turn.
+
+    The test is ``subagent_comms.is_child(job_id)``: the SAME predicate
+    ``build_hub_tool`` uses to decide the child-shaped ``hub`` tool, so the two
+    readers cannot disagree about who a caller is. A top-level session holds the
+    comms surface as well (that is how its own children reach it) but its own
+    context carries no job id this instance knows, so it is not a child.
+    """
+    comms = getattr(context, "subagent_comms", None)
+    is_child = getattr(comms, "is_child", None)
+    if not callable(is_child):
+        return False
+    try:
+        return bool(is_child(getattr(context, "job_id", None)))
+    except Exception:  # noqa: BLE001 — attribution must never fail the flow
+        return False
+
+
+def _notify_channel(context: ToolContext | None) -> str:
+    """How THIS caller can tell the operator something, from declared capabilities.
+
+    ``ask_user`` is the hook behind ``ask``, declared on ``ToolContext`` and
+    createIf-gated on exactly that field by ``build_ask_tool``. Naming a tool the
+    reader does not have is the defect this exists to stop: round 1 found this
+    text telling SUBAGENTS to notify through ``ask`` (no child has it) and to
+    "ask the user directly" on a deny, for a reader whose only route out is
+    ``hub`` to its parent.
+
+    A CHILD is therefore told ``hub`` (round 2, Q9): the browser text named no
+    route at all for a reader with no ask hook, and the same child's own
+    ``<interactivity>`` block names ``hub`` as its way through — the two are read
+    in one turn, so they have to agree. The child test is
+    :func:`_delegated_here`, the same ``is_child(job_id)`` the ``hub`` tool
+    builder uses.
+
+    ``hub`` is still NOT offered to a top-level session: it holds the tool so its
+    CHILDREN can reach it and cannot notify anyone through it, so naming it there
+    would be a false instruction. Such a reader gets "a short message" alone,
+    which is the channel it actually has.
+    """
+    if getattr(context, "ask_user", None) is not None:
+        return "a short message, or `ask`"
+    if _delegated_here(context):
+        return "a short message, or `hub` to that session"
+    return "a short message"
+
+
 def _access_result_text(
     state: str,
     origin: str,
@@ -13091,6 +13544,10 @@ def _access_result_text(
     position: int | None = None,
     pending_count: int | None = None,
     host: str = "",
+    attached: bool = True,
+    delegated: bool = False,
+    notify: str = "a short message",
+    total_s: float = 0.0,
 ) -> str:
     """One agent-facing line per access state, including the next step — the
     agent discovers this flow through error/result text, not documentation.
@@ -13101,33 +13558,148 @@ def _access_result_text(
     extension's popup and badge, or the desktop app's browser tab. Telling the
     user of the app to look in a browser toolbar sends them hunting for a window
     that is not there.
+
+    ``attached`` selects whether the model is told an interface can PRESENT the
+    prompt, and it must never deny a surface this same message just named: the
+    predicate counts Local Operator PANES (a TUI, a leased desktop renderer),
+    while the prompt may be sitting in the extension popup or the app's browser
+    tab — a surface the operator can click. "Nobody can act on it" was that
+    contradiction, and it is the incident's own shape (round 1, D2/U3).
+
+    ``delegated`` says WHOSE pane this text is talking about. A child renders its
+    PARENT's attachment answer (``harness/subagent.py`` installs the parent's live
+    probe on the child's holder), so "attached to this session" attributes the
+    parent's pane to a run that owns none — the false-subject claim the
+    ``<interactivity>`` block beside it was fixed for, read by the same child in
+    the same turn (round 3, D9).
+
+    ``notify`` is the channel this caller can actually use, from
+    :func:`_notify_channel`, and ``total_s`` is the wait an ``await_access`` just
+    spent. Both the pending and the timeout arms are rendered HERE rather than
+    inline, so the two cannot give contradictory next steps — which they did:
+    one said "proceed without blocking", the other told every caller to keep
+    waiting (round 1, U4 / MAJOR 2).
+
+    Every arm leaves through :func:`_wrap_receipt`, AFTER its interpolations,
+    and that placement is the fix for a finding rather than a style: the card
+    clips each raw line to its measure, so a line whose length depends on
+    ``{notify}``/``{origin}``/``{where}`` has to be wrapped where those values
+    are known.
     """
+    # A child's attachment answer is its parent's, so every claim about a pane
+    # has to name the session that owns it (round 3, D9).
+    subject = "the session this run was delegated from" if delegated else "this session"
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
-        return f"{origin} is allowed. 'open' or 'goto' the URL now."
+        return _wrap_receipt(f"{origin} is allowed. 'open' or 'goto' the URL now.")
     if state == "denied":
-        return (
-            f"the user denied access to {origin}. Do not retry or re-request this "
-            "origin; ask the user directly if it is essential."
+        return _wrap_receipt(
+            f"the operator denied access to {origin}. Do not retry or re-request "
+            f"this origin; raise it with them if it is essential ({notify})."
         )
     if state == "pending":
         # NOTIFY-FIRST is load-bearing: the browser's own notification banner is
         # best-effort (macOS suppresses it without Notification Center
-        # authorization), so if the agent does not message the user the prompt
+        # authorization), so if the agent does not message the operator the prompt
         # sits unseen until its TTL — the exact incident this flow replaces.
+        #
+        # HARD-WRAPPED, and short. The TUI receipt paints ONE ROW PER RAW LINE and
+        # clips each to the measure (94 cells at 100 columns), so a paragraph
+        # authored as one long line loses its tail on the card: measured in round 1
+        # (D6), the unattached line lost "proceed with what you have" and the
+        # timeout line lost BOTH "15 MINUTES" and "not a refusal". Line breaks are
+        # free to the model and are what keep the load-bearing clause inside the
+        # first row.
         where = (
-            "in the Local Operator extension popup (toolbar icon, numbered badge showing "
-            "the pending count) — the badge alone is not reliably seen"
+            "in the Local Operator extension popup (toolbar icon, numbered badge "
+            "showing the pending count) — the badge alone is not reliably seen"
             if extension_host
-            else "in the Local Operator desktop app's browser tab — the prompt alone is not "
-            "reliably seen"
+            else "in the Local Operator desktop app's browser tab — the prompt "
+            "alone is not reliably seen"
         )
-        return (
-            f"approval for {origin} is pending"
-            + (f" ({position} of {pending_count})" if position and pending_count else "")
-            + ". FIRST notify the user (via the ask "
-            f"tool or a message) to approve it {where} — THEN "
-            "call action='await_access' with the same url to wait for the decision."
+        slots = f" ({position} of {pending_count})" if position and pending_count else ""
+        head = f"approval for {origin} is pending{slots}.\nThe prompt is showing {where}.\n\n"
+        if attached:
+            return _wrap_receipt(
+                f"{head}"
+                f"An interface is attached to {subject}, so the operator can answer "
+                f"it as soon as they look — make sure they are told ({notify}).\n\n"
+                "- Wait UP TO 15 MINUTES in total for the decision: a person may be "
+                "away from the desk, and a slow answer is NOT a refusal.\n"
+                "- Keep calling action='await_access' with the same url for that "
+                "budget — each call waits at most 240s, so about four calls sized "
+                "to that cap span it (an unsized call waits 120s, so eight of "
+                "those do). That is the mechanism: there is no sleep shortcut "
+                "here, because the `wait` tool awaits a background job and this "
+                "flow has none.\n"
+                "- The prompt expires after about 10 minutes. If await_access "
+                "returns \"no live access request\", call action='request_access' "
+                "with the same url to raise a NEW prompt — that is what pings the "
+                "operator again. Re-requesting while the old prompt is still live "
+                "changes nothing and notifies nobody, so do it only once it has "
+                "expired, and at most once per 15-minute window: after that, "
+                "report what you have and move on.\n"
+                "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as "
+                "refused — the request is still pending while an interface is "
+                "attached — but say plainly if you proceeded without access."
+            )
+        # UNATTACHED. What is measured is that no PANE of this run's session is
+        # attached; the prompt named above is still on a surface the operator uses,
+        # so the text must not claim that nobody can act on it. The notify
+        # instruction stays (it is what reaches them when nothing of theirs is
+        # watching this session), and so does the re-request, which is what pings
+        # them again once a surface attaches.
+        return _wrap_receipt(
+            f"{head}"
+            f"No Local Operator pane is attached to {subject} right now, so nothing "
+            f"in this run will present the question — the prompt above is the "
+            f"surface, and the operator can answer it there. Notify them anyway "
+            f"({notify}), so the decision is waiting for them; then proceed with "
+            f"what you have rather than blocking the turn.\n\n"
+            "- The prompt expires after about 10 minutes. Re-raise it with "
+            "action='request_access' (the same url) when the origin is next "
+            "needed — that is what pings the operator again rather than leaving "
+            "them a dead prompt.\n"
+            "- AN UNANSWERED PROMPT IS NOT A REFUSAL. Do not report it as refused: "
+            "an interface may attach later, and this request is what makes it "
+            "visible — but say plainly if you proceeded without access."
+        )
+    if state == "await_timeout":
+        # The arm that used to disagree with the pending text (round 1, U4): it
+        # told every caller to wait again, including sessions this flow had just
+        # told not to block. It is now attachment-aware and names the executable
+        # path — repeated await_access calls — where it used to send the model to
+        # the `wait` tool, which needs a background job it does not have
+        # (round 1, MAJOR 2 / U2).
+        check = (
+            "the Local Operator extension popup"
+            if extension_host
+            else "the Local Operator desktop app's browser tab"
+        )
+        if attached:
+            advice = (
+                f"- An interface is attached to {subject}: keep calling "
+                "action='await_access' — each call waits at most 240s — until "
+                "about 15 MINUTES in total have gone by.\n"
+            )
+        else:
+            # ONE term for the surface across the strings the same model reads:
+            # the pending arm calls it a "Local Operator pane", so a bare "pane"
+            # here left the reader holding two names for one thing
+            # (round 2, D8r2).
+            advice = (
+                f"- No Local Operator pane is attached to {subject}, so nothing in "
+                f"this run will present it: notify the operator ({notify}) and "
+                "proceed with what you have rather than blocking the turn.\n"
+            )
+        return _wrap_receipt(
+            f"still pending after {total_s:.0f}s, and the operator has not decided "
+            f"on this origin yet:\n{origin}\n"
+            f"Remind them to check {check}. Then:\n"
+            f"{advice}"
+            "- Once the prompt has expired, call action='request_access' with the "
+            "same url to raise a new one: that is what pings them again.\n"
+            "AN UNANSWERED PROMPT IS NOT A REFUSAL."
         )
     if state == "superseded":
         # A DIFFERENT session's request replaced this one's prompt slot (one
@@ -13139,16 +13711,18 @@ def _access_result_text(
             if extension_host
             else "the desktop app shows one prompt at a time"
         )
-        return (
+        return _wrap_receipt(
             f"the approval prompt for {origin} was superseded by another session's "
-            f"request — {shower}. Wait for the other "
-            "session's prompt to resolve, then call action='request_access' again "
-            "if this origin is still needed."
+            f"request — {shower}. Wait for the other session's prompt to resolve, "
+            "then call action='request_access' again if this origin is still "
+            "needed."
         )
     if state == "cancelled":
-        return f"your pending access request for {origin} was cancelled."
-    # "none": no live request for the caller — expired or never raised.
-    return (
+        return _wrap_receipt(f"your pending access request for {origin} was cancelled.")
+    # "none": no live request for the caller — expired or never raised. The
+    # recovery is the LAST thing in the line, so it is the first thing the card
+    # used to clip: `none` is the commonest post-expiry state (round 2, U8).
+    return _wrap_receipt(
         f"no live access request for {origin} (it may have expired unanswered, or "
         "never been raised). Call action='request_access' with the url to raise a "
         "new prompt."
@@ -13174,6 +13748,19 @@ async def _bridge_access(
     host = _host_of_client(client)
     url = params.url.strip()
     identity = _browser_identity_params(context, tool_call_id)
+    # Read WHERE EACH TEXT IS RENDERED, never once here (round 1, MINOR 3). The
+    # attachment answer decides whether the model is told the operator can answer,
+    # so an await_access that spent 240s waiting must report the state at the END
+    # of that wait — reading it up front told a session whose surface attached
+    # mid-wait to give up, and made the probe's own "live view" claim false.
+    # ``_attached_here`` falls back to True without a probe, so the fail-open
+    # direction is unchanged.
+    # ``notify`` and ``delegated`` are properties of THIS RUN — the hook its host
+    # installed and whether it is a delegated session — so reading them once here
+    # is right; only the attachment answer has to be re-read at each render site
+    # (round 1, MINOR 3), because a surface can attach while the model waits.
+    notify = _notify_channel(context)
+    delegated = _delegated_here(context)
     if action == "request_access":
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
@@ -13192,6 +13779,9 @@ async def _bridge_access(
                 position=result.get("position"),
                 pending_count=result.get("pending_count"),
                 host=host,
+                attached=_attached_here(context),
+                notify=notify,
+                delegated=delegated,
             ),
             details={
                 "origin": origin,
@@ -13215,7 +13805,14 @@ async def _bridge_access(
         return _text(
             tool_call_id,
             "browser",
-            _access_result_text(state_value, origin, host=host),
+            _access_result_text(
+                state_value,
+                origin,
+                host=host,
+                attached=_attached_here(context),
+                notify=notify,
+                delegated=delegated,
+            ),
             details={
                 "origin": origin,
                 "state": state_value,
@@ -13232,17 +13829,23 @@ async def _bridge_access(
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
-            check = (
-                "the Local Operator extension popup"
-                if host != HOST_UI_PREFIX
-                else "the Local Operator desktop app's browser tab"
-            )
+            # RENDERED BY ``_access_result_text`` rather than inline: this arm and
+            # the pending one must not give contradictory next steps, and they did
+            # — the pending text said "proceed without blocking the turn", this one
+            # told every caller to keep waiting, and neither knew whether an
+            # interface was attached (round 1, U4).
             return _text(
                 tool_call_id,
                 "browser",
-                f"still pending after {total_s:.0f}s: the user has not decided on {url} "
-                f"yet. Remind them to check {check}, then call "
-                "await_access again.",
+                _access_result_text(
+                    "await_timeout",
+                    url,
+                    host=host,
+                    attached=_attached_here(context),
+                    notify=notify,
+                    delegated=delegated,
+                    total_s=total_s,
+                ),
                 details={"origin": url, "state": "pending"},
             )
         wire = {
@@ -13266,6 +13869,9 @@ async def _bridge_access(
                     position=result.get("position"),
                     pending_count=result.get("pending_count"),
                     host=host,
+                    attached=_attached_here(context),
+                    notify=notify,
+                    delegated=delegated,
                 ),
                 details={
                     "origin": origin,
@@ -15301,7 +15907,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "download directory, and 'upload' attaches local files to a page's file "
             "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
             "it, and 'await_access' before navigating again. "
             "Never install or script a browser engine instead."
         ),
@@ -18468,13 +19074,17 @@ def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
     twice)."""
     requested = raw if isinstance(raw, list) else [raw]
     ids: list[str] = []
+    seen: set[str] = set()
     errors: list[str] = []
     for item in requested:
         resolved, error = comms.resolve(str(item))
         if error is not None:
             errors.append(error)
         for job_id in resolved:
-            if job_id not in ids:
+            # Broadcasts can overlap explicit targets; keep ordered output but
+            # avoid quadratic list membership as the recipient set grows.
+            if job_id not in seen:
+                seen.add(job_id)
                 ids.append(job_id)
     return ids, errors
 
@@ -18507,6 +19117,20 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age} — {extras}")
         if row.resumable and row.detail:
             lines.append(f"    {row.detail}")
+        # WHY it stopped, when it was not a clean completion: a child the loop
+        # cut off carries a cause token (``ChildInfo.cut_off_cause``) and without
+        # this line the roster printed only ``failed — resumable``, so a parent
+        # scanning the list could not tell a cut-off child from an ordinary
+        # provider failure — the recorded cause reached no surface (design D4).
+        # Rendered through the same ``render_cut_off_reason`` every other
+        # surface uses, so the words cannot drift.
+        if row.cut_off_cause:
+            # FUNCTION-LOCAL import: this module is a denied-module boundary and
+            # must not import ``incidents`` at module scope (see the denied-module
+            # note above). ``update.py`` reaches the same helper the same way.
+            from local_operator.incidents import render_cut_off_reason
+
+            lines.append(f"    cut off: {render_cut_off_reason(row.cut_off_cause)}")
         # The session id only where it can be acted on. It is the id
         # ``--resume`` takes (NOT the job id on the line above), and this
         # roster is the only surface that shows it now that children are kept
@@ -19127,11 +19751,31 @@ async def execute_ask(
         # a user decision — and it must not be reported as one, or the model
         # would "fall back to its recommendation" on a session where the user
         # was never shown anything.
+        #
+        # IT MUST ALSO CLAIM NOTHING ABOUT WHO IS AT A SCREEN, AND NOTHING ABOUT A
+        # ROSTER. It used to read "No interactive surface is attached to this
+        # session, so the user cannot be asked", and that sentence was repeated
+        # into ``hub`` messages by parents that had a perfectly good surface
+        # attached — an absent HOOK is a fact about this process, not about the
+        # operator. The condition being reported is the missing wiring, so the text
+        # names that and what follows from it.
+        #
+        # It also used to list the hosts that have no hook — "a subagent, an
+        # `exec` run and a scheduler run have none" — and that roster was WRONG:
+        # a supervised ``exec --control`` run DOES have one (``exec_control``
+        # installs the gates and ``serving`` calls ``set_ask_handler`` with them),
+        # which the builder's own docstring three lines above says. A roster is a
+        # second copy of a wiring fact that drifts from the wiring; the condition
+        # is named instead, and the delegated child's real route is stated because
+        # "the operator cannot be asked" is false for it — its parent is one
+        # ``hub`` call away (design §4).
         return _error(
             tool_call_id,
             "ask",
-            "No interactive surface is attached to this session, so the user cannot "
-            "be asked. Decide without them.",
+            "this host has no way to present a question to a person — no ask hook is "
+            "wired into this session, so this process cannot put one in front of the "
+            "operator. A delegated child's route to them is `hub` to its parent; "
+            "otherwise decide without them.",
         )
     answers = await ask_user(params.questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):

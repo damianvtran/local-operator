@@ -4,7 +4,9 @@ PR #1411 repointed the credential readers and writers at the encrypted store but
 left a transition leg in place: several readers still fell back to the plaintext
 ``credentials.env`` file LAST, and a plain ``CredentialManager(...)`` still
 CREATED that file on construction. PR2a removes the reader legs and the
-recreator, so the file is no longer a credential SOURCE at all.
+recreator and PR2b deletes ``credentials.py`` entirely, so the file is no
+longer a credential SOURCE at all — the only code that touches it is the
+migration's own reader in ``local_operator.secrets.legacy_env``.
 
 This module is the evidence for that claim, and it is deliberately adversarial:
 it seeds a file that LOOKS authoritative — the decoy value is one no ambient
@@ -45,7 +47,7 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
+from local_operator.secrets.legacy_env import CREDENTIALS_FILE_NAME
 
 #: A value that exists ONLY in the decoy file, so any reader that returns it has
 #: read the file. Distinct per key is deliberate — a reader wired to the wrong
@@ -56,10 +58,9 @@ DECOY_PREFIX = "decoy-from-the-plaintext-file-"
 def _write_decoy(root: Path, *keys: str) -> None:
     """Seed ``<root>/credentials.env`` with a decoy value for each key.
 
-    Deliberately NOT via ``CredentialManager``: the point is a file that exists
-    on disk exactly as a host mid-migration would have it, and the class's own
-    writer is retired (no production caller) so using it here would test the
-    writer rather than the readers.
+    Deliberately NOT via the retired module: the point is a file that exists
+    on disk exactly as a host mid-migration would have it, and the class that
+    used to write it is deleted (PR2b), so there is no writer left to test.
     """
     root.mkdir(parents=True, exist_ok=True)
     body = "".join(f"{key}={DECOY_PREFIX}{key.lower()}\n" for key in keys)
@@ -68,6 +69,17 @@ def _write_decoy(root: Path, *keys: str) -> None:
 
 def _decoy(key: str) -> str:
     return f"{DECOY_PREFIX}{key.lower()}"
+
+
+def _config_manager(root: Path):
+    """A ``ConfigManager`` bound to the sandbox root.
+
+    The ``/v1/credentials`` route takes a ``ConfigManager`` now that PR2b deleted
+    the ``CredentialManager`` whose ``config_dir`` it used to read.
+    """
+    from local_operator.config import ConfigManager
+
+    return ConfigManager(root)
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +116,7 @@ def _read_catalogue_api_key(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
 def _read_auth_store_env_tier(root: Path, monkeypatch: pytest.MonkeyPatch) -> str | None:
     from local_operator.providers.auth_store import AuthStore
 
-    store = AuthStore(db_path=root / "auth.db", credential_manager=CredentialManager.readonly(root))
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
         return store._env_api_key("openrouter")
     finally:
@@ -121,22 +133,22 @@ async def _read_vendor_credential(root: Path, monkeypatch: pytest.MonkeyPatch) -
     """
     from local_operator.classification.vendors import OpenRouterVendor
 
-    manager = CredentialManager.readonly(root)
-    value, tier = await OpenRouterVendor(manager)._resolve_key(manager)
+    vendor = OpenRouterVendor(root)
+    value, tier = await vendor._resolve_key(root)
     return value.get_secret_value() if value is not None else None
 
 
 def _read_vendor_status(root: Path, monkeypatch: pytest.MonkeyPatch) -> bool:
     from local_operator.classification.cascade import vendor_status
 
-    return dict(vendor_status(CredentialManager.readonly(root)))["openrouter"]
+    return dict(vendor_status(root))["openrouter"]
 
 
 def _read_search_provider_statuses(root: Path, monkeypatch: pytest.MonkeyPatch) -> bool:
     from local_operator.web_search.models import WebSearchSettings
     from local_operator.web_search.providers import provider_auth_mode
 
-    with_store = provider_auth_mode("tavily", CredentialManager.readonly(root), WebSearchSettings())
+    with_store = provider_auth_mode("tavily", root, WebSearchSettings())
     return with_store == "api-key"
 
 
@@ -153,7 +165,7 @@ def _read_credentials_listing(root: Path, monkeypatch: pytest.MonkeyPatch) -> se
     from local_operator.server.routes.credentials import list_credentials
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-    response = asyncio.run(list_credentials(CredentialManager.readonly(root)))
+    response = asyncio.run(list_credentials(_config_manager(root)))
     # ``result`` is ``Optional`` on the envelope; the listing route always
     # populates it, so narrow explicitly rather than assert-and-please.
     payload = response.result or {}
@@ -164,7 +176,7 @@ def _read_evaluation_resolver(root: Path, monkeypatch: pytest.MonkeyPatch) -> tu
     from local_operator.evaluation.runner.host_secrets import CredentialStoreResolver
     from local_operator.evaluation.runner.secrets import MissingSecret
 
-    resolver = CredentialStoreResolver(CredentialManager.readonly(root))
+    resolver = CredentialStoreResolver(root)
     try:
         resolved = resolver.resolve(["OPENROUTER_API_KEY"])
     except MissingSecret:
@@ -176,9 +188,9 @@ def _read_persisted_providers(root: Path, monkeypatch: pytest.MonkeyPatch) -> se
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.controller import ProviderController
 
-    store = AuthStore(db_path=root / "auth.db", credential_manager=CredentialManager.readonly(root))
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
-        controller = ProviderController(store, CredentialManager.readonly(root))
+        controller = ProviderController(store, root)
         return controller.persisted_providers() or set()
     finally:
         store.close()
@@ -189,9 +201,9 @@ def _read_daemon_catalogue_admission(root: Path, monkeypatch: pytest.MonkeyPatch
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.controller import ProviderController
 
-    store = AuthStore(db_path=root / "auth.db", credential_manager=CredentialManager.readonly(root))
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
-        controller = ProviderController(store, CredentialManager.readonly(root))
+        controller = ProviderController(store, root)
         admitted = controller.persisted_providers()
         return admitted or set()
     finally:
@@ -201,7 +213,7 @@ def _read_daemon_catalogue_admission(root: Path, monkeypatch: pytest.MonkeyPatch
 def _read_web_search_credential(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     from local_operator.web_search.providers import _credential
 
-    return _credential(CredentialManager.readonly(root), "TAVILY_API_KEY")
+    return _credential(root, "TAVILY_API_KEY")
 
 
 def _read_session_factory_credential(root: Path, monkeypatch: pytest.MonkeyPatch) -> str | None:
@@ -227,7 +239,7 @@ def _read_auth_cli_stored_names(root: Path, monkeypatch: pytest.MonkeyPatch) -> 
     """
     from local_operator.providers.auth_cli import stored_login_key_names
 
-    return stored_login_key_names(CredentialManager.readonly(root))
+    return stored_login_key_names(root)
 
 
 def _read_tool_digest(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
@@ -253,7 +265,7 @@ def _read_tool_digest(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     settings = WebSearchSettings(providers=["tavily"])
-    service = WebSearchService(settings, CredentialManager.readonly(root))
+    service = WebSearchService(settings, root)
     params = _digest_params()
     return _search_digest_key(service, settings, params)[2]
 
@@ -436,11 +448,11 @@ def _list_logins_output(root: Path) -> str:
     from local_operator.providers.auth_cli import list_logins
     from local_operator.providers.auth_store import AuthStore
 
-    store = AuthStore(db_path=root / "auth.db", credential_manager=CredentialManager.readonly(root))
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            list_logins(store, CredentialManager.readonly(root))
+            list_logins(store, root)
     finally:
         store.close()
     return buffer.getvalue()
@@ -631,55 +643,70 @@ def test_the_search_digest_follows_an_exported_variable(
     assert with_export != without
 
 
-def test_no_construction_creates_the_plaintext_file(tmp_path: Path) -> None:
-    """The recreator (defect B) is gone: a read-only construction writes nothing.
+def test_no_reader_creates_the_plaintext_file(tmp_path: Path) -> None:
+    """The recreator (defect B) is gone: reading a credential writes nothing.
 
     ``CredentialManager.__init__`` ran ``_ensure_config_exists``, which created
     an empty ``credentials.env`` on every plain construction — the defect that
-    rewrote the operator's file daily. ``readonly`` binds without touching disk,
-    which is what every production site now uses.
+    rewrote the operator's file daily. PR2b deletes the class outright, so the
+    shape to pin is that the READERS leave the root untouched: the file must not
+    come back on a host that has migrated.
     """
+    from local_operator.providers.registry import provider_env_key
+    from local_operator.secrets.legacy_env import read_credentials
+
     root = tmp_path / "config"
     root.mkdir()
     assert not (root / CREDENTIALS_FILE_NAME).exists()
 
-    CredentialManager.readonly(root)
-    assert not (root / CREDENTIALS_FILE_NAME).exists()
-    assert list(root.iterdir()) == []
+    provider_env_key("openrouter", base=root)
+    assert read_credentials(root) == {}
 
 
-def test_no_plain_construction_of_credential_manager_remains_in_the_tree() -> None:
-    """A guard on the guard: every construction site must use ``readonly``.
+def test_the_credentials_module_is_gone_from_the_tree() -> None:
+    """A guard on the guard: nothing may import the deleted module.
 
-    The 14 plain constructions PR2a replaced were the recreator. A future edit
-    that adds one is invisible to a runtime test (it only resurrects the file on
-    some path), so the call shape is read at the AST level: outside
-    ``credentials.py`` itself (where the class is DEFINED and ``readonly``
-    still routes through ``_bind``), no call to ``CredentialManager(...)`` with a
-    bare positional/keyword config argument may appear.
+    PR2a replaced the 14 plain constructions that recreated the file; PR2b
+    deletes ``local_operator/credentials.py`` entirely, so the shape to pin is
+    that no production module imports it and the file itself is absent — a
+    re-introduction would otherwise only be visible as a resurrected
+    ``credentials.env`` on some path nothing exercises. Read at the AST level
+    rather than by grep so a ``from . import credentials`` spelling counts too.
     """
     import ast
     from pathlib import Path
 
     package = Path(__file__).resolve().parents[3] / "local_operator"
+    assert not (
+        package / "credentials.py"
+    ).exists(), "local_operator/credentials.py is back; PR2b deleted it"
     offenders: list[str] = []
     for path in sorted(package.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            # ``CredentialManager(...)`` directly, or ``cls(...)``/``self(...)``
-            # inside credentials.py (skipped).
-            if isinstance(func, ast.Name) and func.id == "CredentialManager":
-                where = f"{path.relative_to(package)}:{node.lineno}"
-                offenders.append(f"{where} CredentialManager(...)")
-            elif isinstance(func, ast.Attribute) and func.attr == "CredentialManager":
-                where = f"{path.relative_to(package)}:{node.lineno}"
-                offenders.append(f"{where} .CredentialManager(...)")
-    assert (
-        offenders == []
-    ), "plain CredentialManager(...) constructions recreate the plaintext file: " + repr(offenders)
+            module = getattr(node, "module", None) or ""
+            if isinstance(node, ast.ImportFrom) and (
+                module == "local_operator.credentials" or module == "credentials"
+            ):
+                offenders.append(f"{path.relative_to(package)}:{node.lineno} from {module}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "local_operator.credentials":
+                        offenders.append(f"{path.relative_to(package)}:{node.lineno} import")
+    assert offenders == [], "the deleted credentials module is imported: " + repr(offenders)
+
+
+def test_the_module_is_not_importable() -> None:
+    """The deleted module has no importable surface left.
+
+    Belt and braces beside the AST sweep above: an import that the sweep's
+    ``ImportFrom``/``Import`` handling missed — a dynamic ``importlib`` call, a
+    string in a plugin registry — still fails here, because the MODULE is gone.
+    """
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("local_operator.credentials")
 
 
 def test_the_decoy_value_is_not_ambient(tmp_path: Path) -> None:

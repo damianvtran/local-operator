@@ -39,11 +39,9 @@ from pydantic import SecretStr
 
 if TYPE_CHECKING:
     # Import-graph hygiene, not tidiness: this module is reachable from the
-    # session composition root, and `local_operator.credentials` pulls the
-    # crypto/secret-broker stack with it. The annotation is a string anyway
-    # (`from __future__ import annotations`), so the runtime import buys
-    # nothing.
-    from local_operator.credentials import CredentialManager
+    # session composition root. The annotation is a string anyway
+    # (`from __future__ import annotations`), so a runtime import buys nothing.
+    from pathlib import Path
 
 QuestionKind = Literal["choice", "noul", "score"]
 
@@ -205,14 +203,14 @@ class DecisionVendor(Protocol):
 
     Credential resolution is per-vendor because Radient's is an OAuth session
     held in ``AuthStore`` while the others are plain credential rows — and it
-    takes the manager as an argument so a caller can probe a leg against a
-    manager it does not own, which is what :func:`resolve_vendor` does while
+    takes the config root as an argument so a caller can probe a leg against a
+    root it does not own, which is what :func:`resolve_vendor` does while
     deciding which leg is usable.
     """
 
     name: str
 
-    async def credential(self, manager: "CredentialManager") -> SecretStr | None:
+    async def credential(self, config_dir: "Path | None") -> SecretStr | None:
         """The bearer this leg would send, or ``None`` when it has none."""
         ...
 

@@ -596,6 +596,25 @@ class AsyncJobManager:
             return None  # scoping: mismatch is not-found
         return job
 
+    def lookup_snapshot(self) -> Mapping[str, AsyncJob]:
+        """Copy the non-sweeping lookup table, including attempt aliases.
+
+        ``list()`` is intentionally not used here: it applies retention and may
+        mutate the ledger as a read. The mobile roster instead needs the same
+        point lookups as ``get()`` while walking many nodes, so this snapshot
+        preserves alias precedence without triggering an observable sweep.
+        """
+        rows = dict(self._jobs)
+        for alias, target in self._aliases.items():
+            job = self._jobs.get(target)
+            if job is None:
+                # ``get(alias)`` resolves aliases before direct row ids, so a
+                # swept target must not expose a colliding stale direct row.
+                rows.pop(alias, None)
+            else:
+                rows[alias] = job
+        return rows
+
     def list(self, *, registrant_id: str | None = None) -> list[AsyncJob]:
         """Every job row, oldest first, with retention applied AT READ TIME.
 
@@ -946,8 +965,11 @@ class AsyncJobManager:
         settle. A row that was still ``queued`` (parked behind the capacity
         gate, ``status == "running"`` with ``queued == True``) never ran and has
         no transcript, so it is NOT interrupted — it is simply gone; it is
-        dropped rather than restored, matching the comms side, which already
-        skips it in ``snapshot()`` because its record has no ``session_dir``.
+        dropped rather than restored. The comms side agrees, but for a narrower
+        reason than "no ``session_dir``": ``snapshot()`` now keeps a
+        no-transcript record that has a recorded terminal ``outcome`` (a child
+        that died DURING launch), and drops only a record with neither a
+        transcript nor an outcome — which is exactly this parked case.
         Every restored row is flagged ``restored`` and carries no runtime
         handles (an ``AsyncJob`` serializes none — the abort signal and asyncio
         task live in the manager's own ``_signals``/``_tasks`` maps, which the
@@ -998,9 +1020,13 @@ class AsyncJobManager:
                 continue
             if row.status == "running":
                 if row.queued:
-                    # Parked and never started, so it has no transcript to show
-                    # or resume; a ``⇥ interrupted`` row for it would invite a
-                    # resume that finds nothing. Drop it entirely.
+                    # Parked and never started (settled is False, no outcome
+                    # recorded), so it has no transcript to show or resume; a
+                    # ``⇥ interrupted`` row for it would invite a resume that
+                    # finds nothing. Drop it entirely. A queued child that DID
+                    # settle before attaching is ``status == "failed"`` rather
+                    # than "running", so it is not this branch and keeps its row
+                    # (and its comms record) for diagnosis.
                     continue
                 # No task backs it any more; a live-looking row would spin a
                 # spinner forever and invite a cancel that finds nothing.

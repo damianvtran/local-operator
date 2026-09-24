@@ -462,7 +462,7 @@ EntryKind = Literal[
 
 ToolState = Literal["composing", "queued", "running", "done", "failed", "interrupted"]
 
-SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked"]
+SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked", "queued"]
 
 TodoStatus = Literal["pending", "done", "blocked", "dropped"]
 
@@ -814,6 +814,18 @@ class SessionProjection:
         this is a property of THIS COPY, not of the projection.
         """
         self.activity_age_reference: tuple[float, float] | None = None
+        # The frame cap's re-cap memo — also deliberately NOT a field, for the
+        # same ``asdict`` reason: it is a cache over this object's rows, not a
+        # property of the projection, and a field would ship it down the wire.
+        # It lives HERE because the rows being re-capped are this object's, and
+        # the object is retained across repaints by both wire paths, which is
+        # the whole precondition for the memo (see
+        # ``projection._frame_capped``). ``projection._reconcile_frame_cap_memo``
+        # is what bounds it: to the roster, and to the shape each live row
+        # carries, of the last frame PUBLISHED — capped or under the cap, since
+        # the reconcile runs before the size check and the frame that shrinks a
+        # roster is the one that comes in under the cap.
+        self._frame_cap_memo: dict[str, dict[Any, tuple[str, int, Any, str]]] = {}
 
 
 def stamp_activity_age(projection: SessionProjection) -> None:

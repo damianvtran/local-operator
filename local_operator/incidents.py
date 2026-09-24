@@ -443,14 +443,17 @@ def _update_failed_cause_sentence() -> str:
     one sentence would tell a reader to go looking for a handover that never occurred.
 
     IT NAMES NO NUMBER, and that is a correction rather than an omission (design
-    review round 1, D2). TWO arms publish this token with two different bounds — the
-    bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds) and the build DRAIN
-    (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) — so a sentence rendered from
-    the constant is wrong for one of them by construction: an update that spent a
-    quarter of an hour in the drain reported that it "did not finish within 5s". The
+    review round 1, D2). THREE arms publish this token with THREE different bounds —
+    the bounded update WINDOW (``buildwatch.UPDATE_LOCK_S``, seconds), the build DRAIN
+    whose work went SILENT (``types.BUILD_DRAIN_PROGRESS_S``, fifteen minutes) and the
+    build drain that was HELD with work still in flight
+    (``types.BUILD_DRAIN_DWELL_S``, thirty minutes; ``process._abandon_move``'s dwell
+    arm, which is the second bound the drain can run out of) — so a sentence rendered
+    from any one constant is wrong for the other two by construction: an update that
+    spent half an hour in the dwell reported that it "did not finish within 5s". The
     bound is known at the only place that can name it, so it rides the incident's
     DETAIL (``RuntimeServer.note_update_failed`` renders it from the argument its
-    caller passed), and this sentence says the thing that is true of both arms.
+    caller passed), and this sentence says the thing that is true of every arm.
     """
     return (
         "the update to the build on disk did not finish within its bound; the runtime "
@@ -462,11 +465,13 @@ def update_failed_detail(pair: str, bound: float) -> str:
     """The detail a failed handover's incident carries: the pair, and the bound spent.
 
     A HELPER RATHER THAN AN INLINE JOIN, because the bound is the fact that was
-    silently wrong until design review round 1 (D2): the sentence names none (two arms
-    publish this token with two different bounds), so this is the ONLY place a reader
-    can learn which bound the runtime actually ran out of — 5 s for the bounded update
-    window, fifteen minutes for the build drain. ``bound`` of 0 means the caller did
-    not say, and then no number is claimed rather than a default being invented.
+    silently wrong until design review round 1 (D2): the sentence names none (three
+    arms publish this token with three different bounds), so this is the ONLY place a
+    reader can learn which bound the runtime actually ran out of — 5 s for the bounded
+    update window, fifteen minutes for a drain whose work went silent, thirty minutes
+    for a drain held with work still in flight (``types.BUILD_DRAIN_DWELL_S``).
+    ``bound`` of 0 means the caller did not say, and then no number is claimed rather
+    than a default being invented.
     """
     from local_operator.session.runtime.types import bound_text
 
@@ -512,6 +517,18 @@ KILL_CAUSE = "runtime-killed"
 #: a wait or a spin?") is the leg, and ``stall_watchdog.fired_leg`` names it.
 STALL_BOUND_CAUSE = "runtime-stall-bound"
 
+#: The LOOP'S own bound (``harness/loop.py``, the outer-loop continuation guard).
+#: Involuntary, and NOT an error the model made: the turn had more work queued
+#: than its producer's budget allows. Named rather than left as the bare
+#: ``AgentEndEvent`` it used to be, because a bare end reads as a COMPLETED
+#: ANSWER on every surface — a child cut off mid-list arrived at its parent
+#: saying it had finished, which is the silent half of the subagent-stall
+#: report. It is a token in this table rather than a private string so
+#: :func:`is_cut_off_cause` answers True and every existing renderer (the
+#: attention outcome, the subagent panel's "cut off" row, the roster) names it
+#: without being taught a new field.
+CONTINUATION_LIMIT_CAUSE = "continuation-limit"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
@@ -520,6 +537,12 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # actor outside the victim, and a reader who found one of those would go
     # looking for a reaper or a sweep that never ran.
     STALL_BOUND_CAUSE: _stall_bound_cause_sentence(),
+    # Bounded on PURPOSE, unlike the arms above: the bound is a budget the loop
+    # chose to spend, so the sentence says what ran out rather than naming an
+    # actor — there is no reaper and no process to go looking for.
+    CONTINUATION_LIMIT_CAUSE: (
+        "the turn kept being asked to continue, so it was stopped and the pending message dropped"
+    ),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     # The BOUNDED handover: a build drain that stopped waiting for its own work
@@ -1109,6 +1132,12 @@ def format_shape_incident_message(
 
     ``reached_model`` defaults to True — the escalated reading — because a caller
     that cannot classify must not make the quieter claim.
+
+    An EMPTY ``labels`` on the escalated path is a real state, not a caller error:
+    a hit whose mask cannot be claimed (``complete=False``) is dropped from
+    ``ShapeReport.labels`` while it still escalates if any readable material
+    survived (``exposed=True``), so ``labels=()`` with ``reached_model=True``
+    reaches here — see the shape-clause note in the body.
     """
     shapes = ", ".join(labels) if labels else "credential-shaped content"
     tool_name = tool or "a tool"
@@ -1121,6 +1150,20 @@ def format_shape_incident_message(
     # on "[credential redaction] " (``harness/rows.py``), and a row that painted as
     # the user's own words would be worse than a jargon-first one.
     if reached_model:
+        # WHEN THE TABLE COULD NOT NAME THE SHAPE, SAY SO — do not assert a generic
+        # one. The reader's first question is "what matched?", and the ``shapes``
+        # fallback above ("credential-shaped content") reads as a shape the table
+        # DID identify, leaving an operator unable to tell an un-named hit from a
+        # named one. This state is reachable on the shipped path, measured this
+        # session on the corpus's own escalating case (the ``amqp`` DSN whose
+        # username is its password): its hit grades ``complete=False, exposed=True``,
+        # so ``shape_report`` yields ``labels=()`` with ``reached_model=True`` — an
+        # ESCALATION naming no shape. Only the provenance clause changes; what the
+        # guard MEASURED, and the rotate instruction below, are untouched.
+        if labels:
+            credential = f"a credential ({shapes})"
+        else:
+            credential = "a credential the shape table could not name"
         # The CAUSE has to be true in both directions the escalation covers. The
         # `amqp` DSN case masks its password whole and still escalates, because the
         # DSN rule keeps the userinfo username by design and an operator who used
@@ -1132,7 +1175,7 @@ def format_shape_incident_message(
         # the notice does not pick one it cannot distinguish. The rotate
         # instruction is untouched — it is the reason the wording exists.
         return (
-            f"[credential redaction] rotate it — a credential ({shapes}) reached "
+            f"[credential redaction] rotate it — {credential} reached "
             f"{tool_name} and its value is readable in this session's context: "
             f"either the mask did not cover it fully, or it survives in the text "
             f"another way.{where} A value that reached the model may be in "

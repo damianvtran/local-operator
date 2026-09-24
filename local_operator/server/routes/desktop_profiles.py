@@ -25,7 +25,6 @@ from local_operator.server.utils.desktop_profiles import (
     team_catalogue,
 )
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
-from local_operator.tools.agent_tool import AgentParams, write_profile
 
 router = APIRouter(tags=["Desktop profiles"], dependencies=[Depends(require_desktop)])
 
@@ -135,6 +134,12 @@ async def save_profile(
 ):
     # Validate effort through the same live configuration validator as the tool;
     # its structured result, never the tool's prose, drives the HTTP response.
+    # Imported per write, not at module scope: `tools.agent_tool` pulls
+    # `tools.builtin`, and this router is imported by `server.app`, so the tool
+    # layer was ~160 ms of every `lop serve` boot for a route that only runs when
+    # someone saves a profile (backend load report B-F10).
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
     payload = body.model_dump(exclude={"request_id", "name"}, exclude_unset=True)
     params = AgentParams(op="create" if creating else "update", name=name, **payload)
 

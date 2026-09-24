@@ -2423,6 +2423,56 @@ class ServingSessionHandle(SessionHandle):
         """
         return self._session.subscribe_frontend(on_update, display_window=display_window)
 
+    def subscribe_frontend_nowait(self, on_update: Callable[[Any], None]) -> Any:
+        """Bind a viewer from THIS thread when the session loop cannot answer.
+
+        THE FALLBACK FOR A BUSY OWNER, and it exists because the on-loop bind
+        is only as fast as the owner's own turn. ``subscribe_frontend`` marshals
+        its whole body onto the loop that owns the session
+        (``@_on_session_loop``), which is required for the refresh it publishes
+        — but it makes the caller wait out whatever synchronous step the turn is
+        inside. Measured on a blocked owner: 15.0 s and a failed control attach,
+        while the session was merely busy and the serving plane was idle.
+
+        The SUBSCRIBE half needs no loop at all. ``subscribe_threadsafe`` admits
+        the callback and captures the snapshot in one critical section of the
+        store's publish lock, so this returns immediately and the loop is left
+        carrying only the refresh.
+
+        THE REFRESH IS DEFERRED, NOT LOST. ``Session.subscribe_frontend``
+        refreshes BEFORE snapshotting so a joiner sees the freshest state at its
+        own sequence; here the refresh is scheduled onto the session loop and
+        lands as an ordinary delta (sequence +1) whenever that loop frees. That
+        is correct by the same exact-``+1`` rule every client already enforces,
+        and it is the ONLY semantic difference from the on-loop path.
+
+        NO DISPLAY WINDOW, deliberately: ``capture_window`` reads the loop-owned
+        transcript, so it stays on the loop. A viewer bound this way falls back
+        to its own durable replay (``_load_frontend_history``), which is what it
+        already does for an owner that never negotiated the capability.
+
+        A handle whose session exposes no store raises rather than binding
+        nothing: the caller has already decided the on-loop bind is too slow,
+        and a silent no-op would leave the connection waiting for a frame
+        nobody is going to send.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            raise RuntimeError("session exposes no frontend state store")
+        subscription = store.subscribe_threadsafe(on_update)
+        loop = getattr(self, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            try:
+                # Fire-and-forget on purpose: the point of this path is that the
+                # caller never waits on the session loop. A loop that closes
+                # between the check and the call loses only the extra refresh —
+                # the snapshot this bind already carries is the freshest state
+                # that loop published, so the bind itself stands.
+                loop.call_soon_threadsafe(self._session.refresh_frontend_state)
+            except RuntimeError:
+                logger.debug("deferred frontend refresh could not be scheduled", exc_info=True)
+        return subscription
+
     @_on_session_loop
     async def record_shell(self, command: str, result: Any) -> None:
         await self._session.record_shell(command, result)
@@ -3562,10 +3612,11 @@ class ServingSessionHandle(SessionHandle):
         overnight) and the user answers it when they come back.
 
         The short cap survives for exactly the case it was written for: no
-        client can present the card at all. With a viewer attached, or a phone
-        watching, something is showing the question to someone; with nothing
-        attached the card exists only in this process's memory, and a bounded
-        wait is still the honest behaviour there.
+        client can present the card at all. With an interface attached — a
+        terminal, a phone, or a desktop pane holding this conversation —
+        something can show the question to someone; with nothing attached the
+        card exists only in this process's memory, and a bounded wait is still
+        the honest behaviour there.
         """
         if self._registrant is None:
             # No control socket at all: an embedded or reduced host, where the
@@ -3576,10 +3627,11 @@ class ServingSessionHandle(SessionHandle):
             # because the policy stopped reading it.
             return PENDING_REQUEST_TIMEOUT_S
         parked = self._parked_timeout_s()
-        if self._watching_surfaces() or self._desktop_notification_available():
-            # A visible terminal/phone or a notification-capable desktop can
-            # reach a person. This is not the interactivity probe: background
-            # delivery earns a parked wait, never an assertion somebody is here.
+        if self._attached_surfaces() or self._desktop_notification_available():
+            # Something can PRESENT the card, or an OS banner can reach a person
+            # out of band. This is the attachment predicate, not the attention
+            # one: parking is a bet that a question will eventually be seen, which
+            # a mounted pane settles whether or not anyone is looking this second.
             return parked
         # Nothing is presenting the card. A parked gate is still preferable to
         # a denial when the user has an out-of-band way to be told about it
@@ -3630,7 +3682,7 @@ class ServingSessionHandle(SessionHandle):
         return DEFAULT_UNATTENDED_GATE_TIMEOUT_H
 
     def _install_interactivity_probe(self) -> None:
-        """Let the MODEL know whether anyone can answer a question.
+        """Let the MODEL know whether a question can be PRESENTED to anyone.
 
         The runtime is the only component that knows — it owns the control
         socket's connection table — and the session's goal-state holder is
@@ -3640,12 +3692,19 @@ class ServingSessionHandle(SessionHandle):
         the prompt closure asks at turn start, so a viewer that comes and
         goes fifty times costs exactly one line of context, and no transcript
         row is ever written for an attach or a detach.
+
+        It reads ATTACHMENT, never attention. The attention predicate is the
+        one that told a focused, visible desktop app's own session that nobody
+        was at a screen, because the machine-wide record could not name the
+        conversation (see ``docs/design/attached-interface-signal.md``); it also
+        flaps with window focus, which is the one thing a block inside the
+        persisted system prefix must never do.
         """
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
         try:
-            holder.interactive_probe = lambda: bool(self._watching_surfaces())
+            holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
 
@@ -3674,6 +3733,45 @@ class ServingSessionHandle(SessionHandle):
                 return frozenset(cast("frozenset[str]", reader()))
             except Exception:  # noqa: BLE001 — routing must never raise into a gate
                 logger.debug("could not read the watching surfaces", exc_info=True)
+        return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
+
+    def _attached_surfaces(self) -> frozenset[str]:
+        """Which kinds of surface can PRESENT a question, for the MODEL.
+
+        The ATTACHMENT predicate, not the attention one: see
+        ``RuntimeServer.attached_surfaces`` for why those are different questions
+        and why focus is absent from this one. This is what the interactivity
+        probe reads, so it is what decides the ``<interactivity>`` block the
+        model carries.
+
+        Falls back to the narrow answers an OLDER registrant can still give. Two
+        of them, in this order, and the order is the point:
+
+        1. ``watching_surfaces()`` — the ATTENTION question. Attention is a
+           strict SUBSET of attachment (a surface somebody is looking at can
+           present a card), so an older registrant's attention answer is sound
+           evidence of attachment. Reading it first is what keeps a PHONE
+           watcher parking a gate on a mixed-version fleet, which is the case
+           ``test_parked_gates.test_a_phone_watching_parks_for_the_configured_day``
+           pins.
+        2. ``attach_clients()`` — the same question one bit wide, and the
+           reading this handle's own probe already had available.
+
+        Both arms can only ever turn "unattached" into "attached". That is the
+        direction the whole predicate is biased: a wrong "attached" costs a
+        parked gate and a late answer, a wrong "unattached" costs a turn that
+        gives up on a question the operator was ready to answer.
+        """
+        server = self._registrant
+        reader = getattr(server, "attached_surfaces", None)
+        if callable(reader):
+            try:
+                return frozenset(cast("frozenset[str]", reader()))
+            except Exception:  # noqa: BLE001 — an unreadable probe must not fail a turn
+                logger.debug("could not read the attached surfaces", exc_info=True)
+        watching = self._watching_surfaces()
+        if watching:
+            return watching
         return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
 
     def _session_id_for_resume(self) -> str:
@@ -6466,12 +6564,17 @@ class ServingSessionHandle(SessionHandle):
         published on the record because a subagent graph is in-process state no
         other session can observe.
 
-        The roster is ONE flat read: ``SubagentComms.nodes()`` already contains
-        every nested descendant, so counting is a filter over that list and must
-        never have a recursive walk added on top — that would double count every
-        node below depth 0. The statuses counted as running mirror the ones
-        ``info.collect`` uses, so the record and this session's own tree cannot
-        disagree.
+        The roster is ONE linear read: ``SubagentComms.status_counts()`` counts
+        every nested descendant in a single pass over the shared registry, so
+        counting is a filter over that histogram and must never have a
+        recursive walk added on top — that would double count every node below
+        depth 0. (The count used to be a filter over the ``nodes()`` LIST, which
+        read as "one flat read" and was not: ``nodes()`` -> ``node()`` ->
+        ``_describe()`` -> ``_live_twin()`` walked every record once per record,
+        so this publisher was quadratic in the roster and ran on the event loop
+        once per root event. See ``RosterPass``.) The statuses counted as
+        running mirror the ones ``info.collect`` uses, so the record and this
+        session's own tree cannot disagree.
 
         ``(None, None)`` on an unreadable roster rather than ``(0, 0)``: an
         unanswerable probe is not a measurement of zero, and the reader's
@@ -6482,17 +6585,12 @@ class ServingSessionHandle(SessionHandle):
             comms = getattr(session, "subagent_comms", None)
             if comms is None:
                 return (None, None)
-            nodes = comms.nodes()
+            counts = comms.status_counts()
         except Exception:  # noqa: BLE001 — an unhealthy session still publishes
             logger.debug("could not read the subagent roster", exc_info=True)
             return (None, None)
-        running = queued = 0
-        for node in nodes:
-            status = str(getattr(node, "status", "") or "")
-            if status in RUNNING_SUBAGENT_STATUSES:
-                running += 1
-            elif status == "queued":
-                queued += 1
+        running = sum(counts.get(status, 0) for status in RUNNING_SUBAGENT_STATUSES)
+        queued = counts.get("queued", 0)
         return (running, queued)
 
     def _publish_subagents(self) -> None:
@@ -6501,8 +6599,13 @@ class ServingSessionHandle(SessionHandle):
         Driven from ``_publish_busy`` — i.e. from ``_notify`` — because a
         subagent launching or settling IS a session event, so the transition
         publish is sub-second under any real workload while the 15 s heartbeat
-        floor bounds a missed publish. ``set_subagents`` de-duplicates, so the
-        steady-state cost is one dict walk plus two comparisons per event.
+        floor bounds a missed publish. ``set_subagents`` de-duplicates, so a
+        publish that changes nothing costs one comparison per side.
+
+        The walk behind the counts is linear, and saying so is the point: it
+        was quadratic, and the earlier claim here ("one dict walk plus two
+        comparisons per event") was what stopped anyone looking. See
+        :meth:`subagent_counts` and ``SubagentComms.RosterPass``.
         """
         server = self._registrant
         setter = getattr(server, "set_subagents", None)
@@ -6582,9 +6685,10 @@ class ServingSessionHandle(SessionHandle):
         # registry in ``SubagentComms`` is the only place that knows it. Both
         # hosts must therefore agree about the same row, or a runtime-hosted
         # session 404s every child transcript while a TUI-hosted one serves it.
-        # The cost is the one the TUI already pays per folded event (one
-        # registry walk plus a bounded copy); no child transcript ever leaves
-        # with it.
+        # The cost is the one the TUI already pays per folded event: one linear
+        # registry pass, plus a job-row lookup and the outcome/error text caps
+        # per node (both listed as unaddressed in the PR). No child transcript
+        # ever leaves with it.
         comms = getattr(self._session, "_subagent_comms", None)
         if comms is not None:
             self._fold.set_subagent_details(comms)
@@ -6736,14 +6840,12 @@ async def spawn_owned_session(
     # function-local form is what keeps that future change cheap.
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.paths import config_dir
     from local_operator.session.runtime.publication import PublicationGate
     from local_operator.session_factory import create_session
 
     config_directory = config_dir()
     config_manager = ConfigManager(config_dir=config_directory)
-    credential_manager = CredentialManager.readonly(config_dir=config_directory)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
     # The publication latch the deferred MCP wiring parks on. Created HERE, on
@@ -6787,7 +6889,6 @@ async def spawn_owned_session(
     session = await create_session(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=False,
         cwd=cwd,

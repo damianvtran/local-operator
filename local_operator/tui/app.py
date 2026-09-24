@@ -128,13 +128,15 @@ from local_operator.model.effort import (
     next_effort,
     resolve_effort_in,
 )
-from local_operator.providers.catalogue import picker_rows
 
-# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
-# it is reached through a lazy seam: this module already imports the session
-# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
-# objection that applies to a Textual WIDGET does not apply to the app.
-from local_operator.references import expand_references, scan_directory_report
+# NOT imported here: `providers.catalogue` (the model picker's shared ranking)
+# and `references` (the `@path` resolver). Both are reached only after the user
+# acts -- opening `/model`, typing `@`, submitting a message with a reference --
+# and together they were ~460 ms of this module's 1.8-2.8 s import, because
+# `providers.catalogue` pulls the whole provider layer (httpx) and `references`
+# pulls `tools.builtin`. Every `lop` launch paid that before first paint
+# (backend load report B-F10). They are imported at their call sites instead;
+# `tests/unit/test_import_graph.py` pins them off this module's import graph.
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -821,6 +823,39 @@ _DRAIN_NOTICES: dict[str, str] = {
     LEAVING_ON_SIGNAL: SIGNAL_DRAIN_NOTICE,
     LEAVING_FOR_BUILD_OVERDUE: OVERDUE_DRAIN_NOTICE,
 }
+
+#: NO SENTENCE FOR THE ABANDONED HANDOVER, and that is the round-2 correction rather
+#: than an omission (agent review round 1, MAJOR-1; QA round 1, Q-1, which measured it
+#: independently at wire level).
+#:
+#: WHAT WAS TRIED. `process._abandon_move` keeps `LEAVING_FOR_BUILD` on the record when
+#: it gives the handover up — the drain object stays latched and the departure still
+#: lands at the first idle instant — so the phrase alone earned :data:`DRAIN_NOTICE`,
+#: whose second clause ("a new message will not start a turn until the new build is
+#: up") is false from the instant the latch is released. A sentence keyed on the record
+#: PAIR (`leaving` plus a non-empty `update_failed`) was added for that state, and the
+#: selection for the pair was correct — but NOTHING COULD PAINT IT: the only producer
+#: of `retiring` frames composes them at the latch, before any failure exists, and a
+#: viewer that arrives after the abandon receives no frame at all. A sentence table
+#: with no reachable painter is the same class of defect this module deleted once
+#: already (see the round-1 MINOR-3 note above), so the sentence and its key are gone
+#: rather than kept for a wire addition that has not happened.
+#:
+#: WHAT THE ABANDONED STATE IS TOLD, TODAY. The record and the incident row carry it,
+#: where every other fleet surface already reads it: `lop sessions` prints the phrase
+#: (true — the commitment survives) beside `update failed` in its own column, and the
+#: incident row names the bound the runtime actually spent. The viewer's row is the
+#: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
+#: drain sentence after the abandon, and **nothing takes that row down** — it is painted
+#: once, through `_notice_for`, which appends a block to the transcript, and the only
+#: retraction in this app is `_retire_unsent_runtime_notice`, for the unsent-runtime row
+#: (matched by its own private text). So the claim is not corrected on screen: the
+#: operator's next message starts a turn, and the row's second clause is contradicted by
+#: what they see rather than reworded (agent review round 2, R2-NIT-2). Repainting it
+#: truthfully needs a frame the renderer acts on at the moment the latch comes off —
+#: either `draining=True`, which would be false, or a NEW "the departure ended" op —
+#: i.e. a two-repo wire addition with its own design round, deferred in the PR thread
+#: rather than half-built here.
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -15048,6 +15083,14 @@ class OperatorApp(App[None]):
         ``Editor.DESTRUCTIVE_COMMANDS`` and the single ``alert`` row that fills
         the word — but the authority to delete is the submission carrying `yes`,
         not a keystroke on a row.
+
+        THE REMOVAL RUNS OFF THE UI THREAD (review round 2, R2-3). A confirmed
+        delete can now ASK a warm runtime to leave and wait up to
+        ``cleanup.KEEP_ALIVE_PREEMPT_WAIT_S`` for it, so calling it inline froze
+        the interface for ~2.4 s on a keypress — the one shape a delete must not
+        have. It goes through a worker exactly as the slash host below does
+        (``asyncio.to_thread``), which is also why the outcome handling lives in
+        here rather than after the dispatch: the notices are the caller's.
         """
         from local_operator.paths import config_dir
         from local_operator.session.cleanup import delete_session
@@ -15059,48 +15102,63 @@ class OperatorApp(App[None]):
             )
             return
         confirmed = arg.strip().casefold() == "yes"
-        outcome = delete_session(config_dir(), session_id, actor="tui", dry_run=not confirmed)
-        if not outcome.found:
-            # Reachable when the directory is already gone (another window
-            # deleted it, or the id came from a stopped session's record).
-            notice(f"{session_id} is not on disk — nothing to delete", "warning")
-            return
-        if outcome.refusal:
-            notice(outcome.refusal, "warning")
-            return
-        if not confirmed:
-            # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on the
-            # outcome, so this host, the attached/slash host below and the
-            # detached runtime cannot drift apart on the wording of a
-            # confirmation for an irreversible act. The target is named the way
-            # the lists name it (design round 1, D2) for the same reason.
-            notice(outcome.rehearsal(), "warning")
-            return
-        # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the session
-        # it was standing in no longer exists, so leaving the user on it strands
-        # them on a dead conversation. It runs only AFTER the removal is
-        # confirmed, so a refused or rehearsed delete never moves them off their
-        # work.
-        #
-        # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
-        # ledger from the session that boots — an empty screen for a fresh
-        # conversation — so a notice written before it is erased with the
-        # outgoing one. ``_pending_fork_outcome`` is that mechanism (the fork's
-        # own receipts publish through it for the same reason), and it is used
-        # directly rather than re-spelled. A host that cannot start a new
-        # session at all never runs the transition, so there is no reset for the
-        # notice to survive and it is emitted directly after the refusal it
-        # accompanies.
-        if self._resume_factory is not None:
-            kept_clause = (
-                f"; {outcome.children} subagent run(s) it started were kept"
-                if outcome.children
-                else ""
-            )
-            self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
-        else:
-            notice(f"deleted {session_id}", "info")
-        self._cmd_new(notice)
+
+        async def delete() -> None:
+            try:
+                outcome = await asyncio.to_thread(
+                    delete_session, config_dir(), session_id, actor="tui", dry_run=not confirmed
+                )
+            except Exception:
+                # A DELETED COMMAND MUST NOT TAKE THE APP DOWN, and a silent one
+                # must not let the user believe it happened: the worker is
+                # dispatched with ``exit_on_error=False`` and this is the notice
+                # that stands in for the receipt.
+                logger.debug("delete failed", exc_info=True)
+                notice("that conversation could not be deleted", "warning")
+                return
+            if not outcome.found:
+                # Reachable when the directory is already gone (another window
+                # deleted it, or the id came from a stopped session's record).
+                notice(f"{session_id} is not on disk — nothing to delete", "warning")
+                return
+            if outcome.refusal:
+                notice(outcome.refusal, "warning")
+                return
+            if not confirmed:
+                # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on
+                # the outcome, so this host, the attached/slash host below and
+                # the detached runtime cannot drift apart on the wording of a
+                # confirmation for an irreversible act. The target is named the
+                # way the lists name it (design round 1, D2) for the same reason.
+                notice(outcome.rehearsal(), "warning")
+                return
+            # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the
+            # session it was standing in no longer exists, so leaving the user on
+            # it strands them on a dead conversation. It runs only AFTER the
+            # removal is confirmed, so a refused or rehearsed delete never moves
+            # them off their work.
+            #
+            # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
+            # ledger from the session that boots — an empty screen for a fresh
+            # conversation — so a notice written before it is erased with the
+            # outgoing one. ``_pending_fork_outcome`` is that mechanism (the
+            # fork's own receipts publish through it for the same reason), and it
+            # is used directly rather than re-spelled. A host that cannot start a
+            # new session at all never runs the transition, so there is no reset
+            # for the notice to survive and it is emitted directly after the
+            # refusal it accompanies.
+            if self._resume_factory is not None:
+                kept_clause = (
+                    f"; {outcome.children} subagent run(s) it started were kept"
+                    if outcome.children
+                    else ""
+                )
+                self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
+            else:
+                notice(f"deleted {session_id}", "info")
+            self._cmd_new(notice)
+
+        self.run_worker(delete(), group="session-delete", exit_on_error=False)
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -17880,6 +17938,40 @@ class OperatorApp(App[None]):
             self.run_worker(self._open_link(target, notice), group="open-link")
 
         self.push_screen(LinkPickerScreen(targets), _open_choice)
+
+    def open_transcript_link(self, url: str) -> None:
+        """Open a URL the user CLICKED in the transcript.
+
+        The click route's entry point, called by
+        :meth:`~local_operator.tui.widgets.transcript.TranscriptBlock.on_click`
+        once it has resolved which URL the pointer was over. The block is
+        deliberately left knowing nothing about schemes or browsers: it reports
+        a cell's link, and everything that decides whether a string may reach a
+        browser lives here, beside ``/links``.
+
+        It funnels into the SAME :meth:`_open_link` the picker uses, so the two
+        routes cannot drift — one guard, one opener, one receipt. That is the
+        property that makes the scheme check honest: a second opener spelled
+        out here would be a second place to forget it.
+
+        A worker rather than an await for :meth:`_open_link`'s own reason: the
+        launcher waits on a child process, and this is called from inside
+        Textual's event dispatch, which must not block on one.
+
+        ``LinkTarget`` is constructed rather than looked up. Its ``sender`` and
+        ``rank`` describe a ROW IN THE PICKER — which message a URL came from,
+        so two same-host links can be told apart — and a click has already
+        answered that question by pointing at one. The fields are filled with
+        what is true of this route rather than left to imply a provenance
+        nobody read.
+        """
+        source = self._interaction
+
+        def notice(body: str, kind: NoticeKind = "info") -> None:
+            self._notice_for(source, body, kind)
+
+        target = LinkTarget(url=url, sender="agent", rank=0)
+        self.run_worker(self._open_link(target, notice), group="open-link")
 
     async def _open_link(self, target: LinkTarget, notice: NoticeFn) -> None:
         """Hand ONE url to the browser, and say what happened.
@@ -27037,10 +27129,22 @@ class OperatorApp(App[None]):
                 wake_rows = 0
         return rows + wake_rows + _SUBAGENT_DOCK_ROWS < screen_height
 
-    def _subagent_job(self, job_id: str) -> Any:
+    def _subagent_job(self, job_id: str, read: Any = None) -> Any:
+        """One node's execution row, through the roster's own resolvers.
+
+        ``read`` is a prebuilt :meth:`SubagentComms.roster_pass` when the caller
+        already has one. Its ``job`` is the SAME search ``comms.job`` performs
+        (root, then each live child in insertion order, then the record's
+        retained row), but the session list it searches was built once for the
+        whole pass instead of once per call — so a dock tick that resolves a row
+        per node stops being O(N^2) at the ``MAX_RECORDS`` cap. Callers with no
+        pass (the follower's snapshot facade, an older host) keep the per-call
+        lookup, which is what they have always done.
+        """
         session = self._session
         comms = getattr(session, "_subagent_comms", None)
-        lookup = getattr(comms, "job", None)
+        source = read if read is not None else comms
+        lookup = getattr(source, "job", None)
         job = lookup(job_id) if callable(lookup) else None
         manager = getattr(session, "jobs", None)
         if job is None and manager is not None:
@@ -27050,6 +27154,80 @@ class OperatorApp(App[None]):
             frontend = getattr(session, "frontend_state", None)
             job = next((row for row in getattr(frontend, "jobs", ()) if row.id == job_id), None)
         return job
+
+    def _roster_read(self, comms: Any) -> Any:
+        """A linear pass over the comms graph for this resolver, or the graph
+        itself where there is no pass to build.
+
+        WHY THE RESOLVERS TAKE ONE. Every dock path resolves a job row per node
+        it shows, and ``comms.job`` rebuilds the live-child session list by
+        scanning all N records on every call — so N lookups cost O(N^2) at the
+        cap, once per tick and once per ``Subagent*`` handler. One pass answers
+        all of them from the single scan it had to make anyway.
+
+        NOT ONE PASS PER TICK, one per resolver call: each of the two resolvers
+        builds its own here, and ``paused_child_ids(comms)`` builds a third
+        through ``comms.nodes()``, so a tick pays four linear walks where it
+        used to pay two quadratic sweeps. The complexity claim is about the
+        walks being linear and is unchanged by the count; the count is stated so
+        a reader counting them is not surprised.
+
+        TOTAL FOR THE BUILD ONLY, not for the readers that use it. A graph that
+        cannot build a pass is the graph, not an exception — but the pass is a
+        convenience, not the only route back into the registry: ``read.children``
+        and ``read.nodes`` on a class without them still reach
+        ``comms.children``/``comms.nodes``, whose own ``roster_pass()`` may raise
+        outside this guard. Every step in either caller that CAN raise is inside a
+        guard, so a raising reader blanks the dock rather than escaping into a
+        Textual handler. What each caller leaves outside one is ENUMERATED rather
+        than generalised, because the general form was wrong three times: "both
+        callers wrap their whole body" held for the outcome and not the syntax
+        (review round 3, N3-1), and so did "``getattr``/attribute reads, which
+        cannot raise" (review round 1 on this PR, R1-2) and then the same claim
+        one read over, about the SESSION reads (review round 2 on this PR, R2-1).
+
+        * :meth:`_subagent_roster` leaves, before its ``try``, ``self._session``
+          and the ``_subagent_view`` read. Both are plain attributes of the APP,
+          declared on it and never delegated, so neither can raise.
+        * :meth:`_subagent_child_counts` leaves, before its ``try``, only
+          ``self._session``; and after it, ``paused``, ``counts = {}`` and the
+          loop header ``for job in jobs:``.
+        * The session capability reads (``_subagent_comms``, then ``jobs``) are
+          INSIDE the guard in both callers, as is the ``callable`` test on
+          ``nodes`` and the row identity read. What is true of all of them is not
+          that they are total READS but that a guard bounds them: ``getattr``
+          swallows only the ``AttributeError`` it would have raised itself and
+          propagates whatever a property or an ``__getattr__`` raises, which is
+          how the identity read escaped first (round 1, R1-2) and how the two
+          session reads escaped one read over (round 2, R2-1). Each guard
+          degrades to what its own column needs: no marks at all, no roster, and
+          no mark for the row that cannot name itself.
+        * The ``for job in jobs:`` header is left outside deliberately: it walks
+          the roster the caller just built, and a guard there could only convert a
+          caller's own type error into a silently blank band. Its residual risk is
+          that the argument is not a sequence at all, which is the caller's type
+          to get right.
+        * ``paused_child_ids`` guards its own body and degrades to an empty set.
+
+        That is the behavior this must keep, and why the capability check is a
+        ``getattr`` rather than a cast.
+
+        The follower's ``SnapshotSubagentComms`` is the case that has no
+        ``roster_pass``: its ``job`` is a documented stub returning ``None``, and
+        what makes the follower cheap is that ``_subagent_job`` then falls
+        through to ``SnapshotJobs.get``, a dict lookup (its own comment records
+        the last time a linear lookup there made a paint quadratic). Returning
+        the facade unchanged is what keeps a follower and an owner reading the
+        same members, and it is load-bearing: an unconditional build raises
+        ``AttributeError`` out of the follower path and blanks the dock.
+        """
+        build = getattr(comms, "roster_pass", None)
+        if callable(build):
+            try:
+                return build()
+            except Exception:  # noqa: BLE001 — a tick may not cost the band
+                logger.debug("could not build the roster pass", exc_info=True)
+        return comms
 
     @staticmethod
     def _within_roster_window(jobs: list[Any], manager: Any, paused_ids: set[str]) -> list[Any]:
@@ -27144,22 +27322,36 @@ class OperatorApp(App[None]):
         resumed session's rehydrated children are untouched.
         """
         session = self._session
-        comms = getattr(session, "_subagent_comms", None)
-        manager = getattr(session, "jobs", None)
         view = self._subagent_view
         try:
-            job_for = self._subagent_job
+            # The two capability reads are INSIDE the guard, not before it.
+            # ``getattr`` is not a guarantee — it propagates whatever a property
+            # or an ``__getattr__`` raises — so out here either one escaped into
+            # the Textual handler that called this (``RuntimeError: comms
+            # exploded`` / ``RuntimeError: jobs exploded``) instead of resolving
+            # to the empty roster below (review round 2 on this PR, R2-1).
+            comms = getattr(session, "_subagent_comms", None)
+            manager = getattr(session, "jobs", None)
+            # This resolver's own pass: the child list, every node's job row and
+            # the ``children()`` scan below all come off it. ``paused_child_ids``
+            # builds one of its own (through ``comms.nodes()``), so the tick pays
+            # two linear walks here rather than one — see ``_roster_read``.
+            read = self._roster_read(comms)
 
             if comms is not None and callable(getattr(comms, "children", None)):
-                nodes = comms.children(view.job_id if view is not None else None)
-                jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
+                nodes = read.children(view.job_id if view is not None else None)
+                jobs = [
+                    job
+                    for node in nodes
+                    if (job := self._subagent_job(node.job_id, read)) is not None
+                ]
                 jobs = self._within_roster_window(jobs, manager, paused_child_ids(comms))
-                return jobs, job_for(view.job_id) if view is not None else None
+                return jobs, self._subagent_job(view.job_id, read) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
             return (
                 manager.list() if manager is not None and view is None else [],
-                self._subagent_job(view.job_id) if view is not None else None,
+                self._subagent_job(view.job_id, read) if view is not None else None,
             )
         except Exception:
             return [], None
@@ -27199,6 +27391,16 @@ class OperatorApp(App[None]):
         roster row, and only to the children of rows actually listed: a page
         deep in a large tree reads its own children, never the whole graph.
 
+        AND the per-row resolver reads that same pass (review round 1, M1).
+        Resolving each child through ``comms.job`` rebuilt the live-child
+        session list by scanning every registry record per call, so the
+        per-row half of this method was STILL quadratic in the record count —
+        66,816 registry touches at ``MAX_RECORDS`` on the reviewer's rig,
+        against 1,280 for the fold's shape. ``_roster_read`` builds one pass for
+        the tick and every lookup below comes off it, so the grouping and the
+        resolutions are two reads of one scan rather than one scan plus a
+        quadratic sweep.
+
         Total and silent by design, because this runs from the 1 Hz poll and
         from every ``Subagent*`` handler: a host with no comms graph, or one
         whose ``nodes`` is not callable, answers ``{}`` — i.e. no marks — and a
@@ -27206,34 +27408,64 @@ class OperatorApp(App[None]):
         a leaf does. The alternative here is not a better mark but an exception
         in a Textual message handler, for a decoration.
         """
-        comms = getattr(self._session, "_subagent_comms", None)
-        nodes = getattr(comms, "nodes", None)
-        if not callable(nodes):
-            return {}
         try:
+            # Built INSIDE the try, like the roster resolver's: ``_roster_read``
+            # cannot raise today, but a build moved back out would be a raising
+            # step outside the guard, and it would escape into a Textual message
+            # handler instead of blanking the marks. The guard covers every step
+            # that CAN raise; what sits outside it is enumerated in
+            # ``_roster_read``'s docstring, which is the single place that list
+            # lives (review round 3, N3-1; review round 1 on this PR, R1-2).
+            #
+            # The two SESSION reads belong in here with it, and for the same
+            # reason: they are ``getattr``, which propagates whatever a property
+            # or an ``__getattr__`` raises, so outside the guard both escaped
+            # into the handler as ``RuntimeError: comms exploded`` / ``RuntimeError:
+            # jobs exploded`` rather than blanking the marks (review round 2 on
+            # this PR, R2-1). Nothing here is total because of how it is READ;
+            # it is total because every step that can raise is inside a guard.
+            comms = getattr(self._session, "_subagent_comms", None)
+            nodes = getattr(comms, "nodes", None)
+            if not callable(nodes):
+                return {}
+            read = self._roster_read(comms)
             buckets: dict[str, list[Any]] = {}
-            for node in cast(Sequence[Any], nodes()):
+            for node in cast(Sequence[Any], read.nodes()):
                 parent_id = str(getattr(node, "parent_job_id", "") or "")
                 if parent_id:
                     buckets.setdefault(parent_id, []).append(node)
+            manager = getattr(self._session, "jobs", None)
         except Exception:  # noqa: BLE001 — a mark may not cost the band
             return {}
-        manager = getattr(self._session, "jobs", None)
         paused = paused_child_ids(comms)
         counts: dict[str, int] = {}
         for job in jobs:
-            job_id = str(getattr(job, "id", "") or "")
+            try:
+                # Identified INSIDE a guard of its own: ``getattr`` is not a
+                # guarantee — it swallows the ``AttributeError`` it would have
+                # raised itself and propagates whatever a property or an
+                # ``__getattr__`` raises. Executed against an ``id`` that raises,
+                # the unguarded form escaped this method's totality contract into
+                # a Textual message handler (``RuntimeError: id exploded``; review
+                # round 1 on this PR, R1-2). A row that cannot name itself cannot
+                # be counted, so it earns the same mark a row outside the window
+                # does: none.
+                job_id = str(getattr(job, "id", "") or "")
+            except Exception:  # noqa: BLE001 — a mark may not cost the band
+                continue
             if not job_id:
                 continue
             try:
                 # Resolved LAZILY, per roster row rather than per node in the
                 # graph: a page deep in a large tree reads its own children
                 # only, and `_subagent_job` is the roster's own resolver, whose
-                # follower form detaches a public job per call.
+                # follower form detaches a public job per call. Each lookup is
+                # answered by the tick's shared pass (`read`), not by a fresh
+                # session scan.
                 children = [
                     child
                     for node in buckets.get(job_id, ())
-                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or "")))
+                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or ""), read))
                     is not None
                 ]
                 counts[job_id] = len(self._within_roster_window(children, manager, paused))
@@ -33567,6 +33799,8 @@ class OperatorApp(App[None]):
         # order and cannot import a textual widget to get it. Everything below
         # this call is session-shaped and stays here: a daemon has no sticky
         # serving spec and no runtime catalogue to merge.
+        from local_operator.providers.catalogue import picker_rows
+
         rows, _hidden = picker_rows(
             entries,
             usable=usable,
@@ -34275,7 +34509,6 @@ class OperatorApp(App[None]):
         clear text and hand it to the model on the next turn.
         """
         from local_operator.config import ConfigManager
-        from local_operator.credentials import CredentialManager
         from local_operator.paths import config_dir
         from local_operator.web_search.models import (
             PROVIDER_IDS,
@@ -34297,12 +34530,12 @@ class OperatorApp(App[None]):
         )
 
         manager = ConfigManager(config_dir())
-        credentials = CredentialManager.readonly(config_dir())
+        config_dir_path = config_dir()
         words = arg.split()
         try:
             if not words:
                 settings = load_search_settings(manager)
-                statuses = provider_statuses(settings, credentials)
+                statuses = provider_statuses(settings, config_dir_path)
                 labels = {status.id: status.label for status in statuses}
                 strategy = settings.strategy.replace("_", " ").title()
                 order = " → ".join(labels[value] for value in settings.providers)
@@ -34402,7 +34635,7 @@ class OperatorApp(App[None]):
                     row = next(
                         (
                             status
-                            for status in provider_statuses(settings, credentials)
+                            for status in provider_statuses(settings, config_dir_path)
                             if status.id == provider
                         ),
                         None,
@@ -34446,7 +34679,7 @@ class OperatorApp(App[None]):
                     "search order: "
                     + ", ".join(providers)
                     + " "
-                    + provider_order_note(providers, settings, credentials)
+                    + provider_order_note(providers, settings, config_dir_path)
                 )
                 return
             if command == "setup" and len(words) == 2:
@@ -36340,6 +36573,8 @@ class OperatorApp(App[None]):
         """
         message.stop()
         picker = self._editor().picker
+        from local_operator.references import scan_directory_report
+
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
         if not choices:
             picker.set_choices([])
@@ -38474,7 +38709,7 @@ class OperatorApp(App[None]):
         # user picks between them. 67 composed cells against the 74 ceiling.
         lines.append(_key_row("ctrl+r", "copy the open aside; ctrl+f folds it in instead"))
         lines.append(_key_row("esc", "stop the agent; leave a mode"))
-        lines.append(_key_row("ctrl+d", "quit, on an empty composer"))
+        lines.append(_key_row("ctrl/cmd+d", "empty: quit; draft: delete forward"))
         # Where the logs went. Console logging is off while the TUI owns the
         # terminal (see `local_operator.logger.file_logging`), so without this
         # line the file is unfindable without reading the source. `/help` and
@@ -38655,6 +38890,8 @@ class OperatorApp(App[None]):
         async def _decline(tool_name: str, description: str) -> bool:
             """Refuse without asking — see the chain above for why."""
             return False
+
+        from local_operator.references import expand_references
 
         result = await expand_references(text, self.session_cwd(), request_approval=_decline)
         for notice in result.notices:

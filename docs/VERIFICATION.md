@@ -2184,3 +2184,63 @@ the window), `tests/unit/providers/test_controller.py` (9 ticket cases — the
 stored ticket reaching the dispatcher, no ticket meaning no request, and
 another provider never querying the namespace), and the `page-usage-qwencloud`
 usage-panel frame captured from the real `OperatorApp`.
+
+## A completed turn that never reached the attention store (2026-09-23)
+
+`attention.db` is the most contended store on this machine — ~25 concurrent
+sessions, the mobile daemon, the tunnel connector and the browser bridge all
+publish completions into one file — and it keeps SQLite's DEFAULT ROLLBACK
+JOURNAL, so a reader (SHARED) blocks a writer's `COMMIT` (RESERVED). `publish`
+rides that out on a bounded budget and then raises `AttentionWriteDeferred`, and
+the only remedy was the next boot's `bootstrap_transcript`.
+
+**A finished session is idle and never boots again**, so for the case that
+matters there was no remedy at all. The completion stayed in the transcript
+journal, and because the STORE row is what raises the OS notification and draws
+the sidebar's "completed, unread" mark (and what sorts the row into Active), all
+three went silent for a turn that had in fact completed.
+
+The shape was confirmed on live sessions before anything was changed: a settled
+`completion_attention` marker in `transcript.jsonl`, no row for that conversation
+in `attention.db`, and the matching log line
+
+```
+attention: completion outcome for <session> deferred to the next boot's import:
+attention store stayed busy through 2 attempts: database is locked
+```
+
+### Isolated repro, before and after
+
+One scenario, driven through the real product path, with a real `Session`, a real
+scripted turn and a real sibling connection holding `BEGIN IMMEDIATE` on the
+session's own store:
+
+1. the turn ends while the lock is held (`publish` deferred, warning logged);
+2. `refresh_attention()` is called while the lock is STILL held — the viewer's
+   poll a second later, which consumes the one-shot boot restore;
+3. the lock is released and NOTHING else happens — no boot, no new turn, no
+   viewer. The store is then polled through `AttentionStore.state_many` for the
+   turn's own token, exactly as a frontend observes it;
+4. only then are `refresh_attention()` ticks issued.
+
+Isolated `HOME` + config dir, this checkout's venv, `env -i` (so no inherited
+`CMUX_*`/`LOP_*`), shipped store budget and shipped ladder delays:
+
+| | the deferral | after 60 s of watching the store | after 5 ticks |
+|---|---|---|---|
+| `main` (1055e973) | deferred, warning logged, `_attention_restored` set | **token absent** (store still holds the earlier row) | **token still absent** |
+| this branch | deferred, same warning | **token present**: same token and anchor, `unseen: true`, one row | present |
+
+The branch's landing was measured at **0.3 s after the lock cleared** — the
+rung's blocked `BEGIN IMMEDIATE` acquired as soon as the holder rolled back — so
+the ladder, not a delay, is what publishes it. Same script, same command, same
+isolated store shape for both rows; the only difference is the product code the
+venv resolved, which each run printed from `local_operator.__file__`.
+
+The reproducible form of both arms is in
+`tests/unit/session/test_attention_lock_contention.py` (the ladder section at the
+foot of the file, driving the real held lock) with
+`tests/unit/session/test_attention.py` covering the boot-restore arm, the
+`eligible: False` refusal and the journal's-latest-marker ordering: all eight
+ladder cases were run against `main`'s own `session.py` and fail there, and pass
+on this branch.

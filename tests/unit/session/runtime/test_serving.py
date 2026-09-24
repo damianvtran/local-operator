@@ -86,6 +86,13 @@ class FakeSession:
         #: MCP grant through it, since the grant outlives the request that
         #: started it. Tests replace it to capture what viewers would see.
         self._emit: Any = None
+        #: The holder ``_install_interactivity_probe`` installs the model-facing
+        #: probe onto. ``None`` matches a host that never grew one — an absent
+        #: attribute reads the same way — and a test that pins the install puts a
+        #: real :class:`GoalState` here. Declared for the same reason as
+        #: ``mcp_manager``: an undeclared attribute is invisible to the type
+        #: checker every gate runs.
+        self._goal_state: Any = None
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
@@ -1324,6 +1331,48 @@ async def test_background_desktop_owns_notification_without_becoming_interactive
     registrant.active = False
     handle._announce_pending("approval", "bash", "build the project")
     assert len(deliveries) == 1
+
+
+def test_the_model_facing_probe_reads_attachment_not_attention() -> None:
+    """The probe behind ``<interactivity>`` asks the PRESENTATION question.
+
+    Pinned as its own case because the two predicates have to stay separable: the
+    desktop pane below has been dropped by the attention predicate (notification
+    routing, rung 1) and is at the same time exactly the surface a question from
+    this session would appear on. Reading attention here is what told the
+    operator's own focused, visible app that nobody was at a screen.
+
+    The probe is exercised through the real install seam, on a real ``GoalState``,
+    so this also pins that it is LIVE: an answer cached at install time would
+    freeze the block for the life of the session.
+    """
+    from local_operator.session.goal import GoalState
+
+    handle, session = make_handle()
+
+    class _PaneAttached:
+        def __init__(self) -> None:
+            self.attached = True
+
+        def attached_surfaces(self) -> frozenset[str]:
+            return frozenset({"desktop"}) if self.attached else frozenset()
+
+        def watching_surfaces(self) -> frozenset[str]:
+            return frozenset()
+
+        def set_record_pending(self, _pending: str | None) -> None:
+            return None
+
+    registrant = _PaneAttached()
+    session._goal_state = GoalState()
+    handle._registrant = registrant
+    handle._install_interactivity_probe()
+
+    assert not handle._watching_surfaces()
+    assert session._goal_state.is_interactive() is True
+    # ...and it re-reads rather than reporting what it saw at install time.
+    registrant.attached = False
+    assert session._goal_state.is_interactive() is False
 
 
 @pytest.mark.asyncio

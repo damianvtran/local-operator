@@ -106,6 +106,86 @@ freezes actually suffered (1.5-7.2 h, four of five with zero writes). A single
 synchronous step that holds the GIL for five unbroken minutes is not slow work.
 `LOP_RUNTIME_STALL_SECONDS` overrides it; `0` disables it.
 
+**The bound during BOOT: 900 s, and 300 s starts at engagement.** The steady bound
+is measured from the last sign of life, so it can only be honest once something is
+in a position to write one — and nothing in the boot path can. `arm` runs from the
+`__main__` guard, before `main()`, and seeds both planes to that instant; the
+workload beat's only driver starts after publication and sleeps a heartbeat before
+its first stamp, and the serving beat starts with the serving thread. So from the
+arm to the first post-publication beat, every second of a legitimate boot
+(session construction, lease arbitration, MCP bring-up, the inbox drain, socket
+bind, publication) was spent against a clock no boot code could re-arm, and the
+only possible deadline was `arm + 300 s`. Measured over 68 retained dumps on the
+build carrying the observation header: 17 fires, 10 of them at the full
+`Timeout (0:05:00)` value, i.e. no beat ever re-armed the timer at all — the
+never-engaged class, and the plurality. (An UPPER bound on that class, not an exact
+count: a failed re-arm is indistinguishable from it by the armed value alone; see the
+exception below.) `DEFAULT_BOOT_STALL_S`
+(`LOP_RUNTIME_BOOT_STALL_SECONDS`, same spellings and floor/ceiling as the steady
+knob, `off` meaning "no boot phase") is what `arm` arms with; the runtime's first
+ENGAGEMENT — the publication boundary in `process.amain`, where `_live_handle` is
+set — calls `stall_watchdog.engage()`, which moves the bound down to the steady one
+and stamps BOTH planes, so the steady bound is measured from engagement rather than
+from boot. That is also what makes the never-engaged class NAMEABLE: a fire that
+RE-ARMED has the deadline sibling `engage` writes, and one that never did has
+none. Engagement never widens the bound.
+
+*Exception, measured (design review round 1, D1):* engagement is not atomic. `engage()`
+moves the bound in memory and stamps both planes, THEN replaces the C timer, so a
+replacement that FAILS leaves the original boot-bound timer in force while the bound
+reads steady. A single fire can therefore carry the boot value on a runtime that DID
+engage. The dump names this (`[stall watchdog] re-arm failed: the engage could not
+re-arm the timer, ...`). This is why the never-engaged reading is qualified on the
+re-arm having SUCCEEDED wherever the file states it as a reading of a fire — the boot
+note, the comment above it, and `HOW_TO_READ_THE_FIRED_VALUE` — and not at every site
+that merely describes the class: statements of its *identity* (a runtime whose main
+thread never reported) stay as they are.
+
+`engage()` relies on its early return for its “idempotent” contract (see the
+function's own docstring). It returns before moving anything when the bound is
+already at steady, so a second call is a no-op. Measured against the real object with
+that early return bypassed, an unguarded second call does **not** fire early: it
+RE-stamps both planes to `now` and hands `_rearm` a **positive remainder — the full
+fresh steady bound** (+9.9999… s of a 10 s steady bound), and on a runtime already
+1 s from its deadline it **pushes the fire out by that whole bound** (+9.000 s
+measured). The hazard is a fire delayed past the moment a real participant went
+silent, not an early cut.
+
+**What that bound does with a hung boot: it DUMPS it and HOLDS it, it does not cut
+it.** The exit leg answers through `process._busy_probe`, which reports work in
+flight for the whole pre-publication window — `True` while `_live_handle` is `None`,
+because a runtime still constructing itself is not idle in any sense that bound may
+act on — so `arm` seeds `_Armed.held` true and every fire in this stretch is
+non-fatal: the fire writes its dump and its `bound held:` marker, and the process
+carries on. A boot that never reaches publication therefore keeps answering "in
+flight" for the rest of its life, and nothing in the module ends it. **What does end
+it, measured rather than assumed** (the first version of this paragraph named an
+escape that cannot reach this class — agent review round 2, Q-3): the boot's **own
+failure path** is the automatic exit (the construction error that ends the runtime
+child: `rc 2` with the cause on stderr, 1.4 s here); **`lop stop` is not one**, because
+it resolves its target through session records (`mobile.peer_send.resolve_peer_target`)
+and a boot that never published has none — `lop stop --pid <pid>` answers `no session
+found with pid <pid>` and the process goes on; and an operator ends it by signalling
+the pid the dump is named for, which its header carries (`kill -TERM <pid>`, not gated
+on any record). What the boot bound contributes in that window is the ATTRIBUTION — the
+fired value is the boot bound and the deadline sibling is absent, together the
+the never-engaged class — *provided the re-arm succeeded*; an engaged runtime whose
+timer replacement failed can fire at the boot value too (D1) — while the exit leg only becomes fatal once the runtime has
+published and its work has cleared (a property of the in-flight prohibition, #1439,
+not of the boot phase). Pinned as a pair, because the two arming shapes answer
+different questions:
+`test_a_hung_boot_with_the_production_probes_is_dumped_and_HELD` (the entry point's
+own arming, `busy=process._busy_probe`, held at `rc 0`) and
+`test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut` (a caller with no
+probe at all, armed fatally, `rc 1`).
+
+**Still open in that window, and NOT closed here.** A tick that returns early
+without raising is never re-created by `_watch_stall_beats`, whose restart fires
+only on an exception (`_do_shutdown` is the same class: a plane is unreported
+because the runtime is ending). Both are real — dump 24646 (19 threads, main idle
+in `select`, no `tick died:` line) and 75019 (mid-shutdown) — and both need their
+own fix (a restart on early return, and a shutdown state the bound recognises).
+
 **What the exit costs, beyond the turn.** A hard exit runs no Python, so the
 in-process kill of this turn's tool process groups cannot fire (`execute_bash`'s
 `_kill` chain) — which is exactly the "hard death of the owning `lop` process"

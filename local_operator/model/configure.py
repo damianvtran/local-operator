@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -71,7 +72,6 @@ if TYPE_CHECKING:
 
     from local_operator.clients.openrouter import OpenRouterListModelsResponse
     from local_operator.clients.radient import RadientListModelsResponse
-    from local_operator.credentials import CredentialManager
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
     from local_operator.providers.auth_store import AuthStore
@@ -1675,9 +1675,9 @@ def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
 
-    ``base`` is threaded from the caller's ``CredentialManager`` (R4), so a
-    catalogue resolve for a manager configured at a non-default root reads the
-    store that manager writes.
+    ``base`` is threaded from the caller's config root (R4), so a catalogue
+    resolve for a host configured at a non-default root reads the store that root
+    holds.
     """
     canonical = "test" if provider == "noop" else provider
     try:
@@ -2685,7 +2685,7 @@ def refresh_model_info_background(provider: str, model_id: str) -> None:
 def configure_model(
     hosting: str,
     model_name: str,
-    credential_manager: CredentialManager | None = None,
+    config_dir: Path | None = None,
     model_info_client: ModelListingClient | None = None,
     env_config: EnvConfig | None = None,
     temperature: Optional[float] = None,
@@ -2726,15 +2726,13 @@ def configure_model(
     # no longer a rung, PR2a). The cascade at
     # stream time re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
     api_key: Optional[SecretStr] = None
-    if credential_manager is not None:
+    if config_dir is not None:
         try:
             from local_operator.providers.registry import provider_env_key
 
-            # The manager's own root (R4): a store the caller configured
-            # elsewhere is the one this key must come from.
-            static_key = provider_env_key(
-                canonical, base=getattr(credential_manager, "config_dir", None)
-            )
+            # The caller's own root (R4): a store configured elsewhere is the
+            # one this key must come from.
+            static_key = provider_env_key(canonical, base=config_dir)
         except Exception:  # noqa: BLE001 - a store failure must not block config
             static_key = None
         if static_key:
@@ -2754,9 +2752,7 @@ def configure_model(
         # compaction sizes itself off a 128k fallback on a 1M model and cost
         # cannot be reported at all. `resolve_model_info` fills the gap from a
         # disk-cached catalogue: one HTTP call a day, and never a blocked start.
-        model_info = resolve_model_info(
-            canonical, model_name, base=getattr(credential_manager, "config_dir", None)
-        )
+        model_info = resolve_model_info(canonical, model_name, base=config_dir)
 
     spec = build_model_spec(canonical, model_name, model_info)
     if definition.local_setup:
@@ -3053,6 +3049,34 @@ class _SessionTransport:
     owners: int = 1
 
 
+class _ChildModelRequestCounter:
+    """Count provider streams owned by this session's delegated children.
+
+    The runtime's native watchdog samples the count from another thread, so
+    keep the shared state to one lock-protected integer rather than walking the
+    child-session registry or reading mutable child contexts there.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def begin(self) -> None:
+        with self._lock:
+            self._count += 1
+
+    def end(self) -> None:
+        with self._lock:
+            if self._count <= 0:
+                raise RuntimeError("child model request counter underflow")
+            self._count -= 1
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+
 class SessionStreamFn:
     """One conversation's stateful router over a shareable client pool.
 
@@ -3145,6 +3169,8 @@ class SessionStreamFn:
         cache_lineage_id: str | None = None,
         *,
         _transport: _SessionTransport | None = None,
+        _child_request_counter: _ChildModelRequestCounter | None = None,
+        _counts_as_child_request: bool = False,
     ) -> None:
         import httpx
 
@@ -3171,6 +3197,14 @@ class SessionStreamFn:
         )
         self._http = self._transport.http
         self._closed = False
+        # Forked child streams share this scalar counter with their root session.
+        # The root's own calls never increment it; only forks set the per-stream
+        # marker, so unrelated manager work and detached streams stay out.
+        self._child_request_counter = _child_request_counter or _ChildModelRequestCounter()
+        self._counts_as_child_request = _counts_as_child_request
+        # Descendants inherit this stream's shared counter. If this is a root
+        # session, its own request calls still never count as child activity.
+        self._descendant_request_counter = self._child_request_counter
         self._context_tracker = ContextTokenTracker()
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
@@ -3560,11 +3594,13 @@ class SessionStreamFn:
         )
 
     def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
-        """Create a conversation owner sharing only auth and HTTP transport.
+        """Create a conversation owner sharing transport and parent activity count.
 
         Route pins, callbacks, effort decisions and usage attribution are local
         to the child. Cache lineage sharing is opt-in for true transcript forks;
         a fresh delegated prompt does not inherit a parent's cache identity.
+        Nested forks retain the same parent-owned counter so one scalar answers
+        whether any delegated model request is outstanding.
         """
         if self._closed:
             raise RuntimeError("cannot fork a closed session stream")
@@ -3574,9 +3610,12 @@ class SessionStreamFn:
             session_id,
             cache_lineage_id,
             _transport=self._transport,
+            _child_request_counter=self._descendant_request_counter,
+            _counts_as_child_request=True,
         )
         self._transport.owners += 1
         child._parent_session_id = self._session_id
+        child._descendant_request_counter = self._descendant_request_counter
         if cache_lineage_id:
             # A TRUE transcript fork replays a byte-identical prefix, so the
             # parent's host is genuinely warm for it — the same reasoning that
@@ -5592,6 +5631,17 @@ class SessionStreamFn:
                 self._context_tracker.record(binding.measured if binding else measured, usage)
             yield event
 
+    @property
+    def child_model_requests_in_flight(self) -> bool:
+        """Whether any forked child stream is currently awaiting a provider.
+
+        This O(1) read is intended for a parent runtime's watchdog probe. It is
+        deliberately narrower than child-job liveness: a child counts only while
+        its provider stream is active, so a hung child outside that request is
+        not made immune to the parent watchdog.
+        """
+        return self._descendant_request_counter.count > 0
+
     async def _record_stream(
         self, request: ChatRequest, stream: AsyncIterator[StreamEvent]
     ) -> AsyncIterator[StreamEvent]:
@@ -5637,6 +5687,12 @@ class SessionStreamFn:
 
         final_usage: Usage | None = None
         ok = True
+        counted_child_request = self._counts_as_child_request
+        if counted_child_request:
+            # This is immediately before the first provider-stream await. The
+            # child wrapper's finally also runs on early close, failure, and
+            # cancellation, keeping concurrent/nested requests balanced.
+            self._descendant_request_counter.begin()
         try:
             async for event in stream:
                 if first_token_at is None and getattr(event, "type", "") in (
@@ -5716,6 +5772,10 @@ class SessionStreamFn:
             outcome = type(exc).__name__
             raise
         finally:
+            if counted_child_request:
+                # Stop representing provider work before the separate analytics
+                # handoff; that bookkeeping must not widen the in-flight window.
+                self._descendant_request_counter.end()
             # In a ``finally`` so an aborted/failed stream (which still cost
             # input tokens) is recorded too — best-effort and never raising.
             self._record_usage(

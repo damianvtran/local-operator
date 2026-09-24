@@ -370,6 +370,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the tmp FILE of a failed record write",
     ),
+    # Store-maintenance completion metadata (2026-09-23). Startup passes the
+    # AgentRegistry config root to this worker; session directories are its
+    # separate `sessions/<id>` children. The target uses a fixed stamp basename
+    # at that root, and mkstemp creates the temporary FILE beside it in the same
+    # config root, so neither replace nor failure cleanup can displace a session.
+    (
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
+        "os.replace",
+        "atomically publishes only the fixed config-root .store-maintenance.json FILE; "
+        "its tmp FILE is created in that same root, outside sessions/<id>",
+    ),
+    (
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
+        "<path>.unlink",
+        "removes only the same-root temporary FILE after stamp publication fails; "
+        "config_dir is the store root, not a session directory",
+    ),
     # -- agent / team storage (agents/<id>/, teams/<name>/), never sessions/ --
     ("local_operator/agents.py::AgentRegistry.delete_agent", "shutil.rmtree", "agents/<id>"),
     (
@@ -553,13 +570,8 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.replace",
-        "temp FILE -> .env",
-    ),
-    # Same shape as the credentials writer above: a temp FILE inside the
-    # secrets directory replacing master.key in that same directory. Both
+    # Same shape as the browser-bridge/keys writers below: a temp FILE inside
+    # the secrets directory replacing master.key in that same directory. Both
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
@@ -700,11 +712,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/secrets/keys.py::discard_staged_wrapped_key",
         "<path>.unlink",
         "master.wrapped.incoming* under config_dir()/secrets, staged by this call",
-    ),
-    (
-        "local_operator/credentials.py::CredentialManager.write_to_file",
-        "os.unlink",
-        "temp FILE -> .env",
     ),
     ("local_operator/browser_bridge/daemon.py::_private_write", "os.replace", "temp FILE"),
     ("local_operator/browser_bridge/state.py::publish", "os.replace", "temp FILE"),
@@ -1279,7 +1286,10 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        "local_operator/session/frontend_state.py::FrontendStateStore.subscribe.unsubscribe",
+        # ``_join`` rather than ``subscribe``: both entry points (``subscribe``
+        # and ``subscribe_threadsafe``) admit their callback through this one
+        # private method, so the closure that removes it is qualified here.
+        "local_operator/session/frontend_state.py::FrontendStateStore._join.unsubscribe",
         "<path>.remove",
         "list.remove(listener)",
     ),
@@ -1310,11 +1320,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
         "<path>.replace",
         "in-memory .replace",
-    ),
-    (
-        "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
-        "<path>.replace",
-        "self.replace(state): FrontendStateStore.replace, an in-memory snapshot swap",
     ),
     (
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
@@ -1717,8 +1722,6 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
-        # self.replace(state) = in-memory snapshot swap
-        "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
         # Same receiver, same reason: the local publication installs an accepted
         # directory onto the in-memory FrontendStateStore before the desktop
         # bridge repaints from it. `store.replace(state)` is a state swap, never
@@ -1739,6 +1742,12 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # pid and nothing else (see the allow-list rows above): no session id, no
         # caller input, so neither can name a path under sessions/.
         "local_operator/session/runtime/stall_watchdog.py::_record_deadline",
+        # The worker is called with AgentRegistry.config_dir (the config root),
+        # while sessions live in its separate sessions/<id> child. Its destination
+        # is config_dir / the fixed .store-maintenance.json basename and its temp
+        # FILE is created with mkstemp(dir=config_dir), so these file replacements
+        # cannot rename a session directory.
+        "local_operator/session_factory.py::_write_store_maintenance_stamp",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
     }

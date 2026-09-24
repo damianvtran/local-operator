@@ -269,27 +269,157 @@ lane is stepping, so ``_subagent_roster_generation`` moves). A run where all
 three legs held for 300 continuous seconds is not a slow step; it is a process
 burning a core to produce nothing.
 
-WHAT THIS LEG STILL CANNOT SEE, named so a reader does not assume coverage. The
-in-flight leg reads the PROCESS's own step and its compaction. A SUBAGENT LANE
-running a long in-process tool of its own is not "in flight" by that measure, so
-a lane parked in private CPU work with no step boundary for longer than the
-window is cut with its parent. Widening the probe to every child session is its
-own change — ``comms._records`` holds those sessions privately today — and is NOT
-in this one.
+WHAT THIS LEG NOW READS ABOUT CHILD LANES, IN TWO HALVES AND TWO CHANGES. Both
+halves are closed, and they cover different things a lane can be doing:
 
-IT ALSO CANNOT TELL A PARKED CHILD LANE FROM A SPIN, and that gap is the same
-false-positive class the liveness leg was just taught to see, one layer out. The
-shape: a parent driving subagents IN PROCESS, every child parked in a long model
-call, so no lane closes a step and ``_subagent_roster_generation`` does not move
-(the roster bumps on a completed assistant message, a model change or a lifecycle
-event — not on a call being outstanding), while the PARENT's own loop burns CPU in
-the same per-event projection walk the fires above were caught in. All three legs
-then hold and the process is cut while it is working. The measured cost of that
-walk is superlinear in the roster: ``nodes()`` calls ``node()`` per record and
+* a PROVIDER REQUEST outstanding in any FORKED child stream — every in-process
+  lane takes its stream from ``SessionStreamFn.fork``
+  (``harness.subagent._construct_child_session``), those forks share ONE counter
+  with the runtime's own stream, and the probe reads it as the scalar
+  ``child_model_requests_in_flight``: O(1) for the whole tree at once, and the
+  manager's own request never counts;
+* a STEP OPEN IN THE LANE ITSELF — its own tool batch, its own on-demand
+  compaction — which no counter can express, read per live lane by
+  ``process._child_lanes_in_flight`` off the roster's private records.
+
+WHAT THE SECOND READ COSTS, MEASURED RATHER THAN ASSUMED — AND IT IS LINEAR IN
+ROWS SCANNED, NOT IN LANES ALONE. It is the read the paragraph above refused as
+"not cheap" before there was a number for it, and the refusal does not survive the
+number; but the number has TWO axes, and quoting only the lane axis is how a
+tail-dependent figure gets read as a tail-independent one. Both are below.
+
+THE LANE AXIS. On this host (2026-09-23, CPython 3.12.13, load average 128-280 over
+the sweeps — the figures are CPU, so the fleet's load does not enter them), over a
+REAL ``SubagentComms`` roster of real child sessions, each holding a completed-turn
+tail (four rows plus the ``user`` boundary the scan breaks on):
+
+    live lanes   widened read (µs CPU/sample)     per lane
+    0            0.19-0.21                        --
+    1            0.85-0.87                        0.85-0.87
+    8            6.02-8.88                        0.75-1.11
+    64           59.09-62.04                      0.92-0.97
+    256          290.49-331.93                    1.13-1.30
+
+(two sweeps of ONE rig, so the ranges are this host's run-to-run spread; the
+reviewer's and QA's own rigs put N = 256 at 278-315 µs, so the ORDERING and the
+~1 µs per-lane constant are the stable part of this table and a single digit is
+not). The sampler reads it once per ``_sample_interval`` — 15 s at the shipped
+300 s bound, four samples a minute — so at that tail the widest measured roster
+spends ~1.2-1.3 ms of CPU per minute: about 0.002% of one core, three orders of
+magnitude below the :data:`PROGRESS_CPU_FLOOR` (5% of one core) the leg demands of
+the very spin this read exists to judge.
+
+THE TAIL AXIS IS THE REAL DRIVER, AND THE PER-ROW CONSTANT IS A PROPERTY OF THE
+ROW CLASS, so it is only meaningful with the class beside it. What the scan walks
+is not "a lane": it is the run of rows after the last ``user`` boundary that are
+neither that boundary nor an assistant row carrying tool calls — the rows
+``unanswered_tail_call_ids`` steps over one at a time. One lane, one row class per
+sweep, same rig, CPU via ``time.thread_time()``, the minimum of three sweeps:
+
+    row class                                   N=514     N=4098   marginal
+    CustomMessage, the product's own ctors      849.65    6706.46   1.65 µs/row
+    CustomMessage, bare                         937.03    7039.58   1.72
+    CustomMessage carrying a role extra         659.00    7391.50   1.80
+    Message(role='assistant') with text          38.36     305.96   0.075
+    Message(role='assistant') with tool_calls     0.29       1.00   returns there
+    SimpleNamespace(role='assistant')            31.81     250.38   0.061
+
+THE CLASSES ARE 20-30x APART, so a µs/row figure means nothing without its class.
+The 0.08-0.12 µs/row table this paragraph used to carry was measured on the CHEAP
+class — ``Message`` and ``SimpleNamespace`` rows (0.061-0.075 here) — while the
+sentence above it named the ``CustomMessage`` row the incident lands on, which is
+1.65-1.80. At the class the rule names, 4098 rows cost ~6.7 ms on ONE lane rather
+than ~0.46 ms. What is walked in the incident shape IS the ``CustomMessage`` class:
+that is what a hub message, a job result, a compaction marker and an incident all
+are.
+
+WHAT A REAL TAIL IS, COUNTED RATHER THAN ASSUMED: over the 10,482 saved
+transcripts under ``~/.local-operator/sessions``, the walk — rows from the end to
+the first assistant row carrying calls, or to the last ``user`` row — is a MEDIAN
+OF 5 ROWS, p95 7, p99 9, p99.9 16, and the widest is 25. Of the 43,194 rows those
+walks step over, 21,809 (50.5%) are ``CustomMessage``-class entries and 21,341
+(49.4%) are ``Message`` rows (44 are journal rows that never enter a live context).
+A real tail is short, and about half of it is the cheap class. A WHOLE-TRANSCRIPT
+COUNT IS NOT THIS NUMBER, and the gap is the reason the paragraph this one replaces
+was wrong to divide by the lane count alone: the same corpus's transcripts hold a
+MEDIAN OF 63 ``custom`` entries, p99 612, up to 3057 — they accumulate over the
+whole conversation, while the walk stops at the last ``user`` boundary.
+
+AT A REAL WIDTH THE READ IS CHEAP AND THE FLOOR IS UNDER NO PRESSURE. The widest
+walk those transcripts show, on a 256-lane roster, is 11.7-13.5 ms of CPU per
+sample: 47-54 ms of a CPU minute, ~0.08-0.09% of one core, about 55x below the
+:data:`PROGRESS_CPU_FLOOR`. At the median 5-row walk it is 2.3-2.7 ms per sample,
+~0.015-0.018% of a core, ~300x below it. That is the honest form of the "three
+orders" claim: it holds for the tail rows a real lane carries, and it is about ROWS
+more than lanes — the lane axis alone, over a real completed-turn tail (four rows
+plus the boundary the scan breaks on), is 191-239 µs at 256 lanes, 0.75-0.93 µs per
+lane, this round's own re-measure at the low end of the table above and inside the
+rig spread that paragraph names.
+
+THE SHAPE THAT BREACHES THE FLOOR, NAMED, BECAUSE THE FLOOR KEEPS ITS ROLE: 256
+lanes whose tails are 4098 ``CustomMessage`` rows each — the shape this paragraph
+used to extrapolate — costs 1.88-2.03 s of CPU per sample, 7.5-8.1 s of a CPU
+minute, ~12.5-13.5% of one core. That is ABOVE the 5% floor, not below it. Even on
+the real 50/50 row mix counted above the same shape is ~1.1 s per sample, ~7.5% of
+a core, still above. The floor itself does not move: it is the demand the legs make
+and the number this read is judged against, and what this section now says is that
+at that tail the read does not meet it. Two consequences, stated rather than left
+to inference:
+
+* 4098 rows is SYNTHETIC, not a rate seen in the field — it is 164x the widest walk
+  in those 10,475 transcripts, and it is structurally hard to reach, because the
+  walk ends at the last ``user`` boundary: a tail that long needs thousands of
+  incident / hub / job-result rows on top of one open batch. The steady state is
+  the 0.08% case above.
+* Should tails that long ever become real, the fix is a BOUNDED read rather than a
+  smaller constant, and the bound belongs in ``protocol.unanswered_tail_call_ids``
+  — the one rule this read shares with the two display predicates. That is a
+  different change from this one, with a wider blast radius, and it is not taken
+  here. A CHEAP BOUND WAS CONSIDERED AND REFUSED, measured rather than argued: a
+  fast path that skips a row class it "knows" cannot qualify is NOT
+  semantics-preserving, because ``CustomMessage`` is ``extra="allow"`` and the scan
+  reads its ``role`` and ``tool_calls`` — a ``CustomMessage`` carrying
+  ``role='assistant'`` and ``tool_calls`` IS the qualifying row (its calls come
+  back as unanswered), one carrying ``role='tool'`` plus ``tool_call_id`` ANSWERS
+  the batch below it (the answer flips from ``{'open-1'}`` to empty), and one
+  carrying ``role='user'`` STOPS the walk. Short-circuiting on the first qualifying
+  row is already what the loop does. A bound that can miss an unanswered call is
+  not one to take.
+
+Two structural facts keep the walk as small as it is, and both are pinned in
+``tests/unit/session/runtime/test_child_lane_progress.py``: each live lane is asked
+once per sample, and a lane that DOES hold a step answers on the first row the scan
+reaches, so the in-flight case is the cheaper one (measured on that same 256-lane
+roster: 1.5 µs per sample with an open batch on the FIRST record, against 211 µs
+with one on the LAST, where every lane is asked).
+
+N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``, and the cap is not a budget for this
+read. ``_evict_overflow`` evicts only records with no live child AND no running
+job, so it bounds the map's evictable tail rather than lane concurrency: measured
+here, 300 attached lanes leave 300 records, and a record detached without settling
+is not evictable either. A live roster has been measured at 296 records on this
+fleet. What bounds this read is how many lanes one manager is running, which is a
+scheduling fact and not a constant in this module.
+
+THE SHAPE BOTH HALVES ABOVE EXIST FOR, AND WHY ITS CPU IS THERE. A parent
+driving subagents IN PROCESS, every child parked in a long model call, so no lane
+closes a step and ``_subagent_roster_generation`` does not move (the roster bumps
+on a completed assistant message, a model change or a lifecycle event — not on a
+call being outstanding), while the PARENT's own loop burns CPU in the same
+per-event projection walk the fires above were caught in. All three legs then
+hold — no motion, nothing in flight by the parent's own reading, CPU advancing —
+and the process is cut while it is working; that is the false positive the two
+reads above close, one half at a time. The step half was measured on this
+change's OWN child: with a lane mid-batch and nothing else in flight, the
+production probe answered ``not in flight`` and the bound ended the process.
+The measured cost of that walk is superlinear in the roster: ``nodes()`` calls
+``node()`` per record and
 ``_describe()`` calls ``_live_twin()``, which re-scans ``_records`` for each one, so
-the walk is O(N^2) in the lane count, and ``MAX_RECORDS`` is 256 — measured AT the
-cap on this machine on 2026-09-22 (one session's ``subagent-roster.v1.json`` holds
-exactly 256 records, four more hold 146-243). The coordinator on this change
+the walk is O(N^2) in the lane count, and the widest roster measured on this
+machine on 2026-09-22 holds 256 records (one session's
+``subagent-roster.v1.json`` holds exactly 256, four more hold 146-243) — a
+measured width, not the ``MAX_RECORDS`` cap, which does not bound a live roster
+(see the note above). The coordinator on this change
 measured one ``_refresh_state``'s subagent work at 46 ms at 64 records, 113 ms at
 128, 165 ms at 192 and 422 ms at 256 on an idle box against the real
 ``SubagentComms`` (this change's own synthetic re-measurement, on bare records with
@@ -297,16 +427,56 @@ no ``child`` or job state, gives 0.5 ms at 64 and 2.0 ms at 256 — the shape is
 same and the constant is the real records', so quote the ordering, not the
 constant).
 
-THIS CHANGE DOES NOT RELAX THAT LEG, and no part of the fix above depends on the
-mechanism behind those fires being settled: the abstention rests on an OBSERVED
-moving frame, not on a theory of why the stamp was late. What would close this gap
-is a probe field that reads "this session has a child lane with a model call
-outstanding", and it is NOT cheap: it means reading every child session's own
-context off the sampler's foreign thread, behind ``comms._records``, at every
-sample — the same cross-thread live-state read this change is REDUCING (see
-:func:`_read_probe` on why the probe no longer runs under ``_LOCK``). Adding a
-second reader of that state to save a bound is the wrong trade until the
-bookkeeping walk is linear; that work is a separate change.
+THE RESIDUAL, STATED PLAINLY BECAUSE THE WIDENING IS A REAL TRADE, on both sides
+of it. Still uncovered: a lane parked in synchronous CPU work with NO step open —
+inside one C call or one long callback, no tool batch, no compaction, no provider
+request outstanding — which the liveness leg's frame observation cannot see
+either, because that watches only the two threads that beat. Such a lane is still
+cut with its parent, and closing that means reading a lane's frames, which is a
+different change from this one.
+
+AND THE MIRROR RESIDUAL, WHICH THIS WIDENING EXPOSES RATHER THAN CLOSES, named
+because it is the shape closest to the incident this leg was written for. A step
+that never CLOSES — a lane wedged inside an in-process tool whose results never
+land, a compaction that hangs — holds its lane's answer "in flight" for as long as
+it lives, which is the very property ``lane._is_streaming`` is refused for below,
+reached through the narrow question instead. For that shape BOTH LEGS NOW ABSTAIN,
+and the consequence is worth spelling out: the liveness leg watches the two planes'
+stamps and frames and never reads CPU, so a parent that keeps looping while one
+lane holds an open step is ended by nothing in this module. The run stays resident,
+with no ``no progress:`` line to find. The founding incident (four running lanes
+that had produced nothing for seven minutes) is this shape's neighbour: had those
+lanes been parked MID-BATCH rather than idle, this leg would now spare the run. A
+reader who finds a runtime alive past its bound with a lane holding a step should
+read it as "possibly stalled in a lane" and stop it by hand — ``lop stop``, the
+route the held arm already documents — rather than assume the bound is watching;
+closing it means bounding a LANE's own step, which is a different change from this
+one. The direction is still the right one (spare a process that is working past
+any bound rather than cut a dead one late), and it is why the lane question is
+asked narrowly, about a step being OPEN, and never as ``lane._is_streaming``: that
+is true for a lane's whole turn, so one lane parked in a provider call that never
+returns would keep its parent's spin unobservable forever, with not even a step to
+point at.
+
+AND IN THE SPARED SHAPE THE BOUND DOES NOT FIRE AT ALL — IT DEFERS. That is a
+THIRD outcome beside the two the exit leg distinguishes, and the vocabulary is
+worth keeping straight because a dump carries evidence of only two of them.
+**Deferred**: the probe answers "in flight" at every sample, so :func:`_sample`
+restarts the progress clock each time and no window ever closes — the file carries
+the ARM-time header and neither the ``Timeout (`` fired marker nor a
+``no progress:`` line, however many bounds the process outlives. That is what a
+lane holding an open step produces, and it is an ABSTENTION rather than a fire
+that was held. **Fired and held**: reached only once the probe STOPS answering in
+flight while the exit leg still holds work (a job in flight, a live subagent); the
+fire writes the fired marker, the progress line and :data:`HELD_MARKER`, re-arms
+for the next episode, and leaves the process running. **Fatal**: a fire on an idle
+runtime, where ``faulthandler`` writes the dump and calls ``_exit(1)``. A reader
+looking at a header-only dump on a process that outlived several bounds is looking
+at the first of the three, not at a fire that was held.
+
+AND NO PART OF THE FIX ABOVE DEPENDS ON THE MECHANISM BEHIND THOSE FIRES BEING
+SETTLED: the abstention rests on an OBSERVED moving frame, and now on an OBSERVED
+open step, not on a theory of why the stamp was late.
 
 THE TICK ITSELF CAN DIE, AND UNTIL THIS ITS DEATH WAS INVISIBLE
 --------------------------------------------------------------
@@ -350,9 +520,12 @@ rungs cannot be reached from the state being detected: ``_drain_for_signal``,
 is blocked, and the ``SIGTERM`` handler that reaches them is a loop handler that
 needs bytecodes the stuck thread never executes. That is the same fact that
 makes ``lop stop`` refuse a silent-socket runtime without ``--force``. So the
-timer is armed with ``exit=True``: faulthandler writes the dump and calls
-``_exit(1)`` from its own C thread. Write-then-act is therefore structural
-rather than something this module has to sequence.
+graceful rungs cannot be reached at all from that state, and the timer's exit is
+the blunt one: on an IDLE runtime the arm carries ``exit=True`` and faulthandler
+writes the dump and calls ``_exit(1)`` from its own C thread, while a runtime
+HOLDING WORK is dumped and left running (the two arms are stated above).
+Write-then-act is therefore structural rather than something this module has to
+sequence.
 
 WHAT IS LOST: the in-flight turn's uncommitted step — the same loss a SIGKILL
 inflicts, because a turn commits its transcript at each step and the step in
@@ -458,6 +631,19 @@ logger = logging.getLogger(__name__)
 #: :data:`DEFAULT_STALL_S`; ``0``/``off`` disables the watchdog outright.
 ENV_SECONDS = "LOP_RUNTIME_STALL_SECONDS"
 
+#: The BOOT bound's own knob, parallel to :data:`ENV_SECONDS` and resolved by the
+#: same rules (same spellings, same floor, same ceiling). Unset means
+#: :data:`DEFAULT_BOOT_STALL_S`; ``0``/``off`` means "no boot phase" — arm
+#: straight at the steady bound — rather than "do not arm". The two knobs read
+#: their spellings identically and mean different things by them, which is worth
+#: the sentence: only the STEADY knob can disable the watchdog, because it is the
+#: one that governs the life a runtime spends after it has engaged.
+#:
+#: Deliberately NOT a registry key (``settings_io``): the bound has always been
+#: env-only, and registering one drags in a ``Setting``, a ``Scope`` and the
+#: every-default-matches-its-consumer gate for a knob no operator asked to see.
+ENV_BOOT_SECONDS = "LOP_RUNTIME_BOOT_STALL_SECONDS"
+
 #: How many doublings a survived fire's interval may take, and the ceiling it stops
 #: at (agent review round 1, MINOR-5). Two figures rather than one so the growth is
 #: written down where a reader asks "how fast does this grow": 4 steps of a 300 s
@@ -489,6 +675,70 @@ HELD_FIRE_BACKOFF_MAX_S = 3600.0
 #: CEILING on one uninterrupted stall, not a limit on how long a session may
 #: live or how long a turn may take: a turn that keeps yielding keeps beating.
 DEFAULT_STALL_S = 300.0
+
+#: Seconds of NO PROGRESS allowed BEFORE THE RUNTIME HAS ENGAGED, and the bound the
+#: single :func:`arm` call arms with.
+#:
+#: A SEPARATE NUMBER FROM :data:`DEFAULT_STALL_S` BECAUSE THE WINDOW IT COVERS HAS
+#: NO CLOCK OF ITS OWN. ``arm`` runs from the ``__main__`` guard, before ``main()``,
+#: and it seeds both planes to that instant — but NOTHING IN THE BOOT PATH CAN MOVE
+#: A STAMP: the WORKLOAD beat's only driver starts after publication and sleeps a
+#: heartbeat before its first stamp, and the SERVING beat starts with the serving
+#: thread. So from the arm to the first post-publication beat, every second a
+#: legitimate boot spends — session construction, lease arbitration, MCP bring-up,
+#: the inbox drain, the socket bind, publication — is spent against a clock no boot
+#: code can re-arm, and the earliest deadline is ``arm + bound``.
+#:
+#: MEASURED over 68 retained dumps on the build that carries the observation header:
+#: 17 fires, and 10 of them carried the full ``Timeout (0:05:00)`` value — i.e. NO
+#: beat ever re-armed the timer, the never-engaged class and the plurality of that
+#: build's fires. (THOSE 10 ARE AN UPPER BOUND ON THAT CLASS, not an exact count: a
+#: failed re-arm is indistinguishable from a never-engaged runtime by the armed value
+#: alone -- see :func:`engage` -- which is why the note below and
+#: :data:`HOW_TO_READ_THE_FIRED_VALUE` both qualify the reading.)
+#: (The other 7 show the planes' boot latencies differ: the
+#: re-arm line names WORKLOAD "has reported nothing since the ARM" while SERVING
+#: "reported 0 s ago" — the workload plane is the long pole, which is why
+#: :func:`engage` stamps BOTH.)
+#:
+#: 900 s is loose ON PURPOSE, and it is not the same kind of number as the steady
+#: bound: that one is a ceiling on one silent synchronous step in a runtime that is
+#: running, and this one is room for a boot whose latency is unbounded and
+#: legitimate (there is no boot-side false-positive class to size against, only the
+#: unbounded-tail risk of cutting a slow-but-working boot). The steady bound takes
+#: over the moment the runtime engages, so the whole of this number is spent on boot.
+#:
+#: IT BUYS EVIDENCE, NOT A CUT, and the distinction is the one thing the entry point's
+#: side of the split is easiest to misread (agent review round 1, R1-1). The exit leg
+#: answers through ``process._busy_probe``, which reports WORK IN FLIGHT for the whole
+#: pre-publication window — ``True`` while ``_live_handle`` is None, because a runtime
+#: still constructing itself is not idle in any sense this bound may act on — so
+#: ``arm`` seeds ``_Armed.held`` True here and every fire in this stretch is
+#: NON-FATAL. A boot that hangs is therefore DUMPED at this bound and HELD, and one
+#: that never reaches publication keeps answering "in flight" for the rest of its
+#: life, so nothing in this module ends it. THE WAY OUT IS MEASURED RATHER THAN
+#: ASSUMED, because the first version of this paragraph named one that does not
+#: reach this class (agent review round 2, Q-3):
+#:
+#: * the boot's OWN FAILURE PATH is the exit that is automatic — the construction
+#:   error that ends the runtime child (measured: rc 2 and the cause on stderr, 1.4 s);
+#: * ``lop stop`` is NOT one. It resolves its target through session RECORDS
+#:   (``mobile.peer_send.resolve_peer_target``) and a boot that never published has
+#:   none, so ``lop stop --pid <pid>`` answers ``no session found with pid <pid>``
+#:   and the process carries on (measured, as is the ``--session`` form);
+#: * an operator ends it by SIGNALLING the pid this dump is named for — the header
+#:   above carries it, and ``kill -TERM <pid>`` ends the process (measured: the
+#:   signal is not gated on any record).
+#:
+#: What this bound contributes is the ATTRIBUTION: the fired value is this number
+#: and the deadline sibling is absent — together the never-engaged class, WHEN THE RE-ARM
+#: SUCCEEDED. An engaged runtime whose timer replacement FAILED has no sibling either
+#: (nothing re-armed it, so no beat ever wrote one) and can fire at this value, which is
+#: why :func:`engage` records that failure in the dump rather than letting the value and
+#: the missing sibling be read as never-engaged. The exit
+#: leg goes fatal only once the runtime has published and its work has cleared
+#: (#1439's rule, applied to the boot phase).
+DEFAULT_BOOT_STALL_S = 900.0
 
 #: The largest bound ``faulthandler`` can hold. Its timeout becomes a signed
 #: 64-bit count of nanoseconds, so a larger value raises ``OverflowError:
@@ -547,9 +797,13 @@ OBSERVATION_NOT_VERDICT = (
     "NOT a statement that the runtime stopped -- the timer can expire on a process that is "
     "mid-turn and working -- so THIS PROCESS MAY STILL BE ALIVE ON THIS SAME PID, and may carry "
     "on serving, AFTER this dump is written. What would turn the observation into a death is the "
-    "exit faulthandler takes once it has dumped (this timer is armed with exit=True), and THAT "
-    "EXIT MAY NEVER COME. So a fire is not by itself a body count, and THE PID, NOT THIS FILE, "
-    "IS WHAT SAYS WHETHER THE RUNTIME IS STILL THERE."
+    "exit faulthandler takes once it has dumped, and WHETHER THIS TIMER CARRIES THAT EXIT IS "
+    "ANSWERED AT EVERY RE-ARM RATHER THAN FIXED HERE: a runtime HOLDING WORK (a turn under the "
+    "lock, a live subagent lane, a background job, a gate parked on the user) is dumped and LEFT "
+    "RUNNING, while an IDLE one is dumped and exited. This header is written at ARM time, BEFORE "
+    "any of those re-arms, so it cannot name the answer that will hold at the fire -- and so the "
+    "file cannot say whether the runtime is gone either. A fire is not by itself a body count: "
+    "THE PID, NOT THIS FILE, IS WHAT SAYS WHETHER THE RUNTIME IS STILL THERE."
 )
 
 #: How to read the two numbers a fire leaves behind: the value on ``faulthandler``'s own
@@ -561,14 +815,23 @@ OBSERVATION_NOT_VERDICT = (
 #: ``0:05:00``-style value, which is :func:`arm`'s own bound and means NO beat ever
 #: re-armed the timer (the never-engaged class -- a main thread idle from boot), while
 #: 19 read a small value (0.4-17 s), which is a beat's recomputed remainder and means a
-#: plane's stamp, not the bound, was what the timer measured. Nothing in the file said
-#: which of the two a number was, so "which plane went quiet, and when" stayed
+#: plane's stamp, not the bound, was what the timer measured. THE FIRST READING IS
+#: CONDITIONAL ON THE RE-ARM, for the same reason the boot note is (design review round
+#: 1, D1): :func:`engage` moves the bound in memory BEFORE it replaces the timer, so an
+#: engaged runtime whose replacement FAILED keeps the original C timer and can fire at
+#: the armed value -- a member of this 6, not of the never-engaged class, and the class
+#: the paragraph below states as an exception rather than hiding. Nothing in the file
+#: said which of the two a number was, so "which plane went quiet, and when" stayed
 #: unreadable on a runtime whose own record is the only witness left.
 HOW_TO_READ_THE_FIRED_VALUE = (
     "HOW TO READ WHAT FIRES: the value on the fired line above the stacks is the seconds the "
     "timer was LAST ARMED FOR, and which arming that was is the whole question. It is the bound "
     "above, with no beat re-arming it at all, when no loop ever reported -- a runtime that never "
-    "engaged, its main thread idle from boot. It is a SMALLER value when a beat recomputed it "
+    "engaged, its main thread idle from boot, PROVIDED THE RE-ARM SUCCEEDED. An ENGAGE whose "
+    "timer replacement FAILED is the exception: the bound moves in memory while the original "
+    "timer stays in force, so a fire can carry this value on a runtime that DID engage -- the "
+    "dump then carries a 're-arm failed' line, and that line's absence is what makes the "
+    "never-engaged reading safe. It is a SMALLER value when a beat recomputed it "
     "from the oldest plane's stamp, which is how a plane that went quiet shows up as a number "
     f"below the bound. {DUMP_PREFIX}-<pid>{DEADLINE_SUFFIX} holds the deadline the timer is "
     "currently armed for and the leg that pinned it, rewritten by every beat THAT RE-ARMED, and "
@@ -890,6 +1153,8 @@ class _Armed:
         "deadline_path",
         "handle",
         "seconds",
+        "boot_seconds",
+        "steady_seconds",
         "pid",
         "last_beat",
         "seeded_at",
@@ -921,13 +1186,30 @@ class _Armed:
         pid: int,
         probe: "ProgressProbe | None" = None,
         busy: "BusyProbe | None" = None,
+        *,
+        steady_seconds: float | None = None,
     ) -> None:
         self.path = path
         #: Where the CURRENT deadline is recorded for a reader who arrives after the
         #: process is gone (:func:`deadline_path`), rewritten by every beat.
         self.deadline_path = path.with_suffix(DEADLINE_SUFFIX)
         self.handle = handle
+        #: THE LIVE BOUND, and the only one the timer arithmetic reads
+        #: (:meth:`deadline`, the quiet threshold, the progress window). It starts at
+        #: the bound this process was ARMED for -- the BOOT bound, because nothing in
+        #: the boot path can stamp a plane -- and :func:`engage` moves it DOWN to
+        #: :attr:`steady_seconds` once and once only.
         self.seconds = seconds
+        #: What ``seconds`` was at arm time: the bound the header named and the timer
+        #: was armed with, kept because ``seconds`` no longer holds it after an
+        #: engage, and both a reader of the dump and the failure line in :func:`engage`
+        #: are about THAT number rather than the live one.
+        self.boot_seconds = seconds
+        #: The bound :func:`engage` moves to, resolved from the steady knob. Defaults
+        #: to the armed bound, so an ``_Armed`` built with one number (every cell that
+        #: constructs one directly, and every arm that resolved a single value) has no
+        #: boot phase to end and :func:`engage` is a documented no-op on it.
+        self.steady_seconds = seconds if steady_seconds is None else steady_seconds
         #: How many fires this process has SURVIVED. Only the held-fire backoff reads
         #: it (see ``_rearm``): an all-thread dump is ~14 KB, so a runtime wedged with
         #: work in flight would otherwise write one every bound for the rest of its
@@ -1230,41 +1512,46 @@ _ARMED: _Armed | None = None
 _LOCK = threading.Lock()
 
 
-def bound_seconds() -> float | None:
-    """The configured bound, or ``None`` when the watchdog is switched off.
+def _bound_from_raw(env_name: str, raw: str | None, default: float) -> float | None:
+    """One bound from one RAW environment value, with the shared floor and ceiling.
 
-    Unreadable, non-numeric and out-of-range values fall back to
-    :data:`DEFAULT_STALL_S` rather than raising, and a value below
-    :func:`min_bound_seconds` is raised TO that floor (see the constant): this runs in the runtime's
-    entry point, where an exception would take the session down over a
-    diagnostic, and the honest failure of a typo is the default bound rather
-    than no bound at all. An explicit ``0``/``off`` is the one spelling that
-    means "do not arm", which an operator (or a test that deliberately blocks a
-    loop) needs.
+    BOTH KNOBS PARSE HERE rather than in two near-copies, because the rules are the
+    same rules: the same spellings mean "off", the same typos fall back to the knob's
+    own default, and both clamp to :func:`min_bound_seconds` and the C timer's range.
+    Two copies would be two chances for the boot knob to accept something the steady
+    one refuses, and a bound that is only wrong during boot is the one nobody measures.
+
+    The ``os.environ.get`` itself stays at each caller, one line per knob, and that is
+    load-bearing: the ambient-environment audit
+    (``tests/unit/test_ambient_env_isolation.py``) resolves a read's key through
+    module-local constants, so a read through a PARAMETER would leave both knobs
+    invisible to it and quietly unaccounted for.
+
+    Unreadable, non-numeric and out-of-range values fall back to ``default`` rather
+    than raising: this runs in the runtime's entry point, where an exception would
+    take the session down over a diagnostic, and the honest failure of a typo is the
+    default bound rather than no bound at all.
     """
-    raw = os.environ.get(ENV_SECONDS)
     if raw is None:
-        return DEFAULT_STALL_S
+        return default
     text = raw.strip().lower()
     if text in ("", "off", "no", "false"):
         return None
     try:
         seconds = float(text)
     except ValueError:
-        logger.warning("%s=%r is not a number; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S)
-        return DEFAULT_STALL_S
+        logger.warning("%s=%r is not a number; using %.0fs", env_name, raw, default)
+        return default
     if seconds == 0:
         return None
     if seconds < 0:
         # A NEGATIVE bound is a typo rather than a switch: ``0`` is the written
         # spelling for "do not arm", and nothing else can be meant by -1.
-        logger.warning("%s=%r is negative; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S)
-        return DEFAULT_STALL_S
+        logger.warning("%s=%r is negative; using %.0fs", env_name, raw, default)
+        return default
     if seconds >= MAX_BOUND_S:
-        logger.warning(
-            "%s=%r is beyond the C timer's range; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S
-        )
-        return DEFAULT_STALL_S
+        logger.warning("%s=%r is beyond the C timer's range; using %.0fs", env_name, raw, default)
+        return default
     floor = min_bound_seconds()
     if seconds < floor:
         # THE FLOOR, and clamping rather than honouring it: a bound under three
@@ -1275,7 +1562,7 @@ def bound_seconds() -> float | None:
         # set 4 s and got 45 s needs to know which one they are running.
         logger.warning(
             "%s=%.3fs is below the %.0fs floor (%d heartbeat intervals); using %.0fs",
-            ENV_SECONDS,
+            env_name,
             seconds,
             floor,
             MIN_BOUND_FLOOR_TICKS,
@@ -1283,6 +1570,35 @@ def bound_seconds() -> float | None:
         )
         return floor
     return seconds
+
+
+def bound_seconds() -> float | None:
+    """The configured STEADY bound, or ``None`` when the watchdog is switched off.
+
+    This is the bound a runtime is judged against once it has ENGAGED, which
+    :func:`engage` moves the timer to; the stretch before that is covered by
+    :func:`boot_bound_seconds`. An explicit ``0``/``off``/``no``/``false`` (or an
+    empty value) is the one spelling that means "do not arm", which an operator (or
+    a test that deliberately blocks a loop) needs.
+    """
+    return _bound_from_raw(ENV_SECONDS, os.environ.get(ENV_SECONDS), DEFAULT_STALL_S)
+
+
+def boot_bound_seconds() -> float | None:
+    """The configured BOOT bound (:data:`DEFAULT_BOOT_STALL_S`), or ``None`` for
+    "no boot phase".
+
+    Read by :func:`arm` and only there: it is the deadline covering the stretch in
+    which nothing can stamp a plane, and :func:`engage` is what ends it.
+
+    ``None`` here means the boot phase is DISABLED, not that the watchdog is: the
+    entry point arms straight at the steady bound, exactly the behaviour that existed
+    before the two bounds were split. The distinction runs opposite to the steady
+    knob's, where ``0``/``off`` means "do not arm at all" — worth the paragraph
+    because the two knobs accept identical spellings and mean different things by
+    them.
+    """
+    return _bound_from_raw(ENV_BOOT_SECONDS, os.environ.get(ENV_BOOT_SECONDS), DEFAULT_BOOT_STALL_S)
 
 
 def dump_path(pid: int | None = None, directory: Path | None = None) -> Path:
@@ -1342,7 +1658,10 @@ def deadline_path(pid: int | None = None, directory: Path | None = None) -> Path
     ITS ABSENCE IS A SIGNAL, not a gap: nothing writes it at :func:`arm`, so a missing
     sibling means no beat ever re-armed this timer -- the never-engaged class, whose
     fire carries the ARMING value rather than a recomputed remainder
-    (:data:`HOW_TO_READ_THE_FIRED_VALUE`).
+    (:data:`HOW_TO_READ_THE_FIRED_VALUE`). THE ONE EXCEPTION IS A FAILED RE-ARM: a
+    replacement that raises leaves the previous timer in force and writes
+    :data:`REARM_FAILED_MARKER` instead of a sibling, so absence-plus-an-armed-value is
+    the never-engaged class only when that line is absent (see :func:`engage`).
 
     ARM CLEARS IT, AND THAT IS NOT A CONTRADICTION OF THE PARAGRAPH ABOVE. A PID IS
     RECYCLED, so a sibling in this directory may be the previous holder's, and it would
@@ -1451,6 +1770,7 @@ def _bound_class() -> str:
 def arm(
     *,
     seconds: float | None = None,
+    boot_seconds: float | None = None,
     directory: Path | None = None,
     pid: int | None = None,
     probe: "ProgressProbe | None" = None,
@@ -1463,6 +1783,18 @@ def arm(
     watchdog timers. Idempotent in the sense that re-arming replaces the bound,
     but it is written to be called once: a second call leaks the first handle.
 
+    THE BOUND IT ARMS IS THE BOOT BOUND (:data:`DEFAULT_BOOT_STALL_S`), not the
+    steady one, and that is the whole of the entry point's side of the split: the
+    entry point runs before anything can stamp a plane, so the deadline it sets is
+    measured from here and only :func:`engage` can move it — and ``engage`` is called
+    FROM the boot path, at the publication boundary inside ``process.amain``, so what
+    cannot reach it is nothing before that boundary rather than the boot path as a
+    whole. ``boot_seconds`` overrides the boot bound for a caller that has a
+    reason (the suite's children pass one to exercise the mechanism without waiting
+    out 900 s); an explicit ``seconds=`` is a statement about THIS process's whole
+    arming and therefore stands as both bounds unless ``boot_seconds=`` says
+    otherwise.
+
     Never raises. A diagnostic that cannot be armed must leave the runtime
     otherwise untouched: an unwritable log directory is a reading of "no dump
     possible", not a reason to fail a session's boot.
@@ -1471,10 +1803,80 @@ def arm(
     with _LOCK:
         if _ARMED is not None:
             return True
-        bound = bound_seconds() if seconds is None else seconds
-        if bound is None:
+        steady = bound_seconds() if seconds is None else seconds
+        if steady is None:
             logger.info("stall watchdog disabled by %s", ENV_SECONDS)
             return False
+        # WHICH BOUND IS ARMED HERE, and why the rule is not simply "the boot knob":
+        # the split exists because an operator's steady bound is measured from
+        # ENGAGEMENT and a boot cannot be. So the boot bound is the boot knob's when
+        # this call resolves its own numbers (the production path — the entry point
+        # passes only ``probe=``), and an explicit ``seconds=`` supplies both when a
+        # caller has stated the bound for the whole arming (every child in the suite
+        # passes one at 1-2 s, far below the floor the environment is held to, and a
+        # boot bound of 900 s there would mean no cell could reach a fire).
+        if boot_seconds is not None:
+            boot = boot_seconds
+        elif seconds is not None:
+            boot = seconds
+        else:
+            boot = boot_bound_seconds()
+        if boot is None:
+            # The boot knob spelled ``off``: no boot phase, so the steady bound from
+            # the first instant. The watchdog is NOT disabled here — only the steady
+            # knob says that (see :func:`boot_bound_seconds`).
+            boot = steady
+        # NEVER TIGHTER THAN THE STEADY BOUND, even for the boot stretch: an operator
+        # who set the steady knob above the boot default asked for MORE silence than
+        # the boot bound allows, and arming shorter than that would cut their runtime
+        # during boot and then judge it more leniently afterwards. ``max`` also makes
+        # :func:`engage` a downward move by construction, which is the property its
+        # cells pin.
+        bound = max(boot, steady)
+        if boot < steady:
+            # THE `max` ABOVE DROPS THE BOOT BOUND HERE, and until agent review round 1
+            # (Q-1) it did so SILENTLY: every other unusable value of either knob is
+            # announced by ``_bound_from_raw`` (non-numeric, negative, beyond the C
+            # timer's range, below the floor), while a boot bound below the steady one
+            # left the operator's only artifact naming a number they never configured.
+            # The arithmetic is intended — the boot stretch is never judged more
+            # tightly than the steady bound, which is also what makes :func:`engage` a
+            # downward move by construction — so this is visibility, not a different
+            # bound, and a boot window longer than the operator asked for is exactly
+            # the kind of thing they need to be told about.
+            logger.warning(
+                "%s=%gs is below the steady bound of %gs; the boot window is %gs (boot is "
+                "never armed tighter than the steady bound)",
+                "boot_seconds" if boot_seconds is not None else ENV_BOOT_SECONDS,
+                boot,
+                steady,
+                steady,
+            )
+        # THE ONE SENTENCE THAT MAKES THE SPLIT READABLE FROM THE ARTIFACT. A fired
+        # value on its own cannot say which of the two bounds produced it, and the two
+        # classes have different causes: a value at the steady bound is a runtime that
+        # ENGAGED and then went silent (the case the steady bound was sized for), while
+        # a value at the boot bound is a runtime that never engaged at all — no session
+        # judged, no beat ever landing — which is the class 10 of the 17 measured
+        # current-build fires belonged to. THAT READING IS CONDITIONAL ON THE RE-ARM, which
+        # is why the note below qualifies it rather than stating it flatly (design review
+        # round 1, D1): :func:`engage` moves the bound in memory BEFORE it replaces the
+        # timer, so a runtime that DID engage but whose replacement failed keeps the
+        # original C timer and can still fire at the boot bound — a member of the 10/17
+        # class the attribution above would misread as never-engaged. Written only when
+        # the two bounds differ: with one bound there is no split to explain, and a header
+        # sentence about a phase that cannot exist is how a header starts lying.
+        boot_note = ""
+        if bound != steady:
+            boot_note = (
+                f"THIS IS THE BOOT BOUND, covering the stretch before the runtime has a "
+                f"session to judge: nothing can stamp a plane in it, so the value above is "
+                f"the whole of what a fire in that stretch measured. The runtime's first "
+                f"engagement moves the bound to {steady:g}s and stamps BOTH planes. "
+                f"When re-arming succeeds, a fired value of {bound:g}s -- this number -- means "
+                f"the runtime never engaged. If engagement could not re-arm the timer, see the "
+                f"re-arm-failed message in this dump; the timer may still fire at the boot bound.\n"
+            )
         target = dump_path(pid, directory)
         inherited = deadline_path(pid, directory)
         try:
@@ -1507,9 +1909,10 @@ def arm(
         # there it reads as a beat of THIS life -- an mtime BEFORE this process's own arm
         # epoch, a leg naming a plane of a dead life, on a fire whose own value says no beat
         # ever re-armed the timer -- and that presence/absence is the ONE thing a reader has
-        # for telling the never-engaged class from a stale plane (see :func:`deadline_path`),
-        # so a stale file must not be able to fake it. Best-effort: a file that cannot be
-        # removed must not stop the bound being armed.
+        # for telling the never-engaged class from a stale plane (given a fire at the armed
+        # value with no 're-arm failed' line; see :func:`engage`), so a stale file must not
+        # be able to fake it. Best-effort: a file that cannot be removed must not stop the
+        # bound being armed.
         try:
             inherited.unlink()
         except OSError:
@@ -1525,6 +1928,7 @@ def arm(
                 f"timer as they run, so what its expiry measures is {bound:g}s WITH NO RE-ARM FROM "
                 f"THEM -- a fact about the TIMER, never a reading of what this process was "
                 f"doing.\n"
+                f"{boot_note}"
                 f"{OBSERVATION_NOT_VERDICT}\n"
                 f"{HOW_TO_READ_THE_FIRED_VALUE}"
                 f"AND IF A FIRE IS THE CLASS THIS DUMP COUNTS AS, this is the only record of it: "
@@ -1544,7 +1948,9 @@ def arm(
                 f"a progress fire, or a runtime with a quiet plane.\n"
             )
             handle.flush()
-            to_arm = _Armed(target, handle, bound, pid or os.getpid(), probe, busy)
+            to_arm = _Armed(
+                target, handle, bound, pid or os.getpid(), probe, busy, steady_seconds=steady
+            )
             _rearm(to_arm, remaining=bound)
         except (OSError, ValueError, OverflowError, RuntimeError):
             logger.warning("stall watchdog could not arm; no dump will be written", exc_info=True)
@@ -1618,10 +2024,11 @@ def _holds_work(busy: "BusyProbe | None") -> bool:
       that has been given no way to report what it is doing (a rig, an in-process
       host, a test of the liveness leg alone), and the bound's documented contract
       for such a caller is unchanged rather than silently withdrawn. The distinction
-      matters because the ONE production arm site (``process._start_runtime``) always
-      supplies the probe: there is no released runtime that can answer and does not,
-      so holding on absence would only ever disarm the bound for the callers that
-      cannot speak — the dead-instrument shape, not a safety win.
+      matters because the ONE production arm site (``stall_watchdog.arm`` in
+      ``process.py``'s ``__main__`` guard, the only place a real runtime child arms
+      at all) always supplies the probe: there is no released runtime that can answer
+      and does not, so holding on absence would only ever disarm the bound for the
+      callers that cannot speak — the dead-instrument shape, not a safety win.
     """
     if busy is None:
         return False
@@ -2043,6 +2450,106 @@ def beat(plane: str) -> None:
         _note_quiet_plane(armed, now)
 
 
+def engage() -> bool:
+    """End the BOOT phase: move the bound to the steady one and stamp BOTH planes.
+
+    THE RESET IS ON ENGAGEMENT, NOT ON ARM, and this function is the whole of the
+    difference. :func:`arm` runs before the runtime has a session, a loop or a
+    socket, so the deadline it sets is measured from the entry point — a clock no
+    boot code can re-arm (:data:`DEFAULT_BOOT_STALL_S`). This call belongs where the
+    runtime HAS something to judge, so from here the deadline must be measured from
+    NOW: it stamps both planes to this instant and moves the bound down to the steady
+    one, which is what makes that bound mean what it was sized for (a ceiling on one
+    silent synchronous step in a runtime that is running) rather than an accident of
+    how long boot happened to take.
+
+    BOTH PLANES, and that is not symmetry: in the measured fires where a beat HAD
+    re-armed the timer, the re-arm line names WORKLOAD as "has reported nothing since
+    the ARM" while SERVING "reported 0 s ago". The workload plane is the long pole of
+    boot — its tick starts last, and it sleeps a heartbeat before its first stamp —
+    so a reset that stamped only the plane that happens to be beating would leave the
+    workload plane's seed at arm time and re-arm the very deadline this exists to move.
+
+    IT NEVER WIDENS THE BOUND. The move is downward by construction (:func:`arm`
+    seeds the armed bound at the LARGER of the two), and when the armed bound is
+    already at or below the steady one there is nothing to move: that is the state of
+    an explicit ``arm(seconds=...)``, of a boot knob spelled ``off``, and of a steady
+    knob set at or above the boot bound. In all three this is a documented no-op
+    rather than an extension, and a cell
+    (``test_engage_never_widens_the_steady_bound``) goes red on any edit that lets it
+    raise the bound a silent runtime is judged against.
+
+    Idempotent, and a no-op when nothing is armed — the same contract as
+    :func:`beat`, and for the same reason: an in-process host (a TUI, a test) calls
+    this on a boot path that never armed the process timer, and it must cost it
+    nothing.
+
+    IT RE-ARMS THROUGH :func:`_rearm`, NOT WITH A TIMER CALL OF ITS OWN, and that is
+    a requirement rather than a refactor: ``_rearm`` is the one place that decides
+    the EXIT LEG (``exit_leg=not armed.held``, so a runtime holding a turn, a
+    subagent or a job is dumped but never ended) and the fired-held policy. An
+    ``engage`` that called ``dump_traceback_later(..., exit=True)`` directly would
+    silently OVERRIDE both for the one arming that starts the steady phase — the
+    arming whose bound the rest of the design rests on. The remaining time it is
+    handed is derived from the stamps this call just moved, so the timer holds
+    exactly the steady bound measured from NOW.
+
+    Returns whether THIS call moved the bound, which is what lets a caller — and a
+    cell — tell the boot-to-steady transition from a call that had nothing to do. It
+    is a diagnostic and never a control: every failure below leaves the runtime with a
+    live bound and the caller with nothing to handle.
+    """
+    with _LOCK:
+        armed = _ARMED
+        if armed is None:
+            return False
+        if armed.seconds <= armed.steady_seconds:
+            # Nothing to move, which is also the SECOND call's path: the bounds are only
+            # equal before an engage when there is no boot phase to end, and equal after
+            # one because this is what made them equal.
+            return False
+        now = time.monotonic()
+        armed.seconds = armed.steady_seconds
+        for plane in PLANES:
+            armed.last_beat[plane] = now
+        try:
+            # ONE CALL, NO CANCEL FIRST, for the reason :func:`beat` gives: the replace is
+            # atomic, and a cancel-then-fail would leave the process with no bound while
+            # the steady bound is what everything below assumes is in force. Both planes
+            # have just been stamped to ``now``, so the remaining time ``_rearm`` derives
+            # is the steady bound exactly, and the exit leg comes from the in-flight
+            # answer as it does on every other re-arm.
+            _rearm(armed)
+        except (OSError, ValueError, RuntimeError):
+            logger.warning("stall watchdog could not re-arm its timer on engage", exc_info=True)
+            # AND THE FAILURE IS NAMED, because the attribution a reader gets otherwise is
+            # the WRONG CLASS: the sibling is absent (no beat has ever written it), which
+            # is the signature of the never-engaged runtime, while the value on a fired
+            # line would be the boot bound. The bound did move in memory, so the dump has
+            # to carry both facts. THIS LINE IS ALSO WHAT KEEPS THE HEADER'S NOTES TRUE:
+            # the qualified never-engaged reading is safe exactly when this line is absent
+            # (see :data:`HOW_TO_READ_THE_FIRED_VALUE`), so a reader who finds it in the
+            # dump must not make that reading.
+            if not _write_dump_line(
+                armed,
+                f"{REARM_FAILED_MARKER}the engage could not re-arm the timer, so a fired line "
+                f"below carries the BOOT bound ({armed.boot_seconds:g}s) rather than the "
+                f"steady one ({armed.steady_seconds:g}s) this runtime moved to\n",
+            ):
+                logger.warning(
+                    "stall watchdog could not record a failed engage for pid %s", armed.pid
+                )
+        else:
+            # AFTER a successful re-arm, and only then, exactly as :func:`beat` does: the
+            # sibling must carry the deadline the timer really holds. Its EXISTENCE is
+            # also the reader's half of the split — a runtime that re-armed has one, and
+            # the never-engaged class has none (see :func:`deadline_path`) — and it is the
+            # successful-re-arm half of the qualification the header notes carry, which is
+            # why the failure above writes a line rather than leaving absence to speak.
+            _record_deadline(armed)
+        return True
+
+
 def note_tick_death(plane: str, reason: str) -> bool:
     """Record durably that ``plane``'s TICKER died, in the armed dump file.
 
@@ -2280,6 +2787,9 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
     re-checked after the unlocked section rather than trusted from before it: that
     section can take arbitrarily long, and ``disarm`` can run inside it.
     """
+    # THE FIRST CADENCE, and only the first: it is re-derived from the LIVE bound on
+    # every wake below, because ``armed.seconds`` is no longer a value fixed at the arm
+    # (agent review round 1, R1-3 / QA Q-2).
     interval = _sample_interval(armed.seconds)
     while not stop.wait(interval):
         # THE WHOLE BODY IS GUARDED, and it is the same rule ``server._heartbeat_loop``
@@ -2308,6 +2818,24 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
             with _LOCK:
                 if _ARMED is not armed:
                     return
+                # THE CADENCE FOLLOWS THE LIVE BOUND, re-derived here on every wake
+                # rather than captured once before the loop. :func:`engage` moves
+                # ``armed.seconds`` DOWN (900 -> 300 at the shipped defaults) while the
+                # window :func:`_sample` accumulates reads that same attribute, so a
+                # cadence taken at the arm would stay the BOOT bound's for the rest of
+                # the process's life — a sampler looking LESS often than the window it
+                # measures implies. Measured before this line existed: probe-call gaps
+                # of 7.504 s both before and after an engagement moved a 90 s bound to
+                # 45 s, where ``_sample_interval(45)`` is 3.75 s. The direction was
+                # safe (``_sample_interval`` is monotone in the bound, so the frozen
+                # value can only be too coarse) and capped at ``HEARTBEAT_INTERVAL_S``,
+                # which is why this was a MINOR and not a mechanism defect — but at a
+                # steady bound under 180 s it is the difference between the window's
+                # ``/PROGRESS_SAMPLES_PER_WINDOW`` resolution and the liveness beat's
+                # ceiling, i.e. a leg deciding on fewer looks than it intends.
+                # Re-derived BEFORE the fire bookkeeping, so the ``continue`` on a
+                # recorded held fire waits on the fresh value too.
+                interval = _sample_interval(armed.seconds)
                 # BEFORE the sample, and in this order: a fire that landed since the
                 # last wake is recorded and re-armed on the same pass, only then is the
                 # exit leg applied — so a flip made while the timer was pending is in
@@ -2509,7 +3037,8 @@ def disarm() -> None:
             try:
                 # Beside the dump (see the docstring): a surviving sibling would advertise
                 # a deadline for a process that disarmed, and the sibling's absence is
-                # half of how a never-engaged fire is told apart from a stale-plane one.
+                # half of how a never-engaged fire is told apart from a stale-plane one
+                # (the other half being the absence of a 're-arm failed' line).
                 # WHEN A HELD FIRE IS KEPT the pair is kept with it, deliberately: the
                 # sibling names the deadline the fire was waiting for, so a reader
                 # comparing "was due at" against "fired at" reads one episode rather
@@ -2546,11 +3075,28 @@ def announce() -> None:
         armed = _ARMED
         if armed is None:
             return
+        if armed.seconds == armed.steady_seconds:
+            logger.info(
+                "stall watchdog armed: %.0fs of no progress dumps every thread to %s and ends "
+                "the runtime only when nothing is in flight (a turn, a subagent or a job holds "
+                "the exit; the dump is written either way)",
+                armed.seconds,
+                armed.path,
+            )
+            return
+        # BOTH BOUNDS, when they differ, and for the same reason the dump header spells
+        # the split: this line is the artifact an operator reads FIRST after a freeze,
+        # and one claiming the boot bound for the whole life would be a log that
+        # misstates the bound the runtime is actually judged against from publication on.
+        # The exit-leg sentence carries over unchanged: the in-flight hold applies to a
+        # fire under EITHER bound.
         logger.info(
-            "stall watchdog armed: %.0fs of no progress dumps every thread to %s and ends "
-            "the runtime only when nothing is in flight (a turn, a subagent or a job holds "
-            "the exit; the dump is written either way)",
+            "stall watchdog armed: %.0fs of no progress during BOOT (before the runtime has a "
+            "session to judge), then %.0fs once it engages -- either one dumps every thread to "
+            "%s and ends the runtime only when nothing is in flight (a turn, a subagent or a "
+            "job holds the exit; the dump is written either way)",
             armed.seconds,
+            armed.steady_seconds,
             armed.path,
         )
 

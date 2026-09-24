@@ -334,7 +334,6 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
     from argparse import Namespace
 
     from local_operator.agents import AgentRegistry
-    from local_operator.credentials import CredentialManager
     from local_operator.exec_mode import ExecArgs, job_status
     from local_operator.session.attached import AttachedSession
     from local_operator.session_factory import create_session
@@ -355,7 +354,6 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
         return await create_session(
             Namespace(**vars(ExecArgs(resume=session_id))),
             ConfigManager(root),
-            CredentialManager(root),
             AgentRegistry(root),
             has_ui=True,
             cwd=str(tmp_path),
@@ -425,7 +423,6 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
     from argparse import Namespace
 
     from local_operator.agents import AgentRegistry
-    from local_operator.credentials import CredentialManager
     from local_operator.exec_mode import ExecArgs, job_status
     from local_operator.session_factory import create_session
     from local_operator.tui.app import OperatorApp
@@ -451,7 +448,6 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
         return await create_session(
             Namespace(**vars(ExecArgs(resume=state["session_id"]))),
             ConfigManager(root),
-            CredentialManager(root),
             AgentRegistry(root),
             has_ui=True,
             cwd=str(tmp_path),
@@ -844,7 +840,6 @@ def test_a_supervised_run_is_approved_through_the_handoff(exec_server, tmp_path)
     from argparse import Namespace
 
     from local_operator.agents import AgentRegistry
-    from local_operator.credentials import CredentialManager
     from local_operator.exec_mode import ExecArgs
     from local_operator.harness.approval import (
         OPERATOR_CAP_BYTES,
@@ -942,7 +937,6 @@ def test_a_supervised_run_is_approved_through_the_handoff(exec_server, tmp_path)
             return await create_session(
                 Namespace(**vars(ExecArgs(resume=session_id))),
                 ConfigManager(root),
-                CredentialManager(root),
                 AgentRegistry(root),
                 has_ui=True,
                 cwd=str(tmp_path),

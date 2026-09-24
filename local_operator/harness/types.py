@@ -1179,6 +1179,24 @@ class ToolContext(BaseModel):
     # was never shown the question. ``None`` means the tool is not advertised
     # at all (createIf), for the same reason ``wake_scheduler`` is.
     ask_user: AskUserFn | None = None
+    #: Live read of "an interface is attached to the SESSION this tool is running
+    #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
+    #: goal-state probe, so it is re-read per call rather than snapshotted per
+    #: turn. The read SITE matters and is the contract's other half: the browser
+    #: flow calls it where the text is rendered, so an ``await_access`` that waited
+    #: reports the attachment at the end of the wait, not at the start (round 1,
+    #: MINOR 3 — it used to be read once before the wait while three comments
+    #: claimed otherwise). ``None`` means no session stands behind this context (a
+    #: bare tool test), which reads as attached: the pre-existing default, and the
+    #: direction every uncertain answer must fall (a wrong "attached" costs a
+    #: parked gate, a wrong "unattached" costs a question the operator was ready
+    #: to answer).
+    #:
+    #: NOT a synonym for :attr:`has_ui`, which says a host wired the tool surface
+    #: at all, and NOT evidence that anybody is looking right now: an attached
+    #: pane holds a question a person answers when they return. See
+    #: ``docs/design/attached-interface-signal.md``.
+    attached_probe: Callable[[], bool] | None = None
     # Optional host hook that makes a mid-session credential change VISIBLE to
     # the model (``Session.journal_credential_change``). The ``ask`` tool
     # stores secret answers through ``context.variables`` directly, so the
@@ -1839,6 +1857,14 @@ class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
     status: str  # completed | failed | cancelled
     result_text: str | None = None
     error_text: str | None = None
+    #: Why the child was CUT OFF, when it was: the machine token
+    #: (``incidents.CUT_OFF_CAUSES``) and its rendered operator sentence. Both
+    #: ``""`` for a clean completion or a deliberate stop, which is also what an
+    #: OLD child runtime produces — the same backwards-compatibility story
+    #: ``AgentEndEvent.cut_off`` states at length, and the reason an additive
+    #: field here needs no ``PROTOCOL_VERSION`` bump.
+    cut_off: str = ""
+    cut_off_cause: str = ""
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
@@ -2152,7 +2178,19 @@ class LoopConfig(BaseModel):
     deadline: float | None = None
 
     # Guardrails.
+    # Steering + asides: parent/peer-driven re-entries at the outer-loop yield
+    # boundary. Each is a NEW instruction rather than a retry, so the budget is
+    # generous, but it stays BOUNDED — a producer that speaks faster than the
+    # child consumes is the runaway this exists for.
     max_paused_turn_continuations: int = 8
+    # Follow-ups (the todo reminder): self-limiting already, because the
+    # producer latches on a byte-identical list (``Session._todo_continuation``
+    # returns ``[]`` while the list does not move). This budget is a backstop
+    # against a model that keeps the latch open with trivial edits, not the main
+    # bound, so it is deliberately the larger one — and it is SEPARATE from the
+    # steering/aside budget so a chatty parent cannot spend a child's todo
+    # allowance (the defect the split exists to fix).
+    max_follow_up_continuations: int = 64
     # Bound live tool work even when the model emits a very wide batch.
     max_parallel_tools: int = Field(default=DEFAULT_MAX_PARALLEL_TOOLS, ge=1)
 

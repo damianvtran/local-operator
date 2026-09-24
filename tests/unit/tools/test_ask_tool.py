@@ -14,6 +14,7 @@ is what the prose version was reaching for with its third option.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -326,7 +327,23 @@ async def test_a_question_the_user_skipped_is_reported_as_not_answered() -> None
 async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
     """Unreachable through the advertised tool, and it must not be reported as
     "the user declined": that would have the model act as though a person had
-    seen the question on a session where nothing was ever drawn."""
+    seen the question on a session where nothing was ever drawn.
+
+    It must also claim NOTHING about who is at a screen. The retired wording
+    reported that no interactive surface was attached, so the user could not be
+    asked — and parents repeated that claim into ``hub`` messages while a surface
+    was attached to their own session. An absent HOOK is a fact about this
+    process, not about the operator. The exact text is asserted, so putting the
+    claim back has to be deliberate.
+
+    It must NOT carry a ROSTER either (round 1, D3). It used to say "a subagent,
+    an `exec` run and a scheduler run have none", and that is wrong about one of
+    the three: a supervised ``exec --control`` run DOES have a hook
+    (``exec_control`` builds it with ``install_gates=supervised`` and ``serving``
+    installs it), which ``build_ask_tool``'s own docstring says three lines
+    above that string. A roster is a second copy of a wiring fact; the condition
+    is named instead.
+    """
     hook, _seen = await _answer_with(None)
     # Built WITH a hook (the builder refuses to create it without one) and then
     # executed against a context that has none — the only way this session's
@@ -336,7 +353,39 @@ async def test_a_missing_host_hook_is_an_error_not_a_user_refusal() -> None:
     result = await tool.execute("call-1", {"questions": _questions()}, None, None, _context(None))
 
     assert result.is_error is True
-    assert "cannot" in result.text
+    assert result.text == (
+        "this host has no way to present a question to a person — no ask hook is "
+        "wired into this session, so this process cannot put one in front of the "
+        "operator. A delegated child's route to them is `hub` to its parent; "
+        "otherwise decide without them."
+    )
+    assert "surface" not in result.text
+    assert "screen" not in result.text
+    # The roster is gone, and with it the claim the wrong entry made.
+    assert "scheduler run" not in result.text
+    assert "exec" not in result.text
+
+
+def test_no_test_still_pins_the_retired_refusal_sentence() -> None:
+    """A guard, not documentation: the retired claim must not survive in here.
+
+    Scoped to ``tests/`` on purpose. Product code may quote the old sentence in
+    an explanatory comment (``builtin.execute_ask`` does, to say why it went
+    away), but a TEST that asserts it would go green on a harness that started
+    saying the false thing again — which is exactly how this one was missed the
+    first time.
+    """
+    tests_root = Path(__file__).resolve().parents[2]
+    # Assembled from parts, deliberately: written whole, this guard's own source
+    # would be the first offender it reported.
+    needle = "No interactive" + " surface"
+    offenders = sorted(
+        str(path.relative_to(tests_root))
+        for path in tests_root.rglob("*.py")
+        if needle in path.read_text(encoding="utf-8", errors="replace")
+    )
+
+    assert offenders == []
 
 
 # --- secret questions -------------------------------------------------------
