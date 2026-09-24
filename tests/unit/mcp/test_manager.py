@@ -3860,63 +3860,288 @@ class TestAuthBlockRevalidation:
         finally:
             store.close()
 
+    # --- the REAL seam: these tests replace only the transport --------------
+    #
+    # Agent review round 2, major-1. The previous revision's guard tests
+    # replaced ``_connect_server`` wholesale and hand-wrote the marker line
+    # inside the stub, so they asserted the AUTHOR'S MODEL of the seam rather
+    # than the seam: they passed with the production seam deleted and with it
+    # moved back above the refresh (the reviewer measured 15 passed in both
+    # cases). Everything below replaces ``_open_transport_and_session`` and
+    # nothing else, so the real ``_connect_server`` body — and the real attempt
+    # seam inside it — executes.
+    #
+    # The rotations are the three real ones, driven through production code.
+    # ``ensure_mcp_oauth_fresh`` says of itself that it "is one of three ways a
+    # refresh can start": the pre-dial refresh is driven by the real
+    # ``_ensure_oauth_fresh``, and the other two — the in-flight coordinator an
+    # ``async_auth_flow`` runs before every request, and the 401-recovery refresh
+    # — by pumping the real ``async_auth_flow`` of the provider the transport
+    # builds, which is how httpx drives it in production.
+
+    @pytest.fixture(autouse=True)
+    def _isolated_lock_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep this class's refresh lock out of the operator's real config dir.
+
+        These tests drive the REAL refresh path, which takes the cross-process
+        lock under ``config_dir()``. Without a per-test dir, two xdist workers
+        running them at once contend on the SAME lock path, and a sibling
+        worker's exchange would be read as this test's — the coupling the
+        durability tests document. A per-test dir also means a leaked lock
+        cannot outlive the test that took it.
+        """
+        from local_operator.paths import CONFIG_DIR_ENV
+
+        monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path / "cfg"))
+
+    @staticmethod
+    def _endpoints() -> Any:
+        """The discovered endpoint set the provider and the refresh both use."""
+        from mcp.shared.auth import OAuthMetadata
+
+        from local_operator.mcp.auth import DiscoveredOAuthEndpoints
+
+        return DiscoveredOAuthEndpoints(
+            oauth_metadata=OAuthMetadata.model_validate(
+                {
+                    "issuer": TestAuthBlockRevalidation.URL,
+                    "authorization_endpoint": "https://as.example/authorize",
+                    "token_endpoint": "https://as.example/token",
+                }
+            )
+        )
+
+    @staticmethod
+    def _stub_discovery(
+        monkeypatch: pytest.MonkeyPatch, endpoints: Any, *, during: Any = None
+    ) -> None:
+        """Stand in for the network at the DISCOVERY boundary.
+
+        Discovery is the first thing the pre-dial refresh does and it is a real
+        HTTP call, so it is stubbed at the boundary rather than mocked away.
+        ``during`` is awaited while that call is "in flight", which is how a test
+        places a peer's ``/mcp reauth`` INSIDE our pre-dial window — a window
+        that is seconds wide in production (discovery plus the token POST).
+        """
+        from local_operator.mcp import auth as auth_mod
+
+        async def discovery(url: str) -> Any:
+            if during is not None:
+                await during()
+            return endpoints
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", discovery)
+
+    @staticmethod
+    def _stub_token_endpoint(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+        """A rotating authorization server, counting POSTs at the TRANSPORT.
+
+        Counting at the transport is what makes "no rotation happened" a fact
+        about the wire rather than about our logging.
+        """
+        import httpx
+        from mcp.shared.auth import OAuthToken
+
+        calls = {"posts": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["posts"] += 1
+            n = calls["posts"]
+            token = OAuthToken(
+                access_token=f"A{n}",
+                refresh_token=f"R{n + 1}",
+                token_type="Bearer",
+                expires_in=28800,
+            )
+            return httpx.Response(200, json=token.model_dump(mode="json"), request=request)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched)
+        return calls
+
+    @staticmethod
+    async def _seed_client_info(store: Any) -> None:
+        """Register a client, without which no refresh site does anything.
+
+        ``ensure_mcp_oauth_fresh`` returns before the lock when the row has no
+        client registration, so a rotation test that skipped this would measure
+        nothing at all.
+        """
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        from local_operator.mcp.auth import McpTokenStorage
+
+        await McpTokenStorage(TestAuthBlockRevalidation.URL, store).set_client_info(
+            OAuthClientInformationFull(client_id="cid")
+        )
+
+    @staticmethod
+    def _write_fresh_grant_once(store: Any) -> Any:
+        """``_write_fresh_grant``, once — the peer re-auths once, not per attempt.
+
+        The discovery stub runs on EVERY attempt that gets that far, so an
+        unguarded peer write there would have the peer re-authing once per poll
+        and the test would measure its own storm instead of ours.
+        """
+        written = False
+
+        async def once() -> None:
+            nonlocal written
+            if written:
+                return
+            written = True
+            await TestAuthBlockRevalidation._write_fresh_grant(store)
+
+        return once
+
+    @staticmethod
+    def _row(store: Any) -> dict[str, Any]:
+        """The one ``mcp-oauth`` row's payload, as written to disk."""
+        from local_operator.mcp.auth import MCP_OAUTH_PROVIDER
+
+        return store.list_credentials(MCP_OAUTH_PROVIDER)[0].data
+
+    @staticmethod
+    def _auth_error() -> Exception:
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        return McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+
+    @staticmethod
+    def _stub_transport(monkeypatch: pytest.MonkeyPatch, dial: Any) -> None:
+        """Replace ONLY ``_open_transport_and_session``.
+
+        ``dial`` is the whole of what the transport does — rotate the grant, take
+        a peer's write, tombstone it, or nothing — and it either returns a
+        connection (the connect succeeds) or returns ``None`` for the documented
+        "refused us on authorization" failure. Dials that want a different
+        failure raise it themselves.
+
+        Module-level ``setattr`` on the class, so the real ``_connect_server``
+        runs for every caller (``_reconnect``, the revalidation poll, the
+        call-site retry) exactly as it does in production.
+        """
+
+        async def transport(
+            self: McpManager,
+            stack: Any,
+            name: str,
+            cfg: Any,
+            timeout_s: float | None,
+            stderr_log: Any,
+            **_: Any,
+        ) -> ServerConnection:
+            result = await dial(name, cfg)
+            if result is None:
+                raise TestAuthBlockRevalidation._auth_error()
+            return result
+
+        monkeypatch.setattr(McpManager, "_open_transport_and_session", transport)
+
+    @staticmethod
+    async def _drive_flow(store: Any, cfg: Any, endpoints: Any, *, refuse_original: bool) -> str:
+        """Pump the REAL ``async_auth_flow`` the way the transport does.
+
+        Returns the ``Authorization`` header of the first request the flow
+        yields, which is the proof that the in-transport site under test really
+        carried a token: after a coordinator refresh it is the ROTATED one, and
+        without one it is the stored token.
+
+        ``refuse_original`` answers that first request with a 401, which is what
+        starts the flow's own 401-recovery refresh — the documented provider
+        shape, where our locally-valid token was revoked server-side. The
+        recovery re-yields the original request only after it has persisted a
+        rotation, so reaching the second ``asend`` is itself the evidence.
+        """
+        import httpx
+
+        from local_operator.mcp.auth import build_oauth_provider
+
+        provider = build_oauth_provider(
+            TestAuthBlockRevalidation.URL, cfg, store=store, endpoints=endpoints
+        )
+        async with provider.context.lock:
+            await provider._initialize()
+        gen = provider.async_auth_flow(
+            httpx.Request("POST", TestAuthBlockRevalidation.URL, content=b"payload")
+        )
+        try:
+            request = await gen.__anext__()
+            header = request.headers.get("Authorization", "")
+            if refuse_original:
+                retried = await gen.asend(httpx.Response(401, request=request))
+                assert retried is not None
+            return header
+        finally:
+            await gen.aclose()
+
     @pytest.mark.asyncio
     async def test_a_grant_written_during_the_failing_connect_still_heals(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """THE unfalsifiable-block defect. Do not delete or weaken.
 
-        The marker was read AFTER the connect failed, so a peer's re-auth that
-        landed WHILE that connect was in flight was recorded as "the grant we
-        already failed on". The marker then never moves again — the new grant is
-        valid, so nobody re-obtains it — and the block is unfalsifiable: the
+        The marker used to be read AFTER the connect failed, so a peer's re-auth
+        that landed WHILE that connect was in flight was recorded as "the grant
+        we already failed on". The marker then never moves again — the new grant
+        is valid, so nobody re-obtains it — and the block is unfalsifiable: the
         server stays dead for the life of the process against a perfectly good
         credential, and every ``/mcp reauth`` in another session is a no-op
         because the block being cleared is per-process in-memory state.
 
         Observed on the operator's machine 2026-09-18: a session failed a
-        ``linear`` connect at 22:13:18 having read the marker for a grant
-        written at 22:11:06, blocked on it, and was still dead ten hours later
-        while a sibling session used the same row happily.
+        ``linear`` connect at 22:13:18 having read the marker for a grant written
+        at 22:11:06, blocked on it, and was still dead ten hours later while a
+        sibling session used the same row happily.
 
         The window is not exotic. It is exactly as wide as an OAuth connect —
         PRM/ASM discovery plus a token exchange, seconds — and a human who has
         just been told "this server needs authorizing" is re-authing during it
         BY CONSTRUCTION. This is the common case, not the race nobody hits.
+
+        Driven through the REAL seam (only the transport is replaced), and the
+        peer's write lands INSIDE our pre-dial window, at the discovery call —
+        so the assertion below distinguishes a marker taken before that window
+        from one taken after it.
         """
         store = self._real_store(tmp_path, obtained_at=1000.0)
         manager = self._oauth_manager(tmp_path, store)
         try:
-            from local_operator.mcp.auth import McpAuthRequiredError
+            # The peer's re-auth lands DURING this connect, before it fails — so
+            # a read taken after the failure would see the NEW grant and block
+            # on it.
+            self._stub_discovery(
+                monkeypatch,
+                self._endpoints(),
+                during=self._write_fresh_grant_once(store),
+            )
 
-            # The peer's re-auth lands DURING the connect, before it fails —
-            # so the post-failure read would see the NEW grant and block on it.
-            async def failing_after_a_peer_reauth(name: str, cfg: Any, **_: Any):
-                # Stand in for the real ``_connect_server``: it records the
-                # attempt marker between its own OAuth refresh and opening the
-                # transport, so a stub that skips that seam would not exercise
-                # the path under test. No refresh happens here, so the marker
-                # is simply the grant on disk at dial time.
-                manager._attempt_grant_marker[name] = manager._grant_marker(name)
-                # …and NOW the peer's re-auth lands, mid-dial.
-                await self._write_fresh_grant(store)
-                raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+            async def refuses(name: str, cfg: Any) -> None:
+                return None
 
-            monkeypatch.setattr(manager, "_connect_server", failing_after_a_peer_reauth)
+            self._stub_transport(monkeypatch, refuses)
             await manager._reconnect("dd", 0.0, manager._epoch)
             assert manager.auth_blocked("dd") is True
+            # The block names the grant the attempt STARTED with, not the peer's.
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
 
             # The grant on disk is NEWER than the one this attempt actually
             # used, so the very next tick owes it one attempt. Before the fix
-            # this returned [] forever: the block had been taken against a
-            # grant the failed connect never tried.
+            # this returned [] forever: the block had been taken against a grant
+            # the failed connect never tried.
             attempts: list[str] = []
 
-            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            async def counting(name: str, cfg: Any) -> ServerConnection:
                 attempts.append(name)
                 return _make_conn(name, cfg)
 
-            monkeypatch.setattr(manager, "_connect_server", counting)
+            self._stub_transport(monkeypatch, counting)
             assert await manager.revalidate_auth_blocked() == ["dd"]
             assert attempts == ["dd"]
             assert manager.get_connection_status("dd") == "connected"
@@ -3930,38 +4155,34 @@ class TestAuthBlockRevalidation:
     ) -> None:
         """Closing the window must not reopen the retry storm it guards.
 
-        Healing on a marker the attempt did not use is correct exactly once:
-        if that attempt ALSO fails, the block must re-take against the grant it
-        just tried, so a dead-but-newer grant still costs one connect per
-        change rather than one per 60 s tick in nine processes.
+        Healing on a marker the attempt did not use is correct exactly once: if
+        that attempt ALSO fails, the block must re-take against the grant it just
+        tried, so a dead-but-newer grant still costs one connect per change
+        rather than one per 60 s tick in nine processes.
         """
         store = self._real_store(tmp_path, obtained_at=1000.0)
         manager = self._oauth_manager(tmp_path, store)
         try:
-            from local_operator.mcp.auth import McpAuthRequiredError
+            self._stub_discovery(
+                monkeypatch,
+                self._endpoints(),
+                during=self._write_fresh_grant_once(store),
+            )
 
-            async def failing_after_a_peer_reauth(name: str, cfg: Any, **_: Any):
-                # Stand in for the real ``_connect_server``: it records the
-                # attempt marker between its own OAuth refresh and opening the
-                # transport, so a stub that skips that seam would not exercise
-                # the path under test. No refresh happens here, so the marker
-                # is simply the grant on disk at dial time.
-                manager._attempt_grant_marker[name] = manager._grant_marker(name)
-                # …and NOW the peer's re-auth lands, mid-dial.
-                await self._write_fresh_grant(store)
-                raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+            async def refuses(name: str, cfg: Any) -> None:
+                return None
 
-            monkeypatch.setattr(manager, "_connect_server", failing_after_a_peer_reauth)
+            self._stub_transport(monkeypatch, refuses)
             await manager._reconnect("dd", 0.0, manager._epoch)
 
             # The retry this earns also fails, and writes nothing new.
             attempts: list[str] = []
 
-            async def still_failing(name: str, cfg: Any, **_: Any):
+            async def still_failing(name: str, cfg: Any) -> None:
                 attempts.append(name)
-                raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+                return None
 
-            monkeypatch.setattr(manager, "_connect_server", still_failing)
+            self._stub_transport(monkeypatch, still_failing)
             assert await manager.revalidate_auth_blocked() == []
             assert attempts == ["dd"], "the newer grant earned exactly one attempt"
 
@@ -3973,77 +4194,432 @@ class TestAuthBlockRevalidation:
             await manager.disconnect_all()
             store.close()
 
+    async def _run_rotation_scenario(
+        self, site: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Any:
+        """Drive one of OUR three refresh sites inside a failing connect.
+
+        Returns a namespace with the manager, the store, the stamp the attempt
+        started with, the 30-poll connect count and the refresh-POST count. Does
+        not assert the behaviour under test — the two tests below do that, one
+        for the storm and one for the mechanism that closes it, so each mutation
+        reds the assertion that names it rather than whichever comes first.
+        """
+        import time as _time
+
+        from local_operator.mcp.auth import McpTokenStorage
+
+        # A locally-VALID token is what the 401-recovery shape needs: the
+        # coordinator skips a fresh token, and the server's refusal is what
+        # starts the recovery refresh. The other two sites need an expired one,
+        # so the pre-dial refresh and the coordinator have something to do.
+        obtained_at = _time.time() if site == "401_recovery" else 1000.0
+        store = self._real_store(tmp_path, obtained_at=obtained_at)
+        manager = self._oauth_manager(tmp_path, store)
+        endpoints = self._endpoints()
+        await self._seed_client_info(store)
+        storage = McpTokenStorage(self.URL, store)
+        posts = self._stub_token_endpoint(monkeypatch)
+        before = storage.grant_marker()
+        assert before == (obtained_at, False)
+
+        # The pre-dial site rotates BEFORE the transport opens, so it needs
+        # discovery to answer. The other two rotate INSIDE the transport, and
+        # discovery returning nothing is what keeps the pre-dial refresh out of
+        # their way: ``ensure_mcp_oauth_fresh`` returns before the lock when
+        # there is no endpoint to POST to.
+        self._stub_discovery(monkeypatch, endpoints if site == "pre_dial" else None)
+
+        async def refuses(name: str, cfg: Any) -> None:
+            if site == "coordinator":
+                # The real in-flight coordinator, which the transport drives
+                # before its first request. It rotates an expired token.
+                header = await self._drive_flow(store, cfg, endpoints, refuse_original=False)
+                assert header == "Bearer A1", header
+            elif site == "401_recovery":
+                # The real recovery refresh: our token is locally valid, the
+                # server refuses it with a 401, and the flow rotates under the
+                # lock before re-yielding the request.
+                header = await self._drive_flow(store, cfg, endpoints, refuse_original=True)
+                assert header == "Bearer STALE", header
+            return None
+
+        self._stub_transport(monkeypatch, refuses)
+        await manager._reconnect("dd", 0.0, manager._epoch)
+        assert manager.auth_blocked("dd") is True
+
+        connects: list[str] = []
+
+        async def same_shape(name: str, cfg: Any) -> None:
+            connects.append(name)
+            if site == "401_recovery":
+                # The storm shape: this provider keeps refusing the token it
+                # holds, so every attempt that DOES happen rotates again.
+                await self._drive_flow(store, cfg, endpoints, refuse_original=True)
+            return None
+
+        self._stub_transport(monkeypatch, same_shape)
+        for _ in range(30):
+            await manager.revalidate_auth_blocked()
+        return SimpleNamespace(
+            manager=manager,
+            store=store,
+            storage=storage,
+            before=before,
+            connects=connects,
+            posts=posts,
+            row=self._row(store),
+        )
+
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("site", ["pre_dial", "coordinator", "401_recovery"])
     async def test_our_own_in_connect_refresh_is_not_a_peer_reauth(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, site: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """THE self-write storm guard for the attempt marker. Do not weaken.
 
-        ``_connect_server`` proactively refreshes an OAuth grant BEFORE dialling
-        (``_ensure_oauth_fresh``), and a successful rotation moves
-        ``tokens_obtained_at``. So an attempt marker read before that refresh
-        describes a grant the dial never presented, and the row is newer than
-        the block the instant the connect fails — which every later poll reads
-        as "a peer re-authed", spending a refresh token per tick in every
-        running process. Against a provider running reuse detection that
-        revokes the whole token family: the exact storm ``_grant_marker``'s
-        ``updated_at`` discussion exists to prevent, reached through a
-        pre-refresh read instead.
+        Each of our three refresh sites moves ``tokens_obtained_at``, and the
+        authorization server ROTATES on every one of them. A marker keyed on that
+        timestamp is therefore stale the instant a connect that rotated fails,
+        and every later poll reads the movement as "a peer re-authed" — one
+        connect and one refresh-token POST per tick, per process, forever.
+        Against a provider running reuse detection that revokes the whole token
+        family: the storm ``GRANT_DEAD_AT_KEY`` and ``_grant_marker`` exist to
+        prevent, reached through the self-write rather than a naive
+        ``updated_at``.
 
-        Caught by agent review round 1 (blocker-1) on the first revision of this
-        feature and measured there at 30 connects over 30 polls, against 0 on
-        ``main``. The marker is therefore taken INSIDE ``_connect_server``,
-        after its own refresh and before the transport opens.
-
-        The shape below is the documented real one: our refresh rotates the
-        grant successfully, and the resource server still refuses the rotated
-        access token with a 401.
+        Round 1 measured 30 connects over 30 polls on the pre-dial site and round
+        2 30/30 on the in-transport one, against 0 on ``main``. All three sites
+        are exercised here on their own real path — a marker that held for one of
+        them is exactly the half-fix round 2 rejected — and the assertion below
+        is the observable one the storm was measured on, so the failure it
+        reports carries the count.
         """
-        from mcp.shared.auth import OAuthToken
+        from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY
 
-        from local_operator.mcp.auth import McpAuthChallengeError, McpTokenStorage
+        scenario = await self._run_rotation_scenario(site, tmp_path, monkeypatch)
+        try:
+            assert scenario.posts["posts"] >= 1, "no refresh POST: this test measured nothing"
+            assert (
+                scenario.row[TOKENS_OBTAINED_AT_KEY] != scenario.before[0]
+            ), "the grant did not rotate: this test measured nothing"
+            assert scenario.connects == [], (
+                "our own refresh was mistaken for a peer's re-auth: "
+                f"{len(scenario.connects)} extra connects over 30 polls"
+            )
+        finally:
+            await scenario.manager.disconnect_all()
+            scenario.store.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("site", ["pre_dial", "coordinator", "401_recovery"])
+    async def test_a_rotation_carries_the_chain_stamp_it_started_from(
+        self, site: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mechanism, asserted separately from the storm it prevents.
+
+        Two facts, per site: the pair's ``issued_at`` is the stamp the row
+        ALREADY carried (the carry-forward, not a mint), and the block names that
+        stamp rather than one read after the connect. The second is what a marker
+        read at block time gets wrong for a PEER's write; the first is what makes
+        it right for ours.
+        """
+        from local_operator.mcp.auth import GRANT_CHAIN_KEY, TOKENS_OBTAINED_AT_KEY
+
+        scenario = await self._run_rotation_scenario(site, tmp_path, monkeypatch)
+        try:
+            pair = scenario.row[GRANT_CHAIN_KEY]
+            assert (
+                pair["issued_at"] == scenario.before[0]
+            ), "the rotation minted a new chain stamp instead of carrying the old one"
+            assert pair["attested_at"] == scenario.row[TOKENS_OBTAINED_AT_KEY], (
+                "the pair does not attest the row's own timestamp, so the read rule "
+                "will never believe it"
+            )
+            assert (
+                scenario.manager._auth_grant_marker.get("dd") == scenario.before
+            ), "the block did not name the grant the attempt started with"
+        finally:
+            await scenario.manager.disconnect_all()
+            scenario.store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_rotation_of_ours_moves_no_marker_another_process_reads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The state that closes the storm is IN THE ROW, not in this process.
+
+        A peer session — a different process, sharing only ``auth.db`` — must see
+        our rotation as "no movement" too. Anything process-local (an own-write
+        ledger, a memoized marker) passes an in-process test and fails here,
+        which is why the alternative designs were rejected by measurement: two
+        real processes scored 30/31 with a ledger against 1/1 with the chain
+        stamp. This is the hermetic form of that measurement: a SECOND manager
+        and storage, built fresh over the same file, reads the same stamp and
+        spends nothing.
+        """
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        endpoints = self._endpoints()
+        try:
+            await self._seed_client_info(store)
+            posts = self._stub_token_endpoint(monkeypatch)
+            self._stub_discovery(monkeypatch, endpoints)
+
+            async def refuses(name: str, cfg: Any) -> None:
+                return None
+
+            self._stub_transport(monkeypatch, refuses)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
+            assert posts["posts"] >= 1
+
+            # A second process: same file, same server, nothing shared in memory.
+            peer = TestAuthBlockRevalidation._oauth_manager(tmp_path, store)
+            peer._auth_blocked.add("dd")
+            # The baseline both processes agreed on is the stamp the blocked
+            # attempt held. Reading the row again here instead would make this
+            # test tautological: the peer would be handed whatever our rotation
+            # wrote, and no implementation could ever fail it.
+            peer._auth_grant_marker["dd"] = manager._auth_grant_marker["dd"]
+            connects: list[str] = []
+
+            async def counting(name: str, cfg: Any) -> None:
+                connects.append(name)
+                return None
+
+            self._stub_transport(monkeypatch, counting)
+            for _ in range(30):
+                await peer.revalidate_auth_blocked()
+            assert connects == [], "another process read our own rotation as movement"
+            await peer.disconnect_all()
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_tombstone_written_inside_the_transport_is_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A tombstone costs ONE connect, then flat — never a storm.
+
+        ``mark_grant_dead`` runs inside the transport when the authorization
+        server has rejected the grant, and it moves the marker's dead element
+        while deliberately leaving the chain stamp where it is. So this attempt
+        earns exactly one retry (the block's dead flag is now stale), and that
+        retry re-blocks against the tombstoned marker. Round 1 measured the same
+        one-connect shape and accepted it; what this pins is that the CHAIN rule
+        had not silently removed the dead element's meaning along with the
+        timestamp's.
+        """
+        from local_operator.mcp.auth import McpTokenStorage
 
         store = self._real_store(tmp_path, obtained_at=1000.0)
         manager = self._oauth_manager(tmp_path, store)
         try:
-            storage = McpTokenStorage(TestAuthBlockRevalidation.URL, store)
-            attempts: list[int] = []
+            storage = McpTokenStorage(self.URL, store)
+            self._stub_discovery(monkeypatch, None)
 
-            async def refresh_then_401(name: str, cfg: Any, **_: Any):
-                attempts.append(len(attempts) + 1)
-                i = len(attempts)
-                # Exactly what ``_refresh_oauth_token_locked`` persists on a
-                # successful rotation…
-                storage.store_refresh_result(
-                    OAuthToken(
-                        access_token=f"A{i}",
-                        refresh_token=f"R{i + 1}",
-                        token_type="Bearer",
-                        expires_in=28800,
-                    ),
-                    presented_refresh_token=f"R{i}",
-                )
-                # …then the marker seam, in the real code's order: after the
-                # refresh, before the transport.
-                manager._attempt_grant_marker[name] = manager._grant_marker(name)
-                raise McpAuthChallengeError(
-                    TestAuthBlockRevalidation.URL,
-                    status_code=401,
-                    oauth_available=True,
-                    has_stored_grant=True,
-                )
+            async def tombstone(name: str, cfg: Any) -> None:
+                storage.mark_grant_dead(rejected_refresh_token="R1")
+                return None
 
-            monkeypatch.setattr(manager, "_connect_server", refresh_then_401)
+            self._stub_transport(monkeypatch, tombstone)
             await manager._reconnect("dd", 0.0, manager._epoch)
-            assert manager.auth_blocked("dd") is True
-            after_block = len(attempts)
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
 
+            connects: list[str] = []
+
+            async def tombstone_again(name: str, cfg: Any) -> None:
+                connects.append(name)
+                storage.mark_grant_dead(rejected_refresh_token="R1")
+                return None
+
+            self._stub_transport(monkeypatch, tombstone_again)
             for _ in range(30):
                 await manager.revalidate_auth_blocked()
-            assert len(attempts) == after_block, (
-                "our own refresh was mistaken for a peer's re-auth: "
-                f"{len(attempts) - after_block} extra connects over 30 polls"
+            assert connects == ["dd"], (
+                "a tombstone must cost exactly one connect, then go quiet: "
+                f"got {len(connects)} over 30 polls"
             )
+            # …and the tombstone did not move the chain stamp underneath it.
+            assert manager._auth_grant_marker.get("dd") == (1000.0, True)
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("order", ["peer_then_rotation", "rotation_then_peer"])
+    async def test_a_peer_login_and_our_rotation_in_one_attempt_still_heals(
+        self, order: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both writers land in ONE attempt, in both orders: heal, exactly once.
+
+        This is the case the CHAIN rule has to get right and a single timestamp
+        cannot: the attempt contains a peer's ``/mcp reauth`` AND a rotation of
+        ours. Whichever order they land in, the grant the session ends up blocked
+        against must be one a later poll can see replaced — so the next tick
+        spends exactly one connect and the server is connected.
+        """
+        from local_operator.mcp.auth import McpTokenStorage
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        endpoints = self._endpoints()
+        try:
+            await self._seed_client_info(store)
+            self._stub_token_endpoint(monkeypatch)
+            # The pre-dial refresh stays out of the way: OUR rotation below is the
+            # in-transport recovery one, which is a real site and the one the
+            # transport can reach.
+            self._stub_discovery(monkeypatch, None)
+
+            async def both(name: str, cfg: Any, *, order: str = order) -> None:
+                if order == "peer_then_rotation":
+                    await self._write_fresh_grant(store)
+                    # …and now we rotate the grant we were just handed. The
+                    # provider is initialized from the store AFTER the peer's
+                    # write, so the 401 goes down the recovery path (no peer
+                    # token to adopt: store and memory agree).
+                    await self._drive_flow(store, cfg, endpoints, refuse_original=True)
+                else:
+                    await self._drive_flow(store, cfg, endpoints, refuse_original=True)
+                    await self._write_fresh_grant(store)
+                return None
+
+            self._stub_transport(monkeypatch, both)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager.auth_blocked("dd") is True
+            # The attempt's record is the grant it started with (the stale one),
+            # NOT the newer state both writers left behind — which is what makes
+            # the next tick's comparison meaningful.
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
+            blocked = manager._auth_grant_marker["dd"]
+            assert McpTokenStorage(self.URL, store).grant_marker() != blocked, (
+                "the two writers between them must leave the disk newer than the "
+                "attempt's record, or there is nothing to heal from"
+            )
+
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            self._stub_transport(monkeypatch, counting)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert attempts == ["dd"], "exactly one retry, earned by the replaced grant"
+            assert manager.get_connection_status("dd") == "connected"
+            for _ in range(5):
+                assert await manager.revalidate_auth_blocked() == []
+            assert attempts == ["dd"], "a heal must not leave a retry running"
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_an_old_version_writer_is_read_as_a_new_grant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mixed-version fleet: an old writer's rotation costs ONE retry.
+
+        A process still running the pre-change code moves ``tokens_obtained_at``
+        and knows nothing about the pair, so it leaves ``attested_at`` behind.
+        That mismatch is the whole reason the key is a PAIR rather than one
+        float: the stamp then falls back to ``tokens_obtained_at``, which reads
+        as a chain change — bounded to one unearned retry, and it never storms.
+        A single-float stamp believed whenever present would instead read as "no
+        movement" and strand the session on a grant that is genuinely gone.
+        """
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.mcp.auth import (
+            GRANT_CHAIN_KEY,
+            TOKENS_OBTAINED_AT_KEY,
+            McpTokenStorage,
+        )
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            storage = McpTokenStorage(self.URL, store)
+            # Give the row a pair first, so the assertions below are about the
+            # PAIR being invalidated rather than about a missing key.
+            storage.store_refresh_result(
+                OAuthToken(
+                    access_token="A1", refresh_token="R2", token_type="Bearer", expires_in=28800
+                ),
+                presented_refresh_token="R1",
+            )
+            assert self._row(store)[GRANT_CHAIN_KEY]["issued_at"] == 1000.0
+
+            self._stub_discovery(monkeypatch, None)
+
+            async def refuses(name: str, cfg: Any) -> None:
+                return None
+
+            self._stub_transport(monkeypatch, refuses)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
+
+            # An OLD-VERSION writer: tokens + the timestamp, the pair left as it
+            # was, written through the production write path.
+            creds = storage._read() or {}
+            creds["tokens"] = {
+                "access_token": "OLD",
+                "refresh_token": "OLD-R",
+                "token_type": "Bearer",
+            }
+            creds[TOKENS_OBTAINED_AT_KEY] = 2000.0
+            storage._write(creds)
+
+            # The row's own stamp moved and the pair no longer attests it, so the
+            # block must read that as a replaced grant: one attempt, which heals.
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            self._stub_transport(monkeypatch, counting)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert attempts == ["dd"]
+            assert manager.get_connection_status("dd") == "connected"
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_non_auth_failure_leaves_no_attempt_state_behind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round 2, major-2: the record dies with its attempt, by construction.
+
+        The per-server dict this replaced recorded a marker for every connect,
+        including the ones whose caller can never block, so a marker could
+        outlive its attempt and be adopted by a later, unrelated failure. The
+        record is a local owned by the blocking caller, so the durable state here
+        is the only attempt state that exists — asserted directly rather than
+        argued from the code's shape.
+        """
+        from local_operator.mcp.manager import McpTransportError
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            self._stub_discovery(monkeypatch, None)
+
+            async def dead_transport(name: str, cfg: Any) -> None:
+                raise McpTransportError(self.URL, "connection refused")
+
+            self._stub_transport(monkeypatch, dead_transport)
+            for _ in range(5):
+                await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager.auth_blocked("dd") is False
+            assert manager._auth_grant_marker == {}
+            # No per-server attempt state of any kind survives: the state that
+            # used to hold it is gone, so a stale entry cannot be adopted later.
+            assert not [name for name in vars(manager) if "attempt" in name]
         finally:
             await manager.disconnect_all()
             store.close()
@@ -4053,62 +4629,94 @@ class TestAttemptMarkerUnknownSemantics:
     """``None`` (the store was unreadable) is not "the caller did not say".
 
     Review round 1, minor-1. ``_block_on_auth`` used one value for both, so an
-    attempt whose pre-connect read FAILED fell through to a read taken after
-    the connect failed — the exact post-failure read this feature removes. A
-    peer re-authing during such an attempt would then be recorded as the grant
-    we failed on, and the block would be unfalsifiable again for that case.
+    attempt whose pre-connect read FAILED fell through to a read taken after the
+    connect failed — the exact post-failure read this feature removes, restored
+    for precisely that case.
+
+    With the attempt record, "the caller did not say" is reachable only for a
+    caller that never watched its record fill (the seam is now the FIRST thing an
+    attempt does, so a connect that reaches ``_connect_server`` always records
+    something — and a read that FAILS records ``None``, which is a value). These
+    are therefore unit tests of the resolution rule itself; the guard tests above
+    cover the recorded cases end to end through the real seam.
     """
 
     URL = TestAuthBlockRevalidation.URL
 
+    @staticmethod
+    def _fresh_grant(store: Any) -> Any:
+        return TestAuthBlockRevalidation._write_fresh_grant(store)
+
     @pytest.mark.asyncio
-    async def test_an_unreadable_pre_attempt_read_does_not_become_a_post_failure_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_an_unreadable_attempt_read_does_not_become_a_post_failure_read(
+        self, tmp_path: Path
     ) -> None:
-        """A recorded ``None`` keeps the good marker; it never re-reads the store."""
-        from local_operator.mcp.auth import McpAuthRequiredError
+        """A recorded ``None`` keeps the good marker; it never re-reads the store.
+
+        The block is re-taken while a peer's NEW grant is already on disk — the
+        only state where the two readings differ — so adopting the peer's grant
+        here is exactly the unfalsifiable block the feature exists to remove.
+        """
+        store = TestAuthBlockRevalidation._real_store(tmp_path, obtained_at=1000.0)
+        manager = TestAuthBlockRevalidation._oauth_manager(tmp_path, store)
+        try:
+            # A first ordinary block, as a real arm would have taken it.
+            manager._block_on_auth("dd", (1000.0, False))
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
+
+            # The attempt's own read failed (a store hiccup) AND a peer re-auths
+            # before the block is taken. ``None`` is that recorded fact.
+            await self._fresh_grant(store)
+            manager._block_on_auth("dd", None)
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False), (
+                "an unreadable attempt read fell through to a read taken at "
+                "block time and adopted the peer's grant"
+            )
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_cannot_say_falls_back_to_reading_the_store(
+        self, tmp_path: Path
+    ) -> None:
+        """The sentinel means "cannot say", and only that, reads at block time.
+
+        Preserved deliberately: it is the pre-feature behaviour, and it is still
+        correct whenever no grant was written during the attempt. What must not
+        happen is a RECORDED unreadable read (``None``) sharing this value, and
+        what must not happen either is the sentinel escaping into the durable
+        state — so both halves are asserted here.
+        """
+        from local_operator.mcp.manager import (
+            _MARKER_NOT_RECORDED,
+            _AttemptRecord,
+            _NotRecorded,
+        )
 
         store = TestAuthBlockRevalidation._real_store(tmp_path, obtained_at=1000.0)
         manager = TestAuthBlockRevalidation._oauth_manager(tmp_path, store)
         try:
-            # A first ordinary failure establishes a known-good marker.
-            async def failing(name: str, cfg: Any, **_: Any):
-                manager._attempt_grant_marker[name] = manager._grant_marker(name)
-                raise McpAuthRequiredError(TestAttemptMarkerUnknownSemantics.URL)
+            # The sentinel cannot be mistaken for a marker, and a fresh record
+            # starts as "not recorded" rather than as an unreadable read.
+            assert isinstance(_MARKER_NOT_RECORDED, _NotRecorded)
+            assert _MARKER_NOT_RECORDED is not None
+            assert _MARKER_NOT_RECORDED != (0.0, False)
+            assert _AttemptRecord().marker is _MARKER_NOT_RECORDED
 
-            monkeypatch.setattr(manager, "_connect_server", failing)
-            await manager._reconnect("dd", 0.0, manager._epoch)
-            good = manager._auth_grant_marker.get("dd")
-            assert good == (1000.0, False)
+            # A caller that cannot say: the store is the evidence.
+            manager._block_on_auth("dd")
+            assert manager._auth_grant_marker.get("dd") == (1000.0, False)
 
-            # Now the attempt's own read fails (store hiccup) AND a peer
-            # re-auths mid-dial. The block must keep the good marker rather
-            # than adopt the peer's grant off a post-failure read.
-            async def failing_unreadable(name: str, cfg: Any, **_: Any):
-                manager._attempt_grant_marker[name] = None  # the read failed
-                await TestAuthBlockRevalidation._write_fresh_grant(store)
-                raise McpAuthRequiredError(TestAttemptMarkerUnknownSemantics.URL)
-
-            monkeypatch.setattr(manager, "_connect_server", failing_unreadable)
-            await manager._reconnect("dd", 0.0, manager._epoch)
-            assert manager._auth_grant_marker.get("dd") == good, (
-                "an unreadable pre-attempt read fell through to a post-failure "
-                "read and adopted the peer's grant"
-            )
-
-            # …and because the peer's grant was never adopted, the next tick
-            # still owes this server its one attempt.
-            attempts: list[str] = []
-
-            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
-                attempts.append(name)
-                return _make_conn(name, cfg)
-
-            monkeypatch.setattr(manager, "_connect_server", counting)
-            assert await manager.revalidate_auth_blocked() == ["dd"]
-            assert attempts == ["dd"]
+            # …and once the store has moved, that same call adopts the new
+            # grant. It never records the sentinel itself: the durable marker is
+            # always a pair or ``None``.
+            await self._fresh_grant(store)
+            manager._block_on_auth("dd")
+            adopted = manager._auth_grant_marker.get("dd")
+            assert adopted is not None
+            assert adopted != (1000.0, False)
+            assert not isinstance(adopted, _NotRecorded)
         finally:
-            await manager.disconnect_all()
             store.close()
 
 
