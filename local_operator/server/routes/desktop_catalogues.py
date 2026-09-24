@@ -166,15 +166,27 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
                 or (status == "static" and key not in contributed)
             }
         else:
-            # NOT `asyncio.to_thread`. `initial_catalogue` is synchronous and
-            # I/O-free by contract (it exists to paint on the keystroke that
-            # opens the picker; measured 0.21 ms median, 0.77 ms max), so the
-            # hop bought nothing -- and it cost correctness: the AuthStore's
-            # sqlite connection is created on the event-loop thread, so reading
-            # it from a worker raised `ProgrammingError`, which
+            # NOT `asyncio.to_thread`, and the reason is CORRECTNESS rather than
+            # cost: the AuthStore's sqlite connection is created on the event-loop
+            # thread, so reading it from a worker raised `ProgrammingError`, which
             # `usable_providers()` reported as "store unreadable" and the
             # catalogue turned into "everything is connected" on a machine with
             # no credentials (D18). Keep this call on the loop thread.
+            #
+            # The cost claim that used to stand here -- "`initial_catalogue` is
+            # synchronous and I/O-free by contract (measured 0.21 ms median,
+            # 0.77 ms max)" -- is FALSE since the first frame began reading every
+            # provider's cached listing, so it is replaced rather than left to
+            # mislead (agent review round 2, R2-2). What the call really does now,
+            # all of it disk and none of it a request: the cache document per
+            # provider, config.yml ONCE (only when a local provider is in the
+            # registry), and -- only when a cached listing contributed a model the
+            # shipped registry does not carry -- one keyless price document.
+            # Measured on this host against an isolated populated cache: 1.48 ms
+            # median cold, 1.76 ms with a listing-only row and no price document
+            # on disk, 4.0 ms with a 139 KiB models.dev projection to read. It
+            # stays on the loop thread: milliseconds, and the hop is what broke
+            # the credential store.
             entries = controller.initial_catalogue()
         # `CatalogueEntry.connected` is True both when a provider IS usable and
         # when the credential store could not be read at all -- the deliberate
