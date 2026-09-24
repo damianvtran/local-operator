@@ -1439,12 +1439,14 @@ def _is_type_expression(value: str) -> bool:
         # a nested application (``Pass<Vec<u8>>``) is no more proof of a type than
         # ``int`` was — yet every such spelling was released whole, with no hit,
         # while the qualifier stood. NO primitive-carrying base in the paired tables is
-        # a stem, and that is the property this refusal has: the claim is about the base
-        # and its LAST segment (agent review R3-3 corrected this sentence — it read as a
-        # property of types, and R3-1 lived underneath exactly that reading). A type's
-        # own base is not spelled as a credential word, so ``Vec<u8>``,
-        # ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their release: the refusal
-        # sits on the BASE and is silent about the argument,
+        # a stem, and that is the property this refusal has: the claim is about EVERY
+        # ``::`` SEGMENT of the base (agent review R3-3 corrected this sentence once, and
+        # R4-1 is the reason the correction is now about segments rather than a single
+        # one — it read as a property of types, and R3-1 lived underneath exactly that
+        # reading, while R4-1 lived underneath the narrower "LAST segment" one). A type's
+        # own base is not spelled as a credential word in any of its segments, so
+        # ``Vec<u8>``, ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their release:
+        # the refusal sits on the BASE and is silent about the argument,
         # which is the direction that cannot trade containment back.
         return False
     if any(is_credential_name(part) for part in _type_token_segments(base)):
@@ -1452,8 +1454,8 @@ def _is_type_expression(value: str) -> bool:
         # R1-2): ``Pass<int>``, ``Pass<any>``, ``Token<void>``, ``Secret<str>``. A
         # type's base is not spelled as a credential word in the paired tables —
         # ``Vec``, ``Option``, ``HashMap``, ``String`` and every custom type name are not
-        # (the R3-3 correction applies to this sentence too: the property is about the
-        # base and its LAST segment) — so this rejects
+        # (the R3-3 correction applies to this sentence too, and R4-1 widens it: the
+        # property is about every ``::`` SEGMENT of the base, not its leaf) — so this rejects
         # the class the argument grammar alone cannot, and it does it on the base
         # rather than on the argument, which is what keeps a real annotation over a
         # primitive (``Vec<u8>``, ``Option<Vec<u8>>``) released.
