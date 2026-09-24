@@ -1822,12 +1822,24 @@ async def test_real_aws_answer_never_publishes_coerced_values(
                 return result.model_copy(update={"metadata": metadata})
 
             async def _call_raw(
-                self, method: Any, params: Any, result_type: Any, *, timeout: float
+                self,
+                method: Any,
+                params: Any,
+                result_type: Any,
+                *,
+                timeout: float,
+                execution_overhead_seconds_per_action: float = 0.0,
             ) -> Any:
                 if method == "ask_user_exchange":
                     self.calls.append(method)
                     return await adapter.ask_user_exchange(params)
-                return await super()._call_raw(method, params, result_type, timeout=timeout)
+                return await super()._call_raw(
+                    method,
+                    params,
+                    result_type,
+                    timeout=timeout,
+                    execution_overhead_seconds_per_action=(execution_overhead_seconds_per_action),
+                )
 
         async def rescue(descriptor: Any, **kwargs: Any) -> Any:
             return SimpleNamespace(complete=True)
