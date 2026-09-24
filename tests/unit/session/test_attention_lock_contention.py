@@ -42,6 +42,7 @@ a bet on machine load (see AGENTS.md, "Timing, flakes").
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import threading
@@ -49,10 +50,12 @@ import time
 import uuid
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import local_operator.session.attention as attention
+import local_operator.session.session as session_module
 from local_operator.session.attention import (
     ATTENTION_CUSTOM_TYPE,
     AttentionReadDeferred,
@@ -133,6 +136,58 @@ def _shrink_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """A millisecond-scale retry budget, so the bounded case is not a wait."""
     monkeypatch.setattr(attention, "_BUSY_TIMEOUT_MS", 50)
     monkeypatch.setattr(attention, "_CONTENTION_BACKOFF_S", 0)
+
+
+def _shrink_the_ladder(monkeypatch: pytest.MonkeyPatch, *delays: float) -> None:
+    """Millisecond rungs, so the bounded case is a wait on the EVENT, not a clock.
+
+    Patched on the SESSION MODULE, which is where the rung reads it: the delays are
+    module-level precisely so a test can change how long the ladder waits without
+    changing how many rungs it has (`_run_attention_republish` receives its delay
+    as an argument, so the shipped tuple is what names the rung).
+    """
+    monkeypatch.setattr(session_module, "ATTENTION_REPUBLISH_DELAYS_S", delays)
+
+
+def _completion_rows(path: Path, conversation: str) -> int:
+    """How many completions the store holds for one conversation."""
+    with closing(sqlite3.connect(path)) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM completions WHERE conversation=?", (conversation,)
+        ).fetchone()[0]
+
+
+def _delivery_row(path: Path, conversation: str) -> tuple[object, ...] | None:
+    """The conversation's delivery row, so "untouched" can be asserted exactly."""
+    with closing(sqlite3.connect(path)) as conn:
+        return conn.execute(
+            "SELECT conversation, delivered, delivered_at, backend FROM deliveries "
+            "WHERE conversation=?",
+            (conversation,),
+        ).fetchone()
+
+
+async def _wait_for_store(
+    path: Path, conversation: str, token: str, *, seconds: float = 30.0
+) -> dict[str, Any]:
+    """Wait for THAT token to be the store's completion, or fail saying where it stood."""
+    store = AttentionStore(path)
+    deadline = time.monotonic() + seconds
+    state = store.state(conversation)
+    while state["completion_token"] != token:
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{token} never reached the store; it holds {state}")
+        await asyncio.sleep(0.02)
+        state = store.state(conversation)
+    return state
+
+
+async def _wait_until(predicate, *, seconds: float = 30.0, what: str = "condition") -> None:
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.02)
 
 
 def _contention_error(errorname: str) -> sqlite3.OperationalError:
@@ -299,7 +354,10 @@ async def test_the_turn_outcome_publish_degrades_instead_of_killing_the_turn(
     line -- "ASGI callable returned without completing response" -- and it skips
     the rest of the teardown. The turn's own answer must survive a store it could
     not write to, the delay must be visible, and the durable journal must still
-    hold the outcome for the next boot's import.
+    hold the outcome -- which the REPUBLISH LADDER armed by this arm now retries
+    against the live store in this process (see the section at the foot of this
+    file), because the next boot's import was the only remedy and a finished
+    session never boots again.
     """
     from local_operator.harness.types import AgentEndEvent
     from local_operator.paths import config_dir
@@ -326,8 +384,9 @@ async def test_the_turn_outcome_publish_degrades_instead_of_killing_the_turn(
         # The write genuinely did not land -- the caller survived a real store
         # failure rather than a simulated one.
         assert store.revision() == before
-        # And the completion is not lost: the journal marker precedes the publish
-        # exactly so the next boot re-imports what the store refused.
+        assert session._attention_republish_due, "a deferral must arm the ladder"
+        # And the completion is not lost: the journal marker precedes the publish,
+        # which is what the ladder and the next boot both republish from.
         saved = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
         assert saved is not None and saved["conversation_id"] == identity
     finally:
@@ -561,5 +620,638 @@ async def test_the_refresh_read_degrades_instead_of_killing_the_caller(
             holder.close()
         assert state == previous, "the previous state stands rather than raising"
         assert "keeping the previous state" in caplog.text, caplog.text
+    finally:
+        await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The republish LADDER: a deferred completion is retried in THIS process.
+#
+# The store's own budget (~11 s at the shipped constants) is the bound that keeps
+# a turn's `finally` prompt, and it stays exactly as it is. What was missing is
+# what happens AFTER it: the only remedy used to be the next boot's
+# `bootstrap_transcript`, and a session that finishes a turn and then sits idle --
+# which is what a finished session IS -- never boots again. The operator saw the
+# consequence rather than the cause (2026-09-23): completed sessions stopped
+# raising OS notifications and stopped drawing the sidebar's "completed, unread"
+# checkmark, because the store row that both of those read was never written.
+#
+# These tests drive the real paths: a real `Session`, a real held `BEGIN
+# IMMEDIATE` from a sibling connection, the real publish, and the real rung.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_completion_is_republished_in_process_by_the_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The incident, repaired where the operator was waiting.
+
+    A busy store costs the completion for ~11 s, never for the rest of the run: the
+    journal marker is appended BEFORE the publish, so the ladder has something
+    durable to republish, and it republishes the SAME token -- the store ends up
+    holding the completion the turn meant to publish, with the anchor the turn
+    chose, and neither watermark moving: `receipts` is untouched, and the delivery
+    already claimed for the EARLIER completion is exactly as it was.
+
+    THE ROW THIS INSERTS IS NEW, and that is the point of the ladder: a deferred
+    completion never reached the store, so the republish is its FIRST insert and
+    takes a fresh `sequence` -- which is why `_attention_publish_lock` serialises
+    this read-then-insert against the session's own turn-end publication. What is
+    genuinely idempotent is a republish of a token the store ALREADY holds
+    (`INSERT OR IGNORE`): no second row, no second `sequence`, no duplicate
+    notification (`claim_delivery` dedupes on that sequence). The old wording here
+    claimed "no new `sequence`" of the deferred case too, which is false -- and
+    believing it is what made the ordering hazard invisible (review round 1,
+    MINOR-1).
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    # Rungs a second apart: the release below happens milliseconds after the
+    # deferral arms this, so the ladder still has rungs left to spend on the store
+    # that has just freed up.
+    _shrink_the_ladder(monkeypatch, 1.0, 1.0, 1.0, 1.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        seeded = store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        assert store.claim_delivery(identity, seeded["completion_token"], "phone")
+        delivered_before = _delivery_row(path, identity)
+        rows_before = _completion_rows(path, identity)
+        assert delivered_before is not None
+
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+            with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+                await session._publish_attention_outcome()
+            assert "deferred" in caplog.text, caplog.text
+            assert session._attention_republish_due, "a deferral must arm the ladder"
+            journal = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+            assert journal is not None
+        finally:
+            holder.release()
+            holder.close()
+
+        # The lock is gone and NOTHING else happens -- no boot, no new turn, no
+        # viewer: the ladder alone has to publish this.
+        state = await _wait_for_store(path, identity, journal["token"])
+        assert state["anchor_id"] == journal["anchor"] == f"completion-{journal['token']}"
+        assert state["kind"] == "error"
+        assert state["unseen"] is True, "a republished completion is still unread"
+        assert _completion_rows(path, identity) == rows_before + 1, "one row, one token"
+        assert _delivery_row(path, identity) == delivered_before, "deliveries untouched"
+        await _wait_until(
+            lambda: not session._attention_republish_due,
+            what="the ladder to stand down once the store has it",
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_ladder_that_never_gets_the_store_gives_up_bounded_and_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bounded rungs, one line when they run out, and no cost after that.
+
+    The lock never clears here, which is the case the ladder must LOSE gracefully:
+    it makes exactly one attempt per rung (`len(delays)` of them, and no more),
+    says ONCE that only a boot will publish the completion, and then clears the
+    latch -- an armed latch would make every viewer tick attempt the publish again,
+    which is up to a full store budget per tick. The tick at the end is the
+    assertion: while the store is still contended, it costs no attempt at all.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 0.0, 0.0, 0.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        seeded = store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        rows_before = _completion_rows(path, identity)
+        attempts: list[str] = []
+        real_publish = AttentionStore.publish
+
+        def counting_publish(store_self, conversation, token, anchor, kind, **kwargs):
+            attempts.append(token)
+            return real_publish(store_self, conversation, token, anchor, kind, **kwargs)
+
+        holder = _HeldWriteLock(path)
+        try:
+            # Consume the boot-restore FIRST, while there is nothing journalled to
+            # restore: that costs no publish and leaves `_attention_restored` set,
+            # so every attempt counted below belongs to the ladder alone.
+            await session.refresh_attention()
+            assert session._attention_restored and not session._attention_republish_due
+            monkeypatch.setattr(AttentionStore, "publish", counting_publish)
+            session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+            with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+                await session._publish_attention_outcome()
+                assert len(attempts) == 1, "the turn's own publish is the only one yet"
+                await _wait_until(
+                    lambda: not session._attention_republish_due,
+                    what="the ladder to exhaust itself against a held lock",
+                )
+            assert len(attempts) == 4, f"one bounded attempt per rung, got {attempts}"
+            exhausted = [
+                record
+                for record in caplog.records
+                if "only the next boot's import" in record.getMessage()
+            ]
+            assert len(exhausted) == 1, caplog.text
+            # Losing the ladder is not losing the completion: the store is
+            # unchanged, so nothing was half-written, and the journal still holds
+            # the marker the next boot imports.
+            assert store.state(identity)["completion_token"] == seeded["completion_token"]
+            assert _completion_rows(path, identity) == rows_before
+            assert session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE) is not None
+            # The tick the exhausted ladder must not make expensive.
+            await session.refresh_attention()
+            assert len(attempts) == 4, f"an exhausted ladder must not re-arm: {attempts}"
+        finally:
+            holder.release()
+            holder.close()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_newer_outcome_cancels_a_pending_republish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ladder must never revive a completion a later turn has replaced.
+
+    The outcome is cleared at the top of ``_publish_attention_outcome``, before the
+    newest journal append, so a rung that wakes after a newer turn published finds
+    a clear latch and stops. Driving the rung DIRECTLY is the point: it is the same
+    call the ladder makes, so the assertion is about what a rung does with a
+    superseded deferral rather than about a timer happening not to fire.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 5.0, 5.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="First failure")
+            await session._publish_attention_outcome()
+            stale = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+            assert stale is not None and session._attention_republish_due
+        finally:
+            holder.release()
+            holder.close()
+
+        # The next turn ends before any rung fires: its outcome is the newest fact
+        # there is, and it publishes on its own.
+        session._attention_outcome = AgentEndEvent(messages=[], error="Second failure")
+        await session._publish_attention_outcome()
+        newest = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        assert newest is not None and newest["token"] != stale["token"]
+        assert not session._attention_republish_due, "a newer outcome cancels the pending republish"
+
+        await session._run_attention_republish(0, 0.0)
+        assert store.state(identity)["completion_token"] == newest["token"]
+        assert _completion_rows(path, identity) == 2, "the superseded turn was never published"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_dispose_does_not_wait_for_a_parked_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown cancels the ladder rather than waiting out its rungs.
+
+    The rungs are parked 30 s apart here and `dispose` is given a 5 s bound, so a
+    regression is a `TimeoutError` rather than a teardown that hangs for a minute.
+    The ladder runs through the same tracked-task machinery as every other
+    background spawn for exactly this reason: `dispose` cancels it, so a session
+    that quits with a deferral outstanding does not hold the process open.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 30.0, 30.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    path = config_dir() / "attention.db"
+    # Materialise the store before a sibling takes its lock, and give it a row: the
+    # ladder is the only thing that will publish the next one.
+    AttentionStore(path).publish("session/sess", str(uuid.uuid4()), "anchor-earlier", "complete")
+    holder = _HeldWriteLock(path)
+    try:
+        session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+        await session._publish_attention_outcome()
+        assert session._attention_republish_due
+        parked = session._attention_republish_task
+        assert parked is not None
+    finally:
+        holder.release()
+        holder.close()
+
+    await asyncio.wait_for(session.dispose(), timeout=5.0)
+    assert parked.done() and parked.cancelled(), "dispose must cancel the parked rung"
+
+
+# ---------------------------------------------------------------------------
+# The republish ladder's own failure modes, from review round 1.
+#
+# Three of these are about the same thing: a retry path that is supposed to be
+# BOUNDED has to be bounded in every arm, not only the happy one. The fourth is
+# the reason the first one matters -- a fresh `sequence` is exactly how an older
+# completion can outrank a newer one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rung_cannot_outrank_a_newer_turn_that_publishes_inside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deferred OLDER completion must never take the newest `sequence`.
+
+    `completions.sequence` is AUTOINCREMENT, i.e. INSERT order, and `state_many`
+    reports `MAX(sequence)` as the conversation's newest completion -- so a rung
+    that reads the journal, then loses the store to a NEWER same-session turn inside
+    its `await`, would insert the older completion on top and the sidebar mark, the
+    Active ordering and the newest-row pointer would all move to the older result.
+    Once a client acknowledged that highest sequence, the newer completion would
+    never be reported unread again: the exact symptom class this ladder exists to
+    remove, re-entered through the window the ladder opens.
+
+    The interleaving is injected at the one await boundary (`AttentionStore.publish`
+    for the deferred token parks until this test says go), because only a
+    same-process newer token can invert this conversation's order.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 30.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        # Consume the boot restore first, so the tick below reaches the LADDER.
+        await session.refresh_attention()
+
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="First failure")
+            await session._publish_attention_outcome()
+            older = (session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE) or {})["token"]
+            assert session._attention_republish_due
+        finally:
+            holder.release()
+            holder.close()
+
+        real_publish = AttentionStore.publish
+        entered = threading.Event()
+        release_older = threading.Event()
+        seen: list[str] = []
+
+        def parked_publish(store_self, conversation, token, anchor, kind, **kwargs):
+            # `publish` runs in a WORKER THREAD (`asyncio.to_thread`), so the park is
+            # a thread-side wait: the event loop stays free to run the newer turn,
+            # which is the interleaving this test is about.
+            seen.append(token)
+            if token == older:
+                entered.set()
+                release_older.wait(timeout=30)
+            return real_publish(store_self, conversation, token, anchor, kind, **kwargs)
+
+        monkeypatch.setattr(AttentionStore, "publish", parked_publish)
+        # Drive the republish as a TASK, not through the tick: the tick fires the
+        # ladder now and performed the publish before the fix (MAJOR-3), and this
+        # test is about the republish path itself, which both trees share.
+        republish = asyncio.create_task(session._republish_journalled_outcome())
+        await _wait_until(entered.is_set, seconds=10, what="the republish to reach its insert")
+
+        # The newer turn completes HERE, between that journal read and its insert --
+        # the window MAJOR-1 is about.
+        session._attention_outcome = AgentEndEvent(messages=[], error="Second failure")
+        newer_publish = asyncio.create_task(session._publish_attention_outcome())
+        # Give it a generous chance to land first. THE LOCK MAKES THAT IMPOSSIBLE
+        # while the republish is inside its critical section, which is the point of
+        # the fix -- so this is a bounded wait, never an assumption about who wins a
+        # race: without the lock the newer turn lands here, and the release below
+        # then stamps the OLDER completion on top of it.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            landed = [token for token in seen if token != older]
+            if landed and store.state(identity)["completion_token"] == landed[0]:
+                break
+            await asyncio.sleep(0.02)
+        release_older.set()
+        await asyncio.wait_for(republish, timeout=30)
+        await asyncio.wait_for(newer_publish, timeout=30)
+
+        newer = (session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE) or {})["token"]
+        assert newer != older
+        with closing(sqlite3.connect(path)) as conn:
+            sequences = dict(
+                conn.execute(
+                    "SELECT token, sequence FROM completions WHERE conversation=?",
+                    (identity,),
+                ).fetchall()
+            )
+        assert sequences[newer] > sequences[older], "the newer completion must outrank the older"
+        state = store.state(identity)
+        assert state["completion_token"] == newer, "the newest completion is the newer turn"
+        assert state["unseen"] is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_non_contention_store_failure_disarms_the_latch_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broken store is not a busy one: one attempt, one traceback, then stop.
+
+    The helper returns `True` for a non-contention failure -- "nothing more is owed
+    in this process" -- so the latch has to go with it. Left armed, every caller of
+    `refresh_attention` (the runtime's 1 Hz loop, the TUI's 1 Hz poll, the mobile
+    handle) re-read the journal, re-attempted the write and logged a traceback EVERY
+    SECOND for the life of the session, which is the per-tick cost this ladder
+    exists to bound (review round 1, MAJOR-2).
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 0.0, 0.0, 0.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        await session.refresh_attention()
+
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+            await session._publish_attention_outcome()
+            assert session._attention_republish_due
+        finally:
+            holder.release()
+            holder.close()
+
+        attempts: list[str] = []
+
+        def broken_publish(store_self, conversation, token, anchor, kind, **kwargs):
+            attempts.append(token)
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(AttentionStore, "publish", broken_publish)
+        with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+            for _ in range(3):
+                await session.refresh_attention()
+                await asyncio.sleep(0.02)
+            assert len(attempts) == 1, f"a broken store must be tried once, got {attempts}"
+            assert not session._attention_republish_due, "the latch must go with the attempt"
+            tracebacks = [
+                record
+                for record in caplog.records
+                if "could not republish the journalled outcome" in record.getMessage()
+            ]
+            assert len(tracebacks) == 1, "one traceback, not one per tick"
+            # And the ticks after it cost nothing at all.
+            for _ in range(3):
+                await session.refresh_attention()
+                await asyncio.sleep(0.02)
+        assert len(attempts) == 1, f"a disarmed latch must not retry per tick: {attempts}"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_armed_latch_costs_a_tick_no_store_write_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick FIRES the parked rung; it never performs its own publish.
+
+    Publishing from the tick meant one full store budget (the desktop bridge
+    measures ~10.8 s worst case) per tick, per client-attached session, for the
+    whole contention window -- up to ~86 attempts at 1 Hz against the ladder's four
+    rungs, on the store this module calls the most contended on the machine. The
+    bound asserted here is the ladder's own rung count, which is the whole point of
+    having a ladder (review round 1, MAJOR-3).
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    delays = (30.0, 30.0, 30.0, 30.0)
+    _shrink_the_ladder(monkeypatch, *delays)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        await session.refresh_attention()
+
+        attempts: list[str] = []
+        real_publish = AttentionStore.publish
+
+        def counting_publish(store_self, conversation, token, anchor, kind, **kwargs):
+            attempts.append(token)
+            return real_publish(store_self, conversation, token, anchor, kind, **kwargs)
+
+        holder = _HeldWriteLock(path)  # held for the whole test: every rung defers
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+            await session._publish_attention_outcome()
+            assert session._attention_republish_due
+            monkeypatch.setattr(AttentionStore, "publish", counting_publish)
+            for _ in range(8):
+                await session.refresh_attention()
+                await asyncio.sleep(0.05)
+            await _wait_until(
+                lambda: not session._attention_republish_due,
+                what="the ladder to spend its rungs and stand down",
+            )
+            assert 0 < len(attempts) <= len(delays), (
+                f"8 ticks must cost the ladder's {len(delays)} rungs, not one write "
+                f"each: {attempts}"
+            )
+            spent = len(attempts)
+            for _ in range(3):
+                await session.refresh_attention()
+                await asyncio.sleep(0.02)
+            assert len(attempts) == spent, "a disarmed latch costs a tick nothing"
+        finally:
+            holder.release()
+            holder.close()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_deferral_inside_the_last_rung_restarts_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A deferral that arrives under a spent ladder gets a budget of its own.
+
+    `_schedule_attention_republish` returns early while a rung is in flight, so a
+    deferral landing during the FINAL rung used to inherit that rung's spent budget
+    and then be cleared along with the latch the exhausted arm takes -- the
+    completion (and the log line blaming "4 republish attempts") then waited for a
+    boot that an idle session never has, which is the defect this PR fixes, under a
+    condition a fleet-wide storm can produce (review round 1, MINOR-2).
+
+    The newer marker is journalled from inside the rung's own publish, which is
+    exactly where a newer turn's outcome lands.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 30.0)  # one rung: the parked rung IS the last one
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        await session.refresh_attention()
+
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="First failure")
+            await session._publish_attention_outcome()
+            older = (session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE) or {})["token"]
+            assert session._attention_republish_due
+        finally:
+            holder.release()
+            holder.close()
+
+        newest_marker = {
+            "conversation_id": identity,
+            "token": str(uuid.uuid4()),
+            "anchor": "anchor-from-the-newer-turn",
+            "kind": "complete",
+            "cause": "",
+            "reason": "",
+        }
+        real_publish = AttentionStore.publish
+        entered = threading.Event()
+        release_thread = threading.Event()
+        injected = {"done": False}
+
+        def injecting_publish(store_self, conversation, token, anchor, kind, **kwargs):
+            # Thread-side again: the rung's insert runs in a worker thread, so this
+            # parks the WRITE while the test's loop appends the newer turn's marker
+            # underneath it -- exactly where a newer outcome lands.
+            if token == older and not injected["done"]:
+                injected["done"] = True
+                entered.set()
+                release_thread.wait(timeout=30)
+            return real_publish(store_self, conversation, token, anchor, kind, **kwargs)
+
+        holder = _HeldWriteLock(path)  # held for the WHOLE test: every attempt defers
+        try:
+            first_task = session._attention_republish_task
+            monkeypatch.setattr(AttentionStore, "publish", injecting_publish)
+            with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+                await session.refresh_attention()  # fires the parked last rung
+                await _wait_until(entered.is_set, seconds=10, what="the rung to reach its insert")
+                # The newer turn journals while this rung is trying to insert.
+                await session._transcript.append_custom(ATTENTION_CUSTOM_TYPE, newest_marker)
+                release_thread.set()
+                # The rung spends its last attempt and gives up -- and the handle it
+                # replaces is the proof that the budget was RESTARTED, not cleared.
+                await _wait_until(
+                    lambda: session._attention_republish_task is not first_task,
+                    seconds=10,
+                    what="the restarted ladder to replace the spent rung",
+                )
+            assert session._attention_republish_due, "the newer deferral keeps its own budget"
+            assert not any(
+                "only the next boot's import" in record.getMessage() for record in caplog.records
+            ), "a restart must not blame the ladder that just gave up"
+            assert session._attention_republish_task is not None
+            assert not session._attention_republish_task.done()
+            # With the store free again, the restarted ladder publishes the marker
+            # the journal holds now -- the newer turn's, not the one it gave up on.
+            holder.release()
+            await session.refresh_attention()
+            await _wait_for_store(path, identity, newest_marker["token"])
+        finally:
+            release_thread.set()
+            holder.release()
+            holder.close()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_handle_is_dropped_once_it_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tracked handle does not outlive the ladder (review round 1, NIT-1).
+
+    A rung spawns its successor and the successor becomes the ladder, so the clear
+    is guarded on identity rather than blind -- but when the LAST rung is gone the
+    session must not keep it (and its coroutine frame) for the rest of its life.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 0.0, 0.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        await session.refresh_attention()
+
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+            await session._publish_attention_outcome()
+            assert session._attention_republish_task is not None
+        finally:
+            holder.release()
+            holder.close()
+
+        token = (session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE) or {})["token"]
+        await _wait_for_store(path, identity, token)
+        await _wait_until(
+            lambda: session._attention_republish_task is None,
+            seconds=5.0,
+            what="the finished ladder's handle to be dropped",
+        )
     finally:
         await session.dispose()

@@ -147,6 +147,16 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                     return await original(*args, **kwargs)
 
                 monkeypatch.setattr(handle, "subscribe_frontend", held_subscribe)
+                # THE HOLD HAS TO BE A HOLD. ``_serve_frontend_sync`` gives the
+                # on-loop bind ``_ONLOOP_BIND_GRACE_S`` and then binds off-loop, so
+                # a subscription that never returns no longer holds this viewer at
+                # all: it becomes authoritative in ~100 ms, which is the change
+                # that made a busy owner attachable and is NOT what this test is
+                # about. Removing the off-loop entry point (the shape a single-plane
+                # TUI-kind handle has) keeps the bind outstanding for as long as the
+                # test says, which is the state under test: what the sidebar does
+                # while an AUTHENTICATED sync has still not landed.
+                monkeypatch.delattr(ServingSessionHandle, "subscribe_frontend_nowait")
             server = RuntimeServer(handle, kind="daemon")
             await server.start_in_process()
             servers[sid] = server

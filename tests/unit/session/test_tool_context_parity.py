@@ -204,6 +204,52 @@ def test_scratchpad_dir_is_none_for_an_agent_directory(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# attached_probe: DERIVED from the session's own goal state, which is why it is
+# not in the table either — there is no host-supplied value to hand and compare,
+# so the sentinel guard cannot see it. It is pinned directly instead, because
+# dropping it is not a hypothetical: the field is what the browser flow reads to
+# say whether a question can be presented, and a context that lost it would
+# silently return every access prompt to the pre-fix text.
+# ---------------------------------------------------------------------------
+
+
+def test_the_attached_probe_reads_the_sessions_live_goal_state(tmp_path) -> None:
+    """The field is populated, and it is a LIVE read rather than a snapshot."""
+    from local_operator.session.goal import GoalState
+
+    session = _session_for(tmp_path, tmp_path / "sessions" / "attached")
+    session._goal_state = GoalState()
+    state = {"attached": False}
+    session._goal_state.interactive_probe = lambda: state["attached"]
+
+    context = session._build_tool_context()
+    assert context.attached_probe is not None
+    assert context.attached_probe() is False
+    # A context is built once per TURN, so a value captured at build time would
+    # freeze the answer for the rest of the turn — the browser flow asks after
+    # it has waited.
+    state["attached"] = True
+    assert context.attached_probe() is True
+
+
+def test_an_unprobed_session_reads_as_attached(tmp_path) -> None:
+    """``None`` probe means attached: a host with a person in front of it.
+
+    This is the direction every uncertain path in this design falls. A wrong
+    "attached" costs a parked gate and a late answer; a wrong "unattached" costs
+    a turn that gives up on a question the operator was ready to answer.
+    """
+    from local_operator.session.goal import GoalState
+
+    session = _session_for(tmp_path, tmp_path / "sessions" / "bare")
+    session._goal_state = GoalState()
+
+    context = session._build_tool_context()
+    assert context.attached_probe is not None
+    assert context.attached_probe() is True
+
+
+# ---------------------------------------------------------------------------
 # may_delegate: DERIVED from the live tool inventory (``self._tools``), which is
 # why it is not in the table either. It is the field this module's shape of
 # failure would bite hardest — a delegating shell that reads False is REFUSED

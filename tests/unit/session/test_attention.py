@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -11,6 +12,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -2062,3 +2064,175 @@ def test_only_a_user_gesture_can_reach_the_batch_operation() -> None:
     assert _batch_call_sites("acknowledge_attention_many") == {
         "server/routes/desktop_sessions.py": ["seen_many"],
     }
+
+
+# ---------------------------------------------------------------------------
+# The republish LADDER, from the boot side and from the journal's side.
+#
+# `test_attention_lock_contention.py` drives the ladder a deferred PUBLISH arms,
+# against a real held lock. The three arms here are the rest of the rule: the boot
+# restore arms the same ladder, a marker the product wrote as ineligible is never
+# republished, and a rung publishes the journal's LATEST marker rather than the
+# token its deferral was about.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_boot_restore_arms_the_same_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The boot path defers into the ladder, not into a boot that already happened.
+
+    A session starting on a machine whose store is held used to consume its
+    one-shot import and set `_attention_restored` whether or not the publish
+    landed, so the journalled outcome was left to the NEXT boot -- and a session
+    that finishes and idles never boots again. The one-shot stays one-shot (the
+    flag is still what makes this a boot import rather than a per-tick retry);
+    what changed is that a deferred one now arms the retry.
+    """
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_attention_lock_contention import (
+        _HeldWriteLock,
+        _shrink_the_budget,
+        _shrink_the_ladder,
+        _wait_for_store,
+    )
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 1.0, 1.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        identity = conversation_identity(session._transcript.directory)
+        token = str(uuid.uuid4())
+        # The product's own journal shape, appended the way the turn does.
+        await session._transcript.append_custom(
+            "completion_attention",
+            {
+                "conversation_id": identity,
+                "token": token,
+                "anchor": "anchor-from-the-journal",
+                "kind": "complete",
+                "cause": "",
+                "reason": "",
+            },
+        )
+        path = config_dir() / "attention.db"
+        AttentionStore(path).publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        holder = _HeldWriteLock(path)
+        try:
+            with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+                await session.refresh_attention()
+            assert session._attention_restored, "the boot import stays one-shot"
+            assert session._attention_republish_due, "a deferred restore must arm the ladder"
+            assert "is deferred" in caplog.text, caplog.text
+        finally:
+            holder.release()
+            holder.close()
+
+        state = await _wait_for_store(path, identity, token)
+        assert state["anchor_id"] == "anchor-from-the-journal"
+        assert state["unseen"] is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ineligible_marker_is_never_republished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`eligible: False` is the product saying a turn has nothing to show.
+
+    It is written instead of a completion (a complete turn with no assistant text
+    and no delegated child), so republishing one would mint a store row for a turn
+    with no result behind it -- a checkmark over nothing. The ladder's answer must
+    be "satisfied", and it must cost no store access to say so.
+    """
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        identity = conversation_identity(session._transcript.directory)
+        await session._transcript.append_custom(
+            "completion_attention",
+            {"conversation_id": identity, "token": str(uuid.uuid4()), "eligible": False},
+        )
+        attempts: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            AttentionStore, "publish", lambda *args, **kwargs: attempts.append(args)
+        )
+        # What a deferral would have left armed.
+        session._attention_republish_due = True
+        assert await session._republish_journalled_outcome() is True
+        assert attempts == [], "an ineligible marker is satisfied, not deferred"
+        assert not session._attention_republish_due, "and the latch clears either way"
+        path = config_dir() / "attention.db"
+        assert AttentionStore(path).state(identity)["completion_token"] is None
+        assert not path.exists(), "a satisfied ladder must not even create the store"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_publishes_the_journals_latest_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rung publishes what the transcript holds NOW, never a token it was armed for.
+
+    The deferral here is turn A's, and turn B journals its own marker before any
+    rung fires -- which is what a second turn finishing inside the ladder's window
+    does. Publishing A would be a REVIVE: an older completion taking a FRESH
+    sequence (so `claim_delivery` would notify about a result the human already
+    saw) and sitting on top of B's row, hiding the newer result. Reading the journal
+    per rung is what makes that unrepresentable, so this asserts on the rows.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_attention_lock_contention import (
+        _HeldWriteLock,
+        _shrink_the_budget,
+        _shrink_the_ladder,
+    )
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    # Parked rungs: nothing fires until the rung is driven by hand below, so the
+    # journal's state at that moment is what the rung acts on.
+    _shrink_the_ladder(monkeypatch, 30.0, 30.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="First failure")
+            await session._publish_attention_outcome()
+            stale = session._transcript.latest_custom("completion_attention")
+            assert stale is not None and session._attention_republish_due
+            newest = {
+                "conversation_id": identity,
+                "token": str(uuid.uuid4()),
+                "anchor": "anchor-from-turn-b",
+                "kind": "complete",
+                "cause": "",
+                "reason": "",
+            }
+            await session._transcript.append_custom("completion_attention", newest)
+        finally:
+            holder.release()
+            holder.close()
+
+        await session._run_attention_republish(0, 0.0)
+        state = store.state(identity)
+        assert state["completion_token"] == newest["token"]
+        assert state["anchor_id"] == "anchor-from-turn-b"
+        with closing(sqlite3.connect(path)) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM completions WHERE token=?", (stale["token"],)
+            ).fetchone()[0]
+        assert rows == 0, "the superseded deferral's token must never be published"
+    finally:
+        await session.dispose()

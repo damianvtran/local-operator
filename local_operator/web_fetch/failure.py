@@ -34,8 +34,6 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Literal, Mapping, Sequence
 
-import httpx
-
 #: The failure classes. ``ok`` is not modelled — a 2xx/3xx returns ``None`` from
 #: :func:`classify_response`, so "no failure" is the absence of one of these
 #: rather than a value that has to be checked for everywhere.
@@ -170,6 +168,13 @@ def classify_exception(exc: BaseException, *, timeout_s: float | None = None) ->
     the shipped error message came to read ``timed out fetching '<url>': `` with
     nothing after the colon.
     """
+    # Imported here, not at module scope: the TUI's tool card imports this
+    # module at boot for three string helpers, and a module-level httpx made the
+    # whole HTTP client stack part of first paint (backend load report B-F10).
+    # Only this classifier needs the exception types, and it only runs after a
+    # fetch -- which has already imported httpx to make the request.
+    import httpx
+
     waited = f" after {timeout_s:.1f}s" if timeout_s else ""
     if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout)):
         return FetchFailure(
