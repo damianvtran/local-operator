@@ -406,6 +406,7 @@ def _frontend_jobs_delay(last_cost_s: float) -> float:
         max(_FRONTEND_JOBS_FLOOR_S, last_cost_s / _FRONTEND_JOBS_MAX_SHARE - last_cost_s),
     )
 
+
 #: How long the session waits between attempts to REPUBLISH a completion whose
 #: first publication lost to a contended ``attention.db``, in seconds.
 #:
