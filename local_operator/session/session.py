@@ -369,6 +369,44 @@ _NAME_PERSIST_MAX_PASSES = 3
 #: person will sit through once on ctrl+d.
 _NAME_FLUSH_TIMEOUT_S = 5.0
 
+#: The full-viewer job-roster tick (``Session._schedule_frontend_jobs``): its
+#: floor, the loop share it may take, and the longest a roster may wait.
+_FRONTEND_JOBS_FLOOR_S = 0.05
+_FRONTEND_JOBS_MAX_SHARE = 0.25
+_FRONTEND_JOBS_CEILING_S = 1.0
+
+
+def _frontend_jobs_delay(last_cost_s: float) -> float:
+    """How long to wait before the next job-roster tick, given the last one's cost.
+
+    WHY IT ADAPTS. The tick was a fixed 50 ms regardless of what it cost, so a
+    tick that costs as much as its own period takes the whole loop — and this is
+    the loop that admits the user's next message. Measured on a runtime with 12
+    stepping lanes and a 240-record roster under one full viewer
+    (``scripts/bench_send_admission.py --condition roster``): ``refresh_jobs``
+    cost 22.6 ms CPU p50 / 61 ms p95 per call, and after the other two fixes in
+    this change it was still 46% of all loop samples, with a prompt waiting
+    0.5-0.8 s to be admitted behind it.
+
+    Spacing the next tick by ``cost / share`` bounds this publisher to
+    ``_FRONTEND_JOBS_MAX_SHARE`` of the loop whatever the roster's size, while a
+    cheap tick (the common case: a handful of children) keeps the 50 ms floor
+    and so repaints exactly as before. The ceiling keeps a pathological roster
+    live at ≥1 Hz rather than letting its cadence grow without bound.
+
+    NOTHING GOES STALE BY THIS: each tick reads the live manager when it fires,
+    so a later tick publishes everything an earlier one would have; only the
+    number of intermediate snapshots a viewer sees drops, and those are
+    snapshots of state the next one supersedes.
+    """
+    if last_cost_s <= 0.0:
+        return _FRONTEND_JOBS_FLOOR_S
+    return min(
+        _FRONTEND_JOBS_CEILING_S,
+        max(_FRONTEND_JOBS_FLOOR_S, last_cost_s / _FRONTEND_JOBS_MAX_SHARE - last_cost_s),
+    )
+
+
 #: How long the session waits between attempts to REPUBLISH a completion whose
 #: first publication lost to a contended ``attention.db``, in seconds.
 #:
@@ -7976,17 +8014,30 @@ class Session:
             return
         self._frontend_jobs_refresh_scheduled = True
         try:
-            asyncio.get_running_loop().call_later(0.05, self._flush_frontend_jobs)
+            asyncio.get_running_loop().call_later(
+                _frontend_jobs_delay(getattr(self, "_frontend_jobs_last_cost_s", 0.0)),
+                self._flush_frontend_jobs,
+            )
         except RuntimeError:
             self._frontend_jobs_refresh_scheduled = False
             store.refresh_jobs(self)
 
     def _flush_frontend_jobs(self) -> None:
-        """Coalesce a burst of child trajectory/progress mutations per loop tick."""
+        """Coalesce a burst of child trajectory/progress mutations per loop tick.
+
+        Records the tick's own wall cost so the NEXT tick is spaced by it (see
+        :func:`_frontend_jobs_delay`). Wall, not CPU: what the loop cannot do
+        while this runs — admit a prompt, relay a frame — is wall time, and on
+        a contended host that includes the GIL waits inside the tick.
+        """
         self._frontend_jobs_refresh_scheduled = False
         store = getattr(self, "_frontend_state_store", None)
         if store is not None:
-            store.refresh_jobs(self)
+            started = time.perf_counter()
+            try:
+                store.refresh_jobs(self)
+            finally:
+                self._frontend_jobs_last_cost_s = time.perf_counter() - started
 
     def note_cut_off(self, cause: str, detail: str = "") -> None:
         """Record WHY the current turn is being cut off, before it ends.

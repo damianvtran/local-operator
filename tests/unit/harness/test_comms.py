@@ -16,10 +16,12 @@ import asyncio
 import json
 import time
 from collections import Counter
+from pathlib import Path
 from typing import Any, Callable, cast
 
 import pytest
 
+from local_operator.harness import comms as comms_module
 from local_operator.harness.comms import SubagentComms, extract_parent_message
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.subagent import MCP_DENIED_ATTR
@@ -3467,3 +3469,50 @@ def test_resume_names_a_pre_attach_failure_rather_than_saying_never_started() ->
     result2, reason2 = comms.resume("parked", "carry on")
     assert result2 is None
     assert reason2 is not None and "never started" in reason2
+
+
+# -- the transcript probe outlives one pass, bounded by a TTL -------------------
+#
+# A roster pass runs once per root event; a probe memoised only per pass was
+# still one ``stat`` per settled child per EVENT -- 52% of a loaded runtime's
+# loop samples (``scripts/bench_send_admission.py --condition roster
+# --sample``). Counted, not timed.
+
+
+def test_consecutive_passes_share_one_transcript_probe(tmp_path, monkeypatch) -> None:
+    comms = _settled_roster(8, tmp_path)
+    probes: list[Path] = []
+    original = Path.exists
+
+    def counting(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self.name == TRANSCRIPT_FILENAME:
+            probes.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", counting)
+    for _ in range(20):
+        assert all(row.resumable for row in comms.roster())
+    assert len(probes) == 8, f"20 passes over 8 children probed {len(probes)} times"
+
+
+def test_a_cached_probe_expires_and_a_vanished_transcript_is_seen(tmp_path, monkeypatch) -> None:
+    comms = _settled_roster(1, tmp_path)
+    [row] = comms.roster()
+    assert row.resumable
+    (tmp_path / "job-0000" / TRANSCRIPT_FILENAME).unlink()
+    clock = [comms_module.time.monotonic() + comms_module.TRANSCRIPT_PROBE_TTL_S + 1]
+    monkeypatch.setattr(comms_module.time, "monotonic", lambda: clock[0])
+    [row] = comms.roster()
+    assert row.resumable is False
+    assert row.detail == "transcript is gone from disk"
+
+
+def test_attaching_a_child_forgets_its_directorys_cached_probe(tmp_path) -> None:
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    session_dir = tmp_path / "child"
+    session_dir.mkdir()
+    assert comms._transcript_on_disk(session_dir) is False
+    (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+    comms.attach("job-1", FakeChild(), session_dir)  # type: ignore[arg-type]
+    assert comms._transcript_on_disk(session_dir) is True

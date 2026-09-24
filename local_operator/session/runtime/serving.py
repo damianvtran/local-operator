@@ -60,7 +60,13 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
-from local_operator.harness.types import AgentEndEvent, AgentEvent, ModelChangeEvent
+from local_operator.harness.types import (
+    AgentEndEvent,
+    AgentEvent,
+    ModelChangeEvent,
+    SubagentEndEvent,
+    SubagentStartEvent,
+)
 from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
@@ -213,6 +219,11 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
+
+#: Coalescing window for the per-event child-roster republish. The same 50 ms
+#: as ``RuntimeServer._push_later`` (the repaint it feeds) and
+#: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
+_ROSTER_REFRESH_COALESCE_S = 0.05
 
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
@@ -660,6 +671,7 @@ class ServingSessionHandle(SessionHandle):
         #: type, not a dynamic one every reader has to guess at.
         self._registrant: Any = None
         self._on_projection: Callable[[], None] | None = None
+        self._roster_refresh_scheduled = False
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,  # stamped by the registrant's record
@@ -2580,7 +2592,16 @@ class ServingSessionHandle(SessionHandle):
             # state machine, so folding inline is safe. Only the repaint push
             # crosses threads.
             self._fold.fold_event(event)
-            self._refresh_state()
+            # The ROSTER half of the refresh is coalesced, the scalar half is
+            # not; see ``_schedule_roster_refresh``. A subagent start/end is
+            # the exception: the fold REBUILDS that child's row from the event,
+            # which carries no session id, so the registry's identity fields
+            # must be re-applied before this event's own push goes out.
+            if isinstance(event, (SubagentStartEvent, SubagentEndEvent)):
+                self._refresh_state()
+            else:
+                self._refresh_state(roster=False)
+                self._schedule_roster_refresh()
             self._refresh_todos()
             if isinstance(event, ModelChangeEvent):
                 self._retry_naming_after_route_change()
@@ -7140,7 +7161,61 @@ class ServingSessionHandle(SessionHandle):
             return
         raise RuntimeError("this session cannot accept that op right now")
 
-    def _refresh_state(self) -> None:
+    def _schedule_roster_refresh(self) -> None:
+        """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.
+
+        WHY. ``set_subagent_details`` is one linear pass over a registry capped
+        at ``MAX_RECORDS`` (256), and it ran inline for EVERY root event — which,
+        on a parent with live lanes, is token rate: every lane's progress, every
+        streamed delta of the parent's own turn. Linear is not free at that rate.
+        Sampled on a runtime with 12 stepping lanes and a 240-record roster
+        (``scripts/bench_send_admission.py --condition roster --sample``), 557 of
+        1,846 loop samples (30%) sat in ``set_subagent_details`` after the
+        transcript-probe fix, and a prompt waited 0.8 s p50 behind it to be
+        admitted. The loop that runs this is the loop that admits the user's
+        next message.
+
+        WHY NOTHING IS LOST. The scheduled pass reads the LIVE registry when it
+        fires, so it can never publish a roster older than the one an inline
+        call would have; it only folds a burst of N events into one pass. The
+        repaint it feeds is already coalesced at the same 50 ms by
+        ``RuntimeServer._schedule_push``, so a viewer sees roster movement at
+        most one push tick later than before. Everything else the handler
+        publishes (scalar state, todos, busy, gates) still refreshes inline, and
+        the two events whose fold REPLACES a row refresh inline as well (see the
+        handler).
+
+        Mirrors ``Session._schedule_frontend_jobs``, the coalescer the full-TUI
+        roster has used for the same reason.
+        """
+        if self._roster_refresh_scheduled:
+            return
+        self._roster_refresh_scheduled = True
+        try:
+            self._loop.call_later(_ROSTER_REFRESH_COALESCE_S, self._flush_roster_refresh)
+        except RuntimeError:
+            # No running loop to defer onto (a closing loop, a synchronous test
+            # host): publish now rather than drop the roster.
+            self._roster_refresh_scheduled = False
+            self._refresh_roster()
+
+    def _flush_roster_refresh(self) -> None:
+        self._roster_refresh_scheduled = False
+        if self._disposing:
+            return
+        try:
+            self._refresh_roster()
+        except Exception:  # noqa: BLE001 — a panel refresh never fails the loop
+            logger.debug("deferred roster refresh failed", exc_info=True)
+            return
+        self._notify()
+
+    def _refresh_roster(self) -> None:
+        comms = getattr(self._session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
+
+    def _refresh_state(self, *, roster: bool = True) -> None:
         self._fold.set_state(
             model_label=_effective_label(self._session),
             model_selector=_selector(self._session),
@@ -7168,10 +7243,10 @@ class ServingSessionHandle(SessionHandle):
         # The cost is the one the TUI already pays per folded event: one linear
         # registry pass, plus a job-row lookup and the outcome/error text caps
         # per node (both listed as unaddressed in the PR). No child transcript
-        # ever leaves with it.
-        comms = getattr(self._session, "_subagent_comms", None)
-        if comms is not None:
-            self._fold.set_subagent_details(comms)
+        # ever leaves with it. ``roster=False`` is the per-event path, which
+        # defers this half to ``_schedule_roster_refresh``.
+        if roster:
+            self._refresh_roster()
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command
