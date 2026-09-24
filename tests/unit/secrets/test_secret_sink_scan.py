@@ -1668,7 +1668,7 @@ def test_r5_a_non_command_word_is_not_read_as_the_command(command: str, label: s
         "lop secret run --secret NAME=TOK -- time -p curl -sS http://127.0.0.1:9/",
         "lop secret run --secret NAME=TOK -- node -pe '1 + 1'",
         "lop secret file --env-var KF NAME -- sh -c 'wc -c < \"$KF\"'",
-        "lop secret file --env-var KF NAME -- gcloud auth activate-service-account --key-file \"$KF\"",
+        'lop secret file --env-var KF NAME -- gcloud --key-file "$KF"',
         "lop secret run --secret NAME=TOK -- lop secret get NAME | wc -c",
         "lop secret run --secret NAME=TOK -- lop secret get NAME >/dev/null",
         "lop secret run --secret NAME=TOK -- lop secret list",

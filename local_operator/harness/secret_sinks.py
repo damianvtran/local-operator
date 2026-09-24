@@ -1733,9 +1733,7 @@ def _env_clears_environment(wrappers: Sequence[str]) -> bool:
         # other word can equal, so a nested `env env -i` is not swallowed into
         # the first step, and a stand-in consumer follows because without a
         # word after it the grammar reads the wrapper as the command itself.
-        step, _ = _wrapped_command_index(
-            ["\0", *wrappers[cursor + 1 :], "\0"], table={"\0": spec}
-        )
+        step, _ = _wrapped_command_index(["\0", *wrappers[cursor + 1 :], "\0"], table={"\0": spec})
         if step <= 0:
             return False
         if wrapper == "env":
@@ -2646,7 +2644,11 @@ class _ShellAnalyzer:
             for index, item in enumerate(stage)
             if isinstance(item, _Word) and index not in redirects
         ]
-        texts = [self._word_text(stage[index]).strip() for index in positions]  # type: ignore[arg-type]
+        texts = [
+            self._word_text(item).strip()
+            for index in positions
+            if isinstance(item := stage[index], _Word)
+        ]
         if "run" not in texts:
             return None
         cursor = texts.index("run") + 1
