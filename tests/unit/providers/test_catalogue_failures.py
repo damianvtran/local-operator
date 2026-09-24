@@ -31,6 +31,7 @@ from local_operator.providers.controller import (
     CatalogueEntry,
     ProviderController,
 )
+from local_operator.providers.registry import store_provider_key
 
 #: Any environment key that would make one of these providers "engaged" through
 #: ``resolve_env_key`` and so change what a case asserts. Deleted per test rather
@@ -92,6 +93,29 @@ def _entry(provider: str) -> CatalogueEntry:
         output_price=0.0,
         connected=True,
     )
+
+
+def test_a_store_first_credential_engages_the_provider(
+    controller: ProviderController, isolated: Path
+) -> None:
+    """A key saved through Settings engages a provider auth.db knows nothing about.
+
+    `usable_providers()` reads auth rows and the environment. The provider-class
+    rows of the encrypted secret store — what `PATCH /v1/credentials`, `lop
+    credential update` and the desktop Settings / onboarding flows write — are
+    invisible to it, which is why `persisted_providers()` exists and why the
+    mobile daemon passes `providers=`. Engaging on `usable_providers()` alone made
+    this rule go SILENT for a provider the user HAD engaged, on exactly the ids
+    `live_catalogue` fetches anonymously (a keyless aggregator's listing 401s, so
+    the failure is real).
+    """
+    store_provider_key("OPENROUTER_API_KEY", "sk-or-from-settings", base=isolated)
+    # The gap this test is about, asserted rather than assumed.
+    assert "openrouter" not in (controller.usable_providers() or set())
+    assert "openrouter" in (controller.persisted_providers() or set())
+    assert controller.catalogue_failures([], {"openrouter": "stale"}) == {
+        "openrouter": CATALOGUE_FAILURE_REASON
+    }
 
 
 def test_the_mock_host_is_never_named(controller: ProviderController) -> None:

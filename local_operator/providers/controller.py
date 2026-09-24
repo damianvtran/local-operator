@@ -2142,12 +2142,24 @@ class ProviderController:
            (:func:`local.configured_local_providers`): the preset port nobody
            chose is the app's own default with nobody home, which is not a
            provider that went away. Every other provider counts when it has a
-           usable credential. **When the credential store could not be read at
-           all (``usable_providers() is None``) the credential axis does NOT
-           narrow** — unknown is not unengaged, and this method follows the
-           degradation that already reads an unreadable store as "everything
-           connected". The local-endpoint axis is read from config instead, so
-           it still applies in that case.
+           usable credential, and that means the UNION of both credential views —
+           ``usable_providers()`` (auth rows + the environment) and
+           ``persisted_providers()`` (which adds the provider-class rows of the
+           encrypted secret store). The union is load-bearing rather than
+           belt-and-braces: the store is where ``PATCH /v1/credentials``, ``lop
+           credential update`` and the desktop Settings / onboarding flows write a
+           key, and ``usable_providers()`` cannot see it — the gap
+           ``persisted_providers()`` exists to close, and the reason the mobile
+           daemon passes ``providers=`` into :meth:`live_catalogue`. Consulting
+           only the first made this rule go SILENT for a user whose key came in
+           through Settings, on exactly the ids ``live_catalogue`` fetches
+           ANONYMOUSLY (so the failure is real and the provider IS one they
+           engaged). **When a store could not be read at all (either reader
+           returning ``None``) the credential axis does NOT narrow** — unknown is
+           not unengaged, and this method follows the degradation that already
+           reads an unreadable store as "everything connected". The
+           local-endpoint axis is read from config instead, so it still applies in
+           that case.
         3. The listing actually failed. The existing rule, unchanged: a status in
            ``FAILED_LISTING_STATUSES`` (``stale``/``empty``), or ``static`` with
            no rows contributed — ``static`` conflates "no listing endpoint, only
@@ -2178,7 +2190,14 @@ class ProviderController:
 
         contributed = {entry.provider for entry in entries}
         configured_local = configured_local_providers()
+        # BOTH credential views, for the reason item 2 gives: a key written through
+        # Settings / `lop credential update` lives in the secret store, which
+        # ``usable_providers()`` does not read at all. Either reader answers
+        # ``None`` when its store is unreadable, and then the axis narrows on
+        # nothing — unknown is not unengaged.
         usable = self.usable_providers()
+        persisted = self.persisted_providers()
+        engaged = None if usable is None or persisted is None else usable | persisted
         failures: dict[str, str] = {}
         for provider, status in statuses.items():
             if provider in NO_LISTING_PROVIDERS:
@@ -2187,7 +2206,7 @@ class ProviderController:
             if definition is not None and definition.local_setup:
                 if provider not in configured_local:
                     continue
-            elif usable is not None and provider not in usable:
+            elif engaged is not None and provider not in engaged:
                 continue
             if status in FAILED_LISTING_STATUSES or (
                 status == "static" and provider not in contributed
