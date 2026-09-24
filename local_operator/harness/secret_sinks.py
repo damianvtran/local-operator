@@ -1597,6 +1597,9 @@ _PRECOMMANDS: dict[str, tuple[frozenset[str], int]] = {
     "timeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
     "gtimeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
     "stdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0),
+    # Homebrew's coreutils prefix, as with `gtimeout`: the only GNU stdbuf on
+    # macOS, and the one that accepts the long spellings above.
+    "gstdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0),
     "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-P"}), 0),
 }
 

@@ -1612,6 +1612,10 @@ async def test_r4_1_a_wrapped_run_consumer_still_delivers_the_value(
             "lop secret run --secret NAME=TOK -- stdbuf --output L printenv TOK | rev",
             "shell.secret-verb-emitting-consumer",
         ),
+        (
+            "lop secret run --secret NAME=TOK -- gstdbuf --output L printenv TOK | rev",
+            "shell.secret-verb-emitting-consumer",
+        ),
         # R5-2: an `-i` that `env` does not own is no `env -i`.
         (
             "lop secret run --secret NAME=TOK -- stdbuf -i 0 env printenv TOK | rev",
