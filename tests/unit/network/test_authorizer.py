@@ -371,6 +371,8 @@ def test_the_wire_only_ever_gets_a_sentence() -> None:
 
 DEST = "d_" + "d" * 32
 THIRD = "d_" + "e" * 32
+#: The device a replica on this one was synced FROM (the push's sender).
+OWNER = "d_" + "f" * 32
 
 
 class TombstoneState(FakeState):
@@ -439,6 +441,86 @@ def test_the_carve_out_is_for_the_move_op_only() -> None:
             link(capabilities={"delete"}, device_id=DEST),
             {"op": "net_session_lifecycle", "req": 1, "action": "delete", "session_id": "s_moved"},
         )
+
+
+class ReplicaState(FakeState):
+    """A HOLDER: this device has synced ``s_replica`` from :data:`OWNER`."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.owners = {"s_replica": OWNER}
+
+    def replica_owner(self, session_id: str) -> str:
+        return self.owners.get(session_id, "")
+
+
+def _push(session_id: str = "s_replica") -> dict[str, Any]:
+    return {
+        "op": "net_sync",
+        "req": 1,
+        "phase": "available",
+        "session_id": session_id,
+        "reason": "idle-exit",
+    }
+
+
+def test_the_owner_may_push_a_holder_that_does_not_own_the_id() -> None:
+    """THE ONE FRAME A DEVICE ACCEPTS ABOUT A SESSION IT DOES NOT OWN.
+
+    A push travels OWNER -> HOLDER and says "your copy is behind". The holder is by
+    definition not the owner, so the ordinary ownership rule refused it — measured on
+    the real path, where the holder's relay answered its owner's push with "session …
+    does not live on this device", and no replica ever refreshed (review round 1,
+    M-4). The reviewer's probe had called the handler directly, so it saw the ack
+    without seeing this refusal.
+    """
+    authorizer, _audit = make(state=ReplicaState(sessions=set()))
+    granted = authorizer.check(link(capabilities={"view"}, device_id=OWNER), _push())
+    assert granted.session_id == "s_replica"
+
+
+def test_a_third_device_may_not_push_a_holder() -> None:
+    """Only the device the replica was SYNCED FROM may tell it to pull.
+
+    Otherwise any member could use the phase to make this device copy bytes from
+    somewhere, which is a capability the push does not carry.
+    """
+    authorizer, audit = make(state=ReplicaState(sessions=set()))
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(link(capabilities={"view"}, device_id=THIRD), _push())
+    assert excinfo.value.code == "not_authorised"
+    assert "authorisation_refused" in audit.names()
+
+
+def test_a_holder_of_nothing_refuses_the_push() -> None:
+    """No VERIFIED replica (no cursor) means the ordinary rule applies."""
+    authorizer, _audit = make(state=ReplicaState(sessions=set()))
+    with pytest.raises(types.Refusal):
+        authorizer.check(link(capabilities={"view"}, device_id=OWNER), _push("s_never_synced"))
+
+
+def test_the_replica_carve_out_is_for_the_available_phase_only() -> None:
+    """A fetch/verify/plan frame is not a notification: it stays ownership-scoped.
+
+    Those phases are the HOLDER asking the owner, so the receiving device is the
+    owner and the ordinary rule already admits them; a holder receiving one is
+    refused, which is the direction that matters — otherwise a peer could make this
+    device serve bytes for a session it does not hold.
+    """
+    authorizer, _audit = make(state=ReplicaState(sessions=set()))
+    for phase in ("plan", "fetch", "verify"):
+        with pytest.raises(types.Refusal):
+            authorizer.check(
+                link(capabilities={"view"}, device_id=OWNER),
+                {"op": "net_sync", "req": 1, "phase": phase, "session_id": "s_replica"},
+            )
+
+
+def test_a_state_without_replicas_refuses_closed() -> None:
+    """The protocol's default body answers "no verified replica"."""
+    authorizer, _audit = make(state=FakeState(sessions=set()))
+    with pytest.raises(types.Refusal):
+        authorizer.check(link(capabilities={"view"}, device_id=OWNER), _push())
 
 
 def test_a_state_without_tombstones_refuses_closed() -> None:

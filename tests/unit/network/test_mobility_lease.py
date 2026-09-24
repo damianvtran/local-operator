@@ -21,10 +21,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.network import sync
+from local_operator.network import mobility, sync
 from local_operator.network.projection import read_tombstones
 from local_operator.session.placement import read_handoff_journal
 from local_operator.session_lease import LEASE_NAME, lease_holder
@@ -121,6 +122,59 @@ def test_a_move_of_a_session_a_recordless_process_holds_is_refused_then_succeeds
     assert moved["ok"] is True, moved
     assert not source.exists()
     assert _transcript(server_b.root, SESSION) == before
+
+
+def test_a_lease_taken_between_prepare_and_ready_refuses_the_commit(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """B-M1: THE WINDOW THAT SURVIVED THE PREPARE-TIME CHECK, closed at the commit.
+
+    ``prepare`` reads the lease, and between then and the commit a process can take
+    it — every way the product opens a session goes through the lease, and none of
+    them consults a handoff guard on the way in. The reviewer measured exactly this
+    (``test_p1b``): a real subprocess took the claim right after ``prepare`` answered
+    and the move still returned ``ok: true`` with the directory deleted and its
+    holder alive, leaving a live writer holding a lease on an id the tombstone had
+    given to another device.
+
+    The commit now re-reads the lease IMMEDIATELY BEFORE the only delete and fails
+    closed, naming the holder — and because the check runs before the journal
+    advances to ``handing-off``, the rollback is free and nothing on the source
+    changes.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+    real = mobility.LinkTransport.ask
+    held: dict[str, Any] = {}
+
+    def ask(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        answer = real(self, frame)
+        if frame.get("phase") == "prepare" and "child" not in held:
+            # THE REAL THING: a separate process acquiring the claim the way
+            # ``lop -r``, ``lop exec`` and the TUI all do.
+            held["child"] = _hold_lease(source)
+        return answer
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+    try:
+        refused = _move(server_b, SESSION, monkeypatch=monkeypatch)
+        child = held["child"]
+        assert refused["ok"] is False, refused
+        assert refused["code"] == "busy", refused
+        assert f"pid {child.pid}" in refused["message"], refused
+        assert refused["changed"] is False
+        # NOTHING CHANGED ON EITHER SIDE, and the holder is untouched.
+        assert source.is_dir() and _transcript(server_a.root, SESSION) == before
+        assert child.poll() is None, "the move killed the holder"
+        assert lease_holder(source) == (child.pid, "live")
+        assert read_handoff_journal(server_a.root) == {}
+        assert read_tombstones(server_a.root) == {}
+        assert not (server_b.root / "sessions" / SESSION).exists()
+        assert not sync.staging_dir(server_b.root, SESSION).exists()
+    finally:
+        _reap(held["child"])
 
 
 def test_the_tui_runner_drives_the_real_cli_and_parses_the_contract(

@@ -282,6 +282,21 @@ def test_the_guard_is_per_link_and_per_thread() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _stub_link() -> Any:
+    """A link stand-in for calling a slice handler directly: an id and a network id.
+
+    Not a relay link on purpose — these handlers read nothing else from the link
+    (their authorisation already happened at the chokepoint, which is the previous
+    assertion's subject), and standing a real one up would test the relay rather
+    than the hook this module exists for.
+    """
+    return type(
+        "Link",
+        (),
+        {"device_id": "d_" + "a" * 32, "network_id": "n_test", "context": None},
+    )()
+
+
 def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None:
     """The hook carries every slice's ops, with the SLICE's own deadline.
 
@@ -320,6 +335,31 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
                 landed_handler(None, {"req": 1})  # type: ignore[arg-type]
             assert landed.value.code == "bad_request", op
             assert "not implemented in this build" not in landed.value.sentence, op
+
+        # AND A REAL FRAME IS ANSWERED WITH THE SLICE'S OWN RESULT (review round 1,
+        # T5). The bad_request above is a shape a STUB handler also produces — one
+        # that raises it for everything satisfied this cell, which is why the cell
+        # read as coverage for "the slice serves these ops" without testing it. Each
+        # answer below can only come from the module that owns the op: mobility's
+        # ``not_owner`` for an id this device does not hold, the copy module's
+        # ``no_session`` for an id with no transcript, and the lifecycle slice's
+        # ``session_lifecycle_refused`` document.
+        link = _stub_link()
+        status = server._handlers["net_session_move"](  # noqa: SLF001
+            link, {"phase": "status", "session_id": "9f3ac1e0b7d2"}
+        )
+        assert isinstance(status, dict), status
+        assert status["result"] == "refused" and status["code"] == "not_owner", status
+        with pytest.raises(types.MeshRefusal) as no_session:
+            server._handlers["net_sync"](  # noqa: SLF001
+                link, {"phase": "plan", "session_id": "9f3ac1e0b7d2"}
+            )
+        assert no_session.value.code == "no_session", no_session.value
+        lifecycle = server._handlers["net_session_lifecycle"](  # noqa: SLF001
+            link, {"action": "archive", "session_id": "9f3ac1e0b7d2"}
+        )
+        assert isinstance(lifecycle, dict), lifecycle
+        assert lifecycle["code"] == "session_lifecycle_refused", lifecycle
     finally:
         server.stop()
 
