@@ -303,12 +303,19 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # shim, so its content is byte-identical across generations while a
             # daemon started from an older one keeps serving it. See
             # :func:`launchd.restart_if_build_moved`.
+            #
+            # THE CONSEQUENCE CLAUSE IS THE TUNNEL'S ALONE (design review round 1,
+            # D4): this is the one restart of the four the operator can feel — the
+            # phone link drops for a moment — and the summary already teaches that
+            # shape elsewhere (`mobile daemon restarted — refresh the phone UI`). It
+            # says what will happen next, never that anything was lost.
             return launchd.restart_if_build_moved(
                 name=name,
                 label=LABEL,
                 path=path,
                 recovery="lop tunnel install",
                 run=_launchctl,
+                consequence="remote access reconnects by itself",
             )
         if outcome.kind != "repaired":
             return outcome
