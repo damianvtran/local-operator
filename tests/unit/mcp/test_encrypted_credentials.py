@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.credentials import CredentialManager
 from local_operator.mcp.config import MCPHttpServerConfig, MCPStdioServerConfig
 from local_operator.mcp.credentials import MCPCredentials, store_credentials
 from local_operator.mcp.manager import McpManager
@@ -56,21 +55,29 @@ def test_metadata_is_pristine_deduplicated_and_cold():
     ]
 
 
-def test_encrypted_precedence_and_readonly_legacy(isolated):
-    legacy = CredentialManager(isolated)
-    legacy.set_credential("TOKEN", "legacy-synthetic")
-    before = (isolated / "credentials.env").read_bytes()
+def test_the_encrypted_store_is_the_only_leg_read(isolated):
+    """The plaintext fallback is GONE: only the encrypted store resolves a ref.
+
+    The legacy ``credentials.env`` has no writers left, so a value that lives
+    only there must NOT be served — it reads as missing until ``lop secret
+    migrate-env`` moves it, which is the honest state of an install that has not
+    migrated rather than a silent downgrade to a store nothing maintains.
+    """
+    # The writer that used to seed the in-memory mapping is deleted (PR2b), so
+    # the decoy is written as the FILE a host mid-migration would actually have:
+    # the point of the test is that a value living only in it must not resolve.
+    (isolated / "credentials.env").write_text("TOKEN=legacy-synthetic\n", encoding="utf-8")
     cfg = MCPStdioServerConfig(command="unused", env={"API_KEY": "${TOKEN}"})
-    assert resolve_config_secrets("test", cfg).env["API_KEY"] == "legacy-synthetic"
+    with pytest.raises(McpSecretRefError):
+        resolve_config_secrets("test", cfg)
     access.open_store(isolated, create=True).set("TOKEN", b"encrypted-synthetic")
     assert resolve_config_secrets("test", cfg).env["API_KEY"] == "encrypted-synthetic"
-    assert (isolated / "credentials.env").read_bytes() == before
+    # The config keeps the reference it was written with.
     assert cfg.env["API_KEY"] == "${TOKEN}"
 
 
 @pytest.mark.parametrize("failure", [PermissionError("denied"), SecretCorrupt("corrupt"), b""])
 def test_encrypted_failure_never_downgrades(isolated, monkeypatch, failure):
-    CredentialManager(isolated).set_credential("TOKEN", "legacy-synthetic")
     access.open_store(isolated, create=True).set("TOKEN", b"encrypted-synthetic")
 
     def retrieve(*args):
@@ -86,13 +93,9 @@ def test_encrypted_failure_never_downgrades(isolated, monkeypatch, failure):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("encrypted", [False, True])
-async def test_real_split_child_stderr_is_scrubbed(isolated, encrypted, caplog):
+async def test_real_split_child_stderr_is_scrubbed(isolated, caplog):
     sentinel = "synthetic-split-canary-91730"
-    if encrypted:
-        access.open_store(isolated, create=True).set("TOKEN", sentinel.encode())
-    else:
-        CredentialManager(isolated).set_credential("TOKEN", sentinel)
+    access.open_store(isolated, create=True).set("TOKEN", sentinel.encode())
     # The split has to land INSIDE ``STDERR_LINE_LIMIT`` (2000): everything a
     # child writes past it is truncated before any sink sees it, so a probe that
     # splits at 8190 passes with the whole scrub removed — it was measuring the
@@ -226,9 +229,10 @@ async def test_a_server_echoed_credential_never_reaches_a_sink(isolated, tail):
 async def test_metadata_probe_never_creates_the_legacy_file(isolated):
     """A cold metadata read must not write the store it is describing.
 
-    ``CredentialManager.__init__`` creates ``credentials.env``, so a probe that
-    constructs it turns a read into a write of the plaintext file this change
-    promises to leave alone. Reproduced by the assembled desktop probe.
+    A probe that constructs a store (the retired ``CredentialManager.__init__`` wrote
+    ``credentials.env``; opening the encrypted store initialises it) turns a read
+    into a write of state the caller never asked for. Reproduced by the assembled
+    desktop probe.
     """
     from local_operator.mcp.credentials import credential_source
 

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from rich.cells import cell_len
 
+from local_operator.harness.comms import SubagentComms
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
     FrontendSessionState,
@@ -19,11 +20,14 @@ from local_operator.session.frontend_state import (
     SnapshotSubagentComms,
     TodoPhaseState,
 )
+from local_operator.session.transcript import TRANSCRIPT_FILENAME
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.subagent_panel import SubagentPanel
 from local_operator.tui.widgets.subagent_view import entry_block, fold_trajectory
 from local_operator.tui.widgets.todo_panel import TodoPanel
 from local_operator.tui.widgets.tool_card import ToolCard
+from tests.unit.harness.test_comms import _CountingRecords
+from tests.unit.tui.test_band_panels import _fake_jobs, _Job
 from tests.unit.tui.test_subagent_view import (
     FakeSession,
     _async_factory,
@@ -764,3 +768,260 @@ async def test_the_compact_caption_names_the_level_it_counts() -> None:
         assert "running" not in caption, caption  # a count yields to the name
         assert caption.endswith("ctrl+g"), caption
         assert cell_len(caption) <= panel._row_width(), (caption, panel._row_width())
+
+
+class _SpyComms(SubagentComms):
+    """A real registry that notes every per-node ``job`` lookup the dock makes.
+
+    The dock resolves a job row per node it shows. ``comms.job`` answers by
+    rebuilding the live-child session list from a scan of every registry record,
+    so a row-per-node dock paid O(N^2) at the ``MAX_RECORDS`` cap — 256 ``job``
+    calls where the fold makes none (review round 1, M1). This spy is what makes
+    that per-node call observable, because a clock cannot assert it on a host at
+    load 100+.
+    """
+
+    def __init__(self, session: Any) -> None:
+        super().__init__(session)
+        self.job_calls = 0
+
+    def job(self, job_id: str) -> Any:
+        self.job_calls += 1
+        return super().job(job_id)
+
+
+def _docked_registry(n: int, tmp_path: Any, *, nested: bool = False) -> tuple[Any, Any]:
+    """An app whose session carries a real registry of ``n`` settled children.
+
+    Each child gets a real transcript file: the roster's resumable verdict probes
+    the filesystem, and that probe is part of what the old per-record walk paid.
+
+    ``nested`` PARENTS every child but the first to ``job-0000``, which is the
+    shape the dock actually runs on and the only shape that reaches
+    ``_subagent_child_counts``' per-row resolver: its bucket map is keyed by
+    ``parent_job_id``, so a flat registry buckets NOTHING and the whole per-row
+    half of the dock goes unexercised (review round 2, R2-2; QA Q-1). A guard
+    built on the flat shape cannot go red for a regression confined to that half.
+    """
+    jobs = _fake_jobs(*[_Job(f"job-{i:04d}", f"child-{i}", "completed") for i in range(n)])
+    session = FakeSession()
+    session.jobs = jobs
+    comms = _SpyComms(session)
+    for i in range(n):
+        job_id = f"job-{i:04d}"
+        parent = "job-0000" if nested and i else None
+        comms.record_launch(job_id, f"child-{i}", parent_job_id=parent)
+    for i in range(n):
+        session_dir = tmp_path / f"job-{i:04d}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / TRANSCRIPT_FILENAME).write_text("{}\n")
+        record = comms._records[f"job-{i:04d}"]
+        record.session_dir = session_dir
+        record.settled = True
+        record.settled_at = 1_000.0
+    comms._records = _CountingRecords(comms._records)
+    session._subagent_comms = comms
+    app = OperatorApp(_async_factory(session))
+    # ``_session`` is assigned by the boot path; both resolvers under test only
+    # read it, ``_subagent_view`` (None until a view opens) and module-level
+    # helpers, so no mount is needed to drive them.
+    app._session = session
+    return app, comms
+
+
+def test_the_dock_resolves_its_rows_from_ONE_pass(tmp_path) -> None:
+    """A dock tick reads linear passes, not one session scan per node.
+
+    Counted rather than timed, and on the two methods review round 1 named
+    (``_subagent_roster``, ``_subagent_child_counts``), on a FLAT roster — the
+    nested shape is ``test_every_child_row_the_marks_resolve_reads_them_off_the_pass``,
+    which the flat one cannot exercise at all.
+
+    The ``before`` column this guards is **``origin/main``**, the pre-PR base,
+    measured with this same fixture and instrument (QA re-derived it there
+    digit for digit): the 256 node tick touched the registry 197,888 times in
+    ``_subagent_roster`` and 132,096 in ``_subagent_child_counts`` (x3.95 and
+    x3.97 per doubling), with 256 per-node ``comms.job`` calls. Head is 2,304 and
+    2,048 (exactly x2 per doubling) and ZERO per-node ``comms.job`` calls. The
+    zero is the assertion that matters: it is the call that rebuilt the session
+    list per node. (``84321616``, the branch's first commit, sits between the
+    two: the registry's own readers were linear there, but the dock still took
+    the per-call route, which is what review round 1 filed as M1.)
+    """
+    small_app, small_comms = _docked_registry(64, tmp_path / "small")
+    large_app, large_comms = _docked_registry(128, tmp_path / "large")
+
+    jobs, selected = small_app._subagent_roster()
+    assert len(jobs) == 64, "the fixture must reach a full roster"
+    assert small_app._subagent_child_counts(jobs), "the child-count map must be non-empty"
+
+    small_comms._records.touches = 0
+    small_comms.job_calls = 0
+    small_app._subagent_roster()
+    small_app._subagent_child_counts(jobs)
+    small_touches = small_comms._records.touches
+
+    large_jobs, _ = large_app._subagent_roster()
+    large_comms._records.touches = 0
+    large_comms.job_calls = 0
+    large_app._subagent_roster()
+    large_app._subagent_child_counts(large_jobs)
+    large_touches = large_comms._records.touches
+
+    assert small_comms.job_calls == 0, (
+        "the dock must resolve its rows off the tick's pass: per-node comms.job "
+        f"rebuilt the session list {small_comms.job_calls} times for 64 children"
+    )
+    assert large_comms.job_calls == 0
+    assert (
+        small_touches <= 20 * 64
+    ), f"a dock tick touched the registry {small_touches} times for 64 children"
+    assert large_touches <= 3 * small_touches, (
+        f"doubling the roster multiplied the tick's work by "
+        f"{large_touches / small_touches:.1f}x — that is the quadratic shape back"
+    )
+
+
+def test_every_child_row_the_marks_resolve_reads_them_off_the_pass(tmp_path) -> None:
+    """The per-row half of the dock, which a FLAT roster cannot reach.
+
+    ``_subagent_child_counts`` resolves a job row per child row it counts, and
+    its bucket map is keyed by ``parent_job_id`` — so on a flat registry the map
+    is empty, no row resolves anything, and a regression confined to that
+    resolver leaves every other assertion green. That is not hypothetical: on
+    the round-2 mutant, reverting only the per-row ``_subagent_job(..., read)``
+    re-created the pre-PR cost (68,093 touches, x3.856 per doubling, 255
+    per-node ``comms.job`` calls) while the flat guard above AND the
+    ``CountingComms`` walk test both stayed green.
+
+    So this drives the NESTED shape and asserts the resolver's exact cost rather
+    than a touches-per-record bound: the per-node ``comms.job`` calls must be
+    zero, and the marks must still be the real child counts. An exact zero needs
+    no calibration on a host at load 100+, which is why it is the assertion here
+    instead of another bound — the flat guard's bound is calibrated for the flat
+    shape and head measures 20.9 touches per record once nested.
+    """
+    app, comms = _docked_registry(64, tmp_path / "nested", nested=True)
+
+    jobs, _ = app._subagent_roster()
+    assert [job.id for job in jobs] == ["job-0000"], "the fixture must nest under one row"
+
+    comms.job_calls = 0
+    comms._records.touches = 0
+    counts = app._subagent_child_counts(jobs)
+
+    assert counts == {"job-0000": 63}, f"the marks must be real child counts, not zeros: {counts}"
+    assert comms.job_calls == 0, (
+        "every child row must resolve off the tick's pass: per-row comms.job "
+        f"rebuilt the session list {comms.job_calls} times for 63 children"
+    )
+    small_touches = comms._records.touches
+
+    # The nested shape is the expensive one, so pin that it stays LINEAR too:
+    # doubling the roster doubles the marks' work, where the per-row call made
+    # it quadruple.
+    large_app, large_comms = _docked_registry(128, tmp_path / "nested-large", nested=True)
+    large_jobs, _ = large_app._subagent_roster()
+    large_comms.job_calls = 0
+    large_comms._records.touches = 0
+    large_counts = large_app._subagent_child_counts(large_jobs)
+
+    assert large_counts == {"job-0000": 127}
+    assert large_comms.job_calls == 0
+    assert large_comms._records.touches <= 3 * small_touches, (
+        f"doubling the nested roster multiplied the marks' work by "
+        f"{large_comms._records.touches / small_touches:.1f}x — that is the "
+        "quadratic shape back on the per-row half"
+    )
+
+
+def test_a_row_that_cannot_name_itself_costs_a_mark_and_not_the_band(tmp_path: Any) -> None:
+    """R1-2: the row-IDENTITY read is guarded, because ``getattr`` is not a guarantee.
+
+    ``getattr(job, "id", "")`` swallows only the ``AttributeError`` it would have
+    raised itself and propagates anything a property or an ``__getattr__`` raises.
+    Executed against a row whose ``id`` raises, the unguarded form escaped this
+    method's whole-body totality contract into a Textual message handler —
+    ``RuntimeError: id exploded`` out of ``_subagent_child_counts`` (review round
+    1 on this PR, R1-2) — and the docstring beside it claimed the opposite.
+
+    So the identity read has its own guard now, and what that buys is stated in
+    behaviour rather than in a comment: a row that cannot name itself earns the
+    same nothing a row outside the roster window does, and every row that CAN name
+    itself still carries its real mark. The nested fixture is the one that reaches
+    the per-row resolver at all (see ``_docked_registry``).
+    """
+
+    class _Unnameable:
+        """A roster row whose ``id`` raises on read, not merely missing."""
+
+        @property
+        def id(self) -> str:  # noqa: A003 - the row's own field name
+            raise RuntimeError("id exploded")
+
+    app, _comms = _docked_registry(4, tmp_path / "unnameable", nested=True)
+    jobs, _selected = app._subagent_roster()
+    assert jobs, "the fixture must reach a full roster"
+    expected = app._subagent_child_counts(jobs)
+    assert expected == {"job-0000": 3}, expected
+
+    counts = app._subagent_child_counts([_Unnameable(), *jobs])
+
+    assert counts == expected, (
+        "an unreadable row must cost its own mark and nothing else: the rest of "
+        f"the roster still resolves — {counts}"
+    )
+
+
+def test_a_session_whose_capability_reads_raise_costs_the_marks_not_the_band(
+    tmp_path: Any,
+) -> None:
+    """R2-1: the SESSION reads are guarded by the same rule as the row's identity.
+
+    ``getattr(session, "_subagent_comms", None)`` and ``getattr(session, "jobs",
+    None)`` swallow only the ``AttributeError`` they would have raised themselves
+    and propagate anything a property or an ``__getattr__`` raises — the gap
+    R1-2 closed on the row identity read, one read over. Measured on this head
+    before the fix, both escaped into the caller (``RuntimeError: comms
+    exploded``, ``RuntimeError: jobs exploded``) where the identity read now
+    answers.
+
+    A ``Session`` carries both as plain attributes, so the reachability is the
+    same synthetic class as R1-2 — what the guard buys is that the method's
+    totality contract holds for the shape rather than only for the shipped one.
+    """
+
+    class _CommsReadExplodes:
+        """A session whose comms capability raises on read, not merely missing."""
+
+        @property
+        def _subagent_comms(self) -> Any:
+            raise RuntimeError("comms exploded")
+
+        jobs: Any = None
+
+    class _JobsReadExplodes:
+        """A session whose ``jobs`` raises; the comms graph it carries is real."""
+
+        def __init__(self, comms: Any) -> None:
+            self._subagent_comms = comms
+
+        @property
+        def jobs(self) -> Any:
+            raise RuntimeError("jobs exploded")
+
+    app, comms = _docked_registry(4, tmp_path / "exploding", nested=True)
+    jobs, _selected = app._subagent_roster()
+    assert jobs, "the fixture must reach a full roster"
+    expected = app._subagent_child_counts(jobs)
+    assert expected == {"job-0000": 3}, expected
+
+    app._session = _CommsReadExplodes()
+    assert app._subagent_child_counts(jobs) == {}
+    assert app._subagent_roster() == ([], None)
+
+    # The same session shape with only ``jobs`` raising: the comms graph is real,
+    # so the guard has to answer the same nothing rather than escape.
+    app._session = _JobsReadExplodes(comms)
+    assert app._subagent_child_counts(jobs) == {}
+    assert app._subagent_roster() == ([], None)

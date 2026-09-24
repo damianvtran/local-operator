@@ -651,6 +651,8 @@ async def test_allocate_reclaims_a_tight_guest_before_upstream_resets(
     scripts = [" ".join(post["command"]) for post in stubs.guest_posts]
     assert any("snap refresh --hold=forever" in script for script in scripts)
     assert any("/var/lib/snapd/cache" in script for script in scripts)
+    # The directory that actually fills on this image, cleared in the same step.
+    assert any("/var/lib/snapd/snaps" in script for script in scripts)
 
     # EVERY hygiene post landed before upstream's reset captured the first
     # frame. Preparation that ran afterwards would leave that frame -- and the
@@ -684,25 +686,115 @@ async def test_allocate_leaves_a_roomy_guest_alone_but_still_records_it(
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_guest_control_server_does_not_fail_the_allocation(
+async def test_an_unreachable_guest_control_server_refuses_the_episode_at_preparation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """FAIL SOFT, at the provider boundary this time.
+    """FAIL LOUD, at the provider boundary.
 
-    The readiness probe already passed, so the guest is up; a control server
-    that then refuses the hygiene posts must cost the episode nothing. An
-    allocation that raised here would destroy an episode that would have run.
+    The readiness probe already passed, so the guest was up when the hygiene
+    posts started and answers nothing now -- which is what a guest losing its
+    root filesystem looks like from here (the control server dies when it cannot
+    write). This used to be swallowed, and the episode then died ~400 s later on
+    an opaque transport error. A reclamation that could not be attempted is an
+    unprepared guest, so the episode is refused BEFORE upstream's reset and
+    before any model spend, with the failing steps named.
+
+    The alternative -- recording it and walking on -- is what the four dead paid
+    episodes were, and the operator only learned about it from a diagnostic that
+    named neither the guest nor the knob.
     """
 
     with _Stubs() as stubs:
         stubs.guest_default = ConnectionError("connection refused")
-        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+        with pytest.raises(AllocationError) as excinfo:
+            await _allocate_with_guest(stubs, monkeypatch, tmp_path)
         stubs.ec2_stub.assert_no_pending_responses()
         stubs.sched_stub.assert_no_pending_responses()
 
-    report = json.loads((root / "guest-preparation.json").read_bytes())
+    message = str(excinfo.value)
+    assert "clear-snapd-download-scratch" in message
+    assert "OSWORLD_CLIENT_PASSWORD" in message
+
+    report = json.loads((_cache_root(tmp_path) / "guest-preparation.json").read_bytes())
     assert report["free_bytes_before"] is None
     assert all(step["status"] == "unreachable" for step in report["steps"])
+    assert report["blocking_steps"] == [
+        "abort-in-flight-snap-changes",
+        "hold-snap-auto-refresh",
+        "clear-snapd-download-scratch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_client_password_refuses_the_episode_before_the_environment_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """THE MEASURED FOUR-EPISODE FAILURE, at the level that spends money.
+
+    Every privileged step comes back ``sudo: 1 incorrect password attempt`` --
+    the value the campaign passed, which this image rejects. The disk then fills
+    at ~6.8 MB/s and the episode dies in a 424-466 s window on a transport
+    error. Nothing about that is the model's, so nothing about it should be
+    billed to the model: the episode is refused here, the partial record is kept
+    for the operator, and upstream's environment is never constructed.
+    """
+
+    _ResetRecordingEnv.posts_at_reset = None
+    with _Stubs() as stubs:
+        _ResetRecordingEnv.stubs = stubs
+        stubs.guest_default = {"returncode": 0, "output": str(2_200_000_000), "error": ""}
+        stubs.guest_responses = [
+            (
+                "sudo -S",
+                {
+                    "returncode": 1,
+                    "output": "",
+                    "error": "sudo: 1 incorrect password attempt",
+                },
+            )
+        ]
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_ResetRecordingEnv,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        with pytest.raises(AllocationError) as excinfo:
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
+        stubs.sched_stub.assert_no_pending_responses()
+
+    message = str(excinfo.value)
+    for name in (
+        "abort-in-flight-snap-changes",
+        "hold-snap-auto-refresh",
+        "clear-snapd-download-scratch",
+    ):
+        assert name in message, message
+    assert "OSWORLD_CLIENT_PASSWORD" in message, message
+    # The knob is named BEFORE the guest's own text, which the RPC boundary
+    # truncates: a reader must not have to guess which infra value to check.
+    assert message.index("OSWORLD_CLIENT_PASSWORD") < message.index("incorrect password attempt")
+
+    # Upstream's environment was never constructed, and therefore no task setup,
+    # no observation and no model call followed the refusal.
+    assert _ResetRecordingEnv.posts_at_reset is None
+
+    # The partial record survives: the evidence of WHY the episode ended is in
+    # the episode's own cache root, which is the thing the old fail-soft path
+    # left behind with nobody reading it.
+    report = json.loads((_cache_root(tmp_path) / "guest-preparation.json").read_bytes())
+    assert report["reclamation_attempted"] is True
+    assert report["blocking_steps"] == [
+        "abort-in-flight-snap-changes",
+        "hold-snap-auto-refresh",
+        "clear-snapd-download-scratch",
+    ]
+    assert report["steps"][-1]["status"] == "ok"  # free space was still measured
 
 
 @pytest.mark.asyncio
@@ -713,14 +805,16 @@ async def test_a_guest_returning_a_body_without_a_returncode_reads_as_failure(
 
     Defaulting a missing ``returncode`` to 0 would let a malformed reply be
     recorded as a successful reclamation, which is the one thing the evidence
-    must not be able to claim falsely.
+    must not be able to claim falsely -- and, because every step then reads as
+    failed, it is also a guest the episode must not walk into.
     """
 
     with _Stubs() as stubs:
         stubs.guest_default = {"output": "", "error": "no returncode field"}
-        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+        with pytest.raises(AllocationError):
+            await _allocate_with_guest(stubs, monkeypatch, tmp_path)
 
-    report = json.loads((root / "guest-preparation.json").read_bytes())
+    report = json.loads((_cache_root(tmp_path) / "guest-preparation.json").read_bytes())
     assert report["free_bytes_before"] is None
     assert all(step["status"] == "failed" for step in report["steps"])
 

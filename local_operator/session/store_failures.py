@@ -161,8 +161,15 @@ FULL_VOLUME_FLOOR_BYTES = 16 * 1024 * 1024
 #: ``SQLITE_FULL`` says it outright; nothing else has to be consulted for it.
 _OUT_OF_SPACE_ERRONAMES = frozenset({"SQLITE_FULL"})
 
-#: Contention, in the two spellings SQLite uses. Both are retryable.
-_BUSY_ERRONAMES = frozenset(
+#: Contention, in the spellings SQLite uses. All are retryable.
+#:
+#: PUBLIC BECAUSE A SECOND MODULE DECIDES FROM THE SAME SET. ``session/attention.py``
+#: retries on this exact membership, and when the two lists were written out
+#: separately they drifted -- attention's copy held two of these five, so a
+#: ``SQLITE_BUSY_SNAPSHOT`` escaped the store as a bare ``OperationalError``
+#: while this ladder called it a 503 (review round 1, MINOR-1). The retry set and
+#: the classifier set are one fact, so they are one object.
+BUSY_ERRONAMES = frozenset(
     {
         "SQLITE_BUSY",
         "SQLITE_BUSY_RECOVERY",
@@ -290,7 +297,7 @@ def sqlite_store_failure(error: sqlite3.Error, root: str | Path | None = None) -
     :data:`STORE_UNAVAILABLE`.
     """
     errorname = str(getattr(error, "sqlite_errorname", "") or "")
-    if errorname in _BUSY_ERRONAMES:
+    if errorname in BUSY_ERRONAMES:
         return _busy()
     if errorname in _OUT_OF_SPACE_ERRONAMES:
         return _out_of_space(root)

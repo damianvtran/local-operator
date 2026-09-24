@@ -33,6 +33,7 @@ import time
 from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -56,12 +57,28 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
+    # The unbounded-search guard's escape hatch (``tools/search_guard.ALLOW_ENV``).
+    # An inherited value would waive the refusal every cell in
+    # ``test_bash_search_interception.py`` asserts — the same ESCAPE-HATCH class
+    # as ``ALLOW_NESTED_SESSION`` — so an operator's exported value must not
+    # reach a test. (The guard itself reads only the command's own assignments,
+    # never the process environment, but the name still has to be scrubbed.)
+    "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
     # trail. Inherited from the operator's own runtime it would write their
     # real session id into a sandboxed store's audit rows.
     "LOCAL_OPERATOR_SESSION_ID",
+    # The update window's bounds (``buildwatch.UPDATE_LOCK_S`` and its
+    # heartbeat). They are read through ``buildwatch.update_lock_seconds()`` so
+    # the e2e stage can fail a window inside its budget, which makes them an
+    # ESCAPE HATCH over a rule the suite asserts — the same class as
+    # ``ALLOW_NESTED_SESSION``. Inheriting either from an operator's shell would
+    # move the bound the cells on the update window and its failure arm assert,
+    # and the cells would keep passing while testing a window nothing ships.
+    "LOP_UPDATE_LOCK_S",
+    "LOP_UPDATE_LOCK_HEARTBEAT_S",
     # The marker the desktop app injects into a console surface's environment
     # (design ui-console-tab §6.5), read by ``local_operator/terminals.py``'s
     # ``is_local_operator_console`` and therefore by
@@ -92,6 +109,14 @@ _AMBIENT_VARS = (
     # suite would take the allow path while looking like it tested the refusal.
     # Tests that need it set it explicitly.
     "LOCAL_OPERATOR_AGENT_MAY_DELEGATE",
+    # The session's own scratchpad root, exported to the `bash` child and the
+    # `eval` worker in the same three arms as the allowance above (set / cleared
+    # / omitted). It names a real machine resource — a directory inside ONE
+    # session's store — so an inherited value would have the suite's children
+    # writing into whichever session happened to launch pytest, and the OMITTED
+    # arm would be untestable because the writer's presence test would see a
+    # name it never set. Tests that need an arm set it explicitly.
+    "LOCAL_OPERATOR_SCRATCHPAD",
     # The escape that waives the test-hosting rule, so a suite whose subject is a
     # notification frame can observe one (it answers "not a test session", and
     # the process kill switch still wins). An inherited value is the
@@ -197,6 +222,32 @@ _AMBIENT_VARS = (
     "FAL_API_KEY",
     "ZAI_API_KEY",
     "HF_TOKEN",
+    # The anchor's directory on Windows (`PROGRAMDATA`): an inherited value would
+    # point the operator-authority ANCHOR — the root of trust every loosening is
+    # verified against — at whatever directory the runner happens to name, in a
+    # suite whose operator tests are supposed to be reading a throwaway one. It
+    # is a MACHINE directory rather than a secret, so the remedy is scrubbing
+    # (which makes `anchor_dir` fall back to the platform default) rather than a
+    # `_HARMLESS` note: a variable that names where trust lives is exactly the
+    # "redirectable anchor path" the design forbids, and the suite should not
+    # inherit one either.
+    "PROGRAMDATA",
+    # The three package-manager config dirs the mobile installer reads to work out
+    # where pnpm and corepack keep what they manage for THEMSELVES
+    # (`mobile/install.py`'s `_pnpm_home`/`_corepack_home`, which the fetch guard
+    # resolves through before it refuses a tree it could build in). Each NAMES A
+    # REAL-MACHINE RESOURCE and each STEERS BEHAVIOUR: an inherited `PNPM_HOME`
+    # moves both pnpm's tools directory — the one the guard reads to recognise a
+    # seeded pin — and the content-addressable store every install on the machine
+    # shares through hard links; `XDG_DATA_HOME` moves those two through pnpm's
+    # own fallback order; `COREPACK_HOME` moves the cache a corepack fetch writes
+    # into. A suite that inherited any of them would have its children resolving
+    # against, and writing to, whatever the developer's shell happened to name.
+    # Safe for the tests that exercise these homes: they set them with
+    # `monkeypatch.setenv` or stub the resolver, never inherit one.
+    "PNPM_HOME",
+    "XDG_DATA_HOME",
+    "COREPACK_HOME",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
@@ -998,3 +1049,76 @@ def _sweep_candidates(node: pytest.Item, home: Path | None) -> list[Path]:
     candidates = [home / ".local-operator"] if isinstance(home, Path) else []
     candidates.extend(node.stash.get(_SWEEP_ROOT_KEY, ()))
     return candidates + [root for root in _temp_roots(node) if root not in set(candidates)]
+
+
+# ---------------------------------------------------------------------------
+# The approval gate's operator capability (issue #1310)
+# ---------------------------------------------------------------------------
+#
+# ``RuntimeServer`` demands a per-session capability for an authority-INCREASING
+# control request (`/approvals auto`, an approved card) and refuses one that does
+# not present it. A test that builds a registrant IN THIS PROCESS is that
+# runtime's console — its record carries ``os.getpid()``, which is the key
+# ``AttachClient.connect`` resolves against — so it gets one from the fixture
+# below. These live in the ROOT conftest rather than a package one because the
+# same shape appears in ``tests/e2e`` (an assembled TUI answering a gate on a
+# runtime this process built: ``test_reload_gate_delivery_e2e.py``).
+#
+# Tests that do NOT take ``operator_cap`` keep the capability-free registrant, and
+# those are the ones that pin the refusal.
+
+
+def _capability_api() -> (
+    tuple[Callable[[], bytes], Callable[[int, bytes], None], Callable[[], None]]
+):
+    """``(mint, remember, reset)`` from the approval module.
+
+    Imported here rather than at module scope for the same reason the rest of
+    this file touches nothing but the stdlib and pytest: it is loaded for every
+    collection in the suite, and ``harness.approval`` is a product module.
+    """
+    from local_operator.harness.approval import (
+        mint_operator_cap,
+        remember_operator_cap,
+        reset_operator_caps_for_tests,
+    )
+
+    return mint_operator_cap, remember_operator_cap, reset_operator_caps_for_tests
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operator_caps() -> Iterator[None]:
+    """The operator capability table is process-global (issue #1310).
+
+    Autouse, and reset at BOTH ends, because the failure mode of a leak is a
+    later test whose ``AttachClient`` presents a capability the runtime it dials
+    never received: that reads as a flake in whichever test happened to run
+    next, not in the one that leaked. One entry per spawned runtime is the
+    production shape, so nothing legitimate depends on surviving a test.
+    """
+    _mint, _remember, reset = _capability_api()
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture
+def operator_cap() -> Iterator[bytes]:
+    """The capability for an IN-PROCESS registrant, registered as this process's.
+
+    A test that builds ``RuntimeServer(handle, kind="tui")`` directly is both
+    the runtime and the console, and its record carries ``os.getpid()`` — the
+    same key ``AttachClient.connect`` resolves against — so wiring the value
+    under this process's pid is what makes a follower in the test capable of an
+    authority-increasing op, exactly as the process that spawned a detached
+    runtime is. Pass the returned value to the registrant:
+
+    ``RuntimeServer(handle, kind="tui", operator_cap=operator_cap)``
+
+    Tests that do NOT take this fixture keep the capability-free registrant, and
+    are the ones that pin the refusal.
+    """
+    mint, remember, _reset = _capability_api()
+    capability = mint()
+    remember(os.getpid(), capability)
+    yield capability

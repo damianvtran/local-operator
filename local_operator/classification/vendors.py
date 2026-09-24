@@ -39,12 +39,15 @@ The order is the provider stack's, and it is the same for all three legs
    operator is signed into and the route we bill; a pasted key is the legacy
    path, kept working rather than leading. So a machine that has BOTH uses the
    login row, and the static key is a fallback rather than the default.
-2. **``CredentialManager.get_credential(<env key>)``** — the process environment
-   and the legacy ``credentials.env``. Still needed explicitly: the store's own
-   env tier reads only a provider's *single-string* ``env_keys``, so a tuple
-   like TypeSafe's ``("TYPESAFE_API_KEY", "JEV_API_KEY")`` is not covered there,
-   and neither is ``OPENROUTER_API_KEY_DEV``. This is also the LEGACY tier the
-   ladder below falls back to when the login row cannot serve.
+2. **The provider-class store row, then the process environment** — the
+   ``LOP_PROVIDER_<env key>`` row a login or ``lop credential update`` wrote,
+   else an exported variable. Still needed explicitly: the store's own env tier
+   reads only a provider's *single-string* ``env_keys``, so a tuple like
+   TypeSafe's ``("TYPESAFE_API_KEY", "JEV_API_KEY")`` is not covered there,
+   and neither is ``OPENROUTER_API_KEY_DEV``. This is the LEGACY tier the
+   ladder below falls back to when the login row cannot serve. The plaintext
+   ``credentials.env`` leg is GONE (PR2a) — a name neither the store nor the
+   environment holds resolves to nothing.
 3. **The vendor-specific alternates** — ``JEV_API_KEY`` for TypeSafe,
    ``OPENROUTER_API_KEY_DEV`` behind the production key for OpenRouter.
 4. ``None`` — "this leg has no credential", which the cascade treats as "skip".
@@ -93,6 +96,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -112,7 +116,7 @@ from local_operator.clients._http import scrub_secrets
 from local_operator.providers.registry import get_provider_definition
 
 if TYPE_CHECKING:
-    from local_operator.credentials import CredentialManager
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -434,7 +438,7 @@ def storage_provider_id(provider: str) -> str:
     return definition.store_credentials_as or definition.id
 
 
-async def auth_store_api_key(manager: "CredentialManager", provider: str) -> str | None:
+async def auth_store_api_key(config_dir: "Path | None", provider: str) -> str | None:
     """The ``AuthStore`` row a login wrote for ``provider``, or ``None``.
 
     Read-only (see the module docstring), and every failure degrades to ``None``:
@@ -446,7 +450,9 @@ async def auth_store_api_key(manager: "CredentialManager", provider: str) -> str
 
     store: AuthStore | None = None
     try:
-        store = AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
+        store = AuthStore(
+            (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
+        )
         return await store.get_api_key(storage_provider_id(provider), read_only=True)
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
         logger.warning("classification: %s auth store unavailable", provider, exc_info=True)
@@ -470,19 +476,19 @@ class _HttpDecisionVendor:
     #: :attr:`name` for all three legs; kept separate because they are different
     #: vocabularies (a cascade id versus a provider id) that happen to coincide.
     provider_id: str = ""
-    #: The env / ``credentials.env`` names to try after the store row, in order.
+    #: The env-var names to try after the store row, in order.
     env_key_names: tuple[str, ...] = ()
 
     def __init__(
         self,
-        manager: "CredentialManager",
+        config_dir: "Path | None",
         *,
         model: str = "",
         client: httpx.AsyncClient | None = None,
         credential_ttl_s: float = CREDENTIAL_TTL_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._manager = manager
+        self._config_dir = config_dir
         # An empty override means "the vendor's own id" — §8's ``model`` key
         # defaults to "", and an empty string is not a model id to send.
         self.model_id = model or self.default_model
@@ -518,14 +524,12 @@ class _HttpDecisionVendor:
         OAuth session an interactive login wrote, which is the preferred way to
         bill this call; every name after it is a static key the operator pasted
         or exported, which is the LEGACY tier. The order is the contract (see the
-        module docstring), and the members are ``CredentialManager`` key names,
+        module docstring), and the members are the provider env-key names,
         so a tier can be named in a log line without a value ever being printed.
         """
         return ("authstore", *self.env_key_names)
 
-    async def _resolve_key(
-        self, manager: "CredentialManager"
-    ) -> tuple[SecretStr | None, int | None]:
+    async def _resolve_key(self, config_dir: "Path | None") -> tuple[SecretStr | None, int | None]:
         """The first tier at or after :attr:`_tier` that yields a value.
 
         One implementation for all three legs because the order is the provider
@@ -540,23 +544,40 @@ class _HttpDecisionVendor:
 
         The starting tier is READ from :attr:`_tier` rather than taken as an
         argument, deliberately: subclasses in this repo's own tests wrap this
-        method to count resolves (``_Counting._resolve_key(self, manager)``), and
+        method to count resolves (``_Counting._resolve_key(self, config_dir)``), and
         a new REQUIRED keyword would break every one of them — a private seam that
         quietly raises through a test double is worse than one that reads its own
         state.
+
+        The static-key tiers are resolved STORE-FIRST: for each name in
+        ``env_key_names`` the provider-class store row (``LOP_PROVIDER_<name>``)
+        is read before falling through to the process environment, so a store
+        row the operator saved outranks an ambient export. That keeps the tier
+        vocabulary unchanged — an index still names one credential. The legacy
+        ``credentials.env`` rung is GONE (PR2a): a name neither the store nor
+        the environment holds resolves to nothing.
         """
+        from local_operator.providers.registry import provider_secret_value
+
         for index, tier in enumerate(self.credential_tiers[self._tier :], start=self._tier):
             if tier == "authstore":
-                stored = await auth_store_api_key(manager, self.provider_id)
+                stored = await auth_store_api_key(config_dir, self.provider_id)
                 if stored:
                     return SecretStr(stored), index
                 continue
-            value = manager.get_credential(tier)
-            if value:
-                return value, index
+
+            stored_key = provider_secret_value(tier, base=config_dir)
+            if stored_key:
+                return SecretStr(stored_key), index
+            # An exported variable is a real instruction and is not what PR2a
+            # removes. The tier NAME is itself the env-key name a leg declares,
+            # so the environment rung is that name exported.
+            exported = os.environ.get(tier)
+            if exported:
+                return SecretStr(exported), index
         return None, None
 
-    async def credential(self, manager: "CredentialManager") -> SecretStr | None:
+    async def credential(self, config_dir: "Path | None") -> SecretStr | None:
         """The bearer for this leg, memoized for :data:`CREDENTIAL_TTL_S`.
 
         Memoized on the instance — i.e. per vendor, per service, per session.
@@ -594,7 +615,7 @@ class _HttpDecisionVendor:
                 self.credential_tiers[0],
             )
             self._tier = 0
-        self._key, self._key_tier = await self._resolve_key(manager)
+        self._key, self._key_tier = await self._resolve_key(config_dir)
         self._memo_settled_at = now
         self._key_expires_at = now + self._credential_ttl_s
         return self._key
@@ -645,7 +666,7 @@ class _HttpDecisionVendor:
         return True
 
     async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse:
-        key = await self.credential(self._manager)
+        key = await self.credential(self._config_dir)
         if key is None or not key.get_secret_value():
             raise DecisionVendorError(f"{self.name} has no credential", kind="auth", status=401)
         body = request_body(request, self.model_id)
@@ -682,7 +703,7 @@ class _HttpDecisionVendor:
                 self.name,
             )
             self.invalidate_credential()
-            refreshed = await self.credential(self._manager)
+            refreshed = await self.credential(self._config_dir)
             if refreshed is None or not refreshed.get_secret_value():
                 raise refusal
             response = await self._send_with(
@@ -707,7 +728,7 @@ class _HttpDecisionVendor:
                     self.name,
                     self.credential_tiers[self._tier],
                 )
-                fallback = await self.credential(self._manager)
+                fallback = await self.credential(self._config_dir)
                 if fallback is None or not fallback.get_secret_value():
                     raise refusal
                 response = await self._send_with(
@@ -884,10 +905,10 @@ VENDOR_CLASSES: dict[str, type[_HttpDecisionVendor]] = {
 
 def build_vendor(
     name: str,
-    manager: "CredentialManager",
+    config_dir: "Path | None",
     *,
     model: str = "",
     client: httpx.AsyncClient | None = None,
 ) -> _HttpDecisionVendor:
     """Construct one leg by name. Raises ``KeyError`` for an unknown name."""
-    return VENDOR_CLASSES[name](manager, model=model, client=client)
+    return VENDOR_CLASSES[name](config_dir, model=model, client=client)

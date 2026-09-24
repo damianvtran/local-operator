@@ -18,7 +18,14 @@ export type EntryKind =
 	| "subagent_message"
 	// An inbound message from another local lop session (`lop send`). Rendered
 	// as a distinct cross-session card, never as the user's own turn.
-	| "peer_message";
+	| "peer_message"
+	// The model's own PRIVATE reasoning, streamed while it thinks. Transient by
+	// construction: it never joins the durable transcript, so the row is gone
+	// after the next sync, and it is never the assistant's answer. Listed here
+	// because this union mirrors `local_operator/mobile/types.py` field-for-field
+	// -- the client renders it through its unknown-kind path today, which is what
+	// it rendered before the runtime emitted reasoning at all.
+	| "reasoning";
 
 export type ToolState =
 	| "composing"
@@ -39,7 +46,10 @@ export type SubagentStatus =
 	| "completed"
 	| "failed"
 	| "cancelled"
-	| "parked";
+	| "parked"
+	/** Waiting for a free slot in the parent's capacity. NOT running: a parked
+	    child spends nothing, and the roster header counts the running lane. */
+	| "queued";
 
 export interface TranscriptEntryDetails {
 	/* The fold serializes these in the shape the tool produced, NOT always
@@ -273,7 +283,32 @@ export interface SessionSummary {
 	    omit the field entirely, so readers must treat absence as false. */
 	unseen?: boolean;
 	pending_kind: "approval" | "ask" | "" | null;
-	subagents_running: number;
+	/** The record's own phrase when the runtime has been SIGNALLED and is
+	    finishing the work in flight before it exits; `""` otherwise (an older
+	    daemon omits it, so readers normalise with `?? ""`).
+
+	    RANKED HERE RATHER THAN DRAWN, and that is the point: a draining session
+	    has children still running, so a mark derived from the counts alone would
+	    advertise delegated work for a row the list itself is about to describe as
+	    leaving. The daemon already refuses to report counts for such an entry
+	    (`_advertisable_counts`); this field is the second guard for a client
+	    talking to a build that predates that refusal. */
+	leaving?: string;
+	/** How many of this session's OWN delegated children are RUNNING. `null`
+	    means the daemon did not report a count, and MUST NOT be read as zero: a
+	    row that could not be asked must not be told "no subagents". The daemon
+	    reports `null` for an entry it cannot vouch for (its dial is degraded, the
+	    owner stopped beating, the runtime is leaving) as well as for a session
+	    with no live record at all, and an older daemon omits the field — so
+	    readers normalise with `typeof … === "number"`. */
+	subagents_running?: number | null;
+	/** Delegated children parked waiting for a capacity slot. Separate from the
+	    running count for the reason the record keeps them apart: a parked child
+	    spends nothing, but "queued with nothing running" is still not idle. The
+	    two fields are declared on the same terms — both nullable AND optional —
+	    because a reader that tolerates absence for one and not the other is a
+	    reader whose two arms drift (review round 1, R2). */
+	subagents_queued?: number | null;
 	todos_open: number;
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */
@@ -361,6 +396,14 @@ export type CommandOp =
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }
 	| { op: "slash"; command: string; args: string }
+	/* `slash_result` is the ROUTED slash op — the one the runtime's authority seam
+	   was built for, and the one the desktop backend and the TUI's attached pane
+	   already use. `slash` is the off-terminal SUBSET (`/goal`, `/compact`) and
+	   answers `/approvals` with "terminal-only here", which is the dead end this
+	   phone surface exists to remove: `/approvals auto` is authority-increasing and
+	   only reaches a sink through this op. Typed here so the refusal cannot come
+	   back through the client. */
+	| { op: "slash_result"; command: string; args: string; images?: PromptImage[] }
 	| { op: "new_conversation" }
 	| { op: "resume_session"; session_id: string }
 	| { op: "approval_answer"; request_id: string; approved: boolean; remember: boolean }

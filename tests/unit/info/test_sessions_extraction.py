@@ -20,9 +20,18 @@ from typing import Any
 
 import pytest
 
+from local_operator import buildwatch
 from local_operator.info.collect import session_rows
 from local_operator.info.model import SessionLine
 from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+from local_operator.update import BuildStamp
+
+#: The window pair the fixture publishes, built the way a runtime builds one
+#: (``BuildStamp.label()``), so the cell below pins the string a real record carries.
+UPDATE_PAIR = buildwatch.update_pair_text(
+    BuildStamp(version="0.59.9", source_ref=""),
+    BuildStamp(version="0.59.11", source_ref="ead71b673a9a"),
+)
 
 #: Frozen clock, so every derived duration is a constant rather than a function
 #: of when the suite ran.
@@ -50,6 +59,14 @@ class _Record:
     #: below on purpose: an older runtime's record has no such field, and the
     #: listing must render it as "not leaving" rather than raising.
     leaving: str = ""
+    #: The update window's pair (``SessionRecord.updating``), same additive contract
+    #: as the field above.
+    updating: str = ""
+    #: The FAILED half of the same window (``SessionRecord.update_failed``). Absent
+    #: from ``_OldRecord`` below for the same reason ``updating`` is: a record
+    #: written by an older runtime has no such field, and listing must render the
+    #: row as an ordinary one rather than raising (design review round 1, D1).
+    update_failed: str = ""
 
 
 @dataclass
@@ -168,6 +185,25 @@ EXPECTED = [
         # BYTE of every row for every other cell in this file — the drain has
         # its own cells below.
         "leaving": "",
+        "updating": "",
+        "update_failed": "",
+        # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
+        # and this process's own CPU time over the same gap. Appended at the END
+        # like every extension above it, and ``None`` on rows whose runtime does
+        # not report them — the same unreported-vs-zero distinction
+        # ``subagents_queued`` makes. Both are absent from the fake record below,
+        # which is what a runtime predating the fields looks like.
+        "beat_lag_s": None,
+        "cpu_since_beat_s": None,
+        # WHERE THIS SESSION'S STALL DUMP IS when its own bound fired, appended
+        # after the pair above for the same append-only reason: ``None`` here
+        # because no runtime in this fixture tripped it (the path is
+        # ``stall_watchdog``'s to compose, and it is the one artifact a reader
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
+        "stall_dump": None,
+        "stall_held": False,
     },
     {
         "state": "live",
@@ -198,6 +234,25 @@ EXPECTED = [
         "completion_reason": "",
         # NOT LEAVING — present on every row so the published shape is stable.
         "leaving": "",
+        "updating": "",
+        "update_failed": "",
+        # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
+        # and this process's own CPU time over the same gap. Appended at the END
+        # like every extension above it, and ``None`` on rows whose runtime does
+        # not report them — the same unreported-vs-zero distinction
+        # ``subagents_queued`` makes. Both are absent from the fake record below,
+        # which is what a runtime predating the fields looks like.
+        "beat_lag_s": None,
+        "cpu_since_beat_s": None,
+        # WHERE THIS SESSION'S STALL DUMP IS when its own bound fired, appended
+        # after the pair above for the same append-only reason: ``None`` here
+        # because no runtime in this fixture tripped it (the path is
+        # ``stall_watchdog``'s to compose, and it is the one artifact a reader
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
+        "stall_dump": None,
+        "stall_held": False,
     },
     {
         "state": "stale",
@@ -233,6 +288,25 @@ EXPECTED = [
         # default: a record written by an older runtime lists as "not leaving"
         # rather than raising.
         "leaving": "",
+        "updating": "",
+        "update_failed": "",
+        # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
+        # and this process's own CPU time over the same gap. Appended at the END
+        # like every extension above it, and ``None`` on rows whose runtime does
+        # not report them — the same unreported-vs-zero distinction
+        # ``subagents_queued`` makes. Both are absent from the fake record below,
+        # which is what a runtime predating the fields looks like.
+        "beat_lag_s": None,
+        "cpu_since_beat_s": None,
+        # WHERE THIS SESSION'S STALL DUMP IS when its own bound fired, appended
+        # after the pair above for the same append-only reason: ``None`` here
+        # because no runtime in this fixture tripped it (the path is
+        # ``stall_watchdog``'s to compose, and it is the one artifact a reader
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
+        "stall_dump": None,
+        "stall_held": False,
     },
 ]
 
@@ -248,6 +322,20 @@ DRAINING = [
         replace(record, leaving=LEAVING_ON_SIGNAL) if index == 0 else record,
         state,
     )
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+#: ``FIXTURE`` with one session MID-UPDATE — the idle handover's window, the state
+#: the 2026-09-19 incident is about (``types.UPDATING``).
+#:
+#: A separate set for the reason ``DRAINING`` above is one: a non-empty value
+#: re-flows that row's tail and so every cell that reads the end of the row. And
+#: the two windows must not be confusable — a window is a runtime that HAS the
+#: message and is coming back, a drain is one that refuses it — so this fixture
+#: deliberately carries no ``leaving``, and the cell below asserts both halves.
+UPDATING_WINDOW = [
+    (replace(record, updating=UPDATE_PAIR) if index == 0 else record, state)
     for index, (record, state) in enumerate(FIXTURE)
 ]
 
@@ -457,7 +545,22 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     rows = session_rows()
     assert rows[0]["leaving"] == LEAVING_ON_SIGNAL
     assert [row["leaving"] for row in rows[1:]] == ["", ""]
-    assert "leaving" in rows[0] and list(rows[0])[-1] == "leaving"
+    # THE TRAILING KEY IS THE CONTRACT, so this asserts the rule rather than one
+    # column: a field is APPENDED to the published row and never inserted, so the
+    # key order every existing consumer reads is unchanged by it. The measured
+    # pair (``beat_lag_s``/``cpu_since_beat_s``) is the newest extension and
+    # therefore the last two; ``leaving`` and ``updating`` must still be present
+    # and before them, in that order.
+    assert "leaving" in rows[0] and list(rows[0]).index("leaving") < list(rows[0]).index("updating")
+    assert list(rows[0]).index("updating") < list(rows[0]).index("update_failed")
+    assert list(rows[0]).index("update_failed") < list(rows[0]).index("beat_lag_s")
+    assert list(rows[0]).index("beat_lag_s") < list(rows[0]).index("cpu_since_beat_s")
+    assert list(rows[0]).index("cpu_since_beat_s") < list(rows[0]).index("stall_dump")
+    # ``stall_held`` is the third state and the newest key, appended after the dump
+    # path it qualifies: a reader that has ``stall_dump`` and not this one cannot
+    # tell a runtime that survived its bound from one the bound ended.
+    assert list(rows[0]).index("stall_dump") < list(rows[0]).index("stall_held")
+    assert list(rows[0])[-1] == "stall_held"
 
     assert (
         cli.sessions_command(
@@ -483,6 +586,212 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     # change that has nothing to do with the LEAVING column.
     row = next(line for line in out.splitlines() if line.startswith("live"))
     assert re.match(r"live\s+4243\b", row), row
+
+
+def test_an_update_window_is_published_in_the_rows_and_named_in_the_table(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """The window reaches the same two surfaces the drain does, on its own terms.
+
+    The operator's requirement is that a session mid-update is VISIBLE ("/info"
+    and ``lop sessions`` are where a fleet is inspected), and the separation from
+    ``leaving`` is the part that has to hold: the two fields say opposite things
+    about the operator's message, so a row that carried the window in the drain's
+    column would send them to re-send a message that is already queued.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch, UPDATING_WINDOW)
+    rows = session_rows()
+    assert rows[0]["updating"] == UPDATE_PAIR
+    assert [row["updating"] for row in rows[1:]] == ["", ""]
+    assert rows[0]["leaving"] == "", "a window is not a drain: nothing is being refused"
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "UPDATING" in out
+    # The CELL, rendered from the pair through the one vocabulary: the new build is
+    # what a rotation script reads, so a raw pair or a bare phase would both be wrong.
+    assert "updating → 0.59.11@ead71b6" in out, out
+    assert "LEAVING" not in out, "the column appears only when a row carries one"
+
+
+#: ``FIXTURE`` with one session whose last update FAILED — the third phase, which
+#: rendered nowhere on this surface until design review round 1 (D1).
+FAILED_WINDOW = [
+    (replace(record, update_failed=UPDATE_PAIR) if index == 0 else record, state)
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+#: ``FIXTURE`` whose first session SURVIVED its own stall bound — the third
+#: attribution state, and the one that reached no rendered surface before design review
+#: round 1 (D1): with the exit held, such a runtime stays stalled for the life of the
+#: process, so the listing is where a person learns it needs them.
+HELD_SESSION = [
+    (replace(record, leaving="") if index == 0 else record, state)
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+def test_a_held_runtime_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
+    """D1: the bound fired, dumped, and did NOT end it — the row must say so.
+
+    Before this, ``stall_held`` reached the JSON row and no screen: a held session listed
+    exactly as an idle one, under a state word ("not answering") that reads as "still
+    settling" — while the safety net that used to resolve it has already fired and the
+    only way out is a person running ``lop stop``. Both halves are asserted: the column
+    and its cell when a row is held, and no column at all when none is.
+    """
+    import argparse
+
+    from local_operator import cli
+    from local_operator.session.runtime import stall_watchdog
+
+    _install_fixture(monkeypatch, HELD_SESSION)
+    held_pid = HELD_SESSION[0][0].pid
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {held_pid})
+
+    rows = session_rows()
+    assert rows[0]["stall_held"] is True
+    assert [row["stall_held"] for row in rows[1:]] == [False, False]
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "STALLED" in out, f"the held state rendered nowhere: {out}"
+    assert cli.HELD_CELL in out, out
+    assert "lop stop" in out, "the cell must name the way out, not only the state"
+
+
+def test_a_stale_pid_with_a_leftover_dump_is_not_held(monkeypatch: Any) -> None:
+    """D8 (round 2): a held dump outlives the runtime, and the phrase must not.
+
+    ``held_pids`` is a scan of the dump files and knows nothing about the process, so a
+    held runtime that a person later stopped kept ``bound held`` — the phrase this round
+    exists to make mean "still running, needs you" — beside a state word saying its pid
+    is gone. The fence is here rather than in the panel, because this is the layer that
+    has the state, and both surfaces read what this publishes.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    stale = [
+        (record, "stale" if index == 0 else state) for index, (record, state) in enumerate(FIXTURE)
+    ]
+    _install_fixture(monkeypatch, stale)
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {stale[0][0].pid})
+    monkeypatch.setattr(stall_watchdog, "fired_pids", lambda *a, **k: {stale[0][0].pid})
+
+    rows = session_rows()
+    assert rows[0]["stall_dump"], "the artifact is still published: the dump is the evidence"
+    assert (
+        rows[0]["stall_held"] is False
+    ), "a leftover dump on a dead pid was rendered as a runtime that survived its bound"
+
+
+def test_the_stalled_and_updating_cells_sit_under_their_own_headers(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """Both gates on at once — the case the round-1 fix got backwards.
+
+    A runtime can be held AND carry a failed update, and the first version of the column
+    appended the header one way round and the cell the other: the held value rendered
+    under ``UPDATING`` and the update value under ``STALLED`` (agent review round 2,
+    MAJOR-3, from the rendered frame). One row is enough to show it, and this is that
+    row with both facts set.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    both = [
+        (replace(record, leaving="", update_failed=UPDATE_PAIR) if index == 0 else record, state)
+        for index, (record, state) in enumerate(FIXTURE)
+    ]
+    _install_fixture(monkeypatch, both)
+    from local_operator.session.runtime import stall_watchdog
+
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {both[0][0].pid})
+    rows = session_rows()
+    assert rows[0]["stall_held"] is True and rows[0]["update_failed"] == UPDATE_PAIR
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    header = lines[0]
+    assert header.index("UPDATING") < header.index("STALLED"), header
+    row = next(ln for ln in lines[1:] if "4243" in ln)
+    # The VALUES must be in the same order as the HEADERS, or each is under the other's.
+    assert row.index("update failed") < row.index(cli.HELD_CELL), row
+
+
+def test_the_stalled_column_is_absent_when_no_row_is_held(monkeypatch: Any, capsys: Any) -> None:
+    """The gate, in the other direction: no held row anywhere means no column.
+
+    Same rule as ``LEAVING``/``UPDATING`` — a column that prints for a state nothing is
+    in teaches a reader to ignore it — and the assertion is here because the cell is
+    wide enough that a stray one would push every other column along with it.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "STALLED" not in out, out
+
+
+def test_a_failed_window_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
+    """D1: a fleet whose only news is an abandoned update must say so.
+
+    The design reviewer seeded exactly this record into an isolated root and ran the
+    real CLI: the UPDATING cell was BLANK, and with no open window anywhere in the
+    fleet the whole column was dropped — so the session listed byte-identically to an
+    ordinary idle one. Both halves are asserted here, against the same renderer.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch, FAILED_WINDOW)
+    rows = session_rows()
+    assert rows[0]["update_failed"] == UPDATE_PAIR
+    assert rows[0]["updating"] == "", "a failed window is not an open one"
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "UPDATING" in out, "the column must print when the only news is a failure"
+    assert "update failed" in out, out
+    # AND NOTHING CLAIMS THE MOVE HAPPENED: the failed cell carries no build label,
+    # because naming one there would read as "went to it".
+    failed_row = next(line for line in out.splitlines() if line.startswith("live"))
+    assert UPDATE_PAIR not in failed_row, failed_row
 
 
 def test_the_leaving_column_fits_the_shipped_phrase() -> None:

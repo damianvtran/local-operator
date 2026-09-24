@@ -15,6 +15,7 @@ from local_operator.harness.wake import (
     MAX_WAKE_MESSAGE_CHARS,
     MAX_WAKE_SCHEDULES,
     MIN_WAKE_INTERVAL_MS,
+    WAKE_SCRATCH_CLAUSE,
     DueWake,
     WakeSchedule,
     WakeScheduler,
@@ -321,6 +322,63 @@ class TestDeliveryText:
         due = DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
         text = format_wake_delivery_text(due)
         assert "cancel" not in text.lower()
+
+    def test_every_envelope_points_the_runs_own_files_at_the_scratchpad(self):
+        """A wake is the turn with the LEAST context around it — no user message,
+        no recent tool result naming a path — so it is exactly where a scheduled
+        run's own files (logs, snapshots, bookkeeping) drift to ``/tmp`` by
+        default. Both arms carry the clause, because the FINAL delivery is still
+        a run whose files outlive the turn that wrote them.
+
+        Asserted against the named constant rather than a copy of the sentence:
+        the point of the pin is that the formatter writes the bytes the
+        human-surface stripper knows how to drop, and a literal here would let
+        the two drift apart while both stayed green.
+        """
+        recurring = DueWake(
+            schedule=WakeSchedule(
+                id="w3", message="check the build", next_due_at=NOW, every_ms=3_600_000
+            ),
+            occurrence=3,
+            planned_total=8,
+            final=False,
+        )
+        final = DueWake(
+            schedule=WakeSchedule(id="w1", message="m", next_due_at=NOW, created_at=NOW),
+            occurrence=1,
+            planned_total=1,
+            final=True,
+        )
+
+        for due in (recurring, final):
+            text = format_wake_delivery_text(due)
+            envelope, _, message = text.partition("\n\n")
+            assert WAKE_SCRATCH_CLAUSE in envelope
+            # In the ENVELOPE, never the message: the message is the schedule's
+            # own words and is rendered verbatim on both human surfaces.
+            assert message == due.schedule.message
+            assert text.endswith(due.schedule.message)
+            # The clause is model-facing markup, so it must not be something the
+            # human surfaces have to know about twice — it stays short, and this
+            # is the one line repeated in every delivery.
+            assert len(WAKE_SCRATCH_CLAUSE) <= 80
+
+    def test_the_clause_is_stripped_from_the_human_headline(self):
+        """The receipt line a person reads is the envelope with the model-facing
+        parts removed. A clause appended to the envelope therefore has to be
+        stripped too, and the FINAL delivery is where that is not automatic: it
+        carries no cancel hint, so a stripper that only knows the cancel phrase
+        leaves the new clause sitting in the headline.
+        """
+        from local_operator.harness.rows import wake_receipt_headline
+
+        live = "(alarm) Scheduled wake w-9 (1, every 6h) — cancel with "
+        live += f'wake({{op:"cancel",id:"w-9"}}) once its goal is met. {WAKE_SCRATCH_CLAUSE}'
+        assert wake_receipt_headline(f"{live}\n\nCheck the deploy") == "w-9 (1, every 6h)"
+
+        final = f"(alarm) Scheduled wake w-9 (1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{final}\n\nCheck the deploy") == "w-9 (1)."
+        assert "scratchpad" not in wake_receipt_headline(f"{final}\n\nCheck the deploy")
 
 
 # ---------------------------------------------------------------------------

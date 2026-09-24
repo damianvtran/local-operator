@@ -22,6 +22,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     NoticeEvent,
+    ReasoningDeltaEvent,
     ToolCall,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -43,6 +44,7 @@ from local_operator.tui.events import (
     AssistantMessageStart,
     EventController,
     NoticePosted,
+    ReasoningDelta,
     StartFlushTimer,
     ToolEnded,
     ToolStarted,
@@ -455,6 +457,72 @@ def test_message_update_posts_start_flush_timer() -> None:
     assert any(isinstance(m, StartFlushTimer) for m in app.posted)
     assert len(app.timers) == 1
     assert not app.timers[0].stopped
+
+
+def test_reasoning_delta_coalesces_on_the_same_tick_as_the_text() -> None:
+    """The reasoning channel flushes with the text, at 30 Hz, never per token.
+
+    A reasoning model emits one fragment per token; posting a session event per
+    fragment would put thousands of Textual messages through the queue during one
+    think. The flush is bounded by the same interval the text uses, and the
+    equality guard makes a tick with no new fragment free.
+    """
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    session.emit(MessageStartEvent(message=Message.assistant("")))
+    for fragment in ("weigh", "ing"):
+        session.emit(ReasoningDeltaEvent(message_id="m1", delta=fragment))
+    # Nothing flushed yet - the 30 Hz timer owns the flush.
+    assert not any(isinstance(m, ReasoningDelta) for m in app.posted)
+    controller._flush_reasoning()
+    deltas = [m for m in app.posted if isinstance(m, ReasoningDelta)]
+    assert len(deltas) == 1
+    assert deltas[0].text == "weighing"
+    controller._flush_reasoning()
+    assert len([m for m in app.posted if isinstance(m, ReasoningDelta)]) == 1
+
+
+def test_reasoning_end_closes_the_phase_before_the_answer_settles() -> None:
+    """The app must be told the thinking is over BEFORE the message settles.
+
+    Ordering is the whole assertion: the app retires the reasoning block on both
+    edges, and the message_end handler is the one that freezes the ANSWER. A
+    reasoning phase still live when the answer settles would leave the block
+    accepting fragments into the next model call's transcript row.
+    """
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    session.emit(MessageStartEvent(message=Message.assistant("")))
+    session.emit(ReasoningDeltaEvent(message_id="m1", delta="weighing"))
+    session.emit(MessageUpdateEvent(message=Message.assistant("x"), delta="x"))
+    session.emit(MessageEndEvent(message=Message.assistant("x")))
+
+    kinds = [type(m).__name__ for m in app.posted]
+    assert kinds.index("ReasoningEnd") < kinds.index("AssistantMessageEnd")
+    # And the buffered tail reached the app rather than being dropped.
+    assert [m.text for m in app.posted if isinstance(m, ReasoningDelta)][-1] == "weighing"
+
+
+def test_a_new_model_call_ends_the_previous_reasoning_phase() -> None:
+    """A tool-loop turn reasons once per call: each phase is announced and closed.
+
+    Without the ``message_start`` edge the second call's fragments would land in
+    the first call's block, and the app - which keys a block per phase - would
+    paint one long thought spanning two model calls.
+    """
+    controller, session, app = _controller()
+    session.emit(AgentStartEvent())
+    session.emit(MessageStartEvent(message=Message.assistant("")))
+    session.emit(ReasoningDeltaEvent(message_id="m1", delta="first"))
+    session.emit(MessageStartEvent(message=Message.assistant("")))
+    session.emit(ReasoningDeltaEvent(message_id="m2", delta="second"))
+    controller._flush_reasoning()
+
+    texts = [m.text for m in app.posted if isinstance(m, ReasoningDelta)]
+    # The second phase carries ONLY its own fragment: the buffer was reset at
+    # the new message start, so nothing from the first call is repainted.
+    assert texts == ["first", "second"]
+    assert [type(m).__name__ for m in app.posted].count("ReasoningEnd") >= 1
 
 
 def test_message_end_stops_flush_timer() -> None:

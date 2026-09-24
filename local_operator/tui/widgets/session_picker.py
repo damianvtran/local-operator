@@ -493,6 +493,11 @@ FORK_MARKER = "[fork] "
 #: folding it into the glyph would make the two unaskable at once.
 EXEC_MARKER = "[exec] "
 
+#: The archived column's mark. Same family and width as the two above, and
+#: reserved on the same result-set terms: it is only ever non-empty while the
+#: reveal toggle is on, so a user who never archives never pays its cells.
+ARCHIVE_MARKER = "[archived] "
+
 #: The record kinds this picker TAGS. ``"tui"`` is the unmarked default — the
 #: overwhelming majority, and tagging it would put a badge on every row to say
 #: "normal" — and ``"daemon"`` is deliberately absent for now: the phone daemon
@@ -522,6 +527,52 @@ WAKE_MARKER = "◷"
 #: still fine (that is what a viewer IS now), but the user should know they
 #: will not be alone in there.
 ATTACHED_MARKER = "○"
+
+#: A parent whose own turn is NOT running while it still owns work it delegated
+#: — ``1 subagent running``, or children parked waiting for a capacity slot.
+#:
+#: WHY IT NEEDS A GLYPH AT ALL. The state was reachable before this mark existed
+#: and rendered as ``●``/"Ready": ``ServingSessionHandle.is_conversationally_active``
+#: deliberately excludes subagents from the busy bit (publishing residency there
+#: made every live session claim to be working), so a parent that delegated and
+#: then stopped talking decorated as idle, and the picker — the one surface where
+#: a user can see the whole fleet — said "nothing is happening here" about the
+#: sessions with the most work in flight. Ink alone could not have fixed it: this
+#: column is read at a glance and ``muted`` against ``dim`` measured 1.90:1
+#: (see ``IDLE_MARKER``), so the state needs its own SHAPE.
+#:
+#: ``⇉`` (U+21C9 RIGHTWARDS PAIR OF ARROWS) — a NEW mark in this column, so
+#: the argument for it is its idiom rather than its precedent. The sidebar that
+#: draws this column already speaks a doubled-arrow language: the cursor is
+#: ``›`` and the row being opened is ``»``, one cell each in the same ink, and
+#: ``⇉`` is that same doubling applied to "work moved onward to children". The
+#: desktop surface names this idea separately and in its own idiom (``Share2``,
+#: the icon on the trace's own "Delegated work" label); the two are deliberately
+#: not the same codepoint, because each surface draws with its own font stack.
+#:
+#: THE SHAPE HAS TO SURVIVE THE COLUMN, which is where the crowding argument
+#: comes in: this column already carries ``◷``, ``○``, ``●``, ``!``, ``⊘``,
+#: ``≈`` and the completion marks, and the design work that settled ``⊘``/``≈``
+#: (see ``COMPLETION_MARKERS``) is the standard to meet — no two shapes in the
+#: column may share a stroke direction. ``⇉`` is the only arrow-shaped
+#: silhouette here, and it is further separated from the one other mark that
+#: means "work is happening now" by being STATIC: ``busy`` owns the spinner and
+#: animates, this does not, so the two cannot be read as one state even at the
+#: moment a spinner frame happens to look like an arrow. Adding a second
+#: ANIMATION was the rejected alternative for exactly that reason — two
+#: animations would make two states mean one thing in the column where the
+#: motion is the signal.
+#:
+#: STATIC, in the ``accent`` ink the busy spinner uses — because the two are the
+#: same kind of fact (the session has live work) and the difference is WHO is
+#: doing it, which is the shape's job. ONE CELL, like every marker here, and a
+#: constraint rather than a preference: the column reserves ``STATE_COL_CELLS``
+#: for glyph plus separator, so a two-cell glyph eats the separator and the name
+#: starts flush against it (the ⏰ spelling of ``WAKE_MARKER`` did exactly that,
+#: caught in a rendered frame). Verified one cell with ``rich.cells.cell_len``
+#: AND by rendering, not by assuming Menlo covers it — the frame captured for
+#: this change is the evidence for both.
+DELEGATING_MARKER = "⇉"
 
 #: A runtime that is up and warm with NOBODY watching it. A DIFFERENT glyph
 #: from ``ATTACHED_MARKER``, not the same one in a quieter ink: round 1 (D6)
@@ -1031,6 +1082,22 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
     if row.live_state == "attached":
         return ATTACHED_MARKER, "muted"
+    if row.delegating is not None:
+        # BELOW ``attached`` and ABOVE the armed wake, the same rung
+        # ``CatalogEntry.status_code``/``status`` place it at, read from the same
+        # row-level fact (``SessionRow.delegating``) so the glyph and the tooltip
+        # cannot disagree. Above the wake because a wake is a future fact ("this
+        # will act at some point") and this is a present one ("work is running
+        # now, one layer down") — and above ``idle``/``dormant`` for the same
+        # reason ``◷`` is: bare residency is the least informative thing true of
+        # a live row. Below ``attached`` because ``○`` answers the one question
+        # this mark does not, "where am I?".
+        #
+        # The COUNT does not appear here: this column is one cell and the ladder
+        # is its contract. The number reaches the user through the tooltip, which
+        # renders ``CatalogEntry.status`` — the same ``{N} subagent(s) running``
+        # sentence the desktop row carries in its ``title``.
+        return DELEGATING_MARKER, "accent"
     if row.wakes and not row.wakes_dormant:
         return WAKE_MARKER, "muted"
     if row.live_state == "idle":
@@ -1062,6 +1129,7 @@ def plan_columns(
     forked: bool = False,
     stated: bool = False,
     tagged: bool = False,
+    archived: bool = False,
     show_id: bool | None = None,
     age_width: int | None = None,
 ) -> tuple[int, int, int]:
@@ -1098,6 +1166,13 @@ def plan_columns(
     because the two facts are independent — a forked session can be running
     under exec — and sharing the cells would make one tag hide the other.
 
+    ``archived`` reserves :data:`ARCHIVE_MARKER`'s cells on the same terms, and
+    it is the one that costs nothing by construction: the archived rows only
+    reach this ladder through the picker's reveal toggle, so a list nobody has
+    asked to reveal carries no archived row and reserves no cells for one. The
+    reservation is what keeps the mark from ragging the name column once the
+    toggle IS on, which is the same argument the other three make.
+
     ``show_id=False`` means the caller will not DRAW the id column at all —
     the layout's :data:`NAME_P75` gate dropped it — so the ladder must not
     reserve its cells either. It did, and the cost was the whole 52–71 column
@@ -1130,6 +1205,7 @@ def plan_columns(
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     marker_col += cell_len(FORK_MARKER) if forked else 0
     marker_col += cell_len(EXEC_MARKER) if tagged else 0
+    marker_col += cell_len(ARCHIVE_MARKER) if archived else 0
     # The live-state column follows the same reserve-for-the-RESULT-SET rule as
     # the two above, and for the same reason: a column that appears as a
     # running row scrolls into view makes every name jump sideways on one
@@ -1188,6 +1264,7 @@ def render_rows(
     forked: bool | None = None,
     frame: int = 0,
     tagged: bool | None = None,
+    archived: bool | None = None,
     name_max: int | None = None,
     age_width: int | None = None,
     show_id: bool | None = None,
@@ -1253,6 +1330,15 @@ def render_rows(
         if tagged is not None
         else any(getattr(row, "kind", "") in TAGGED_KINDS for row in rows)
     )
+    # The archive mark, on the same result-set terms and for the same reason as
+    # the three above — and with one difference worth naming: this column is
+    # non-empty only when the caller has REVEALED archived rows, so its cost is
+    # paid exactly by the user who asked to see them.
+    any_archived = (
+        bool(archived)
+        if archived is not None
+        else any(getattr(row, "archived", False) for row in rows)
+    )
     name_col, age_col, id_col = plan_columns(
         rows,
         width,
@@ -1261,6 +1347,7 @@ def render_rows(
         any_forked,
         any_stated,
         any_tagged,
+        any_archived,
         # ``show_id`` is passed INTO the ladder rather than zeroing its result
         # afterwards: zeroing the column after the name had already been
         # clamped to a budget that included it is exactly how 18 cells per row
@@ -1290,6 +1377,7 @@ def render_rows(
     fork_col = cell_len(FORK_MARKER) if any_forked else 0
     state_col = STATE_COL_CELLS if any_stated else 0
     exec_col = cell_len(EXEC_MARKER) if any_tagged else 0
+    archive_col = cell_len(ARCHIVE_MARKER) if any_archived else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -1385,6 +1473,24 @@ def render_rows(
                     EXEC_MARKER if getattr(row, "kind", "") in TAGGED_KINDS else "", exec_col
                 ),
                 style=row_bg + Style(color=dim),
+            )
+        # The archived mark, painted `muted` — NOT the `dim` the qualifier tags
+        # beside it use, and the difference is measured rather than stylistic
+        # (design round 1, D3): `dim` is 3.43:1 on the row ground in the dark
+        # theme and 2.72:1 in the light one, both under AA, and this file's own
+        # body-match note rejects those numbers for a mark that explains a row.
+        # That is what this is: in a revealed list it is the only thing saying
+        # the row is not offered by default, so it gets the ink that explains
+        # (`muted`, 6.51:1 dark / 5.18:1 light) while the age and the id keep
+        # `dim` as lookup keys.
+        #
+        # It sits LAST among the qualifiers, so the marks a user sees on every
+        # list (fork, exec, live state) keep their existing distance from the
+        # name.
+        if archive_col:
+            line.append(
+                _pad_cells(ARCHIVE_MARKER if getattr(row, "archived", False) else "", archive_col),
+                style=row_bg + Style(color=theme_mod.semantic_color("muted")),
             )
         # The live-state mark sits immediately before the name, where the eye
         # scanning the name column passes it anyway. Its ink is the state's own
@@ -1582,6 +1688,18 @@ class SessionPickerScreen(ModalScreen[str | None]):
         Binding("ctrl+u", "pane_scroll(-1)", "Preview up", show=False),
         Binding("ctrl+d", "pane_scroll(1)", "Preview down", show=False),
         Binding("ctrl+g", "pane_end", "Newest turn", show=False),
+        # NAMED FOR THE FEATURE, not for a direction: ``ctrl+a`` reveals the
+        # archived rows and the same key hides them again, so a name like
+        # "show_archived" would be a lie on half its presses.
+        #
+        # NOT A PRINTABLE CHARACTER, and that is a recorded rule for this
+        # widget rather than a preference: inside a filter every printable
+        # character belongs to the query (``on_key`` feeds them to
+        # ``set_query``), so a letter binding would make that letter
+        # untypable. ``ctrl+a`` is unbound here and in the composer's own
+        # keymap, it does not collide with the picker's other ``ctrl`` chords
+        # (``e``/``u``/``d``/``g``/``p``/``n``), and it spells the feature.
+        Binding("ctrl+a", "toggle_archived", "Archived sessions", show=False),
     ]
 
     def __init__(
@@ -1598,6 +1716,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._selected = 0
         self._offset = 0
         self._hovered: int | None = None
+        #: Whether the pointer is on the ARCHIVED TOGGLE LINE. Separate from
+        #: ``_hovered`` because the toggle is not a row — it sits above the list
+        #: and has no index — and it gets its own ground when the pointer is over
+        #: it (design round 1, D5): the whole line is the hit box, so the whole
+        #: line has to say so before it is clicked, not only after.
+        self._toggle_hovered = False
         # ``{session id: conversation digest}``, built by the caller before the
         # screen is pushed (``search_index.build_index``). Optional so a host
         # without an index — tests, embedders — gets the name-and-id filter
@@ -1617,7 +1741,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # by the same keystroke and scanning 200 digests per repaint is the
         # cost this cache exists to avoid.
         self._filtered: list[SessionRow] = list(rows)
-        self._filtered_for = ""
+        # NOT seeded as valid for the empty query, which is what this used to be.
+        # The seed was `list(rows)` — every row, in the host's order — and that
+        # is only the answer for an empty query when the pool IS every row. With
+        # an archive filter in front of it, the seeded value would paint the
+        # archived rows on the FIRST frame of every open, before any keystroke or
+        # toggle could correct it, while every later frame obeyed the pool. The
+        # sentinel is the widget's existing "never a real query" value, so the
+        # first paint computes through `_pool()` like every other one.
+        self._filtered_for = "\x00 never a real query"
         # ``_body_matches`` is the EXACT-body match set; ``_admitted`` is the
         # union of exact-body and bounded-soft matches that ``filter_rows``
         # admits a row on. Two sets rather than one because they answer
@@ -1671,6 +1803,17 @@ class SessionPickerScreen(ModalScreen[str | None]):
         #: and no animation — which is what keeps this widget testable without
         #: a registry and usable by an embedder that has none.
         self._refresh_live_state = refresh_live_state
+        #: Whether the REVEALED archived rows are on screen. Off is the whole
+        #: contract of an archive: the rows are hidden until the user asks for
+        #: them, and asking is a deliberate act (``ctrl+a``, or a click on the
+        #: toggle row itself).
+        self._show_archived = False
+        #: How many of the rows the host handed over are archived. Counted once
+        #: at open and re-counted on every live refresh, because it decides BOTH
+        #: whether the toggle row is drawn at all and what it says — and a
+        #: toggle that is drawn when the store holds nothing to show is worse
+        #: than no toggle: it teaches a control that answers with an empty list.
+        self._archived_total = sum(1 for row in self._all if row.archived)
 
     # -- state ---------------------------------------------------------------
     # ``visible_rows``/``filter_query``/``_card_text``, not ``visible``/``query``/
@@ -1712,19 +1855,103 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # it is not run on every keystroke. WHEN it runs is decided by
             # ``_soft_tier_wanted`` below, which exists because the obvious
             # answers are all wrong in ways that were measured on this surface.
-            admitted = filter_rows(self._all, self._query, self._body_matches)
+            admitted = filter_rows(self._pool(), self._query, self._body_matches)
             if self._soft_tier_wanted(self._query):
                 soft = self._soft_index.search(self._digests, self._query)
                 self._admitted = self._body_matches | soft
                 # Recomputed only on the soft branch: on the common path the
                 # first pass is already the answer, so the uncapped row list is
                 # scanned once per query change rather than twice.
-                admitted = filter_rows(self._all, self._query, self._admitted)
+                admitted = filter_rows(self._pool(), self._query, self._admitted)
             else:
                 self._admitted = set(self._body_matches)
             self._filtered = rank_rows(admitted, self._query, self._body_matches)
             self._filtered_for = self._query
         return self._filtered
+
+    def _pool(self) -> list[SessionRow]:
+        """The rows the list may OFFER: everything, or the un-archived ones.
+
+        ONE predicate, read by the filter, by the ranking gate and by the
+        painter, so the rows on screen, the count beside them and the marks on
+        them can never describe different populations. The alternative —
+        filtering at the paint — leaves the cursor, the tally and the search
+        tier answering about rows that are not there.
+        """
+        if self._show_archived:
+            return self._all
+        return [row for row in self._all if not row.archived]
+
+    @property
+    def _archived_toggle(self) -> bool:
+        """Whether the toggle row is drawn at all.
+
+        ONLY WHEN THE STORE HOLDS SOMETHING TO REVEAL. A user who has never
+        archived a conversation gets a list identical to the one that shipped
+        before this feature — no row, no cells, no key to learn — which is the
+        same "a feature nobody uses costs nothing" rule the exec column
+        follows.
+        """
+        return self._archived_total > 0
+
+    def _toggle_row_text(self) -> str:
+        """The toggle as one plain line, or ``""`` when it is not drawn."""
+        if not self._archived_toggle:
+            return ""
+        state = "shown" if self._show_archived else "hidden"
+        hint = "ctrl+a to hide" if self._show_archived else "ctrl+a to show"
+        return f"Archived ({self._archived_total}) {state} — {hint}"
+
+    def action_toggle_archived(self) -> None:
+        """Reveal or hide the archived rows.
+
+        The cursor is re-homed to the top of the list rather than left pointing
+        at an index that may no longer exist: hiding the archived rows can
+        shorten the list under a cursor that was on one of them, and a cursor
+        past the end is a picker whose next Enter has nothing to choose.
+        ``set_query``\'s own re-home does the same for the same reason — but
+        only when the QUERY changed, so it cannot be borrowed for this.
+        """
+        self._show_archived = not self._show_archived
+        # The filter cache is keyed on the query, and the query did not change:
+        # without this the revealed rows would not appear until the next
+        # keystroke.
+        self._filtered_for = "\x00"
+        self._move_to(0)
+
+    def _clicked_toggle(self, event) -> bool:  # type: ignore[no-untyped-def]
+        """Whether a mouse event landed on the toggle row.
+
+        THE WHOLE LINE IS THE TARGET, not just the words in it. The row exists
+        for exactly one purpose and is one row tall, so the reading a user has
+        — "that line about archived conversations" — is the one that hits; a
+        text-only hit box would answer a click two cells to the left of the
+        word as nothing at all. Measured against the results pane's region for
+        the reason ``_index_at`` is: the card is one ``Static``, and the
+        backdrop covers the whole screen.
+        """
+        if not self._archived_toggle:
+            return False
+        results = getattr(self, "_results", None)
+        if results is None or not results.is_mounted:
+            return False
+        region = results.region
+        if not region.contains(event.screen_x, event.screen_y):
+            return False
+        # The toggle is the FIRST line of that pane; the rows start one line
+        # below it (``_header_rows``).
+        return event.screen_y - region.y == 0
+
+    def _drawable_rows(self) -> int:
+        """The list pane's row budget, after the chrome drawn above the rows.
+
+        Every consumer of the row budget reads it from here — the fit, the
+        hit-test and the footer's counter — so a toggle row that appears cannot
+        leave one of them claiming a row the pane does not have. That is the
+        defect this indirection exists to prevent: ``fit_rows`` would draw one
+        row past the pane and the counter would agree with it.
+        """
+        return max(0, self._layout().list_rows - self._header_rows())
 
     def _soft_tier_wanted(self, query: str) -> bool:
         """Whether to run the bounded soft tier for ``query``.
@@ -1736,7 +1963,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         it is gating in scope; the picker holds rows the phone and the desktop
         do not, which is why the predicate takes them as an argument.
         """
-        return soft_tier_wanted(self._all, query)
+        return soft_tier_wanted(self._pool(), query)
 
     @property
     def body_matched_ids(self) -> set[str]:
@@ -1983,6 +2210,13 @@ class SessionPickerScreen(ModalScreen[str | None]):
         if self._over_preview(event):
             event.stop()
             return
+        if self._clicked_toggle(event):
+            # Stopped like every other hit this handler resolves: one gesture
+            # owns the viewport, and a click that both toggled the row and fell
+            # through to the transcript behind the modal is two actions.
+            event.stop()
+            self.action_toggle_archived()
+            return
         index = self._index_at(event)
         if index is None:
             return
@@ -1994,18 +2228,30 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
         index = self._index_at(event)
+        # One hit-test for two effects: the pointer shape AND the toggle's own
+        # hover ground (design round 1, D5) — the toggle is a control, and until
+        # now only the hand said so, so the mouse path was invisible until it was
+        # used. Computed once because `_clicked_toggle` measures a region.
+        on_toggle = index is None and self._clicked_toggle(event)
         if index != self._hovered:
             self._hovered = index
             self._repaint()
+        if on_toggle != self._toggle_hovered:
+            self._toggle_hovered = on_toggle
+            self._repaint()
         # Hand pointer over a row only (a click resumes it); the card's
-        # padding and headers keep the default shape. The inline-rule
-        # assignment drives `Screen.update_pointer_shape()` through the
-        # property's own observer and no-ops when the shape did not change.
-        self.styles.pointer = "pointer" if index is not None else "default"
+        # padding and headers keep the default shape — EXCEPT the Archived
+        # toggle, which is a control: it takes the hand too, because it is the
+        # only thing in this pane a click does something other than resume.
+        # The inline-rule assignment drives `Screen.update_pointer_shape()`
+        # through the property's own observer and no-ops when the shape did not
+        # change.
+        self.styles.pointer = "pointer" if index is not None or on_toggle else "default"
 
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self._hovered is not None:
+        if self._hovered is not None or self._toggle_hovered:
             self._hovered = None
+            self._toggle_hovered = False
             self._repaint()
         self.styles.pointer = "default"
 
@@ -2039,7 +2285,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         line = event.screen_y - region.y - self._header_rows()
         rows = self.visible_rows
         costs = self._row_costs()
-        drawn = fit_rows(costs, self._offset, self._layout().list_rows)
+        drawn = fit_rows(costs, self._offset, self._drawable_rows())
         if line < 0:
             return None
         # A ROW THAT DRAWS A CONTEXT LINE OCCUPIES TWO LINES, so the click's
@@ -2277,17 +2523,23 @@ class SessionPickerScreen(ModalScreen[str | None]):
         7% — while a 60-row terminal has room for 41.
         """
         costs = self._row_costs()
-        return fit_rows(costs, self._offset, self._layout().list_rows)
+        return fit_rows(costs, self._offset, self._drawable_rows())
 
     def _header_rows(self) -> int:
         """Rows above the first session row.
 
-        Zero: the results pane holds rows and their context lines and nothing
-        else. The title, the tally and the keys live in the filter row, and the
-        preview is a separate widget — which is precisely why the mouse
-        hit-test can measure against this pane's own region.
+        ONE when the Archived toggle is drawn — it sits at the top of this pane,
+        inside the same text block, so the mouse hit-test has to subtract it or
+        every row below it resolves one session too early. Zero otherwise: the
+        title, the tally and the keys live in the filter row, and the preview is
+        a separate widget — which is precisely why the mouse hit-test can
+        measure against this pane's own region.
+
+        It is added to the ROW BUDGET's account too (``_drawable_rows``), because
+        a line that takes a line has to come out of the budget the rows are
+        fitted into, not out of the pane.
         """
-        return 0
+        return 1 if self._archived_toggle else 0
 
     def _exec_column_latched(self, rows: Sequence[SessionRow]) -> bool:
         """Should the exec column be reserved? Once yes, yes until the picker closes.
@@ -2642,6 +2894,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
             self._live_refreshed_at = now
             try:
                 self._all = list(refresh(self._all))
+                # The Archived toggle is a FUNCTION of these rows, so it moves
+                # with them: a refresh that brings in an archived conversation
+                # (another frontend archived one a moment ago) has to add the
+                # toggle, and one that takes the last archived row away has to
+                # remove it. Recounted here rather than read off the pool, which
+                # is the filtered view and would answer 0 as soon as the toggle
+                # was off — the count that decides whether the toggle EXISTS
+                # cannot come from the population the toggle controls.
+                self._archived_total = sum(1 for row in self._all if row.archived)
                 # The filter cache is keyed on the query, which has not
                 # changed — invalidate it explicitly or the refreshed rows are
                 # computed and then thrown away.
@@ -2697,6 +2958,23 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "wakes",
         "wakes_dormant",
         "kind",
+        # The two subagent counts. In the signature because they ARRIVE WHILE THE
+        # LIST IS OPEN — a child starting or a parked child picking up a slot is
+        # exactly the event this state exists to show, and it is sub-second
+        # while the list's own refresh is on a 30 s poll — and because they
+        # change what the row SAYS and DRAWS: the mark becomes `⇉` and the
+        # tooltip's sentence gains the count (``CatalogEntry.status``). Two rows
+        # differing only here are therefore not the same row on screen, which is
+        # the whole test for membership in this tuple.
+        "subagents_running",
+        "subagents_queued",
+        # In the signature because it MOVES A ROW IN OR OUT OF THE LIST UNDER THE
+        # OPEN PICKER: another frontend (the desktop app, a peer terminal)
+        # archiving a conversation is exactly the event the reveal toggle's
+        # contents have to be rebuilt for, and a row surfaced through that
+        # toggle carries the archived mark, so two rows differing only here are
+        # not the same row on screen.
+        "archived",
     )
 
     #: Fields deliberately OUTSIDE the signature, each with the reason it is
@@ -2791,7 +3069,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # line costs a second line) and the cursor clamp depends on the window,
         # so one pass can leave the cursor on an undrawn row — the exact defect
         # ``_page_rows`` exists to prevent. Fit → clamp → fit again.
-        budget = self._layout().list_rows
+        budget = self._drawable_rows()
         costs = self._row_costs()
         self._offset = scroll_into_window(costs, self._offset, self._selected, budget)
         self._offset = max(0, min(self._offset, max(0, len(costs) - 1)))
@@ -2849,34 +3127,87 @@ class SessionPickerScreen(ModalScreen[str | None]):
         return self._pane_top
 
     # -- the three panes -----------------------------------------------------
+    def _toggle_line_text(self) -> Text:
+        """The Archived toggle as a styled line, or an empty ``Text`` when absent.
+
+        ``muted`` rather than the ``dim`` the hints use: while it is OFF this
+        line is the ONLY thing on screen saying conversations exist that the
+        list is not offering, and a hidden population with no signpost reads as
+        deleted work. The state word carries the difference between the two
+        states rather than a colour change, so the line does not move or
+        re-weight under the cursor when it is toggled.
+
+        Truncated to the pane for the reason every other chrome row is: a
+        narrow terminal must lose the hint, never wrap a row the budget has
+        already counted.
+        """
+        text = self._toggle_row_text()
+        if not text:
+            return Text()
+        style = Style(color=theme_mod.semantic_color("muted"))
+        if self._toggle_hovered:
+            # The same ground a hovered ROW gets, and padded to the pane for the
+            # same reason the rows are: a ground that stops at the last word
+            # reads as a highlight on the text, not as "this whole line is the
+            # target" — which is what the hit box already is.
+            style += Style(bgcolor=theme_mod.semantic_color("tint-select"))
+            return Text(
+                _pad_cells(truncate_cells(text, self._usable()), self._usable()), style=style
+            )
+        return Text(
+            truncate_cells(text, self._usable()),
+            style=style,
+        )
+
     def _results_text(self) -> Text:
-        """The list pane: one line per session, plus any grep context lines."""
+        """The list pane: the Archived toggle, then one line per session."""
         dim = Style(color=theme_mod.semantic_color("dim"))
         rows = self.visible_rows
         width = self._usable()
+        toggle = self._toggle_line_text()
+        toggle_drawn = bool(toggle.plain)
 
         if not rows and not self._query:
-            # The shared empty-store notice, whose "subagent runs are not
-            # listed" clause is the EXPLANATION and not decoration — it must
-            # survive the narrow case, so it wraps rather than truncating.
+            if not toggle_drawn:
+                # The shared empty-store notice, whose "subagent runs are not
+                # listed" clause is the EXPLANATION and not decoration — it must
+                # survive the narrow case, so it wraps rather than truncating.
+                out = Text()
+                for index, line in enumerate(_wrap_cells(RESUME_EMPTY_NOTICE, width)):
+                    if index:
+                        out.append("\n")
+                    out.append(line, style=dim)
+                return out
+            # The store is NOT empty — every conversation the host handed over
+            # is archived, and the toggle is the only thing offering them. The
+            # empty-store notice would be a false statement about the user's
+            # work here, so this path says what is actually true instead.
             out = Text()
-            for index, line in enumerate(_wrap_cells(RESUME_EMPTY_NOTICE, width)):
-                if index:
-                    out.append("\n")
-                out.append(line, style=dim)
+            out.append_text(toggle)
+            out.append("\n")
+            out.append(f"all {self._archived_total} conversation(s) are archived", style=dim)
             return out
         if not rows:
             # The filter row already echoes the query; repeating it here said
-            # it twice in two grammars.
-            return Text("no session matches that filter", style=dim)
+            # it twice in two grammars. The toggle stays: with archived rows
+            # hidden, "no session matches" is only half the answer.
+            out = Text()
+            if toggle_drawn:
+                out.append_text(toggle)
+                out.append("\n")
+            out.append("no session matches that filter", style=dim)
+            return out
 
-        budget = self._layout().list_rows
+        budget = self._drawable_rows()
         costs = self._row_costs()
         drawn = fit_rows(costs, self._offset, budget)
         window = rows[self._offset : self._offset + drawn]
         query = self._query.strip()
 
         out = Text()
+        if toggle_drawn:
+            out.append_text(toggle)
+            out.append("\n")
         for index, line in enumerate(
             render_rows(
                 window,
@@ -2892,6 +3223,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
                 self._frame,
                 # The LATCHED exec fact: the column may widen, never narrow.
                 self._exec_column_latched(rows),
+                # The archived column, on the same result-set terms and with the
+                # same reason: it is non-empty only while the reveal toggle is
+                # on, and then it must hold its cells for every row.
+                any(getattr(row, "archived", False) for row in rows),
                 name_max=self._layout().name_width,
                 age_width=self._layout().age_width,
                 show_id=self._layout().show_id,
@@ -3158,7 +3493,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # cannot disagree about how much room this row has.
         width = max(1, measured or self._layout().screen_width)
         costs = self._row_costs()
-        drawn = fit_rows(costs, self._offset, self._layout().list_rows) if rows else 0
+        drawn = fit_rows(costs, self._offset, self._drawable_rows()) if rows else 0
 
         out = Text(no_wrap=True, overflow="ellipsis")
         out.append("/ ", style=accent)
@@ -3201,7 +3536,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # was answering a different question — "how many sessions are
             # there" rather than "how many matched". The unfiltered case still
             # states the store total, which is what it means there.
-            count = len(rows) if self._query else len(self._all)
+            # THE UNFILTERED COUNT IS THE POOL'S, not the host's. ``_all`` is
+            # every row the picker was handed, and with the archive filter that
+            # is one row more than the list is OFFERING: the frame read
+            # "3 sessions" over two rows and a toggle saying "Archived (1)
+            # hidden", which is a tally contradicting the line above it. The
+            # filtered branch below is ``rows`` for the same reason — a number
+            # about what is on offer, never about what the store holds.
+            count = len(rows) if self._query else len(self._pool())
             # MATCHES, not sessions, while a filter is active. The row already
             # says `0 sessions` / `1 session` on the unfiltered store, and over
             # a filtered list that reads as a statement about the STORE — the

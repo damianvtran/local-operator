@@ -17,8 +17,9 @@ provider-agnostic Python architecture:
    auto/mid-turn/idle triggers.
 4. **Providers** — OAuth login (OpenAI/ChatGPT, Anthropic, Kimi, xAI),
    API-key support, SQLite credential store, credential rotation + model
-   fallback chains. Backward compatible with existing `credentials.env`,
-   `config.yml`, and `--hosting` names.
+   fallback chains. `credentials.env` is retired and its module deleted;
+   provider keys live in the encrypted store under `LOP_PROVIDER_*`.
+   `config.yml` and `--hosting` names remain backward compatible.
 5. **TUI** — full-screen Textual app themed with the local-operator brand kit
    (island-dark palette, one green accent, minimal one-line-per-action).
 6. **MCP** — official Python SDK + manager semantics (fast-startup gate,
@@ -150,8 +151,9 @@ Harness core contract:
   — `auth_credentials` table (provider, credential_type, data JSON,
   disabled_cause, identity_key), blocks table, 7-step resolution cascade:
   runtime override > config override > OAuth credential > login-pasted key >
-  env var > stored key > fallback. Round-robin + session stickiness.
-  Backward compat: legacy `credentials.env` keys are read as the env-var tier.
+  provider store row > env var > stored key > fallback. Round-robin + session
+  stickiness. Backward compat (REMOVED in PR2): legacy `credentials.env` keys were read, LAST, as
+  the transition tier until every writer is repointed (PR2 deletes it).
 - `providers/failover.py`: a/b/c credential rotation (initial / force-refresh
   same / rotate sibling; skip refresh on 403+usage-limit; attempted-keys set,
   64 cap), model fallback chains config (`retry.fallbackChains` in
@@ -437,8 +439,12 @@ ink) rather than from the hue.
   `config.yml` and listed by `config list` (marked `[DEPRECATED]` there) so
   existing files and scripts keep working, but they are inert.
 
-- `credentials.env`: still read (env tier of the credential cascade); still
-  written by `credential update`. OAuth credentials live in auth.db, never in
+- `credentials.env`: REMOVED as a credential source (PR2a dropped the reader
+  legs, PR2b deleted `credentials.py`). `credential update` writes a
+  `LOP_PROVIDER_*` row in the encrypted store, and the store-then-env readers
+  are the whole cascade. The file's only surviving reader is
+  `secrets/legacy_env.read_credentials`, for `lop secret migrate-env` alone —
+  an upgrade path, not a tier. OAuth credentials live in auth.db, never in
   credentials.env.
 - Agents on disk: `agent.yml` + `*.jsonl` layout readable. Drop `context.pkl`
   (dill) — agents that have one ignore it with a warning.

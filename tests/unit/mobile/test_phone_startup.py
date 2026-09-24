@@ -63,9 +63,43 @@ asyncio.run(main())
 """
 
 
+def _write_child_config() -> None:
+    """Turn the residency window OFF for the child, in the CHILD's own config root.
+
+    Written into the config dir the child will derive for itself (the suite's
+    autouse isolation gives every test a fresh HOME, and the child resolves its
+    root from the same environment) rather than exported as a process-wide
+    override, so the setting travels with the isolation the suite already
+    applies to child processes rather than becoming an exception to it.
+    """
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.yml").write_text(
+        "values:\n  runtime:\n    keep_alive_seconds: 0\n", encoding="utf-8"
+    )
+
+
 @pytest.fixture
 def fixture_children(monkeypatch):
-    """Keep the real spawn API/env but run an inert session in each child."""
+    """Keep the real spawn API/env but run an inert session in each child.
+
+    THE CHILD RUNS WITH THE KEEP-ALIVE WINDOW OFF, and that is a scoped choice
+    rather than a weakened gate. These cells pin the DAEMON's release contract —
+    "the relay may only ask the runtime to decide and must never send a process
+    kill" — and several of them end by waiting for the child to exit after its
+    last viewer leaves, as a hang guard inside a 15-20 s ``asyncio.timeout``. A
+    phone attach counts as a VIEWER (``RuntimeServer._visible_attach_surfaces``),
+    so with the shipped ``runtime.keep_alive_seconds`` (300 s) the child is
+    deliberately kept resident past that guard: the cells would then be asserting
+    the residency policy instead of the contract they are about, and their own
+    intent is unchanged either way. The window itself is pinned where it lives —
+    ``tests/unit/session/runtime/test_runtime_keep_alive.py`` (the 300 s grace,
+    the machine-wide LRU cap, the stamp on detach) — so this fixture turns off a
+    policy that is asserted elsewhere; it does not stop it being asserted.
+    """
+    _write_child_config()
     actual_spawn = asyncio.create_subprocess_exec
     children = []
 
@@ -399,8 +433,15 @@ async def test_phone_callbacks_cannot_follow_rebind_or_overwrite_replacement(mon
     clients = []
 
     class CapturedClient:
-        def __init__(self, repaint, _disconnected, *, locality):
+        def __init__(self, repaint, _disconnected, *, locality, **extra):
             assert locality == "remote"
+            # ``**extra`` and not a named parameter: the daemon passes
+            # ``on_operator_prompt`` so a machine-side presence prompt names the
+            # session and the effect in its log (UX round 6, U3). This double stands
+            # in for the CLIENT, and the callback is the client's own plumbing —
+            # nothing in these cells asserts on it, so absorbing it keeps the double
+            # a double rather than a copy of the constructor's signature.
+            self.extra = extra
             self.repaint = repaint
             self.connected = False
             clients.append(self)

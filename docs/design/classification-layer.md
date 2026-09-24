@@ -156,16 +156,16 @@ class DecisionVendor(Protocol):
     name: str
     #: Credential resolution is per-vendor because Radient's is an OAuth session
     #: held in AuthStore while the others are plain credential rows.
-    async def credential(self, manager: CredentialManager) -> SecretStr | None: ...
+    async def credential(self, config_dir: Path | None) -> SecretStr | None: ...
     async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse: ...
 
 async def resolve_vendor(
-    manager: CredentialManager,
+    config_dir: Path | None,
     settings: Mapping[str, Any] | None = None,
 ) -> DecisionVendor | None:
     """First available leg honouring `values.classification.vendor`; None when none is usable."""
 
-def vendor_status(manager: CredentialManager, settings: Mapping[str, Any] | None = None) -> list[tuple[str, bool]]:
+def vendor_status(config_dir: Path | None, settings: Mapping[str, Any] | None = None) -> list[tuple[str, bool]]:
     """[(vendor_name, available)] for diagnostics and tests. Never performs I/O."""
 ```
 
@@ -200,7 +200,7 @@ class Recommendation:
     skipped: str | None = None      # "disabled" | "no-vendor" | "empty-roster" | "timeout" | "error" | "circuit-open"
 
 class ClassificationService:
-    def __init__(self, *, manager: CredentialManager, settings: Mapping[str, Any] | None = None) -> None: ...
+    def __init__(self, *, config_dir: Path | None, settings: Mapping[str, Any] | None = None) -> None: ...
     @property
     def enabled(self) -> bool: ...
     @property

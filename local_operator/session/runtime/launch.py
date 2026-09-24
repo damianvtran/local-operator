@@ -68,8 +68,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union
 
+from local_operator.harness.approval import (
+    mint_operator_cap,
+    open_operator_cap_handoff,
+    remember_operator_cap,
+)
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import detached_popen_kwargs
+from local_operator.session.runtime.types import RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
 
@@ -229,32 +235,55 @@ def _session_dir(config_dir: Path, session_id: str) -> Path:
 
 
 def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = True) -> int | None:
-    """Pid currently holding the transcript lease, if it is alive.
+    """Pid currently holding the transcript lease, if it is alive AND still its writer.
 
     Read directly rather than through ``acquire_session_lease``: this is a
     PROBE, and acquiring in order to find out would take the very lease the
     runtime needs. Uses the lease's own claim reader so both agree on the
-    format.
+    format — including the claim's BIRTH fields, which is the difference between
+    "a process holds this pid" and "the process that wrote this claim holds this
+    pid".
 
-    ``check_zombie=False`` is for the engage loop's dense grid. That probe costs
-    a ``ps`` fork (2.4-4.6 ms across runs on an M-series box, against the
-    23-30 µs budget published for one dense poll iteration at ``_poll_delay``),
-    so paying it every 10 ms pass would stretch that period by 24-46% and eat the
-    dead time the grid exists to remove. The loop therefore passes False only
-    while that grid is in force and True on every coarser pass — see the cadence
-    note at the top of the loop. A wrong "live" there costs waiting, never
-    arbitration: a zombie's claim is still only ever taken over by the
-    acquisition path, which always requires the proof.
+    **WHY THE BIRTH FIELDS MATTER HERE, at the user's expense.** A claim whose
+    pid was recycled by an unrelated live process used to read as a live holder,
+    so this function returned that stranger and the engage loop took its
+    "a contender holds the transcript but has not published yet" branch — for the
+    full ``DEFAULT_DEADLINE_S``, spawning NOTHING, and the operator was shown
+    ``the runtime is reconnecting`` (session bfbc971ef537, 2026-09-21). With the
+    identity test this returns ``None`` for a recycled pid, so the loop spawns.
+
+    ``check_zombie=False`` is for the engage loop's dense grid, and it skips the
+    IDENTITY proof with the corpse proof, for the same reason and with the same
+    bound. That proof costs a ``ps`` fork (2.4-4.6 ms across runs on an M-series
+    box, against the 23-30 µs budget published for one dense poll iteration at
+    ``_poll_delay``), so paying it every 10 ms pass would stretch that period by
+    24-46% and eat the dead time the grid exists to remove. The loop therefore
+    passes False only while that grid is in force and True on every coarser
+    pass — see the cadence note at the top of the loop.
+
+    **A wrong "live" in the grid costs waiting, never arbitration, and cannot
+    reintroduce the wedge.** The grid is only reachable on the strength of a
+    holder this probe already reported (``constructing_since`` is set from
+    ``holder is not None``, and the first pass of every engage has it ``None``,
+    so pass one is coarse). A recycled pid therefore cannot *create* the grid: on
+    pass one the full proof runs, the token mismatch proves the owner gone, this
+    returns ``None``, and the loop spawns. Inside a grid the cheap answer can
+    only delay by the remainder of ``_CONSTRUCTING_WINDOW_S``, after which the
+    loop is coarse again and the proof lands. Keep the flag symmetric across
+    platforms too — Linux samples identity for free, and a safety property that
+    differs by platform is worse than a few milliseconds.
     """
     from local_operator.session_lease import LEASE_NAME, _pid_state, _read_claim
 
     path = _session_dir(config_dir, session_id) / LEASE_NAME
     if not path.exists():
         return None
-    _generation, pid = _read_claim(path)
-    if pid is None:
+    claim = _read_claim(path)
+    if claim.pid is None:
         return None
-    return pid if _pid_state(pid, check_zombie=check_zombie) == "live" else None
+    if _pid_state(claim.pid, check_zombie=check_zombie, expected_birth=claim.birth) != "live":
+        return None
+    return claim.pid
 
 
 def _spawn_interpreter() -> str:
@@ -369,32 +398,55 @@ def _spawn_runtime(
     handle_fd, capture_path = tempfile.mkstemp(prefix="lop-runtime-", suffix=".log")
     capture = Path(capture_path)
     handle = os.fdopen(handle_fd, "wb")
+    # THE OPERATOR CAPABILITY'S ONE HANDOFF (issue #1310). MINTED HERE, in the
+    # process the operator's keyboard is attached to, and handed to the child on
+    # an inherited descriptor whose NUMBER — not value — rides in argv. The
+    # child needs it because an authority-INCREASING control request (`/approvals
+    # auto`, an approved card) must be refused to anything that merely read the
+    # session record, and the model's own `bash` tool runs as this uid and can
+    # read it. See ``harness/approval.py`` for why no file, no environment and
+    # no log may carry it, and ``session/runtime/process.main`` for the far end.
+    #
+    # The value is registered against the CHILD'S pid so that a later
+    # ``AttachClient`` in THIS process — the one that will route the console's
+    # typed commands — presents it, while every other process on the machine
+    # (a peer's terminal, the desktop app, the phone relay when it is not the
+    # one that engaged) has nothing to present and is refused.
+    handoff = open_operator_cap_handoff()
+    operator_cap = mint_operator_cap()
     # Name the detached runtime in the OS process listing. A machine has many of
     # these at once (one per live session), and until now every one of them was
     # an indistinguishable `python3.x` row in Activity Monitor. The session id is
     # already a hex handle the user sees in `lop sessions`, and it is truncated
     # to 8 so `ps -o ucomm`'s 16-char window still separates two sessions.
-    # `spawn_identity` returns BOTH axes, and only as a pair: the label is
-    # `argv[0]` when a branded image was planted, and on the rung that could not
-    # plant one it hands back the bare interpreter with the label deliberately
-    # withheld — a labelled `argv[0]` empties the child's `sys.executable` on
-    # Linux (see `procname.spawn_identity`).
+    #
+    # WHICH BUILD THE CHILD RUNS is the interpreter, and it is decided HERE
+    # rather than inherited: `_spawn_interpreter` resolves the CURRENT
+    # generation's, because that is what makes a mixed-generation fleet
+    # converge one session at a time. The NAME then has to be asked for from
+    # that SAME interpreter's tree — one call per branch, so the two axes can
+    # never disagree:
+    #
+    #  - same tree as this process: `spawn_identity` (the link beside our own
+    #    `python`);
+    #  - another generation's tree: `spawn_identity_for_interpreter`, which
+    #    plants the link BESIDE THAT interpreter and returns the pair, or rung
+    #    2 (the bare path, label deliberately withheld). Patching `executable`
+    #    after `spawn_identity` is exactly what this replaced, and it produced
+    #    a LABELLED argv[0] on a `python3.x` image — the row an EDR killed 1079
+    #    times on 2026-09-19, and a labelled `argv[0]` also empties the child's
+    #    `sys.executable` on Linux (see `procname.spawn_identity`).
     from local_operator import procname
 
-    argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])
-    # WHICH BUILD THE CHILD RUNS is the interpreter, so the engage decides it
-    # here rather than inheriting this process's. ``spawn_identity``'s image
-    # belongs to THIS process's venv (it is a hardlink planted beside our own
-    # ``python``), so passing it through would put a freshly engaged runtime
-    # back on the build this engage is leaving — the opposite of converging.
     interpreter = _spawn_interpreter()
     if interpreter != sys.executable:
-        executable = interpreter
-        if argv0 == sys.executable:
-            # Rung 2 had no label to carry (see ``procname.spawn_identity``), so
-            # its argv[0] was a path; keep the pair consistent rather than
-            # naming one interpreter and executing another.
-            argv0 = interpreter
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_SESSION_ANON, interpreter, id=str(session_id)[:8]
+        )
+    else:
+        argv0, executable = procname.spawn_identity(
+            procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
+        )
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
@@ -411,7 +463,23 @@ def _spawn_runtime(
             # interpreter options are recognised only before ``-m``.
             # ``executable`` may name the CURRENT generation's interpreter
             # rather than this process's; see :func:`_spawn_interpreter`.
-            [argv0, SAFE_PATH_FLAG, "-m", "local_operator.session.runtime.process"],
+            # ``RUNTIME_MODULE`` is imported from ``session.runtime.types`` rather
+            # than written here, because the SWEEP identifies a runtime by this
+            # exact ``-m`` word in an argv (``reclaim.runtime_processes``) and a
+            # drift between the two is silent in the worst direction: the census
+            # matches nothing, every store reads as having no runtimes, and the
+            # residency bound goes inert with no failing test. It sits in ``types``
+            # (the runtime's shared vocabulary, no local imports) rather than in
+            # ``reclaim`` because this module must not import the sweep to write an
+            # argv — ``reclaim`` pulls in ``registry`` and ``viewers``, and this is
+            # the file the engage path loads.
+            #
+            # ``handoff.argv`` is APPENDED AFTER IT, so the interpreter still sees
+            # ``-m RUNTIME_MODULE`` in the position it always did (which is what
+            # the sweep matches) and the operator-descriptor flag lands in the
+            # child module's own ``sys.argv``. The two changes are orthogonal: one
+            # names the module, the other carries a descriptor number.
+            [argv0, SAFE_PATH_FLAG, "-m", RUNTIME_MODULE, *handoff.argv],
             executable=executable,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -428,11 +496,43 @@ def _spawn_runtime(
             # or a console close — the opposite of the owned, attachable runtime
             # this function exists to leave behind. See
             # procstate.detached_popen_kwargs.
+            #
+            # KEPT BESIDE THE HANDOFF'S FILE-DESCRIPTOR KWARGS (merge of
+            # ``origin/main``): the two answer different questions and neither
+            # replaces the other — detachment is about which CONSOLE and process
+            # group the child joins, while ``pass_fds``/``close_fds`` are about
+            # which DESCRIPTOR it inherits. ``detached_popen_kwargs`` sets no
+            # ``close_fds`` (POSIX: ``start_new_session``; Windows:
+            # ``creationflags``), so there is no duplicate keyword here.
             **detached_popen_kwargs(),
+            # ``pass_fds``/``close_fds`` come from the handoff: POSIX passes
+            # exactly the one descriptor and keeps ``close_fds=True`` (the
+            # hardening this file already relied on); Windows cannot use
+            # ``pass_fds`` at all, so it passes an inheritable handle and turns
+            # ``close_fds`` off. The runtime reports which boundary it got.
+            pass_fds=handoff.pass_fds,
+            close_fds=handoff.close_fds,
         )
+        # AFTER the fork, and it cannot block: 32 bytes into an empty kernel
+        # buffer. ``deliver`` closes BOTH ends, so the descriptor is gone from
+        # this process before any turn can run — which is what keeps it out of
+        # every tool subprocess's table.
+        handoff.deliver(operator_cap)
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int):
+            # Keyed on the CHILD'S pid, which is the identity the console
+            # resolves later (``AttachClient.connect`` reads it off the record).
+            # A process object that cannot name its pid — a reduced double in a
+            # test — leaves the capability unkeyed, which is the fail-closed
+            # reading: a console with nothing to present is refused, and the
+            # child still holds the only copy that could have been matched.
+            remember_operator_cap(pid, operator_cap)
     finally:
         # The child holds its own duplicated descriptor; this one is ours to
-        # drop so the file is not kept open for the life of the server.
+        # drop so the file is not kept open for the life of the server. The
+        # handoff is closed here too, so a Popen that raised leaves no
+        # descriptor behind either.
+        handoff.close()
         handle.close()
     setattr(process, "lop_capture_path", capture)
     return process
@@ -582,6 +682,11 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
 
     from local_operator.mobile.attach_client import AttachClient
 
+    # NO `on_operator_prompt`: this client exists to deliver one dequeued errand and
+    # has no operator-facing surface at all — an errand that needed a signature
+    # would be answered by the runtime's own refusal, and `AttachClient`'s fallback
+    # logs the effect sentence rather than losing it (UX round 6, U3 = design round
+    # 6, D3, which is about the surfaces a human is actually looking at).
     client = AttachClient(lambda _projection: None, lambda _reason: None)
     try:
         await client.connect(record, session_id)

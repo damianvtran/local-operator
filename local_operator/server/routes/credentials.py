@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from local_operator.credentials import CredentialManager
-from local_operator.server.dependencies import get_credential_manager
+from local_operator.config import ConfigManager
+from local_operator.server.dependencies import get_config_manager
 from local_operator.server.models.schemas import (
     CredentialListResult,
     CredentialUpdate,
@@ -47,16 +47,53 @@ logger = logging.getLogger("local_operator.server.routes.credentials")
     },
 )
 async def list_credentials(
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
 ):
     """
     Retrieve a list of credential keys (without their values).
+
+    Lists the provider-class STORE rows (presented with the reserved
+    ``LOP_PROVIDER_`` prefix stripped, so a caller sees the env-key spelling it
+    configured) UNIONED with the store's plain agent-class rows. The legacy
+    ``CredentialManager`` file keys this used to union are GONE (PR2a) — the
+    plaintext file is no longer a credential source. The desktop Settings section
+    that consumed this is being removed separately; the endpoint stays correct
+    for any other client.
     """
     try:
-        # Get credentials from the credential manager
-        non_empty_credentials = credential_manager.list_credential_keys(non_empty=True)
+        # Provider-class store rows first, keyed by env-key name.
+        from local_operator.providers.registry import stored_provider_env_keys
 
-        result = CredentialListResult(keys=non_empty_credentials)
+        keys = set(stored_provider_env_keys(config_manager.config_dir))
+        # Namespace-scoped plain agent secrets too — `lop secret set
+        # OPENAI_API_KEY` is a value this endpoint's PATCH would list.
+        from local_operator.secrets.access import open_store
+        from local_operator.secrets.errors import SecretStoreError
+        from local_operator.secrets.keys import store_path
+        from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+
+        if store_path(config_manager.config_dir).exists():
+            try:
+                # The provider-class rows are STRIPPED here exactly as the
+                # docstring promises. Adding the raw name made every provider
+                # credential appear twice — once as ``LOP_PROVIDER_<KEY>`` from
+                # this loop and once as ``<KEY>`` from ``stored_provider_env_keys``
+                # above — so a client keyed on this list (the Settings UI) showed
+                # a phantom, un-configurable second row for every provider key
+                # (QA Q-2). Agent-class rows are unprefixed and pass through
+                # untouched, which is what keeps them listed.
+                keys.update(
+                    (
+                        record.name[len(PROVIDER_SECRET_PREFIX) :]
+                        if record.name.startswith(PROVIDER_SECRET_PREFIX)
+                        else record.name
+                    )
+                    for record in open_store(config_manager.config_dir).list()
+                )
+            except (SecretStoreError, OSError):
+                logger.warning("credential store unavailable", exc_info=True)
+
+        result = CredentialListResult(keys=sorted(keys))
 
         return CRUDResponse(
             status=200,
@@ -108,18 +145,28 @@ async def list_credentials(
 )
 async def update_credential(
     credential_data: CredentialUpdate,
-    credential_manager: CredentialManager = Depends(get_credential_manager),
+    config_manager: ConfigManager = Depends(get_config_manager),
 ) -> JSONResponse:
     """
     Update an existing credential or create a new one.
+
+    Writes a provider-class STORE row (``LOP_PROVIDER_<KEY>``, ``role="provider"``)
+    — the consolidated home for provider keys — rather than the plaintext
+    ``credentials.env``. The store row is what the store-first readers resolve,
+    so this is the change that makes a Settings-set key take effect.
     """
     try:
         # Validate the key
         if not credential_data.key:
             raise HTTPException(status_code=400, detail="Credential key cannot be empty")
 
-        # Set the credential
-        credential_manager.set_credential(credential_data.key, credential_data.value)
+        # Set the credential as a provider-class store row, under the manager's
+        # own config root so a server with a custom root writes where it reads.
+        from local_operator.providers.registry import store_provider_key
+
+        store_provider_key(
+            credential_data.key, credential_data.value, base=config_manager.config_dir
+        )
 
         # A key is exactly the reason model metadata resolves poorly: without one
         # a provider's listing 401s and every model it describes falls back to the

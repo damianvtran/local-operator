@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -11,6 +12,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -984,7 +986,17 @@ def test_our_own_record_does_not_block_the_classification(tmp_path: Path) -> Non
 
 
 def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
-    """Design test 3: the record's build, pid and start time ride the detail."""
+    """Design test 3: the record's build, pid and start time ride the detail.
+
+    AND THE DETAIL OPENS BY SAYING NOBODY WAS NAMED (QA round 1, Q4/Q5). The
+    bracket on this rung carries the DEAD runtime's own identity, while every
+    other ``runtime-killed`` reason on the same arm carries an ACTOR in the same
+    place (``… pruned by lop install prune, killer pid N``) — so a reader who has
+    seen one of those reads a bare pid here as the party that acted. The word the
+    other rung uses for the gap leads the parenthetical, and the victim's facts
+    follow it.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED
     from local_operator.session.attention import bootstrap_transcript
     from local_operator.session.transcript import Transcript
 
@@ -999,6 +1011,11 @@ def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
     assert (kind, cause) == ("error", "runtime-killed")
     assert f"pid {dead_pid}" in reason
     assert "1.2.3@abcdef0" in reason
+    # The gap is stated BEFORE the victim's facts, so the pid cannot be misread as
+    # an actor; the victim is still fully named behind it.
+    marker = reason.index("(")
+    assert reason[marker:].startswith(f"({KILL_UNATTRIBUTED},"), reason
+    assert f"pid {dead_pid}" in reason[marker:], reason
 
 
 def test_the_started_at_is_one_token_so_a_wrap_cannot_split_it() -> None:
@@ -1254,6 +1271,218 @@ def test_a_marker_that_predates_the_run_is_not_a_verdict_when_no_record_survives
     assert fresh is not None
     assert (fresh[0], fresh[1]) == ("interrupted", "user-stop"), fresh
     assert "killer pid 61123" in fresh[2], fresh[2]
+
+
+def test_an_involuntary_marker_attributes_the_kill_and_never_reads_as_a_user_stop(
+    tmp_path: Path,
+) -> None:
+    """The operator's requirement, in one verdict: a harness act NAMES ITSELF.
+
+    On 2026-09-18 25 runtimes on this machine vanished within 13 seconds and no
+    artifact named an actor, because the only markers that existed were the ones
+    the stop ladder writes for a stop a person asked for. Every path that can take
+    a runtime's install tree away now stages the same marker with
+    ``deliberate: false`` before it acts, and this is the reader half: the death
+    renders as ``runtime-killed`` (not ``user-stop``, and not the shrug), with the
+    mechanism and the killer in the reason.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "involuntary1"
+    _seed_started(tmp_path, session_id)
+    _write_stop_marker(
+        tmp_path,
+        session_id,
+        rung="",
+        deliberate=False,
+        actor="lop install prune",
+        mechanism="generation-prune",
+        killer={"pid": 61123, "argv0": "lop", "command": "lop install prune"},
+    )
+
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id),
+        AttentionStore(tmp_path / "involuntary.db"),
+    )
+    assert result is not None
+    kind, cause, reason = result[0], result[1], result[2]
+    # NOT a user stop, and not the no-answer rung either: the act was recorded.
+    assert (kind, cause) == ("error", "runtime-killed"), result
+    assert kind != "interrupted"
+    assert cause != "user-stop"
+    assert "its install generation was pruned" in reason, reason
+    assert "by lop install prune" in reason, reason
+    assert "killer pid 61123" in reason, reason
+    # The sentence still carries the discriminator the deliberate row needs.
+    assert "no stop was asked for" in reason, reason
+
+
+def test_an_involuntary_marker_with_no_actor_reads_unattributed(tmp_path: Path) -> None:
+    """A marker that names an act but nobody is still a RECORDED death.
+
+    ``unattributed`` is the word because it is what the operator's requirement
+    asks the artifact to be able to say: "none of these had a recorded actor" is a
+    fact an investigation can act on, where "the cause could not be determined" is
+    the shape that made three incidents read as one mystery.
+
+    The marker's own ``killer.argv0``/``command`` is the fallback the deliberate arm
+    already uses (a marker always knows which process staged it), so this shape needs
+    a marker that names NEITHER an actor nor a staging process — which is what a
+    hand-written or truncated marker looks like. It must degrade to the honest word
+    rather than to a blank or to a raw token.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "involuntary2"
+    _seed_started(tmp_path, session_id)
+    _write_stop_marker(
+        tmp_path, session_id, rung="", deliberate=False, mechanism="unknown-act", killer={}
+    )
+
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id),
+        AttentionStore(tmp_path / "involuntary2.db"),
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("error", "runtime-killed"), result
+    assert KILL_UNATTRIBUTED in result[2], result[2]
+    # A mechanism this build cannot name must not leak its raw token either.
+    assert "unknown-act" not in result[2], result[2]
+
+
+def test_an_involuntary_marker_that_names_only_its_process_still_names_it(
+    tmp_path: Path,
+) -> None:
+    """The fallback the deliberate arm has, asked of this one: pid AND process name.
+
+    A prune or an in-place install stamps the front end's own name into the marker,
+    and a reader hours later has a pid that has long since exited — so the name has
+    to reach the sentence, or the attribution is a number nobody can look up.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "involuntary3"
+    _seed_started(tmp_path, session_id)
+    _write_stop_marker(
+        tmp_path,
+        session_id,
+        rung="",
+        deliberate=False,
+        mechanism="in-place-install",
+        killer={"pid": 61123, "argv0": "lop", "command": "lop update"},
+    )
+
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id),
+        AttentionStore(tmp_path / "involuntary3.db"),
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("error", "runtime-killed"), result
+    assert "its install was being replaced in place by lop update" in result[2], result[2]
+    assert "killer pid 61123" in result[2], result[2]
+
+
+def test_a_stale_involuntary_marker_is_refused_like_any_other(tmp_path: Path) -> None:
+    """The run key is what stops an old act narrating a new death.
+
+    The involuntary arm reads the SAME ``_stop_marker_covers_run`` guard as the
+    deliberate one — the schema and the run key are identical, only ``deliberate``
+    and the attribution fields differ — so a marker from an earlier run of this
+    session must fall through exactly as it does for a deliberate stop, rather
+    than blaming a fresh death on a prune that happened hours ago.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "staleinvoluntary"
+    _seed_started(tmp_path, session_id)
+    _write_stop_marker(
+        tmp_path,
+        session_id,
+        rung="",
+        deliberate=False,
+        actor="lop install prune",
+        mechanism="generation-prune",
+        pid=2**22 + 61,
+        started_at=time.time() - 2_000.0,
+        at=time.time() - 900.0,
+    )
+
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id),
+        AttentionStore(tmp_path / "staleinvoluntary.db"),
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("error", ""), result
+    assert "killer pid 61123" not in result[2], result[2]
+
+
+def test_a_marker_predating_the_deliberate_flag_keeps_its_old_reading(
+    tmp_path: Path,
+) -> None:
+    """The involuntary arm must not swallow a marker written before the flag existed.
+
+    A marker with no ``deliberate`` field is a deliberate stop from an older build;
+    the arm matches ``deliberate is False`` EXACTLY rather than testing falsiness,
+    so history keeps the verdict the build that wrote it produced instead of being
+    re-labelled as a harness kill by a newer reader.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "legacymarker"
+    _seed_started(tmp_path, session_id)
+    _write_stop_marker(tmp_path, session_id)
+    marker_path = tmp_path / "sessions" / session_id / "runtime-stop.json"
+    payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    payload.pop("deliberate")
+    marker_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id),
+        AttentionStore(tmp_path / "legacymarker.db"),
+    )
+    assert result is not None
+    # Not the deliberate verdict (the flag that says so is absent) and not the new
+    # involuntary one either: the OLD reading, which for this shape (a marker that
+    # cannot say which act it was, no surviving record, no open row) is the
+    # no-evidence sentence rather than a cause.
+    assert (result[0], result[1]) == ("error", ""), result
+    assert "its install generation was pruned" not in result[2], result[2]
+    assert "user-stop" not in result[2], result[2]
+
+
+def test_an_open_row_with_no_marker_says_it_is_unattributed(tmp_path: Path) -> None:
+    """The rung that carried the wave: a turn dies, nobody recorded an act.
+
+    This is the arm the 2026-09-18 victims' successors landed on, and the
+    difference it now makes is the difference between "the turn was cut off and the
+    cause could not be determined" and "this run died and NO actor was recorded" —
+    the second can be aggregated, quoted and investigated.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.runtime import journal
+    from local_operator.session.transcript import Transcript
+
+    session_id = "rowonly"
+    _seed_started(tmp_path, session_id)
+    directory = tmp_path / "sessions" / session_id
+    # A turn in flight whose writer is gone: the row is the only evidence left.
+    journal.TurnJournal(directory, session_id, None).open_turn(command_id="cmd-1")
+    row = json.loads((directory / "turn-journal.json").read_text(encoding="utf-8"))
+    row["pid"] = 2**22 + 77
+    (directory / "turn-journal.json").write_text(json.dumps(row), encoding="utf-8")
+
+    result = bootstrap_transcript(Transcript(directory), AttentionStore(tmp_path / "rowonly.db"))
+    assert result is not None
+    assert (result[0], result[1]) == ("error", "runtime-killed"), result
+    assert KILL_UNATTRIBUTED in result[2], result[2]
+    assert f"pid {2**22 + 77}" in result[2], result[2]
 
 
 @pytest.mark.parametrize("offset", [-1.0, -0.5, -0.001, 0.0, 0.001])
@@ -1835,3 +2064,175 @@ def test_only_a_user_gesture_can_reach_the_batch_operation() -> None:
     assert _batch_call_sites("acknowledge_attention_many") == {
         "server/routes/desktop_sessions.py": ["seen_many"],
     }
+
+
+# ---------------------------------------------------------------------------
+# The republish LADDER, from the boot side and from the journal's side.
+#
+# `test_attention_lock_contention.py` drives the ladder a deferred PUBLISH arms,
+# against a real held lock. The three arms here are the rest of the rule: the boot
+# restore arms the same ladder, a marker the product wrote as ineligible is never
+# republished, and a rung publishes the journal's LATEST marker rather than the
+# token its deferral was about.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_boot_restore_arms_the_same_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The boot path defers into the ladder, not into a boot that already happened.
+
+    A session starting on a machine whose store is held used to consume its
+    one-shot import and set `_attention_restored` whether or not the publish
+    landed, so the journalled outcome was left to the NEXT boot -- and a session
+    that finishes and idles never boots again. The one-shot stays one-shot (the
+    flag is still what makes this a boot import rather than a per-tick retry);
+    what changed is that a deferred one now arms the retry.
+    """
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_attention_lock_contention import (
+        _HeldWriteLock,
+        _shrink_the_budget,
+        _shrink_the_ladder,
+        _wait_for_store,
+    )
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 1.0, 1.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        identity = conversation_identity(session._transcript.directory)
+        token = str(uuid.uuid4())
+        # The product's own journal shape, appended the way the turn does.
+        await session._transcript.append_custom(
+            "completion_attention",
+            {
+                "conversation_id": identity,
+                "token": token,
+                "anchor": "anchor-from-the-journal",
+                "kind": "complete",
+                "cause": "",
+                "reason": "",
+            },
+        )
+        path = config_dir() / "attention.db"
+        AttentionStore(path).publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        holder = _HeldWriteLock(path)
+        try:
+            with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+                await session.refresh_attention()
+            assert session._attention_restored, "the boot import stays one-shot"
+            assert session._attention_republish_due, "a deferred restore must arm the ladder"
+            assert "is deferred" in caplog.text, caplog.text
+        finally:
+            holder.release()
+            holder.close()
+
+        state = await _wait_for_store(path, identity, token)
+        assert state["anchor_id"] == "anchor-from-the-journal"
+        assert state["unseen"] is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ineligible_marker_is_never_republished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`eligible: False` is the product saying a turn has nothing to show.
+
+    It is written instead of a completion (a complete turn with no assistant text
+    and no delegated child), so republishing one would mint a store row for a turn
+    with no result behind it -- a checkmark over nothing. The ladder's answer must
+    be "satisfied", and it must cost no store access to say so.
+    """
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        identity = conversation_identity(session._transcript.directory)
+        await session._transcript.append_custom(
+            "completion_attention",
+            {"conversation_id": identity, "token": str(uuid.uuid4()), "eligible": False},
+        )
+        attempts: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            AttentionStore, "publish", lambda *args, **kwargs: attempts.append(args)
+        )
+        # What a deferral would have left armed.
+        session._attention_republish_due = True
+        assert await session._republish_journalled_outcome() is True
+        assert attempts == [], "an ineligible marker is satisfied, not deferred"
+        assert not session._attention_republish_due, "and the latch clears either way"
+        path = config_dir() / "attention.db"
+        assert AttentionStore(path).state(identity)["completion_token"] is None
+        assert not path.exists(), "a satisfied ladder must not even create the store"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_publishes_the_journals_latest_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rung publishes what the transcript holds NOW, never a token it was armed for.
+
+    The deferral here is turn A's, and turn B journals its own marker before any
+    rung fires -- which is what a second turn finishing inside the ladder's window
+    does. Publishing A would be a REVIVE: an older completion taking a FRESH
+    sequence (so `claim_delivery` would notify about a result the human already
+    saw) and sitting on top of B's row, hiding the newer result. Reading the journal
+    per rung is what makes that unrepresentable, so this asserts on the rows.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_attention_lock_contention import (
+        _HeldWriteLock,
+        _shrink_the_budget,
+        _shrink_the_ladder,
+    )
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    # Parked rungs: nothing fires until the rung is driven by hand below, so the
+    # journal's state at that moment is what the rung acts on.
+    _shrink_the_ladder(monkeypatch, 30.0, 30.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        holder = _HeldWriteLock(path)
+        try:
+            session._attention_outcome = AgentEndEvent(messages=[], error="First failure")
+            await session._publish_attention_outcome()
+            stale = session._transcript.latest_custom("completion_attention")
+            assert stale is not None and session._attention_republish_due
+            newest = {
+                "conversation_id": identity,
+                "token": str(uuid.uuid4()),
+                "anchor": "anchor-from-turn-b",
+                "kind": "complete",
+                "cause": "",
+                "reason": "",
+            }
+            await session._transcript.append_custom("completion_attention", newest)
+        finally:
+            holder.release()
+            holder.close()
+
+        await session._run_attention_republish(0, 0.0)
+        state = store.state(identity)
+        assert state["completion_token"] == newest["token"]
+        assert state["anchor_id"] == "anchor-from-turn-b"
+        with closing(sqlite3.connect(path)) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM completions WHERE token=?", (stale["token"],)
+            ).fetchone()[0]
+        assert rows == 0, "the superseded deferral's token must never be published"
+    finally:
+        await session.dispose()

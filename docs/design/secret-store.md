@@ -24,7 +24,7 @@ is a fourth. Keeping them distinct is load-bearing:
 
 | Store | Lives in | Lifetime | Encrypted | Purpose |
 |---|---|---|---|---|
-| `CredentialManager` (`credentials.py:43`) | `~/.local-operator/credentials.env`, 0600, plaintext `KEY=VALUE` | forever | **no** | PROVIDER API keys (Anthropic, OpenAI…) read at boot by the model layer |
+| `CredentialManager` (`credentials.py:43`) — **DELETED** (PR2b, 2026-09-22) | `~/.local-operator/credentials.env`, 0600, plaintext `KEY=VALUE` | the FILE is read by `secrets/legacy_env.read_credentials` for `lop secret migrate-env` alone; every other reader is store-then-env | **no** | formerly PROVIDER API keys; those are now `LOP_PROVIDER_*` rows in the encrypted store |
 | `VariableStore` session credentials (`variables.py:305-361`) | process memory only | one session | n/a | a secret the agent must USE and must never READ |
 | `VariableStore` variables (`variables.py:273-302`) | config / `.local-operator.env` / `LOCAL_OPERATOR_*` env | n/a | no | non-secret config, denylist-filtered |
 | **new: secret store** | `~/.local-operator/secrets/` | forever | **yes** | operator secrets, agent-retrievable from bash and eval |
@@ -1306,6 +1306,28 @@ the `[Credential #1, 64 chars]` marker, history stripping, random naming, the
   needs rendered before/after frames per `AGENTS.md` §"Visual validation", using
   `scripts.visual_capture.save_capture`) + **ux-reviewer** (a new interaction
   flow: type, paste, watch it redact, keep typing).
+
+### PR2 — remove the plaintext mechanism (the follow-up to #1411)
+
+Not one PR; three, in this order, and the split is recorded here because it is
+what shipped:
+
+- **PR2a** (#1437, merged) — stop recreating the file and drop the reader legs.
+  The 14 plain `CredentialManager(...)` constructions became `readonly`, and the
+  eight reader legs that fell back to the file were repointed at
+  `provider_secret_value` / `stored_provider_env_keys` / the store enumeration.
+  A behaviour change with a one-line revert, verified against the installed
+  runtime before anything was deleted.
+- **PR2b** (2026-09-22) — delete `local_operator/credentials.py` outright.
+  `ConfigManager.config_dir` replaces it where a path was wanted;
+  `secrets/legacy_env.py` carries the one surviving read (the migration);
+  `providers/key_prompt.prompt_for_provider_key` is the moved prompt;
+  `AuthStore`/`ProviderController`/`ClassificationService` take
+  `config_dir: Path | None`. Mechanical but wide, so its own risk is
+  compile/type-level and the whole-tree pyright + unit run is its gate.
+- **PR2c** — delete this host's file and warn the operator to `lop-update`
+  first. An operational step, not code, so it follows a release rather than
+  riding one.
 
 **Ordering:** 1 → 2 → 3 → 4. PR 1 is independently shippable. PR 4 depends on 3
 for the persist route but its composer half could be split out if 3 stalls.

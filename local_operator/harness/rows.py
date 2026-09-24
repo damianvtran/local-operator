@@ -92,6 +92,13 @@ _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[session credential] ",  # incidents.format_credential_message
     "[credential redaction] ",  # incidents.format_shape_incident_message
     "[mcp recovery] ",  # incidents.format_mcp_recovery_message
+    # The MCP-unavailable WARNING, and the one head here that is not an
+    # incident: a server whose tools are gone is a missing capability, not a
+    # failed turn. It is listed for the reason every head is — a transcript
+    # written before the ``harness_injected`` stamp existed can only prove its
+    # own provenance by its opening words, and this row must never paint as the
+    # operator's own sentence.
+    "[session warning] ",  # incidents.format_mcp_unavailable_message
     "[session-state]\n",  # Session._system_state_message
     # The unattended-gate timeouts, in _default_convert_to_llm. Two heads rather
     # than the shared ``[system] `` prefix: that prefix is also minted by
@@ -465,55 +472,65 @@ def assistant_row_text(text: str) -> str:
     return text.strip()
 
 
-def gate_timeout_notice(details: dict[str, Any]) -> str:
-    """Say what expired, what it wanted, and that nobody chose it.
+def gate_waited_text(details: Mapping[str, Any] | None) -> str:
+    """The gate's own wait, as a short span — ONE implementation, two audiences.
 
-    The distinction this line has to carry is denial-by-expiry versus
-    denial-by-decision: the user did not say no, they were not there. Naming
-    the tool matters for the same reason the picker's parked row wants it —
-    "a tool was denied" and "`bash rm -rf build/` was denied" are different
-    amounts of help when you are reconstructing what happened overnight.
+    Shared by :func:`gate_timeout_notice` (the transcript row the HUMAN reads) and
+    ``harness/render.py`` (the row the MODEL reads, ``GATE_TIMEOUT_CUSTOM_TYPE``):
+    both report the same expiry, and a second formatter for one number is how the
+    wrong one survived — this used to floor at one hour (``max(1, waited //
+    3600)``), so a 30-second expiry rendered as "waited 1h" (round 3, D12).
+    Whatever a reader is told, it must be the wait that actually happened.
 
-    An unattended gate timeout is the most expensive event in the detached
-    feature (up to a day of held residency ends here), which is why it is
-    worth one shared implementation rather than a per-surface paraphrase.
+    An absent or unreadable value says so rather than rounding up to an hour.
     """
-    tool = str(details.get("tool") or "a tool").strip()
-    description = str(details.get("description") or "").strip()
-    waited = details.get("waited_s")
-    # REPORT THE WAIT THAT HAPPENED. This used to floor at one hour
-    # (`max(1, waited // 3600)`), so a 30-second expiry — a live, reachable
-    # path when there is no registrant, or notifications are off and nothing
-    # is watching — rendered as "waited 1h" (round 3, D12). This row exists
-    # to preserve the difference between denied-by-decision and
-    # denied-by-absence, and a fabricated duration undermines the one number
-    # that has to be trustworthy. An absent or unreadable value says so
-    # rather than rounding up to an hour.
+    waited = (details or {}).get("waited_s")
     try:
         seconds = float(waited) if waited is not None else 0.0
     except (TypeError, ValueError):
         seconds = 0.0
     if seconds <= 0:
-        waited_text = "a while"
-    elif seconds < 60:
-        waited_text = f"{int(seconds)}s"
-    elif seconds < 3600:
-        waited_text = f"{int(seconds // 60)}m"
-    elif seconds < 86400:
-        waited_text = f"{int(seconds // 3600)}h"
-    else:
-        waited_text = f"{int(seconds // 86400)}d"
+        return "a while"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def gate_timeout_notice(details: dict[str, Any]) -> str:
+    """Say what expired, what it wanted, and that nobody chose it.
+
+    The distinction this line has to carry is denial-by-expiry versus
+    denial-by-decision: nobody said no. Naming the tool matters for the same
+    reason the picker's parked row wants it — "a tool was denied" and "`bash rm
+    -rf build/` was denied" are different amounts of help when you are
+    reconstructing what happened overnight.
+
+    An unattended gate timeout is the most expensive event in the detached
+    feature (up to a day of held residency ends here), which is why it is
+    worth one shared implementation rather than a per-surface paraphrase.
+
+    It says NOTHING about who was attached (round 1, D7). It used to read "with
+    nobody attached", which this PR's own change made reachable as a false
+    statement: attachment-first parking holds a gate for
+    ``runtime.unattended_gate_timeout`` hours when a pane IS attached, so a
+    question the operator never got round to answering expires with a pane on it.
+    The measurable fact is the wait, so the row reports that.
+    """
+    tool = str(details.get("tool") or "a tool").strip()
+    description = str(details.get("description") or "").strip()
+    waited_text = gate_waited_text(details)
     # An `ask` is a QUESTION, and an unanswered question was not "denied":
     # describing it in the approval gate's vocabulary told the user something
     # that did not happen (D12's copy note).
     kind = str(details.get("kind") or "approval").strip().lower()
     subject = f"{tool} · {description}" if description else tool
     if kind == "ask":
-        return (
-            f"waited {waited_text} for an answer with nobody attached, "
-            f"then moved on — {subject}"
-        )
-    return f"waited {waited_text} for approval with nobody attached, then denied it — {subject}"
+        return f"waited {waited_text} for an answer, then moved on — {subject}"
+    return f"waited {waited_text} for approval, then expired unanswered — {subject}"
 
 
 def wake_receipt_headline(text: str) -> str:
@@ -539,6 +556,16 @@ def wake_receipt_headline(text: str) -> str:
     head, _, _ = text.partition("\n\n")
     head = " ".join(head.split())  # collapse any envelope whitespace
     head = head.split(" — cancel with wake(", 1)[0]
+    # The scratchpad clause needs its OWN strip rather than riding the cancel
+    # hint's, and the difference is why this line exists: a FINAL delivery carries
+    # no cancel hint at all, so there the clause survived the split above and
+    # landed in the headline — model-facing markup on a human surface, the defect
+    # this function exists to prevent. Imported lazily to keep this module
+    # host-free (see the module docstring), and imported rather than re-spelled so
+    # the stripper and the formatter cannot drift apart.
+    from local_operator.harness.wake import WAKE_SCRATCH_CLAUSE
+
+    head = head.split(WAKE_SCRATCH_CLAUSE, 1)[0]
     # Strip EVERY leading marker, not one. A single strip leaves a doubled
     # prefix ("(alarm) (alarm) …") leaking model-facing markup onto a human
     # surface — the exact defect this function exists to prevent, surviving

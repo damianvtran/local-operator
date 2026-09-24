@@ -4,6 +4,7 @@ depends on."""
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 import subprocess
@@ -107,6 +108,63 @@ def test_scan_reader_mode_moves_nothing(tmp_path: Path) -> None:
     assert not (directory / registry.REAPED_DIRNAME).exists()
 
 
+def test_scan_names_the_unparseable_record_it_removes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MINOR 5 (review round 3): a reaping scan deleted a record without a line.
+
+    The rescue widening to ``except Exception`` made the reaping delete cover a
+    ``KeyError`` raised by our own ``parse`` callable — a bug — as well as a torn
+    payload, and ``session/runtime/registry.py`` had no logger at all, so nothing said
+    which file went or why. The file and the exception type are named now; the level is
+    ``debug`` because the readers that can see the condition already warn about it.
+    """
+    directory = registry.run_dir(tmp_path)
+    torn = directory / "999997.json"
+    torn.write_text("{not json", encoding="utf-8")
+
+    with caplog.at_level(logging.DEBUG):
+        assert registry.scan(root=tmp_path) == []
+
+    assert not torn.exists()
+    assert "999997.json" in caplog.text, caplog.text
+    assert "JSONDecodeError" in caplog.text, caplog.text
+
+
+def test_scan_can_hold_unparseable_evidence_for_a_window(tmp_path: Path) -> None:
+    """MINOR 2 (review round 3): ``run/serve`` keeps fresh evidence, ``run/mobile`` does not.
+
+    The default is what every discovery caller has always had — delete on sight — and
+    it must stay that way, because ``run/mobile``'s listing is polled at 1 Hz by the
+    daemon and by ``lop sessions``. ``run/serve``'s reaper asks for the window instead,
+    so the same shape gets the same retention in the two namespaces that have a reaper
+    (``run/host`` keeps a torn boot record for a day: "evidence is worth one look soon
+    after it lands"). All three arms are asserted on the one function, plus the mtime
+    shape that neither bound caught before (MINOR 1): a stamp in the future.
+    """
+    directory = registry.run_dir(tmp_path)
+    torn = directory / "999996.json"
+    torn.write_text("{not json", encoding="utf-8")
+
+    assert registry.scan(root=tmp_path) == []
+    assert not torn.exists(), "the default stays delete-on-sight"
+
+    torn.write_text("{not json", encoding="utf-8")
+    assert registry.scan(root=tmp_path, unreadable_ttl_s=registry.REAPED_MAX_AGE_S) == []
+    assert torn.exists(), "a fresh torn record is evidence worth one look"
+
+    old = time.time() - registry.REAPED_MAX_AGE_S - 60.0
+    os.utime(torn, (old, old))
+    assert registry.scan(root=tmp_path, unreadable_ttl_s=registry.REAPED_MAX_AGE_S) == []
+    assert not torn.exists(), "past the window the same reaper takes it"
+
+    torn.write_text("{not json", encoding="utf-8")
+    future = time.time() + 10 * 365 * 24 * 3600.0
+    os.utime(torn, (future, future))
+    registry.scan(root=tmp_path, unreadable_ttl_s=registry.REAPED_MAX_AGE_S)
+    assert not torn.exists(), "no mtime may make an unparseable record immortal"
+
+
 def test_scan_passes_the_zombie_policy_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -177,12 +235,17 @@ def test_a_scan_probes_for_the_whole_quiet_population_in_one_fork(
         the FAILURE path, which falls back to probing per record by design (QA
         round 2, Q6), so a silent shim would measure the fallback instead of the
         batching this test is about. ``S`` is an ordinary sleeping process — the
-        answer a live pid gets.
+        answer a live pid gets — and the trailing start time is the second field
+        the probe reads beside the state (the claim's birth token, 2026-09-21): a
+        shim that answers the OLD two-field line is a batch that answers nothing,
+        i.e. it measures the fallback.
         """
 
         def run(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             asks.append([str(item) for item in argv])
-            answered = "".join(f"{pid} S\n" for pid in str(argv[-1]).split(","))
+            answered = "".join(
+                f"{pid} S Mon Sep 21 09:53:01 2026\n" for pid in str(argv[-1]).split(",")
+            )
             return subprocess.CompletedProcess(argv, 0, stdout=answered)
 
     monkeypatch.setattr(procstate, "subprocess", _NoFork())

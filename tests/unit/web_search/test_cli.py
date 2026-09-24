@@ -49,11 +49,10 @@ def test_setup_tavily_oauth_writes_http_oauth_server(monkeypatch, tmp_path) -> N
     }
     # Assert the EFFECTIVE chain, not the stored prefix: `enable` no longer appends
     # to `providers`, and membership of the chain is what the user is asking about.
-    from local_operator.credentials import CredentialManager
     from local_operator.web_search.providers import resolve_providers
 
     settings = load_search_settings(ConfigManager(config_dir()))
-    assert "tavily" in resolve_providers(settings, CredentialManager(config_dir()))
+    assert "tavily" in resolve_providers(settings, config_dir())
 
 
 def test_setup_tavily_oauth_repairs_global_non_oauth_entry(monkeypatch, tmp_path) -> None:
@@ -128,14 +127,13 @@ def test_setup_searxng_validates_and_stores_endpoint(monkeypatch, tmp_path) -> N
         search_command(_args("setup", "searxng", "--endpoint", "https://search.example.test/")) == 0
     )
 
-    from local_operator.credentials import CredentialManager
     from local_operator.web_search.providers import resolve_providers
 
     settings = load_search_settings(ConfigManager(config_dir()))
     assert settings.searxng_endpoint == "https://search.example.test"
     # `setup` calls `enable`, which now means "clear the exclusion" rather than
     # "append to the stored list". Pin the effective chain instead of the list.
-    assert "searxng" in resolve_providers(settings, CredentialManager(config_dir()))
+    assert "searxng" in resolve_providers(settings, config_dir())
     assert "searxng" not in settings.excluded_providers
 
 
@@ -151,7 +149,6 @@ def test_enable_is_an_un_exclusion_and_the_landing_line_names_the_band(
     monkeypatch, tmp_path, capsys
 ) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    from local_operator.credentials import CredentialManager
 
     assert search_command(_args("disable", "deepseek")) == 0
     assert "excluded" in capsys.readouterr().out
@@ -170,8 +167,12 @@ def test_enable_is_an_un_exclusion_and_the_landing_line_names_the_band(
     # metered provider that would be a spend decision the user did not make.
     assert "deepseek" not in settings.providers
 
-    # With a credential the same verb reports the band it will serve from.
-    CredentialManager(config_dir()).set_credential("DEEPSEEK_API_KEY", "stored")
+    # With a credential the same verb reports the band it will serve from. The
+    # key goes in as a PROVIDER-CLASS STORE ROW (PR2a): the plaintext file leg is
+    # gone, so the store row is what the resolver actually reads.
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("DEEPSEEK_API_KEY", "stored")
     assert search_command(_args("disable", "deepseek")) == 0
     capsys.readouterr()
     assert search_command(_args("enable", "deepseek")) == 0
@@ -224,9 +225,10 @@ def test_order_receipt_states_where_each_named_provider_lands(
     resolver rather than promise the same thing for every id.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    from local_operator.credentials import CredentialManager
 
-    CredentialManager(config_dir()).set_credential("DEEPSEEK_API_KEY", "stored")
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("DEEPSEEK_API_KEY", "stored")
 
     assert search_command(_args("order", "duckduckgo", "tavily")) == 0
     free_only = capsys.readouterr().out

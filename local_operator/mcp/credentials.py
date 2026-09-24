@@ -42,18 +42,19 @@ class MCPCredentials(BaseModel):
 
 
 def credential_source(key: str, base: Path) -> str:
-    """Metadata only; absence is the ONLY condition that permits legacy fallback.
+    """Which store holds ``key``: ``encrypted``, ``missing``, or ``unavailable``.
 
-    **Nothing here may create ``credentials.env``.** ``CredentialManager.__init__``
-    calls ``_ensure_config_exists``, so constructing it CREATES the plaintext file
-    — and a metadata probe that creates the store it is describing is a side
-    effect the caller never asked for, on the very file this change promises to
-    leave alone. The existence check is therefore taken BEFORE the manager is
-    constructed, and the manager is never built over a file that is not there.
+    **Nothing here creates a credential-shaped file.** A plain credential
+    constructor once called ``_ensure_config_exists``, which CREATED the
+    plaintext ``credentials.env`` — and a metadata probe that creates the store
+    it is describing is a side effect the caller never asked for, on a file the
+    consolidation retires.
+
+    The plaintext fallback was REMOVED here: the legacy file has no writers and
+    no readers left, so a ``legacy`` answer would describe a store nothing
+    maintains. A key present only in an old ``credentials.env`` simply reads as
+    the store's own ``missing`` until ``lop secret migrate-env`` moves it.
     """
-    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
-
-    legacy_path = base / CREDENTIALS_FILE_NAME
     try:
         if store_path(base).exists():
             try:
@@ -61,8 +62,6 @@ def credential_source(key: str, base: Path) -> str:
                 return "encrypted"
             except SecretNotFound:
                 pass
-        if legacy_path.exists() and key in CredentialManager(base).get_credentials():
-            return "legacy"
         return "missing"
     except Exception:
         # Store diagnostics may quote its input. Public state is intentionally

@@ -13,6 +13,10 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -29,7 +33,16 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_USER_TURN_KEY,
     RENDERED_INJECTION_KEY,
 )
-from local_operator.harness.types import AgentTool, TextContent
+from local_operator.harness.types import (
+    AgentTool,
+    ChatRequest,
+    CustomMessage,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolResult,
+)
 from local_operator.session.session import Session
 from local_operator.session_factory import (
     _latest_user_query,
@@ -41,6 +54,7 @@ from local_operator.session_factory import (
     resolve_hosting_model,
     wire_mcp_into_session,
 )
+from tests.unit.session.test_session import ScriptedStream
 
 if TYPE_CHECKING:
     from local_operator.agents import AgentData, AgentRegistry
@@ -51,10 +65,33 @@ if TYPE_CHECKING:
 
 
 class FakeConfigManager:
-    """ConfigManager stand-in backed by a plain dict."""
+    """ConfigManager stand-in backed by a plain dict, plus ``config_dir``.
 
-    def __init__(self, values: dict[str, Any] | None = None) -> None:
+    ``config_dir`` is here because the composition root reads the config ROOT off
+    the manager since PR2b deleted the ``CredentialManager`` that used to carry
+    it: ``_attach_classification``, ``AuthStore(config_dir=…)`` and the
+    ``configure_model`` call all take ``config_manager.config_dir``, so a double
+    without the attribute fails there before reaching the behaviour under test.
+
+    Its default root is a distinct path UNDER the temp root that is deliberately
+    never created — an isolated host with no store is exactly what these doubles
+    model, and the store readers degrade to their env leg on it
+    (``provider_secret_value`` returns ``None`` for an absent store without
+    creating one). Allocating a directory at construction would instead leak a
+    scratch dir per construction site for a store no test ever writes — the
+    bare-``mkdtemp()`` leak ``tests/unit/tui/conftest.py`` already has to sweep.
+    A test that asserts on the root passes one explicitly.
+    """
+
+    def __init__(
+        self, values: dict[str, Any] | None = None, config_dir: Path | None = None
+    ) -> None:
         self.values = dict(values or {})
+        self.config_dir = (
+            config_dir
+            if config_dir is not None
+            else Path(tempfile.gettempdir()) / "fake-config-manager-no-store"
+        )
 
     def get_config_value(self, key: str, default=None):
         return self.values.get(key, default)
@@ -451,7 +488,6 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.types import Message
     from local_operator.session import transcript as transcript_module
     from local_operator.session.creation import session_created_at
@@ -468,7 +504,6 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -504,7 +539,6 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     (tmp_config_dir / "config.yml").write_text(
         "version: 0.0.0\n"
@@ -516,7 +550,6 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     chosen = await create_session(
         _args(hosting="anthropic", model="claude-opus-5", birth_effort="max"),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -528,7 +561,6 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
     default = await create_session(
         _args(hosting="anthropic", model="claude-opus-5"),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -556,7 +588,6 @@ async def test_dict_compaction_config_flows_through_prompt(
     )
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     config_manager = ConfigManager(tmp_config_dir)
     raw = config_manager.get_config_value("compaction", None)
@@ -565,7 +596,6 @@ async def test_dict_compaction_config_flows_through_prompt(
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         config_manager,
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -601,12 +631,10 @@ async def test_trigger_knobs_are_settable_in_config_yml(tmp_config_dir: Path) ->
     from local_operator.agents import AgentRegistry
     from local_operator.compaction.thresholds import resolve_threshold_tokens
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     settings = cast(Session, session)._compaction_settings
@@ -630,12 +658,10 @@ async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Pat
     from local_operator.agents import AgentRegistry
     from local_operator.compaction.thresholds import CompactionSettings, should_compact
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     # No block in the file: the session runs on the shipped defaults.
@@ -710,7 +736,6 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     agent dir transcript is replayed and appended."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session.transcript import Transcript
 
     config_dir = tmp_config_dir
@@ -740,13 +765,12 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     )
     config_manager = ConfigManager(config_dir)
     config_manager.update_config({"hosting": "test", "model_name": "test-model"}, write=False)
-    credential_manager = CredentialManager(config_dir)
 
     def make_args(train: bool) -> argparse.Namespace:
         return _args(agent_name="roster", train=train)
 
     # First run WITHOUT train: the agent dir transcript stays empty.
-    session = await create_session(make_args(False), config_manager, credential_manager, registry)
+    session = await create_session(make_args(False), config_manager, registry)
     await session.prompt("secret first run")
     await session.dispose()
     agent_dir = config_dir / "agents" / str(agent.id)
@@ -754,13 +778,13 @@ async def test_train_gating_end_to_end(tmp_config_dir: Path) -> None:
     assert len(agent_transcript.entries()) == 0  # nothing appended
 
     # Second run WITHOUT train: history is NOT replayed from the agent dir.
-    session2 = await create_session(make_args(False), config_manager, credential_manager, registry)
+    session2 = await create_session(make_args(False), config_manager, registry)
     assert isinstance(session2, Session)
     assert len(session2._transcript.entries()) == 0  # fresh start
     await session2.dispose()
 
     # Third run WITH train: the transcript lives in the agent dir.
-    session3 = await create_session(make_args(True), config_manager, credential_manager, registry)
+    session3 = await create_session(make_args(True), config_manager, registry)
     assert isinstance(session3, Session)
     assert session3._transcript.directory == agent_dir
     await session3.prompt("train me")
@@ -802,7 +826,7 @@ async def test_knowledge_backend_failure_degrades_to_no_listing(
     try:
         warnings: list[str] = []
         hooks = await session_factory._setup_knowledge(
-            MagicMock(), tmp_config_dir, cast(Any, FakeRegistry(tmp_config_dir)), warnings
+            tmp_config_dir, cast(Any, FakeRegistry(tmp_config_dir)), warnings
         )
     finally:
         skills_api.discover_skills = real_discover
@@ -836,7 +860,6 @@ async def test_knowledge_discovery_uses_the_session_cwd_not_the_process_cwd(
 
     warnings: list[str] = []
     hooks = await session_factory._setup_knowledge(
-        MagicMock(),
         tmp_config_dir,
         cast(Any, FakeRegistry(tmp_config_dir)),
         warnings,
@@ -872,7 +895,7 @@ async def test_knowledge_backend_failure_falls_back_to_local_routing(
     warnings: list[str] = []
 
     hooks = await session_factory._setup_knowledge(
-        MagicMock(), tmp_config_dir, cast(Any, FakeRegistry(tmp_config_dir)), warnings
+        tmp_config_dir, cast(Any, FakeRegistry(tmp_config_dir)), warnings
     )
 
     assert hooks.index is not None
@@ -1060,8 +1083,16 @@ class FakeSessionShell(Session):
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
-    def refresh_tools(self, tools) -> None:
+    def refresh_tools(self, tools) -> bool:
+        """Swap the inventory and report it as reaching the next model call.
+
+        The real ``Session`` publishes its tools array once per turn, so its
+        return value is what the resolver's reply promises. This shell has no
+        turn loop and no array, so every swap is immediately effective — the
+        signature is matched rather than the behaviour imitated.
+        """
         self.tools = list(tools)
+        return True
 
     def add_dispose_hook(self, hook, *, last: bool = False) -> None:
         # ``last`` mirrors ``Session.add_dispose_hook``, including the ordering it
@@ -1611,9 +1642,6 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
 
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
-
     captured: dict[str, object] = {}
 
     def reaping_sweep(cfg_mgr, config_dir, *, live_dir=None):
@@ -1690,7 +1718,6 @@ async def test_prepare_claims_before_a_concurrent_sweep_can_reap_the_dir(
         plan = await _prepare(
             _args(hosting="test", model="test-model"),
             cast("ConfigManager", config_manager),
-            credential_manager,
             cast("AgentRegistry", registry),
             has_ui=False,
         )
@@ -1757,13 +1784,9 @@ async def test_dispose_closes_auth_store(
 
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
-
     session = await create_session(
         _args(hosting="test", model="test-model"),
         cast("ConfigManager", config_manager),
-        credential_manager,
         cast("AgentRegistry", registry),
     )
     # Use the store actually wired into this session's stream, not the first
@@ -1809,13 +1832,9 @@ async def test_build_initial_blocks_without_turn(tmp_config_dir: Path) -> None:
     """CL-18: initial blocks render with no turn executed (benchmark hook)."""
     config_manager = FakeConfigManager({"hosting": "test", "model_name": "test-model"})
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
-
     blocks = await build_initial_blocks(
         _args(hosting="test", model="test-model"),
         cast("ConfigManager", config_manager),
-        credential_manager,
         cast("AgentRegistry", registry),
     )
     assert len(blocks) >= 1
@@ -2226,13 +2245,11 @@ async def test_configured_variables_reach_a_real_tool_call(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.session_factory import create_session
 
     session = await create_session(
         args=argparse.Namespace(),
         config_manager=ConfigManager(config_dir=tmp_config_dir),
-        credential_manager=CredentialManager(config_dir=tmp_config_dir),
         agent_registry=AgentRegistry(config_dir=tmp_config_dir),
         has_ui=True,
     )
@@ -2351,12 +2368,10 @@ async def test_a_real_session_carries_the_operators_instructions(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -2380,7 +2395,6 @@ async def test_a_subagent_inherits_the_operators_instructions(
     the subagent's ``build_system_blocks`` call also left the suite green."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.subagent import _build_child_session
 
     (tmp_config_dir.parent / "system_prompt.md").write_text(
@@ -2390,7 +2404,6 @@ async def test_a_subagent_inherits_the_operators_instructions(
     parent = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(parent, Session)
@@ -2413,6 +2426,209 @@ async def test_a_subagent_inherits_the_operators_instructions(
 
     assert "- Never force-push without asking." in blocks[0]
     assert "<user_instructions>" in blocks[0]
+
+
+def _session_state_rows(session: Session) -> list[Any]:
+    """Every ``[session-state]`` custom row this session's transcript holds.
+
+    Read from the real journal rather than from a bookkeeping flag, because the
+    property under test IS "no row was written" — only the journal can say that.
+    """
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if str(entry.payload.get("custom_type", "")) == "session_state"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fifty_focus_changes_journal_no_session_state_row(tmp_config_dir: Path) -> None:
+    """Focus churn is FREE at the journal, not only in the block bytes.
+
+    The probe is re-read every turn and it reads ATTACHMENT, so a window being
+    raised and lowered fifty times changes nothing it can see: block 3 stays
+    byte-identical, ``_system_state_delta`` returns {}, and no row reaches the
+    transcript. A row per transition is exactly the token accumulation the
+    design forbids, and the block-bytes test in ``test_prompts_api`` cannot see
+    it — this drives the real publication path (``_prepare_system_blocks``) that
+    writes the rows.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        reads = {"n": 0}
+
+        def flap() -> bool:
+            # Something really did change on every read — the window moved. The
+            # answer Tier A gives did not, because focus is not an input to it.
+            reads["n"] += 1
+            return True
+
+        session._goal_state.interactive_probe = flap
+
+        first = await session._prepare_system_blocks()
+        for _ in range(50):
+            assert (await session._prepare_system_blocks())[3] == first[3]
+
+        assert reads["n"] > 50, "the probe was never re-read across those turns"
+        # The returned blocks are the frozen prefix, so the byte equality above
+        # is nearly free to satisfy — the load-bearing assertion is this one: a
+        # change the model cannot see must not write a row it has to read back.
+        assert _session_state_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir: Path) -> None:
+    """A REAL state change costs ONE row, and is silent afterwards.
+
+    The other half of the bound. The block is allowed to move when the answer
+    moves — a session whose pane detaches is being told something true — and the
+    cost is bounded by the number of TRANSITIONS, not by the number of turns.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        attached = {"value": True}
+        session._goal_state.interactive_probe = lambda: attached["value"]
+
+        # ...and with the ASK HOOK a served session has, so the row carries the
+        # body the operator's own sessions see. Without it the block is the
+        # no-channel variant, which is a real state but not this one
+        # (``serving`` installs the gate on every session it serves).
+        async def _never_answered(_questions):  # pragma: no cover — never called
+            return None
+
+        session.set_ask_handler(_never_answered)
+
+        first = await session._prepare_system_blocks()
+        attached["value"] = False
+        moved = await session._prepare_system_blocks()
+        # The RETURNED blocks are the frozen prefix, so both calls hand back the
+        # same bytes: a live change is journalled as a `[session-state]` delta,
+        # not repainted into the prefix. The row is the observation.
+        assert moved == first
+        for _ in range(20):
+            await session._prepare_system_blocks()
+
+        rows = _session_state_rows(session)
+        assert len(rows) == 1
+        payload = str(rows[0].payload)
+        assert "<interactivity>" in payload
+        assert "No interface is attached to this session right now" in payload
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
+    tmp_config_dir: Path,
+) -> None:
+    """A child renders the PARENT's answer, read live off the parent's holder.
+
+    A child Session is built in-process and holds no control socket and no
+    registrant, so "is an interface attached" is not a question it can answer —
+    its only channel to a person is ``hub`` -> parent. Its provider passed no
+    ``interactive=`` argument at all, so EVERY child rendered the ``True``
+    default whatever the truth was: the same defect from the other side, and the
+    reason a parent's false "nobody is watching a screen" reached
+    ``post-analyst`` through ``hub`` unchecked.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    async def child_tail(attached: bool) -> str:
+        parent = await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        )
+        assert isinstance(parent, Session)
+        parent._goal_state.interactive_probe = lambda: attached
+        try:
+            child = await _build_child_session(
+                label="probe",
+                prompt="do a thing",
+                parent_session=parent,
+                model_spec=None,
+                job_id=f"probe-job-{attached}",
+            )
+            try:
+                blocks = child._system_blocks_provider()
+                if inspect.isawaitable(blocks):
+                    blocks = await blocks
+                return str(blocks[-1])
+            finally:
+                await child.dispose()
+        finally:
+            await parent.dispose()
+
+    attached_body = await child_tail(True)
+    assert "<interactivity>" in attached_body
+    # The attachment is the PARENT's, and the child's route to the operator is
+    # named — not ``ask``, which the child does not have (round 1, BLOCKER).
+    assert "An interface is attached to the session this run was delegated from" in attached_body
+    assert "`hub`" in attached_body
+    assert "`ask`" not in attached_body
+    assert "No interface is attached" not in attached_body
+
+    unattached_body = await child_tail(False)
+    assert "<interactivity>" in unattached_body
+    assert "No interface is attached to the session this run was delegated from" in unattached_body
+    assert "An interface is attached" not in unattached_body
+    assert "`ask`" not in unattached_body
+
+
+@pytest.mark.asyncio
+async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: Path) -> None:
+    """A parent with no runtime probe answers "nothing measured", and that is
+    not the same as "attached" — the fail-open default belongs to the PARK
+    decision, not to a block that states what was measured (round 1, MINOR 6).
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    # No probe installed, exactly as a plain CLI or an exec run leaves it.
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-unmeasured",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+            assert "<interactivity>" not in str(blocks[-1])
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
 
 
 def test_a_bom_does_not_survive_into_the_prompt(
@@ -3013,7 +3229,6 @@ async def test_a_real_session_carries_imported_instructions(
     reads the blocks the provider actually returns."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     # The fixture points LOCAL_OPERATOR_CONFIG_DIR at tmp_path while returning
     # tmp_path/.local-operator; HOME follows it so the imported path resolves
@@ -3024,7 +3239,6 @@ async def test_a_real_session_carries_imported_instructions(
     session = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(session, Session)
@@ -3050,7 +3264,6 @@ async def test_a_subagent_inherits_imported_instructions(
     standing rules than their parent, with the suite green."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.harness.subagent import _build_child_session
 
     monkeypatch.setenv("HOME", str(tmp_config_dir.parent))
@@ -3059,7 +3272,6 @@ async def test_a_subagent_inherits_imported_instructions(
     parent = await create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert isinstance(parent, Session)
@@ -3096,7 +3308,6 @@ async def test_a_non_utf8_agent_prompt_does_not_kill_startup(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     registry = AgentRegistry(tmp_config_dir)
     agent = registry.create_agent(_agent_fields("latin1"))
@@ -3111,7 +3322,6 @@ async def test_a_non_utf8_agent_prompt_does_not_kill_startup(
     session = await create_session(
         _args(hosting="test", model="test", agent_name="latin1", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         registry,
     )
     await session.dispose()
@@ -3131,7 +3341,6 @@ async def test_the_composition_root_guard_covers_decode_errors(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     registry = AgentRegistry(tmp_config_dir)
     registry.create_agent(_agent_fields("boom"))
@@ -3144,7 +3353,6 @@ async def test_the_composition_root_guard_covers_decode_errors(
     session = await create_session(
         _args(hosting="test", model="test", agent_name="boom", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         registry,
     )
     await session.dispose()
@@ -3243,7 +3451,6 @@ async def test_an_unreadable_profile_says_so_in_the_log(
     The reason has to be findable."""
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     registry = AgentRegistry(tmp_config_dir)
     registry.create_agent(_agent_fields("noisy"))
@@ -3257,7 +3464,6 @@ async def test_an_unreadable_profile_says_so_in_the_log(
         session = await create_session(
             _args(hosting="test", model="test", agent_name="noisy", yolo=True),
             ConfigManager(tmp_config_dir),
-            CredentialManager(tmp_config_dir),
             registry,
         )
     await session.dispose()
@@ -3678,42 +3884,36 @@ async def test_store_maintenance_does_not_block_session_construction(
 ) -> None:
     """``create_session`` returns without waiting for the store sweeps.
 
-    The four passes are whole-store disk walks that have nothing to do with the
+    The six passes are whole-store disk walks that have nothing to do with the
     session being built; awaiting them put their cost (measured 545 ms of a
     708 ms ``create_session`` on a 3574-session store) on the critical path of
     boot AND of every ``/resume``. They must be dispatched, not awaited.
 
-    Pinned by observing the task handle rather than parking a worker thread:
-    under xdist the default thread pool can starve, and a test that blocks a
-    ``to_thread`` callback can flake as "never started" instead of catching the
-    regression. A live task at return proves the same contract without holding
-    a worker.
+    Pinned by observing the dedicated daemon thread rather than blocking the
+    event loop or using ``asyncio.to_thread``: the worker must be dispatched but
+    cannot keep the loop's default executor busy at interpreter shutdown.
     """
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
-    started = asyncio.Event()
-    release = asyncio.Event()
+    started = threading.Event()
+    release = threading.Event()
 
-    async def blocking_pass(*_a: Any, **_k: Any) -> Any:
+    def blocking_sweep(*_a: Any, **_k: Any) -> Any:
         started.set()
-        await release.wait()
+        release.wait()
         return cleanup_mod.CleanupResult()
 
-    # Patch the coroutine the dispatcher schedules, not the inner sweep: a
-    # regression that awaits it in create_session hangs on ``wait_for`` rather
-    # than merely slowing the test.
-    monkeypatch.setattr(session_factory, "_run_store_maintenance", blocking_pass)
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", blocking_sweep)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await asyncio.wait_for(
         create_session(
             _args(hosting="test", model="test-model", yolo=True),
             ConfigManager(tmp_config_dir),
-            CredentialManager(tmp_config_dir),
             AgentRegistry(tmp_config_dir),
             has_ui=True,
             defer_mcp_wiring=True,
@@ -3721,13 +3921,13 @@ async def test_store_maintenance_does_not_block_session_construction(
         timeout=5.0,
     )
     try:
-        # Dispatched, not awaited: the task exists and has not finished.
-        from local_operator import session_factory as sf
-
-        task = sf._STORE_MAINTENANCE_TASK
-        assert task is not None, "store maintenance was never dispatched"
-        assert not task.done(), "store maintenance was awaited before session return"
-        await started.wait()
+        # Dispatched, not awaited: one dedicated daemon thread owns the pass.
+        worker = session_factory._STORE_MAINTENANCE_THREAD
+        assert worker is not None, "store maintenance was never dispatched"
+        assert worker.daemon, "a blocked maintenance worker must not hold process exit"
+        assert worker.is_alive(), "store maintenance completed before session return"
+        assert await asyncio.to_thread(started.wait, 5), "maintenance callback never started"
+        assert threading.current_thread() not in (worker,)
     finally:
         release.set()
         await await_store_maintenance_for_tests()
@@ -3750,14 +3950,17 @@ async def test_store_maintenance_waits_until_create_session_can_return(
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.session_factory import await_store_maintenance_for_tests
 
-    delay_entered = asyncio.Event()
-    release_delay = asyncio.Event()
-    callback_started = asyncio.Event()
+    delay_entered = threading.Event()
+    release_delay = threading.Event()
+    callback_started = threading.Event()
     model_work_completed: list[bool] = []
 
-    async def controlled_idle_window() -> None:
+    def controlled_idle_window(stop_event: threading.Event) -> bool:
         delay_entered.set()
-        await release_delay.wait()
+        while not stop_event.is_set():
+            if release_delay.wait(0.01):
+                return True
+        return False
 
     def note_filesystem_callback(*_a: Any, **_k: Any) -> Any:
         callback_started.set()
@@ -3780,27 +3983,20 @@ async def test_store_maintenance_waits_until_create_session_can_return(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
         has_ui=True,
         defer_mcp_wiring=True,
     )
     try:
-        assert (
-            not delay_entered.is_set()
-        ), "maintenance task executed before create_session returned"
+        assert delay_entered.wait(5), "maintenance did not reach its idle window"
+        assert not callback_started.is_set(), "maintenance started before its idle window"
         assert (
             model_work_completed
         ), "create_session did not complete its post-dispatch to_thread work"
-        await asyncio.wait_for(delay_entered.wait(), timeout=5.0)
-        assert (
-            not callback_started.is_set()
-        ), "maintenance filesystem work started before the idle window elapsed"
     finally:
         release_delay.set()
         await await_store_maintenance_for_tests()
@@ -3816,7 +4012,7 @@ async def test_store_maintenance_runs_once_per_process(
     """A second session in the same process does not re-sweep the store.
 
     ``/new`` and ``/resume`` re-enter ``create_session``, so before this change
-    every resume re-paid all four whole-store walks — on a store the same
+    every resume re-paid all six whole-store walks — on a store the same
     process had swept seconds earlier. Maintenance answers a question about the
     STORE, and the store does not become dirty because the user pressed
     ``/resume``.
@@ -3834,17 +4030,14 @@ async def test_store_maintenance_runs_once_per_process(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     config_manager = ConfigManager(tmp_config_dir)
     registry = AgentRegistry(tmp_config_dir)
-    credential_manager = CredentialManager(tmp_config_dir)
 
     for _ in range(3):
         session = await create_session(
             _args(hosting="test", model="test-model", yolo=True),
             config_manager,
-            credential_manager,
             registry,
             has_ui=True,
             defer_mcp_wiring=True,
@@ -3853,6 +4046,9 @@ async def test_store_maintenance_runs_once_per_process(
         await session.dispose()
 
     assert calls == [1], f"the store was swept {len(calls)} times in one process"
+    assert session_factory._STORE_MAINTENANCE_THREAD is not None
+    assert session_factory._STORE_MAINTENANCE_DONE is not None
+    assert session_factory._STORE_MAINTENANCE_DONE.is_set()
 
 
 @pytest.mark.asyncio
@@ -3880,12 +4076,10 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     session = await create_session(
         _args(hosting="test", model="test-model", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
         has_ui=True,
         defer_mcp_wiring=True,
@@ -3895,6 +4089,488 @@ async def test_a_failing_maintenance_pass_never_reaches_the_session(
     assert session is not None, "a failing sweep took the session down with it"
     assert ran == ["titles"], "a failing pass stopped the passes after it"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+def _patch_store_maintenance_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[str],
+    *,
+    fail_once: str | None = None,
+) -> None:
+    """Replace store-wide callbacks with ordered, resumable test probes."""
+    from local_operator.analytics import backfill as analytics_backfill
+    from local_operator.session import cleanup as cleanup_mod
+    from local_operator.tools import group_reaper
+
+    pending_failure = [fail_once]
+
+    def record(label: str):
+        def callback(*_args: Any, **_kwargs: Any) -> None:
+            calls.append(label)
+            if pending_failure[0] == label:
+                pending_failure[0] = None
+                raise OSError("injected interrupted pass")
+
+        return callback
+
+    monkeypatch.setattr(cleanup_mod, "cleanup_from_config", record("cleanup"))
+    monkeypatch.setattr(group_reaper, "sweep_orphan_groups", record("groups"))
+    monkeypatch.setattr(resume_mod, "backfill_session_origins", record("origins"))
+    monkeypatch.setattr(resume_mod, "backfill_session_titles", record("titles"))
+    monkeypatch.setattr(
+        analytics_backfill, "backfill_analytics_session_names", record("analytics-names")
+    )
+    monkeypatch.setattr(
+        analytics_backfill, "backfill_analytics_session_daily", record("analytics-daily")
+    )
+
+
+def test_store_maintenance_lock_and_stamp_suppress_process_bursts(tmp_path: Path) -> None:
+    """Serialize overlap and suppress a second process after the lock is free."""
+    # Keep the child script literal and small so every process imports its own
+    # module state while sharing only the config-root lock and stamp.
+    script = r"""
+import sys, time
+from pathlib import Path
+from types import SimpleNamespace
+from local_operator import session_factory as sf, resume
+from local_operator.analytics import backfill
+from local_operator.session import cleanup
+from local_operator.tools import group_reaper
+root, calls_path, ready_path, release_path = map(Path, sys.argv[1:5])
+mode = sys.argv[5]
+sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
+
+def callback(*_args, **_kwargs):
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write("callback\n")
+        handle.flush()
+    if mode == "block":
+        ready_path.touch()
+        deadline = time.monotonic() + 15
+        while not release_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+cleanup.cleanup_from_config = callback
+group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+resume.backfill_session_origins = lambda *_a, **_k: None
+resume.backfill_session_titles = lambda *_a, **_k: None
+backfill.backfill_analytics_session_names = lambda *_a, **_k: None
+backfill.backfill_analytics_session_daily = lambda *_a, **_k: None
+sf._run_store_maintenance(SimpleNamespace(), root, None)
+"""
+    env = os.environ.copy()
+    env.pop("XPC_FLAGS", None)
+    calls_path = tmp_path / "calls.txt"
+    ready_path = tmp_path / "owner-ready"
+    release_path = tmp_path / "owner-release"
+    args = [str(tmp_path), str(calls_path), str(ready_path), str(release_path)]
+    owner = subprocess.Popen(
+        [sys.executable, "-c", script, *args, "block"],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready_path.exists() and owner.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_path.exists(), "maintenance owner did not reach its callback"
+        contender = subprocess.run(
+            [sys.executable, "-c", script, *args, "normal"],
+            cwd=Path(__file__).parents[2],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert contender.returncode == 0, contender.stderr
+    finally:
+        owner.terminate()
+        stdout, stderr = owner.communicate(timeout=5)
+    assert owner.returncode != 0, f"interrupted owner unexpectedly completed: {stdout} {stderr}"
+    assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback"]
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+    # A later runtime must take the released OS lock and retry after the owner
+    # dies mid-pass; the earlier partial run cannot claim completion.
+    retry = subprocess.run(
+        [sys.executable, "-c", script, *args, "normal"],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert retry.returncode == 0, retry.stderr
+    assert (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+    assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback", "callback"]
+
+    # This third process starts only after the retry released its lock; the
+    # completion stamp, not mere lock contention, must suppress the full scan.
+    later = subprocess.run(
+        [sys.executable, "-c", script, *args, "normal"],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert later.returncode == 0, later.stderr
+    assert calls_path.read_text(encoding="utf-8").splitlines() == ["callback", "callback"]
+
+
+def test_store_maintenance_thread_retries_after_lock_owner_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock loser keeps its one daemon alive until owner crash releases it."""
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+
+    real_acquire = session_factory._acquire_store_maintenance_lock
+    busy = [3]
+    attempts = 0
+
+    def released_after_owner_exit(config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        if busy[0]:
+            busy[0] -= 1
+            return None
+        return real_acquire(config_dir)
+
+    monkeypatch.setattr(
+        session_factory, "_acquire_store_maintenance_lock", released_after_owner_exit
+    )
+    stop = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "single maintenance worker did not retry to completion"
+    assert done.is_set()
+    assert attempts == 4, "worker abandoned lock retries after its initial contention"
+    assert calls == [
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+        "analytics-names",
+        "analytics-daily",
+    ]
+
+
+def test_store_maintenance_thread_exits_retry_on_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+    attempted = threading.Event()
+    calls = 0
+
+    def remains_busy(_config_dir: Path) -> int | None:
+        nonlocal calls
+        calls += 1
+        attempted.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", remains_busy)
+    stop = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
+        daemon=True,
+    )
+    worker.start()
+    assert attempted.wait(5)
+    stop.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "reset did not stop bounded contender backoff"
+    assert done.is_set()
+    assert calls < 10, "contender spun instead of backing off"
+
+
+def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+
+    # Keep a real flock held while a separate thread publishes completion.
+    # The contender must keep one retry thread until the owner releases the lock,
+    # then observe the fresh stamp while holding that lock and skip the passes.
+    owner_fd = session_factory._acquire_store_maintenance_lock(tmp_path)
+    assert owner_fd is not None
+    published = threading.Event()
+    release_owner = threading.Event()
+
+    def publish_after_wait() -> None:
+        assert release_owner.wait(5)
+        session_factory._write_store_maintenance_stamp(
+            tmp_path, list(session_factory._STORE_MAINTENANCE_PASS_NAMES)
+        )
+        published.set()
+        session_factory._release_store_maintenance_lock(owner_fd)
+
+    publisher = threading.Thread(target=publish_after_wait, daemon=True)
+    publisher.start()
+    attempts = 0
+    real_acquire = session_factory._acquire_store_maintenance_lock
+
+    def count_attempts(config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        return real_acquire(config_dir)
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", count_attempts)
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, threading.Event(), done),
+        daemon=True,
+    )
+    worker.start()
+    deadline = time.monotonic() + 5
+    while attempts == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert attempts > 0, "contender never attempted the root lock"
+    assert not done.is_set(), "contender abandoned a busy owner instead of retrying"
+    release_owner.set()
+    worker.join(timeout=5)
+    publisher.join(timeout=5)
+
+    assert not worker.is_alive() and not publisher.is_alive()
+    assert done.is_set() and published.is_set()
+    assert attempts >= 2, "contender did not retry after the original busy lock"
+    assert calls == [], "fresh owner stamp should suppress every maintenance pass"
+
+
+def test_store_maintenance_retry_stops_on_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_INITIAL_SECONDS", 0.001)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS", 0.01)
+    attempts = 0
+    entered = threading.Event()
+
+    def lock_stays_busy(_config_dir: Path) -> int | None:
+        nonlocal attempts
+        attempts += 1
+        entered.set()
+        return None
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", lock_stays_busy)
+    stop_event = threading.Event()
+    done = threading.Event()
+    worker = threading.Thread(
+        target=session_factory._store_maintenance_thread_main,
+        args=(FakeConfigManager(), tmp_path, None, stop_event, done),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(5)
+    stop_event.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "reset did not stop the bounded retry wait"
+    assert done.is_set()
+    assert attempts < 10, "retry loop spun instead of backing off"
+
+
+def test_store_maintenance_malformed_stamp_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    stamp.write_text("{ incomplete", encoding="utf-8")
+
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+
+    assert len(calls) == 6
+    assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
+        session_factory._STORE_MAINTENANCE_STAMP_VERSION
+    )
+
+
+def test_store_maintenance_lock_errors_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+
+    def unavailable(_config_dir: Path) -> int | None:
+        raise OSError("lock storage unavailable")
+
+    monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", unavailable)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+
+    assert calls == [], "maintenance ran without its config-root lock"
+    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
+
+
+def test_store_maintenance_stamp_read_error_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    stamp_path = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    stamp_path.write_text("not json", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def unreadable_stamp(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == stamp_path:
+            raise OSError("stamp cannot be read")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_stamp)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+
+    assert calls == [], "a stamp I/O error ran the passes without proving completion state"
+
+
+def test_store_maintenance_failed_pass_retries_without_completion_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls, fail_once="titles")
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    stamp = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    assert not stamp.exists(), "a failed pass published a completion stamp"
+    first_run = list(calls)
+
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    assert calls[: len(first_run)] == first_run
+    assert calls[len(first_run) :] == [
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+        "analytics-names",
+        "analytics-daily",
+    ]
+    assert stamp.exists(), "successful retry did not publish completion"
+
+
+@pytest.mark.parametrize(
+    "invalid_stamp", ["expired", "version", "oversized_timestamp", "integer_digit_limit"]
+)
+def test_store_maintenance_retries_expired_or_version_mismatched_stamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_stamp: str,
+) -> None:
+    calls: list[str] = []
+    _patch_store_maintenance_passes(monkeypatch, calls)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    stamp_path = tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME
+    payload = json.loads(stamp_path.read_text(encoding="utf-8"))
+    if invalid_stamp == "expired":
+        payload["completed_at"] -= session_factory._STORE_MAINTENANCE_STAMP_TTL_SECONDS + 1
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif invalid_stamp == "version":
+        payload["version"] += 1
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif invalid_stamp == "oversized_timestamp":
+        # Python's JSON decoder accepts arbitrary-size integers; a valid JSON
+        # stamp outside float range is invalid metadata, not a worker crash.
+        payload["completed_at"] = 10**400
+        stamp_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        # Python 3.11+ can reject integer literals above its digit limit during
+        # JSON decoding; that is malformed stamp data and must trigger a rerun.
+        stamp_path.write_text('{"completed_at":' + "9" * 5000 + "}", encoding="utf-8")
+
+    first_count = len(calls)
+    session_factory._run_store_maintenance(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None
+    )
+    assert len(calls) == first_count * 2, f"{invalid_stamp} stamp incorrectly suppressed work"
+
+
+def test_blocked_maintenance_worker_does_not_hold_runner_shutdown(tmp_path: Path) -> None:
+    """A blocked maintenance callback cannot pin Runner.close's executor join."""
+    script = r"""
+import asyncio, sys, threading, time
+from pathlib import Path
+from types import SimpleNamespace
+from local_operator import session_factory as sf, resume
+from local_operator.analytics import backfill
+from local_operator.session import cleanup
+from local_operator.tools import group_reaper
+root = Path(sys.argv[1])
+started = threading.Event()
+sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
+
+def blocked(*_args, **_kwargs):
+    started.set()
+    threading.Event().wait()
+cleanup.cleanup_from_config = blocked
+group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+resume.backfill_session_origins = lambda *_a, **_k: None
+resume.backfill_session_titles = lambda *_a, **_k: None
+backfill.backfill_analytics_session_names = lambda *_a, **_k: None
+backfill.backfill_analytics_session_daily = lambda *_a, **_k: None
+async def main():
+    sf._start_store_maintenance(SimpleNamespace(), root, None)
+    deadline = time.monotonic() + 3
+    while not started.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    if not started.is_set():
+        raise RuntimeError("maintenance callback did not start")
+with asyncio.Runner() as runner:
+    runner.run(main())
+"""
+    env = os.environ.copy()
+    env.pop("XPC_FLAGS", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio
@@ -4073,13 +4749,10 @@ async def _prepare_effort_plan(config_manager, tmp_config_dir: Path, **arg_overr
     from local_operator.session_factory import _prepare
 
     registry = FakeRegistry(tmp_config_dir)
-    credential_manager = MagicMock()
-    credential_manager.get_credential.return_value = None
     args = _args(**{"hosting": "anthropic", "model": "claude-opus-5", **arg_overrides})
     return await _prepare(
         args,
         cast("ConfigManager", config_manager),
-        credential_manager,
         cast("AgentRegistry", registry),
         has_ui=False,
     )
@@ -4341,12 +5014,14 @@ async def test_the_classification_seam_is_closed_on_dispose(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     built: list[Any] = []
 
     class _RecordingService:
-        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+        # ``config_dir`` and not ``manager``: PR2b deleted the
+        # ``CredentialManager`` the seam used to take, and the recorder must
+        # accept the signature the composition root now calls it with.
+        def __init__(self, *, config_dir: Any, settings: Any = None) -> None:
             self.closed = False
             self.timeout_s = 1.5
             built.append(self)
@@ -4361,7 +5036,6 @@ async def test_the_classification_seam_is_closed_on_dispose(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -4400,7 +5074,6 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
 
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     captured: list[Any] = []
     real_attach = session_factory.attach_classification_dispose
@@ -4416,7 +5089,6 @@ async def test_dispose_abandons_a_classification_call_still_in_flight(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     assert captured, "the composition root registers the seam's dispose hook"
@@ -4492,7 +5164,6 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     from local_operator.agents import AgentRegistry
     from local_operator.classification import ClassificationService
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     warmed: list[str] = []
     monkeypatch.setattr(ClassificationService, "warm_up", lambda self: warmed.append("warm"))
@@ -4503,7 +5174,6 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     on_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         on_config,
-        CredentialManager(on_dir),
         AgentRegistry(on_dir),
     )
     try:
@@ -4517,7 +5187,6 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     off_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         off_config,
-        CredentialManager(off_dir),
         AgentRegistry(off_dir),
     )
     try:
@@ -4542,13 +5211,12 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
     from local_operator.agents import AgentRegistry
     from local_operator.classification import ClassificationService
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
 
     built: list[Any] = []
 
     class _Recording(ClassificationService):
-        def __init__(self, *, manager: Any, settings: Any = None) -> None:
-            super().__init__(manager=manager, settings=settings)
+        def __init__(self, *, config_dir: Any, settings: Any = None) -> None:
+            super().__init__(config_dir=config_dir, settings=settings)
             built.append(self)
 
     monkeypatch.setattr("local_operator.classification.ClassificationService", _Recording)
@@ -4557,7 +5225,6 @@ async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         config,
-        CredentialManager(tmp_path),
         AgentRegistry(tmp_path),
     )
     try:
@@ -4603,7 +5270,6 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
     from local_operator.providers.auth_store import AuthStore
 
     order: list[str] = []
@@ -4630,7 +5296,6 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
     session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         ConfigManager(tmp_config_dir),
-        CredentialManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
     try:
@@ -4653,3 +5318,366 @@ async def test_the_auth_store_is_closed_after_the_mcp_teardown(
         "still in flight at teardown is persisted through it, and closing first "
         f"is what loses it (order was {order!r})"
     )
+
+
+# --- Leading-region stability ---------------------------------------------------
+#
+# THE COST MODEL. The auto route's upstream cache is a STRICT contiguous prefix
+# cache: a change at position X invalidates every token after X. The system
+# blocks and the tools array both ride AHEAD of the conversation, so a tool
+# published in the middle of a turn — which is what every `read
+# mcp://<server>/<tool>` enable does — reprices the whole conversation on the next
+# call. Measured on live radient/auto traffic: of the consecutive warm pairs whose
+# leading region changed, 32 of 35 were the tools array, at 38.77% of sent tokens
+# re-sent, against 1.05% when the leading region held; two MCP enables 58s apart
+# cost 323,227 and 340,572 excess tokens.
+#
+# These tests pin the two movers measured on that route — the tools array, and a
+# host capability probe re-read while a session is already running — through THE
+# composition root, so neither can be satisfied by wiring no shipped host
+# performs.
+
+
+class _ScriptedChatStream(ScriptedStream):
+    """``ScriptedStream`` for a session built by ``create_session``.
+
+    Two additions, both about living outside one test's control. ``close``:
+    ``create_session`` folds the stream's close into dispose, and the real stream
+    closes a shared httpx pool. A script that repeats once exhausted: background
+    work (a title write, a compaction check) may issue a call the test did not
+    script, and an index error there would be a failure in the harness rather
+    than in the leading region under test.
+    """
+
+    def __init__(self, turns: list[list[Any]]) -> None:
+        super().__init__(turns)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def __call__(self, request: ChatRequest, signal: Any):
+        if len(self.requests) >= len(self.turns):
+            self.turns.append([StreamEndEvent(stop_reason="stop")])
+        return super().__call__(request, signal)
+
+
+def _leading_region(request: ChatRequest) -> tuple[list[str], list[tuple[str, str]]]:
+    """One request's cached prefix, in the shape the cache sees it.
+
+    System blocks, then the tools array IN ORDER — an extra tool appended at the
+    END of the array still lands in the prefix, because the array sits before the
+    conversation. That is why "append, don't reorder" does not help here, and why
+    the fix has to be about WHEN the array moves rather than where in it a tool
+    lands.
+    """
+    return (
+        list(request.system_blocks or []),
+        [(tool.name, json.dumps(tool.parameters, sort_keys=True)) for tool in request.tools],
+    )
+
+
+async def _composition_root_session(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, stream: _ScriptedChatStream
+) -> Session:
+    """A real session from ``create_session`` on a scripted in-process stream.
+
+    ``create_session`` is what ``cli.py``, exec mode and the background worker all
+    call, and it is the only builder that runs the real ``_prepare``: the model
+    resolution, the system-blocks provider and its host probes, and the session's
+    own kwargs. Nothing here reaches the network — provider-client construction
+    and the MCP wiring are both replaced — while the config, credential and agent
+    stores stay the real objects rooted in the isolated ``tmp_config_dir``.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setattr("local_operator.model.configure.create_stream_fn", lambda *a, **kw: stream)
+
+    async def _no_mcp_wiring(session, tools, cwd, **kwargs):
+        # The MCP *connection* is not what these tests measure: an enable reaches
+        # a session as ``Session.refresh_tools`` (see
+        # ``session_factory.refresh_selected``, which the resolver calls), and
+        # that is what the tool below performs. Swapping the wiring keeps this a
+        # no-network, no-SDK test.
+        return None
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", _no_mcp_wiring)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    return cast(Session, session)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_enabled_mid_turn_waits_for_the_next_turn_in_the_array(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression guard for the measured cache loss.
+
+    The array is published at most ONCE per turn. An enable that lands after this
+    turn's first provider call must not move the prefix for the calls that
+    follow, and the enabled tool must not be silently unreachable either: the
+    session's inventory still takes it immediately (that is what makes the tool
+    executable, and what the prompt's inventory delta reports), so this is a
+    delay in the ARRAY and never a freeze of the session. That distinction is the
+    whole design — a session-lifetime freeze would break the lazy-MCP rung.
+    """
+    stream = _ScriptedChatStream(
+        [
+            # Turn 1, provider call 1. In production this tool call is `read
+            # mcp://linear/get_user`, whose resolver calls the same
+            # ``Session.refresh_tools`` the tool below calls.
+            [
+                StreamToolCallDelta(index=0, id="c1", name="enable", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            # Turn 1, provider call 2: the call whose cache this test is about.
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            # Turn 2, where the array is allowed to move.
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    async def never_execute(*args: Any, **kwargs: Any):
+        raise AssertionError("enabling an MCP tool must not execute it")
+
+    enabled = AgentTool(
+        name="mcp__linear_get_user",
+        description="Return the authenticated Linear user",
+        parameters={"type": "object", "properties": {}},
+        approval_tier="read",
+        execute=never_execute,
+    )
+    published: list[bool] = []
+    side_channel: list[list[str]] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        published.append(session.refresh_tools([*session._tools, enabled]))
+        # What an aside or a compaction-advisor request would send. They must ride
+        # the SAME prefix the turn sends (the tools block is the front of it), so
+        # they read the published array — not the live inventory, which the swap
+        # above has already moved.
+        side_channel.append([tool.name for tool in session._side_channel_tools()])
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="enable",
+            content=[TextContent(text="enabled")],
+        )
+
+    def _enable_tool() -> AgentTool:
+        return AgentTool(
+            name="enable",
+            description="enable an MCP tool",
+            parameters={"type": "object", "properties": {}},
+            approval_tier="read",
+            execute=execute,
+        )
+
+    # Published BEFORE the turn opens: the array this test measures is the one the
+    # turn starts with, so the extra harness tool has to be in it already.
+    was_published = session.refresh_tools([*session._tools, _enable_tool()])
+    await session.prompt("enable the linear tool, then answer")
+    await session.prompt("and again")
+
+    assert len(stream.requests) == 3, "one turn with a tool batch, then one more turn"
+    first, second, third = stream.requests[0], stream.requests[1], stream.requests[2]
+    # The claim: two provider calls inside ONE turn share a byte-identical leading
+    # region. A tool appended at the end of the array is still a prefix miss.
+    assert _leading_region(second) == _leading_region(first)
+    assert enabled.name not in {tool.name for tool in second.tools}
+    # The enable WAS applied: the session can resolve and advertise it, so nothing
+    # was frozen — only the array's publish point moved.
+    assert enabled.name in {tool.name for tool in session._tools}
+    # And it is not lost to the session: the next turn's array carries it.
+    assert enabled.name in {tool.name for tool in third.tools}
+    assert _leading_region(third)[0] == _leading_region(first)[0]
+    # The publish contract the resolver's reply is built on: reachable from
+    # before the turn, deferred once the turn's array is on the wire.
+    assert was_published is True
+    assert published == [False]
+    # And the side channels that must reproduce this prefix send what the turn
+    # sent, not the inventory the mid-turn enable already grew.
+    assert side_channel == [[tool.name for tool in first.tools]]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_host_capability_probe_flip_cannot_start_a_prefix_epoch(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block 0 is the one block whose change costs EVERY live session a cold prefix.
+
+    ``prompts_api`` renders the console/browser notes from a HOST probe that
+    reads the desktop app's discovery record, and that record accepts a
+    stale-but-alive heartbeat — so the probe's answer flips with a heartbeat's
+    age, mid-session, on a timer nobody in this process controls. Because the
+    probe was re-read on every render, block 0 moved and the persisted-prefix
+    protocol answered correctly by starting a NEW epoch: two live sessions
+    flipped at 11:34:22/11:34:25 and reverted at 11:37:00/11:37:33, measured as
+    cache_read 47,616 -> 3,968 and 66,816 -> 50,304.
+
+    The epoch path is for AUTHORITY (edited instructions, repo guidance, a newer
+    packaged prompt). A liveness probe is not authority, so the host half of the
+    decision is taken once at construction. The tool-MEMBERSHIP half stays live:
+    the call path re-probes and refuses correctly, which is what makes a stale
+    sentence inside a session the acceptable cost.
+
+    The provider memoises its blocks on a key that does not include the host
+    probes, so the defect is only reachable from a RE-RENDER — and a live session
+    re-renders whenever its knowledge selection moves, which a new user turn does.
+    The knowledge stub below is that re-render, held deterministic: asserting the
+    epoch here while the provider was serving its memo would prove nothing, so the
+    state delta is asserted too, as the evidence the render actually happened.
+
+    THE `console` TOOL MUST BE ABSENT for this guard to mean anything, and the
+    precondition is asserted rather than assumed (QA round 1's scenario E found
+    it: built with the tool present, the membership half ORs the probe away and
+    block 0 does not move on either tree, so the experiment proves nothing). The
+    patch below removes the tool AND flips the host answer, which is the
+    incident's shape — a session built while the desktop app was down.
+    """
+    import local_operator.tools.builtin as builtin_tools
+
+    host = {"console": False}
+    # The console's ONE createIf gate is the same function the prompt's host probe
+    # calls, so patching it drives both the inventory and the note — which is
+    # exactly the coupling the three-state diagnosis rests on.
+    monkeypatch.setattr(builtin_tools, "ui_console_advertisable", lambda: host["console"])
+    monkeypatch.setattr(builtin_tools, "ui_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin_tools, "bridge_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin_tools, "cmux_browser_available", lambda: False)
+
+    knowledge = {"renders": 0}
+
+    async def _changing_knowledge(*args: Any, **kwargs: Any) -> str:
+        knowledge["renders"] += 1
+        return f'<skills>\n<skill name="rev-{knowledge["renders"]}"/></skills>'
+
+    monkeypatch.setattr(session_factory, "_select_knowledge_block", _changing_knowledge)
+
+    stream = _ScriptedChatStream([[StreamEndEvent(stop_reason="stop")]] * 2)
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    await session.prompt("first")
+    epoch = session._transcript.latest_custom_entry("system_prefix")
+    assert epoch is not None, "the persisted-prefix protocol must be on for this session"
+    first_region = _leading_region(stream.requests[0])
+    # The precondition QA round 1 named: with the console tool IN the array, its
+    # membership ORs the host probe away and block 0 cannot move on either tree.
+    assert "console" not in {tool.name for tool in stream.requests[0].tools}
+    # The flip is observable at all only because the construction-time answer
+    # renders the prohibition: without the note in block 0 there would be nothing
+    # for a heartbeat to move, and this guard could not go red.
+    assert "When the `console` tool is NOT in your tool list" in first_region[0][0]
+    await session.prompt("second")
+
+    # The re-render happened (the knowledge selection moved, as a new user turn
+    # makes it move), so the probes below were consulted again.
+    states = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage) and message.custom_type == "session_state"
+    ]
+    assert states, "the provider re-used its memo, so this guard proved nothing"
+
+    # The desktop app's discovery record ages back into the advertisable window —
+    # same process, same session, no edit by anyone — and the frozen prefix must
+    # not care.
+    host["console"] = True
+    await session.prompt("third")
+
+    frozen_before = list(stream.requests[0].system_blocks or [])
+    frozen_now = list(stream.requests[2].system_blocks or [])
+    moved = [
+        index for index, (before, now) in enumerate(zip(frozen_before, frozen_now)) if before != now
+    ]
+    assert not moved, (
+        f"a host capability probe flip moved system block(s) {moved}; block 0 is the one "
+        "whose change forces a new persisted prefix epoch for every live session"
+    )
+    assert session._transcript.latest_custom_entry("system_prefix") is epoch, (
+        "a host capability probe flip started a NEW persisted prefix epoch: the epoch "
+        "path is reserved for authority (edited instructions, repo guidance, a newer "
+        "packaged prompt), and a heartbeat's age is neither"
+    )
+    assert _leading_region(stream.requests[2])[0] == first_region[0]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_removed_mid_turn_stays_in_the_array_until_the_next_turn(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shrink direction, which used to republish the array mid-turn.
+
+    ``session_factory.refresh_selected`` — the MCP ``on_tools_changed`` and
+    disconnect path — rebinds the inventory through ``Session.refresh_tools``,
+    and before the array's one-publish latch that rebind moved the array for the
+    turn in flight: the same prefix cost as a grow, paid by a server dropping
+    away rather than by anything the user did. ``Session._reconcile_web_tools``
+    already refuses to move the inventory mid-turn for exactly this reason; the
+    latch is what extends that rule to the array.
+
+    What must still be immediate is the INVENTORY, and that is asserted too: a
+    removal that took effect only at the next turn would leave a session offering
+    a tool whose transport is gone.
+    """
+    stream = _ScriptedChatStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="drop", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    async def never_execute(*args: Any, **kwargs: Any):
+        raise AssertionError("the removed tool must not be executed by this test")
+
+    def _tool(name: str, execute) -> AgentTool:
+        return AgentTool(
+            name=name,
+            description=f"{name} the inventory",
+            parameters={"type": "object", "properties": {}},
+            approval_tier="read",
+            execute=execute,
+        )
+
+    dropped: list[bool] = []
+
+    async def drop_execute(tool_call_id, args, signal, on_update, context):
+        # Exactly what a disconnected MCP server's `on_tools_changed` does.
+        dropped.append(
+            session.refresh_tools([tool for tool in session._tools if tool.name != "victim"])
+        )
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="drop", content=[TextContent(text="dropped")]
+        )
+
+    seeded = session.refresh_tools(
+        [*session._tools, _tool("victim", never_execute), _tool("drop", drop_execute)]
+    )
+    await session.prompt("drop the victim tool, then answer")
+    await session.prompt("and again")
+
+    first, second, third = stream.requests[0], stream.requests[1], stream.requests[2]
+    assert {"victim", "drop"} <= {tool.name for tool in first.tools}
+    # The inventory dropped it at once — the tool is no longer resolvable.
+    assert "victim" not in {tool.name for tool in session._tools}
+    # ... while the array the turn is using is untouched, then catches up.
+    assert "victim" in {tool.name for tool in second.tools}
+    assert _leading_region(second) == _leading_region(first)
+    assert "victim" not in {tool.name for tool in third.tools}
+    assert seeded is True
+    assert dropped == [False], "a mid-turn removal must not republish the array"
+    await session.dispose()

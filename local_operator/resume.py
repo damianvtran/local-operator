@@ -24,7 +24,14 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from local_operator.procstate import is_zombie, pid_liveness
+from local_operator.procstate import is_zombie, pid_liveness, process_sample
+
+# The archive index is imported at module scope deliberately: it is stdlib-only
+# at ITS module scope (its one local import, of ``session.catalog``, is made
+# inside the function that needs it precisely because ``catalog`` imports this
+# module), so it costs this module's import budget nothing and the scan can read
+# it without a per-poll import.
+from local_operator.session.archived import archived_ids
 
 #: Module level, not lazy, and deliberately so: this module sits on the CLI
 #: startup path, and ``session.errors`` is the one importable that costs
@@ -32,6 +39,8 @@ from local_operator.procstate import is_zombie, pid_liveness
 #: imports no stdlib and no engine. Hiding the refusal behind a function-local
 #: import would make the type unreachable to a caller that wants to catch it.
 from local_operator.session.errors import SessionStoreUnavailable
+from local_operator.session.runtime.types import reported_subagent_count
+from local_operator.session_lease import LEASE_NAME, _read_claim
 
 logger = logging.getLogger(__name__)
 
@@ -1191,10 +1200,28 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
     lost (the schedule stays overdue until a runtime loads). It is also strictly
     narrower than the behaviour before this branch, when such a record read as
     live for the ~45 s until its heartbeat quieted.
+
+    **A PID IS NOT AN OWNER EITHER — the marker outlives its writer.** The
+    marker holds a number, and the kernel hands a reaped process's number to the
+    next process that wants one, so this reported a dead runtime's session as
+    "already open in pid N" naming an unrelated stranger: every attach path
+    refused it and nothing was running (session bfbc971ef537, 2026-09-21). The
+    identity comes from the session's ``.execution-lease`` CLAIM, which records
+    the birth token of the process that wrote it
+    (:func:`local_operator.procstate.same_birth`): when the claim names THIS
+    pid and its recorded birth differs from the live process's, the writer is
+    gone and this returns ``None``. The marker itself keeps its bare-pid format
+    on purpose — ``retention``, ``cleanup`` and this module all parse it as an
+    ``int()``, and an unparseable value reads there as "no owner", which is a
+    second writer against a live one. A marker with no claim beside it, or a
+    claim naming a different pid, has no recorded identity and keeps today's
+    pid-liveness behaviour: that is the mixed-generation cell that keeps an
+    older build's live owner safe.
     """
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
-    marker = config_dir / "sessions" / session_id / ".session.pid"
+    session_dir = config_dir / "sessions" / session_id
+    marker = session_dir / ".session.pid"
     try:
         raw = marker.read_text(encoding="utf-8").strip()
         pid = int(raw)
@@ -1213,14 +1240,58 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
     # ``/resume`` starts a second runtime against.
     if pid_liveness(pid) is False:
         return None
-    if check_zombie and is_zombie(pid):
+    if not check_zombie:
+        # The engage loop's dense 10 ms grid: the cheap answer only, which is
+        # the same deferral the corpse proof gets below and the identity proof
+        # gets with it. The grid exists to shorten the dead time between a
+        # runtime publishing and the parent noticing; a ``ps`` fork costs
+        # 2.4-4.6 ms against a 23-30 µs iteration budget. What it can cost here
+        # is bounded and cannot recovers the impersonation: on that path the
+        # cheap answer selects a record or reports an errand ready, and the
+        # decision to attach or spawn still ends in a runtime that must acquire
+        # the lease — and acquisition always proves identity.
+        return pid
+    sample = process_sample(pid)
+    if sample is None:
+        # The platform could not answer at all. Fall back to the question this
+        # used to ask alone, which never displaces a live owner.
+        return None if is_zombie(pid) else pid
+    if sample.zombie:
         # The probe is spent only here, where signal 0 has already said
         # "exists". At the user-facing call sites the difference between a
         # working runtime and its corpse decides whether someone is told to go
         # and steer a session that nobody is running; on the engage loop's dense
         # discovery path it is deferred, because there it can only cost a wait.
         return None
+    identity = _mirror_identity(session_dir, pid)
+    if identity is not None and sample.is_birth(*identity) is False:
+        # THE MARKER NAMES A PID, AND THIS PROCESS IS NOT THE ONE THAT WROTE IT.
+        # A pid is not an identity: the mirror outlives the process that wrote
+        # it, and the kernel hands the number to the next process that wants one,
+        # so this used to report a session as "already open in pid N" naming a
+        # stranger — every attach path refused while nothing was running. The
+        # identity is read from the CLAIM (the mirror stays a bare pid, because
+        # its readers parse it as an int and an unparseable value there means
+        # "no owner", i.e. a second writer).
+        return None
     return pid
+
+
+def _mirror_identity(session_dir: Path, pid: int) -> tuple[str | None, str | None] | None:
+    """The birth the CLAIM records for ``pid``, or ``None`` for a legacy mirror.
+
+    ``None`` — the legacy cell, and the whole compatibility story — covers both
+    a mirror with no claim beside it (an older build's marker, or the window
+    between release unlinking the claim and the mirror) and a claim that names a
+    DIFFERENT pid than the mirror, where the mirror's writer is not the claim's
+    and nothing about that pid's identity has been recorded. Both are read as
+    "no identity available", which keeps today's pid-liveness behaviour; only a
+    live process whose measured birth differs from the recorded one is demoted.
+    """
+    claim = _read_claim(session_dir / LEASE_NAME)
+    if claim.pid != pid or claim.pid is None:
+        return None
+    return claim.birth
 
 
 def origin_cache_path(config_dir: Path) -> Path:
@@ -1274,9 +1345,22 @@ def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
 
 
 def recent_sessions(
-    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    revalidate: bool = False,
+    include_archived: bool = False,
 ) -> list[tuple[str, float]]:
     """``(id, mtime)`` for the USER's resumable sessions, newest first.
+
+    ``include_archived=False`` is the DEFAULT because every caller of this
+    function is a LISTING, and an archived conversation is exactly what a
+    listing is not supposed to offer. The one caller that must say otherwise is
+    ``session.cleanup``'s retention policy, which ranks this listing to decide
+    what to KEEP: an archived session dropped from that ranking would stop
+    being protected by the recent-N rule and be swept as if it were work nobody
+    kept. See :func:`recent_session_rows` for the picker's version of the same
+    question.
 
     ``limit=None`` means NO TRUNCATION and is the default, so a caller that says
     nothing gets the whole store. That direction is deliberate and was learned
@@ -1380,8 +1464,8 @@ def recent_sessions(
     """
     return [
         (name, mtime)
-        for name, mtime, _origin in _recent_sessions_with_origin(
-            config_dir, limit, revalidate=revalidate
+        for name, mtime, _origin, _archived in _recent_sessions_with_origin(
+            config_dir, limit, revalidate=revalidate, include_archived=include_archived
         )
     ]
 
@@ -1408,7 +1492,8 @@ def _recent_sessions_with_origin(
     *,
     revalidate: bool = False,
     strict: bool = False,
-) -> list[tuple[str, float, str]]:
+    include_archived: bool = False,
+) -> list[tuple[str, float, str, bool]]:
     """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
 
     The scan reads and parses every marker that exists in order to decide
@@ -1427,8 +1512,23 @@ def _recent_sessions_with_origin(
     MEMBERSHIP listing through :func:`recent_session_rows` (the phone's
     history) can declare that for itself rather than only through the
     catalogue; see that function.
+
+    ``include_archived`` is forwarded too, and the row's fourth element is the
+    session's archive state AS THIS SCAN READ IT. It travels on the row rather
+    than being re-derived by the caller for two reasons: the scan has already
+    read the index it filtered against, so a second read is a second answer that
+    can disagree; and ``catalog.cached_session_rows`` serves rows out of a cache
+    keyed on the transcript's own stat, under which an id archived between two
+    polls would keep serving ``archived=False`` from a row built before it was
+    archived.
     """
-    return _scan_sessions(config_dir, limit, revalidate=revalidate, strict=strict)[0]
+    return _scan_sessions(
+        config_dir,
+        limit,
+        revalidate=revalidate,
+        strict=strict,
+        include_archived=include_archived,
+    )[0]
 
 
 def _store_error_detail(error: OSError) -> str:
@@ -1493,7 +1593,8 @@ def _scan_sessions(
     *,
     revalidate: bool = False,
     strict: bool = False,
-) -> tuple[list[tuple[str, float, str]], set[str]]:
+    include_archived: bool = False,
+) -> tuple[list[tuple[str, float, str, bool]], set[str]]:
     """The one store scan: ``(rows, hidden_names)``.
 
     ``revalidate=True`` forces this scan to re-read every marker instead of
@@ -1532,6 +1633,34 @@ def _scan_sessions(
     Split from :func:`_recent_sessions_with_origin` rather than widening its
     return type because that shape is pinned by the CLI's recovery listing and
     by every other caller, none of which has any use for the second value.
+
+    ``include_archived`` is THE archive predicate for every listing in this
+    codebase, and that is the whole design: the picker, the sidebar catalogue,
+    the desktop catalogue and the search digests all reach their rows through
+    this function, so ONE filter here is what makes those four surfaces agree
+    about which conversations exist to be offered. A second filter at a second
+    call site is exactly how the sidebar and the phone came to disagree about
+    subagent visibility before this scan owned that question too.
+
+    With it off (the default) an archived directory is dropped from ``rows``
+    and NOT added to ``hidden_names``: hidden means "not the user's own
+    session" and carries a second meaning at ``load_catalog``, where a hidden
+    name is one the desktop-marker probe may skip. An archived session is the
+    user's own; it is simply not being OFFERED.
+
+    The flag therefore NARROWS WHAT IS OFFERED AND NEVER WHAT EXISTS. An
+    archived session still resolves by explicit id (``lop resume <id>``, the
+    desktop's ``GET /v1/desktop/sessions/{id}``), exactly as a subagent run
+    stays resolvable while the listing hides it — the rule
+    ``_recent_sessions_with_origin``'s docstring already states for the other
+    axis of visibility.
+
+    The archive index is read AT MOST once per scan and LAZILY: only a
+    candidate that has already passed the hidden-origin gate and the
+    directory checks reaches the archive decision, so a store whose entries
+    are all hidden pays no stat and no read for an answer none of them can
+    use, and a store with nothing archived pays one stat and no read (the
+    index is stat-ed before it is opened — see ``session.archived``).
     """
     # Lazy and stdlib-only on the other side: ``retention`` imports nothing
     # heavier than ``logging``, and the CLI startup guard measures this
@@ -1557,7 +1686,17 @@ def _scan_sessions(
         _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
         revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
-    rows: list[tuple[str, float, str]] = []
+    rows: list[tuple[str, float, str, bool]] = []
+    # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
+    # reaches the archive decision below. Not read up front, and that is a
+    # syscall budget rather than a style choice: the poll's per-directory cost
+    # is asserted in syscalls (``tests/unit/session/test_catalog_scan_cost.py``),
+    # and a store whose entries are all hidden — a machine between turns, with
+    # every directory a delegated run — must cost ONE ``scandir`` and nothing
+    # else. Reading the index eagerly added a stat (plus a read when a file is
+    # there) to exactly that scan, for an answer no hidden directory can use.
+    # ``None`` means "not read yet"; an empty store reads nothing at all.
+    archived: frozenset[str] | None = None
     # Every directory this scan established is not the user's own session. See
     # the docstring: ``load_catalog`` uses it to skip a second per-directory
     # stat.
@@ -1776,10 +1915,22 @@ def _scan_sessions(
             #
             # ``session_activity_path`` over ``session_activity``: same clock,
             # same answer, without building a ``Path`` per candidate.
+            #
+            # AN ARCHIVED DIRECTORY IS NOT OFFERED, and this is the one place
+            # that decides it for every listing in this codebase (see the
+            # docstring). Checked BEFORE the activity stat because the answer is
+            # a set lookup: an archived directory then costs no filesystem call
+            # at all on the 2-second poll, which is the poll this branch is
+            # walked by.
+            if archived is None:
+                archived = archived_ids(config_dir)
+            is_archived = entry.name in archived
+            if is_archived and not include_archived:
+                continue
             activity = session_activity_path(entry.path)
             if activity is None:
                 continue
-            rows.append((entry.name, activity, origin))
+            rows.append((entry.name, activity, origin, is_archived))
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
@@ -1818,6 +1969,35 @@ def format_age(seconds: float) -> str:
     return "just now"
 
 
+def _counted(value: int | None) -> int:
+    """A published subagent count as an arithmetic-safe ``int``, or ``0``.
+
+    WHY A GUARD IS NEEDED AT ALL, on a field typed ``int | None``:
+    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
+    no type validation — so every field on a record is whatever the writer put
+    in the file, and :attr:`SessionRow.delegating` is the first thing to do
+    ARITHMETIC on these two. A ``str`` or a ``list`` would raise ``TypeError``
+    inside the sidebar's poll loop behind ``/resume``, and a merely-numeric
+    wrong value would pass silently and render as measured fact.
+
+    THE RULE IS NOT RESTATED HERE. ``reported_subagent_count``
+    (``session.runtime.types``, beside the fields it validates) is the one
+    implementation, shared with ``info.collect``'s fleet tally and with the
+    desktop listing's response model, because three readers disagreeing about
+    which values are believable is how one surface prints a figure another drops
+    (review round 1, R4). Its docstring carries the incident that made the rule.
+
+    ``0`` RATHER THAN ``None``, and that is this call site's own contract:
+    :attr:`SessionRow.delegating` needs a number to add, and both answers mean
+    the same thing to it — a value nobody reported can never make a row
+    delegating. Nothing here is ever RENDERED, so "not reported" and "zero"
+    cannot be confused on a frame; the surfaces that do render a count keep the
+    ``None`` (see ``CatalogEntry.status`` and ``session-list.tsx``), which is why
+    the shared function returns ``None`` and this wrapper collapses it.
+    """
+    return reported_subagent_count(value) or 0
+
+
 class SessionRow(NamedTuple):
     """One pickable conversation: what it was about, when, and its id.
 
@@ -1841,6 +2021,20 @@ class SessionRow(NamedTuple):
     #: Defaulted so every existing construction site keeps working; only the
     #: picker's row builder sets it.
     forked: bool = False
+
+    #: Whether this conversation is ARCHIVED: hidden from every default listing
+    #: and from search, still resumable by explicit id.
+    #:
+    #: Present on the row rather than looked up per render because a renderer
+    #: paints a whole page at once and the archive index is one small file read
+    #: per SCAN (``resume._scan_sessions``), not per row. The picker's reveal
+    #: toggle reads it to decide which rows it is revealing, and every other
+    #: surface simply never receives a row with it set — the flag is the honest
+    #: statement of what the listing did, in both directions.
+    #:
+    #: Defaulted so every existing construction site keeps working, exactly as
+    #: ``forked`` above is: only the scan and the row builders set it.
+    archived: bool = False
 
     # -- live state, supplied by the CALLER -------------------------------
     # This module stays stdlib-only and never scans the registry itself: it
@@ -1882,6 +2076,34 @@ class SessionRow(NamedTuple):
     #: can say it in the runtime's words — the ones `lop sessions` and `/info`
     #: print — without teaching every consumer a new token (UX round 2, U8).
     leaving: str = ""
+    #: How many of this session's OWN delegated children are running, and how
+    #: many are parked waiting for a capacity slot — both straight off the
+    #: live ``SessionRecord``, or ``None`` when there is no record or the build
+    #: that wrote it does not report them.
+    #:
+    #: WHY THEY RIDE THE ROW. The state they exist to name is invisible without
+    #: them: ``live_state`` is the parent's OWN lane, and
+    #: ``ServingSessionHandle.is_conversationally_active`` deliberately excludes
+    #: children from it (publishing residency there made every live session
+    #: claim to be working). So a parent whose turn ended while its children
+    #: still run decorates as ``idle`` and every surface reads it as no
+    #: activity. The fact was already on the record the decorators hold and was
+    #: simply dropped; carrying it on the row is what lets one predicate serve
+    #: the catalogue AND the TUI mark, so the glyph and the words cannot
+    #: disagree about whether this row is delegating.
+    #:
+    #: ``None`` IS NOT ``0``. It means "this build does not report a count",
+    #: which is the only honest thing to say about a record written before the
+    #: field existed — a client that renders it as zero asserts "no subagents"
+    #: about a session it could not ask (see :attr:`delegating`, which treats
+    #: the two identically for the STATE and differently for the COUNT).
+    #:
+    #: Defaulted exactly like ``leaving``/``heartbeat_age_s`` above, so every
+    #: existing construction site keeps working unchanged; only the live
+    #: decorators (``decorate_rows`` and the desktop feed's ``_row_for``) set
+    #: them.
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
     #: How many wakes are scheduled, and whether they are dormant because the
     #: session was deliberately stopped.
     wakes: int = 0
@@ -1921,6 +2143,54 @@ class SessionRow(NamedTuple):
     #: Immutable conversation birth, not transcript activity or runtime start.
     #: Unknown legacy dates tie at zero and are ordered by session id.
     created_at: float = 0.0
+
+    @property
+    def delegating(self) -> tuple[int, int] | None:
+        """``(running, queued)`` when this row owns subagent work, else ``None``.
+
+        THE single fact behind the ``delegating`` state, read by both builders
+        of a status — ``session.catalog.CatalogEntry.status_code``/``status``
+        and ``tui.widgets.session_picker.row_state_mark`` — so the words and
+        the glyph are two renderings of one answer rather than two derivations
+        that a future edit can drift apart. That is the same shape
+        ``CatalogEntry.shows_completion_mark`` has, and for the same reason: the
+        pairing used to be held together by a comment asking the next author to
+        keep the two ladders in step, and a comment is not a mechanism.
+
+        IT ANSWERS ONLY THE COUNT QUESTION, deliberately. Every rung ABOVE
+        this state is a separate louder fact — a parked gate, a wedged or busy
+        runtime, an unread completion, an attached session — and each caller
+        already tests those in its own ladder before it reaches this one, in
+        the order ``row_state_mark`` documents. Folding them in here would give
+        the two callers a second, hidden precedence to keep in step, which is
+        the failure this property exists to remove.
+
+        THE DRAIN IS THE ONE EXCEPTION, and it is here rather than left to the
+        callers because ``leaving`` is a GATE and not a rung: in
+        ``CatalogEntry.status`` the phrase already wins above ``busy``, but
+        ``status_code`` has no leaving arm at all, so a draining row whose
+        ``live_state`` happened to be idle would otherwise publish ``delegating``
+        beside a tooltip reading "Leaving…" — and would draw ``⇉`` next to it.
+        A runtime committed to exiting is the stronger fact, so it suppresses
+        the state at the one place both readers look.
+
+        ``None`` report is treated as zero FOR THE STATE: an unknown count can
+        never make a row delegating. It is still not written as a zero anywhere
+        — the label builder in the catalogue omits a count it was not given.
+        "Queued with nothing running" is the case that must not read as idle:
+        the capacity gate parks a child with ``queued=True`` while it waits for a
+        slot (``harness/subagent.py:663``, ``queued = jobs_manager.at_capacity()``
+        → ``harness/jobs.py:648``, whose ``at_capacity`` counts only
+        non-``queued`` running jobs), so a parent holding only parked children is
+        working in exactly the sense the operator is complaining about.
+        """
+        if self.leaving:
+            return None
+        running = _counted(self.subagents_running)
+        queued = _counted(self.subagents_queued)
+        if running + queued < 1:
+            return None
+        return running, queued
 
 
 #: The fork tag's text as a FILTER sees it. The mark itself is drawn per
@@ -2297,7 +2567,11 @@ def _condense(text: str, max_chars: int) -> str:
 
 
 def recent_session_rows(
-    config_dir: Path, limit: int | None = None, *, strict: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    strict: bool = False,
+    include_archived: bool = False,
 ) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
@@ -2350,9 +2624,19 @@ def recent_session_rows(
     the same confidently-wrong membership this whole change removes from the
     desktop and TUI sidebars, one surface out. That caller passes
     ``strict=True`` and keeps the last listing it did read.
+
+    ``include_archived=False`` keeps archived conversations out of the rows, and
+    that is the default every listing wants. The ``/resume`` picker is the one
+    caller that passes ``True``: it has a toggle that REVEALS them, so it needs
+    the rows in hand and the ``archived`` flag on each one to know which rows the
+    toggle is revealing. A caller that only lists (the CLI's recovery listing,
+    the phone's history, the search) leaves it off and so cannot offer an
+    archived conversation at all.
     """
     rows: list[SessionRow] = []
-    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit, strict=strict):
+    for session_id, mtime, origin, archived in _recent_sessions_with_origin(
+        config_dir, limit, strict=strict, include_archived=include_archived
+    ):
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(
@@ -2363,6 +2647,12 @@ def recent_session_rows(
                 # ordinary conversation — short-circuit here without touching
                 # the disk again.
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
+                # Taken from the scan's own read rather than re-derived here; see
+                # ``_recent_sessions_with_origin``. With the flag off this is
+                # ``False`` for every row by construction, and it is still
+                # stamped rather than left to the field's default so a caller
+                # never has to ask which mode produced the list.
+                archived=archived,
             )
         )
     return rows

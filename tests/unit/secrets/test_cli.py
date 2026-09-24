@@ -179,6 +179,78 @@ def test_describe_shows_metadata_but_no_value(cli) -> None:
     assert b"the-secret-value" not in described.stdout
 
 
+def test_describe_refuses_a_provider_row_and_names_no_namespace(cli) -> None:
+    """``lop secret describe`` is an AGENT surface, so it must refuse (Q-1/R2).
+
+    ``SecretStore.describe`` takes ``role`` now; the CLI's default is the
+    restrictive one, so an operator or an agent script cannot enumerate which
+    provider keys a host holds — name, description, timestamps — through the
+    ordinary secret verbs. Provider-side readers pass ``role="provider"`` and are
+    unaffected.
+    """
+    cli("set", "PLAIN", stdin=b"v\n")
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=cli.config)
+
+    refused = cli("describe", "LOP_PROVIDER_OPENROUTER_API_KEY")
+    assert refused.returncode == 2, refused.stdout
+    assert b"reserved" in refused.stderr
+    assert b"sk-secret" not in refused.stdout
+
+
+def test_rm_refuses_a_provider_row_and_leaves_it_intact(cli) -> None:
+    """The DESTRUCTIVE half (Q-1/R2): an agent verb must not delete a provider key.
+
+    ``delete`` is irreversible — the value is kept nowhere else — so an unguarded
+    ``lop secret rm`` let an agent or a prompt-injected script destroy the
+    credential a provider authenticates with. The row must survive the refusal.
+    """
+    from local_operator.providers.registry import (
+        provider_secret_value,
+        store_provider_key,
+    )
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=cli.config)
+
+    refused = cli("rm", "--yes", "LOP_PROVIDER_OPENROUTER_API_KEY")
+    assert refused.returncode == 2, refused.stdout
+    assert b"reserved" in refused.stderr
+    # Still there, and still resolving: a refusal that removed the row would be
+    # the very defect one step later.
+    assert provider_secret_value("OPENROUTER_API_KEY", base=cli.config) == "sk-secret"
+
+
+def test_rm_by_id_refuses_a_provider_row_and_leaves_it_intact(cli) -> None:
+    """The R2 rerun of the boundary on the BY-ID verb (round-2 review).
+
+    This is the reported repro: `lop secret list --json` emits provider row ids,
+    and `rm --id <id>` removed a row without ever naming it — the name-keyed guard
+    on `rm NAME` never ran. The id is read off `list --json` here exactly as the
+    report did, so the test drives the surface the defect was filed against rather
+    than spelling an id it chose. Paired with a value check: a refusal that still
+    removed the row would be the defect one step later.
+    """
+    import json
+
+    from local_operator.providers.registry import (
+        provider_secret_value,
+        store_provider_key,
+    )
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=cli.config)
+
+    listed = cli("list", "--json")
+    payload = json.loads(listed.stdout)
+    provider_row = next(row for row in payload if row["name"].startswith("LOP_PROVIDER_"))
+
+    refused = cli("rm", "--id", provider_row["id"], "--yes")
+    assert refused.returncode == 2, refused.stdout
+    assert b"reserved" in refused.stderr
+
+    assert provider_secret_value("OPENROUTER_API_KEY", base=cli.config) == "sk-secret"
+
+
 def test_set_confirmation_does_not_echo_the_value(cli) -> None:
     """The confirmation goes to stderr and names the size, never the bytes."""
     stored = cli("set", "TOKEN", stdin=b"the-secret-value\n")

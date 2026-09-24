@@ -282,6 +282,100 @@ _TRIGGER_FOR_LEAVING: dict[str, str] = {
 }
 
 
+class OperatorAuthorityRequired(ValueError, RuntimeError):
+    """This request would loosen a running gate, and did not come from its console.
+
+    `/approvals auto` and an APPROVED card remove the approval gate that
+    constrains the caller, so the runtime additionally demands a per-connection
+    proof of the capability its own spawner minted (issue #1310, ``harness/
+    approval``). A request that arrives without it — a follower pane, the phone
+    relay for a runtime another process started, the desktop app for a session
+    its backend did not engage, or a model-authored tool call that merely read
+    the session record — is refused with this.
+
+    A TYPED refusal so every route can carry it verbatim. Before this, the
+    refusal crossed the socket as an anonymous `error` frame and then a bare
+    `RuntimeError`, and each route guessed: the desktop command surface answered
+    `503 runtime_unreachable` ("reconnect and reconcile") and the desktop card
+    route answered `409 "no longer pending"` while the card was still parked,
+    both of which describe a different problem than the one the operator has
+    (agent review round 1 R1-2 = design D1 = UX U4 = QA Q1).
+
+    BOTH BASES, deliberately, for the reason ``RuntimeRetiring`` records one
+    class down: the routes that carry a control request catch `ValueError` (the
+    relay's HTTP arm) or `RuntimeError` (the card route's answer path), and a
+    class that satisfied only one would silently change the catch shape of a
+    call site that already handles it.
+
+    The message is built HERE from the constant the runtime also sends, so the
+    category and its copy cannot drift (the decode path in
+    :func:`admission_error` takes no text off the wire).
+    """
+
+    code = "operator_authority_required"
+
+    #: Whether this refusal is the UNCONFIGURED variant — the host has no usable
+    #: anchor, so NEITHER named remedy can work until `lop operator install` has
+    #: run there (UX round 6, U1/U2 — the two halves of one gap). It
+    #: selects a different sentence, exactly as ``trigger`` does, and it crosses
+    #: the transport as its own CODE rather than as a field, for the reason the
+    #: module docstring gives for codes: the far side rebuilds the sentence
+    #: locally, so only an enumerated value may ride along.
+    unconfigured = False
+
+    #: The op a refusal came from, as one of the enumerated control ops that can
+    #: carry an increasing request. ``""`` means the raiser did not say, which
+    #: rebuilds the command's sentence — the pre-trigger behaviour.
+    CARD_OPS = frozenset({"approval_answer"})
+
+    def __init__(self, message: str | None = None, *, trigger: str = "") -> None:
+        # Kept so the transport can forward the TOKEN rather than any prose, and
+        # so the far side picks the same sentence locally.
+        self.trigger = trigger if trigger in ("slash", "slash_result", "approval_answer") else ""
+        if message is None:
+            from local_operator.harness.approval import (
+                CARD_APPROVAL_REFUSED_NOTICE,
+                CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE,
+                OPERATOR_AUTHORITY_REQUIRED_NOTICE,
+                OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
+            )
+
+            if self.trigger in self.CARD_OPS:
+                message = (
+                    CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE
+                    if self.unconfigured
+                    else CARD_APPROVAL_REFUSED_NOTICE
+                )
+            else:
+                message = (
+                    OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE
+                    if self.unconfigured
+                    else OPERATOR_AUTHORITY_REQUIRED_NOTICE
+                )
+        super().__init__(message)
+
+
+class OperatorAuthorityUnconfigured(OperatorAuthorityRequired):
+    """The same refusal on a host where no anchor is USABLE, so the remedies differ.
+
+    WHY THIS IS A DIFFERENT CATEGORY RATHER THAN DIFFERENT PROSE. The default state
+    of a fresh host between ``lop operator init`` (which only STAGES the anchor) and
+    ``lop operator install`` (the privileged step that lands it) is: a correctly
+    paired phone signs, and the runtime refuses it — the anchor it would verify
+    against is present-but-untrusted or absent. The old sentence named "this
+    machine (Touch ID) or your paired phone", and on that host NEITHER can work,
+    while the one command that unlocks both was named nowhere (UX round 6, U1/U2).
+
+    A subclass rather than a flag on the message so the code, the level and the
+    sentence stay one decision: every route that keys on
+    ``operator_authority_required`` keeps working for the ordinary case (it is the
+    base class), and the phone can key on this code to say what is actually left.
+    """
+
+    code = "operator_authority_unconfigured"
+    unconfigured = True
+
+
 class ProfileRegistryUnavailable(ValueError):
     code = "profile_registry_unavailable"
 
@@ -479,6 +573,15 @@ def admission_error(
             trigger=trigger if isinstance(trigger, str) else "",
             leaving=leaving if isinstance(leaving, str) else "",
         )
+    if code == OperatorAuthorityUnconfigured.code:
+        # Ahead of the base class only for legibility: the two codes are
+        # distinct strings, so neither can shadow the other.
+        return OperatorAuthorityUnconfigured(trigger=trigger if isinstance(trigger, str) else "")
+    if code == OperatorAuthorityRequired.code:
+        # No PROSE off the wire: the sentence is rebuilt from the constant, and
+        # ``trigger`` — one token from a closed set — only chooses which of the
+        # two constants that is (a refused command vs a refused card).
+        return OperatorAuthorityRequired(trigger=trigger if isinstance(trigger, str) else "")
     if code == ProfileRegistryUnavailable.code:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None

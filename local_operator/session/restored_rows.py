@@ -46,6 +46,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.incidents import CUT_OFF_CAUSES
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
     TRANSCRIPT_FILENAME,
@@ -185,12 +186,30 @@ def restored_job_row(job: Any, record: Any | None) -> Any:
     record_outcome = ""
     if record is not None:
         record_outcome = str(record_field(record, "outcome") or "")
+    # A RECORDED cause beats a blanket one, and is read HERE so the SETTLED arm
+    # below adopts it too. ``owner-lost`` (the fallthrough's default) means "the
+    # runtime under it stopped answering" -- true of a child the parent's process
+    # abandoned, but a LIVE cut-off records a specific cause (the loop's
+    # continuation guard, for instance) before the process dies, and relabelling
+    # that sends a reader looking for a dead runtime that never died. Only a cause
+    # this build can render is adopted; an unknown token keeps the fallback.
+    #
+    # A SETTLED child kept this cause on its row and record at settle; clearing it
+    # there (review MAJOR-2) lost the cause for exactly the child the cause exists
+    # to explain, so a child cut off by the continuation guard read as a plain
+    # provider failure after a restart.
+    recorded_cause = ""
+    if record is not None:
+        candidate = str(record_field(record, "cut_off_cause") or "")
+        if candidate in CUT_OFF_CAUSES:
+            recorded_cause = candidate
+
     if record_outcome in _SETTLED_RECORD_OUTCOMES:
         return job.model_copy(
             update={
                 "status": record_outcome,
                 "restored": True,
-                "cut_off_cause": "",
+                "cut_off_cause": recorded_cause,
                 **identity,
             }
         )
@@ -211,11 +230,14 @@ def restored_job_row(job: Any, record: Any | None) -> Any:
     # settled outcome of its own and cannot be running any more, so it stopped
     # under the process that owned it. One return rather than two identical
     # ones, so the fallthrough reads as intended (review round 1, NIT-1).
+    #
+    # (the recorded-cause read is hoisted above the settled arm
+    # so both arms share it -- see the comment there)
     return job.model_copy(
         update={
             "status": "interrupted",
             "restored": True,
-            "cut_off_cause": "owner-lost",
+            "cut_off_cause": recorded_cause or "owner-lost",
             **identity,
         }
     )

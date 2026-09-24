@@ -289,19 +289,25 @@ def resolve_peer_target(
     eligible = ("live", "wedged") if include_wedged else ("live",)
     live = [(rec, state) for rec, state in scanned if state in eligible]
 
-    if pid is not None:
+    def resolve_scanned_pid(requested_pid: int) -> tuple[Any | None, list[Any], str]:
+        """Resolve an exact pid without reading the registry a second time."""
         for rec, state in scanned:
-            if rec.pid == pid:
+            if rec.pid == requested_pid:
                 if state not in eligible:
-                    return None, [], _not_dialable(f"target pid {pid}", rec, state)
+                    return None, [], _not_dialable(f"target pid {requested_pid}", rec, state)
                 if require_started and not getattr(rec, "started", True):
                     return (
                         None,
                         [],
-                        unengaged_refusal(unengaged_label(pid=pid, session_id=rec.session_id)),
+                        unengaged_refusal(
+                            unengaged_label(pid=requested_pid, session_id=rec.session_id)
+                        ),
                     )
                 return rec, [], ""
-        return None, [], f"no session found with pid {pid}"
+        return None, [], f"no session found with pid {requested_pid}"
+
+    if pid is not None:
+        return resolve_scanned_pid(pid)
 
     if session:
         for rec, state in scanned:
@@ -332,13 +338,7 @@ def resolve_peer_target(
     if needle_source.isdigit():
         as_pid = int(needle_source)
         if any(rec.pid == as_pid for rec, _state in scanned):
-            return resolve_peer_target(
-                pid=as_pid,
-                pid_hint=pid_hint,
-                session_hint=session_hint,
-                include_wedged=include_wedged,
-                require_started=require_started,
-            )
+            return resolve_scanned_pid(as_pid)
 
     needle = needle_source.lower()
     matches: list[Any] = []

@@ -59,6 +59,26 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # blanking a transcript. The session history keeps the narration either
     # way, so `/resume` re-reads it under the current value.
     "display.narration": True,
+    # The model's own private reasoning, streamed live while it thinks, removed
+    # WHOLE when the phase ends. Default OFF: the flag buys a live view of the
+    # model working rather than a record, and a live view that is on by default
+    # spends rows on every model call of every turn for a reader who never asked
+    # to watch — the operator reported the accumulated frames as pollution.
+    #
+    # OFF is also the value under which the live transcript and the RESUMED one
+    # agree exactly, which is the argument the `/settings` help string no longer
+    # has room for: reasoning is never durable, so there is nothing to re-show,
+    # and a reader who opens `/resume` sees the same transcript they left. That
+    # help string is deliberately ONE sentence of 87 characters because the field
+    # paints 93 at 100 columns and elides the rest without wrapping (design
+    # review round 1, D1) — do not grow it back into the argument.
+    #
+    # Collapsing is not what this flag turns off: a finished phase leaves
+    # NOTHING behind, header row included (`retire` closes the block and the app
+    # removes it). A mid-session flip is FORWARD ONLY, for the same reason
+    # `display.narration`'s is: re-projecting mounted blocks in one synchronous
+    # pass leaves them unarranged and paints a blank frame.
+    "display.reasoning": False,
     # A rule down the left edge of the assistant's ANSWER, in the `label`
     # token. It ECHOES the user prompt's rule rather than matching it: same
     # column and same role, but deliberately a different glyph and a different

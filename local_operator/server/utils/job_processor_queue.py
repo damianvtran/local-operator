@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.env import EnvConfig
 from local_operator.jobs import JobContext, JobContextRecord, JobManager, JobStatus
 from local_operator.server.models.schemas import ChatOptions
@@ -43,7 +42,6 @@ def run_job_in_process_with_queue(
     attachments: List[str],
     model: str,
     hosting: str,
-    credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
@@ -64,7 +62,6 @@ def run_job_in_process_with_queue(
         prompt: The user prompt to process
         model: The model to use
         hosting: The hosting provider
-        credential_manager: The credential manager for API keys
         config_manager: The configuration manager
         agent_registry: The agent registry for managing agents
         context: Optional conversation context
@@ -98,7 +95,6 @@ def run_job_in_process_with_queue(
                 process_operator = create_operator(
                     request_hosting=hosting,
                     request_model=model,
-                    credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
                     job_id=job_id,
@@ -174,7 +170,6 @@ def run_agent_job_in_process_with_queue(
     model: str,
     hosting: str,
     agent_id: str,
-    credential_manager: CredentialManager,
     config_manager: ConfigManager,
     agent_registry: AgentRegistry,
     env_config: EnvConfig,
@@ -197,7 +192,6 @@ def run_agent_job_in_process_with_queue(
         model: The model to use
         hosting: The hosting provider
         agent_id: The ID of the agent to use
-        credential_manager: The credential manager for API keys
         config_manager: The configuration manager
         agent_registry: The agent registry for managing agents
         persist_conversation: Whether to persist the conversation history
@@ -241,7 +235,6 @@ def run_agent_job_in_process_with_queue(
                 process_operator = create_operator(
                     request_hosting=hosting,
                     request_model=model,
-                    credential_manager=credential_manager,
                     config_manager=config_manager,
                     agent_registry=agent_registry,
                     current_agent=agent_obj,

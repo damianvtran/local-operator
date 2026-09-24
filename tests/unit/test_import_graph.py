@@ -291,6 +291,38 @@ def test_wake_store_import_is_stdlib_only(wake_store_modules: set[str]) -> None:
     assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.store"], ours
 
 
+@pytest.fixture(scope="module")
+def spooled_store_modules() -> set[str]:
+    """Modules loaded by importing the spooled-turn store."""
+    return _imported_modules("local_operator.wakes.spooled")
+
+
+def test_spooled_turn_store_import_is_stdlib_only(spooled_store_modules: set[str]) -> None:
+    """The third member of the wake store family, on the same resident set.
+
+    ``local_operator.wakes.spooled`` is read by the wake supervisor on the same
+    serve loop as the index and the ledger, so it carries the same contract: no
+    asyncio, no pydantic, nothing under ``session``/``harness``/``mobile``/``tui``.
+    Pinned in its OWN cell rather than folded into theirs because the failure
+    mode differs — this module is the one a future edit is most likely to reach
+    into ``session.runtime.inbox`` from, since the two describe the same spool
+    from different sides, and that import would drag the harness onto the
+    supervisor's resident set.
+    """
+    _assert_absent(spooled_store_modules, "asyncio", "the supervisor is a plain loop")
+    _assert_absent(spooled_store_modules, "pydantic", "the record is a plain dict")
+    _assert_absent(
+        spooled_store_modules, "local_operator.session", "the store never opens a session"
+    )
+    _assert_absent(spooled_store_modules, "local_operator.harness", "no harness types")
+    _assert_absent(spooled_store_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(spooled_store_modules, "local_operator.tui", "no front end")
+    _assert_absent(spooled_store_modules, "textual", "no front end")
+    _assert_absent(spooled_store_modules, "httpx", "no provider layer")
+    ours = sorted(m for m in spooled_store_modules if m.startswith("local_operator"))
+    assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.spooled"], ours
+
+
 def test_wake_delivery_ledger_import_is_stdlib_only() -> None:
     """The same contract as the index, for the same processes.
 
@@ -316,3 +348,76 @@ def test_wake_delivery_ledger_import_is_stdlib_only() -> None:
         "local_operator.wakes",
         "local_operator.wakes.deliveries",
     ], ours
+
+
+# --- The two launch paths: `lop` (TUI) and `lop serve` ------------------------
+#
+# Backend load report B-F10: `import local_operator.tui.app` was 1.8-2.8 s and
+# `import local_operator.server.app` 1.9-3.7 s under fleet load, all of it paid
+# before the first frame / the first request. The modules pinned below were
+# moved to their call sites because nothing on either path to first paint or
+# first request uses them; the figures are `-X importtime` cumulative on the
+# commit they were deferred on (2026-09-23, load ~90), so treat them as the
+# order of magnitude a revert would cost, not a calibration.
+
+
+@pytest.fixture(scope="module")
+def tui_app_modules() -> set[str]:
+    """Modules loaded by importing the TUI application module (every `lop` launch)."""
+    return _imported_modules("local_operator.tui.app")
+
+
+@pytest.fixture(scope="module")
+def server_app_modules() -> set[str]:
+    """Modules loaded by importing the server application module (every `lop serve`)."""
+    return _imported_modules("local_operator.server.app")
+
+
+def test_tui_app_import_leaves_the_tool_layer_for_first_use(tui_app_modules: set[str]) -> None:
+    # `references` (the `@path` resolver) drags in `tools.builtin`. The app
+    # imports it at its three call sites; the composer's reference ink imports it
+    # only once the draft contains an `@`.
+    _assert_absent(tui_app_modules, "local_operator.references", "~270 ms with tools.builtin")
+    _assert_absent(tui_app_modules, "local_operator.tools.builtin", "~260 ms; tool bodies")
+
+
+def test_tui_app_import_leaves_the_provider_stack_for_first_use(tui_app_modules: set[str]) -> None:
+    # `providers/__init__` re-exports lazily (PEP 562), so `model.registry` ->
+    # `providers.local` no longer imports the wire clients; the model picker's
+    # `providers.catalogue` is imported when `/model` opens; `web_fetch.failure`
+    # imports httpx inside the one classifier that needs its exception types.
+    _assert_absent(tui_app_modules, "local_operator.providers.catalogue", "~190 ms; /model only")
+    _assert_absent(tui_app_modules, "local_operator.providers.clients", "the wire clients")
+    _assert_absent(tui_app_modules, "httpx", "~120 ms; no request before first paint")
+
+
+def test_server_app_import_leaves_the_tool_layer_and_tunnel_gateway(
+    server_app_modules: set[str],
+) -> None:
+    # `routes.desktop_profiles` imports `tools.agent_tool` per profile write;
+    # `routes.auth` and `routes.desktop_tunnel` import `tunnels.report` (the
+    # gateway: PyJWT, starlette app) per request.
+    _assert_absent(server_app_modules, "local_operator.tools.builtin", "~160 ms; profile writes")
+    _assert_absent(server_app_modules, "local_operator.tunnels.gateway", "~70 ms; tunnel routes")
+    _assert_absent(server_app_modules, "jwt", "~65 ms; tunnel gateway only")
+    _assert_absent(server_app_modules, "local_operator.providers.clients", "the wire clients")
+
+
+def test_the_lazy_provider_reexports_still_resolve() -> None:
+    """The PEP 562 table must name every export the eager imports used to bind."""
+    import local_operator.providers as providers
+
+    for name in providers.__all__:
+        assert getattr(providers, name) is not None, name
+    from local_operator.providers import (
+        AuthStore,
+        RetrySettings,
+        StoredCredential,
+        WireClient,
+    )
+    from local_operator.providers.auth_store import AuthStore as Direct
+
+    assert AuthStore is Direct
+    assert RetrySettings and StoredCredential and WireClient
+    with pytest.raises(AttributeError):
+        providers.no_such_export  # noqa: B018

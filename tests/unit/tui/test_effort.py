@@ -32,6 +32,7 @@ from tests.unit.tui.test_app_pilot import (
     _band,
     _factory,
     _FakeDef,
+    _set_editor_line,
 )
 
 #: What a DEFAULT install's receipt prints for the file it wrote: the config
@@ -1277,3 +1278,79 @@ async def test_the_viewer_slash_result_refuses_a_decision_only_provider() -> Non
     assert result.kind == "notice"
     assert "decision-model calls" in result.text
     assert after == before
+
+
+# ---------------------------------------------------------------------------
+# The Radient router's `auto` sentinel: one row, never a prepended duplicate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bare_effort_lists_the_auto_rung_once_on_a_router_ladder() -> None:
+    """On the Radient router ladder ``auto`` is ALREADY a member, so the bare
+    listing must not prepend a second one.
+
+    The listing is only useful if each rung appears once: a duplicate ``auto``
+    read as two states and made the marked rung ambiguous. On every non-router
+    ladder ``auto`` is still synthesized (the next test covers that side).
+    """
+    app = OperatorApp(lambda: _factory(EffortSession("radient", "auto")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort")
+        listing = [n for n in _notices(app) if "reasoning effort" in n][-1]
+    # The ladder, not the prompt prose: split just the rendered rungs, and
+    # strip the current-rung mark so only the rung NAMES are compared.
+    rendered = listing.split(": ", 1)[1].split(" — ", 1)[0]
+    rungs = [tok.lstrip(OperatorApp.EFFORT_MARK) for tok in rendered.split()]
+    assert rungs == ["auto", "low", "medium", "high"], rendered
+    assert rendered.startswith("●auto"), rendered
+
+
+@pytest.mark.asyncio
+async def test_bare_effort_still_prepends_auto_on_a_ladder_without_one() -> None:
+    """OpenRouter's router ladder has no ``auto`` member, so the sentinel is
+    still synthesized ahead of the real rungs — the Radient fix must not strip
+    the row from every other model."""
+    app = OperatorApp(lambda: _factory(EffortSession("openrouter", "auto")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort")
+        listing = [n for n in _notices(app) if "reasoning effort" in n][-1]
+    rendered = listing.split(": ", 1)[1].split(" — ", 1)[0]
+    rungs = [tok.lstrip(OperatorApp.EFFORT_MARK) for tok in rendered.split()]
+    assert rungs == ["auto", "low", "medium", "high"], rendered
+
+
+@pytest.mark.asyncio
+async def test_the_effort_picker_has_no_duplicate_auto_row_on_a_router_ladder() -> None:
+    """The picker builds its rows the same way the listing does, so it carried
+    the same duplicate: two ``auto`` rows on the Radient router. The user picks
+    ONE rung from this list, so a repeated row is a repeated answer."""
+    app = OperatorApp(lambda: _factory(EffortSession("radient", "auto")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/effort ")
+        for _ in range(6):
+            await pilot.pause()
+        assert editor.picker.is_open()
+        rows = [name for name, _ in editor.picker.suggestions()]
+    assert rows.count("auto") == 1, rows
+    assert rows == ["auto", "low", "medium", "high"], rows
+
+
+@pytest.mark.asyncio
+async def test_the_effort_picker_prepends_auto_when_the_ladder_lacks_it() -> None:
+    """The OpenRouter side of the same rule: no ``auto`` member, so exactly one
+    synthesized row leads the real rungs."""
+    app = OperatorApp(lambda: _factory(EffortSession("openrouter", "auto")))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/effort ")
+        for _ in range(6):
+            await pilot.pause()
+        assert editor.picker.is_open()
+        rows = [name for name, _ in editor.picker.suggestions()]
+    assert rows == ["auto", "low", "medium", "high"], rows

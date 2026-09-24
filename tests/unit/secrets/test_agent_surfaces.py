@@ -145,6 +145,91 @@ async def test_delete_removes_and_missing_name_is_rejected(isolated: Path) -> No
     assert (await _call("retrieve")).is_error, "a name is required"
 
 
+@pytest.mark.asyncio
+async def test_the_agent_tool_cannot_describe_or_delete_a_provider_row(isolated: Path) -> None:
+    """The agent surface must not reach the reserved namespace (Q-1/R2).
+
+    ``SecretStore.describe``/``delete`` now carry a ``role`` that defaults to the
+    restrictive ``"agent"``, and the tool passes nothing — so an agent (or a
+    prompt-injected call) cannot ENUMERATE a provider key's metadata nor DESTROY
+    it through its ordinary ``secret`` tool. The delete half is the destructive
+    one: the value is retained nowhere, so an unguarded delete removed the
+    credential a provider authenticates with. Verified through the real tool
+    dispatch, and paired with an existence check so a refusal that still removed
+    the row cannot pass.
+    """
+    from local_operator.providers.registry import (
+        provider_secret_value,
+        store_provider_key,
+    )
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=isolated)
+
+    described = await _call("describe", name="LOP_PROVIDER_OPENROUTER_API_KEY")
+    assert described.is_error, described.text
+    assert "reserved" in described.text
+
+    deleted = await _call("delete", name="LOP_PROVIDER_OPENROUTER_API_KEY")
+    assert deleted.is_error, deleted.text
+    # Still stored and still resolving — the guard must not be a delete that
+    # reports failure after removing the record.
+    assert provider_secret_value("OPENROUTER_API_KEY", base=isolated) == "sk-secret"
+
+
+def test_the_agent_tool_list_omits_provider_rows_the_operator_list_keeps(
+    isolated: Path,
+) -> None:
+    """Enumeration is public to the OPERATOR, not to the agent tool (PATCH C, R2).
+
+    The agent surface is the one a model drives, so provider rows are filtered out
+    of ITS list: a name the model never learns is not one it can name back into the
+    destructive verbs, and the map to a machine credential is exactly what the prefix
+    exists to withhold. The operator's own ``lop secret list`` still shows them — it
+    reads the store list directly, which is what the second assertion pins, so the
+    filter cannot quietly become a store-level change that hides rows from the person
+    who owns them.
+    """
+    import asyncio
+
+    from local_operator.providers.registry import store_provider_key
+    from local_operator.secrets.access import open_store
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=isolated)
+    asyncio.run(_call("store", name="GH_TOKEN", value="ghp-secret", description="github"))
+
+    listed = asyncio.run(_call("list"))
+    assert not listed.is_error, listed.text
+    assert "GH_TOKEN" in listed.text
+    assert "LOP_PROVIDER" not in listed.text
+
+    operator_view = [record.name for record in open_store().list()]
+    assert "LOP_PROVIDER_OPENROUTER_API_KEY" in operator_view
+
+
+def test_the_agent_tool_list_says_so_when_only_provider_rows_exist(
+    isolated: Path,
+) -> None:
+    """The filtered-empty case must not read as "you have stored nothing".
+
+    The guidance tells the agent to check what exists before asking for a credential;
+    if the filter collapsed to the empty-store message, a host holding only provider
+    rows would invite the model to ask the user to store one it is deliberately not
+    shown.
+    """
+    import asyncio
+
+    from local_operator.providers.registry import store_provider_key
+
+    store_provider_key("OPENROUTER_API_KEY", "sk-secret", base=isolated)
+
+    listed = asyncio.run(_call("list"))
+    assert not listed.is_error, listed.text
+    assert "No secrets are stored yet" not in listed.text
+    # The message NAMES the prefix to explain itself, so the assertion is against
+    # the row's actual name — the thing the filter exists to withhold.
+    assert "LOP_PROVIDER_OPENROUTER_API_KEY" not in listed.text
+
+
 def test_the_tool_is_one_verb_tool_not_six() -> None:
     """The footprint ladder's whole point; asserted so a split shows up red."""
     tool = build_secret_tool(ToolContext())

@@ -3905,6 +3905,35 @@ async def test_a_model_with_no_effort_ladder_has_nothing_to_retreat_to() -> None
 
 
 @pytest.mark.asyncio
+async def test_retreat_effort_never_lands_on_the_auto_sentinel() -> None:
+    """A retreat from a real rung lands on the cheapest REAL rung, never
+    ``auto``.
+
+    Radient's router ladder leads with the ``auto`` SENTINEL (a delegation,
+    not a depth), so a walk that reads ``ladder[index-1]`` answers a delegation
+    where a level is expected: the retry would be sent at ``auto`` while the
+    band still read the level the user chose, and the episode would pin its
+    ceiling there. The retreat must skip the sentinel and refuse (``None``)
+    once no real rung remains below (round-2 review R2-1).
+    """
+
+    router = ModelSpec(
+        provider="radient",
+        model_id="auto",
+        reasoning_efforts=("auto", "low", "medium", "high"),
+        reasoning_effort="high",
+        reasoning_default_effort="auto",
+    )
+    current = observation()
+    client = _client(ScriptedStream(finish_payload(current)), model_spec=router)
+
+    assert client.retreat_effort() == "medium"
+    assert client.retreat_effort() == "low"
+    # No REAL rung below `low` -- `auto` must NOT be answered here.
+    assert client.retreat_effort() is None
+
+
+@pytest.mark.asyncio
 async def test_an_empty_length_truncation_is_flagged_and_a_truncated_reply_is_not() -> None:
     """Only the SILENT output-limit truncation is marked for an effort retreat.
 

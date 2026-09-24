@@ -14,8 +14,11 @@ import io
 import os
 import random
 import re
+import shlex
+import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 import zlib
@@ -34,6 +37,11 @@ from local_operator.harness.types import (
     TextContent,
     ToolContext,
     ToolResult,
+)
+from local_operator.scratchpad import (
+    SCRATCHPAD_ELSEWHERE,
+    SCRATCHPAD_MAX_WRITE_BYTES,
+    SCRATCHPAD_PATH_ENV,
 )
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
@@ -1217,10 +1225,13 @@ async def test_scratchpad_roundtrip_write_list_read_range_edit(tmp_path) -> None
     # The create receipt also states the LIFETIME: it is the moment a person
     # watching the transcript (or the Files panel) learns a file appeared, and
     # the store is session-scoped, so every file in it was created in this
-    # session and this one clause covers all of them.
+    # session and this one clause covers all of them. It says the pad SURVIVES
+    # RESTARTS and never "deleted with the session": the old wording was read by a
+    # measured session as "ephemeral, like a temp directory", and this receipt is
+    # the surface that phrase was repeated on most (round 1, R3/Q1).
     assert created.text == (
         f"Created scratchpad://perf.md -> {pad / 'perf.md'} (17 chars)"
-        " — deleted with the session."
+        " — kept for this session (survives restarts)."
     )
     # ``details['path']`` and never ``details['url']``: the ``url`` key means
     # "an internal URL the resolver served", which is what compaction's pruning
@@ -1266,7 +1277,7 @@ async def test_scratchpad_roundtrip_write_list_read_range_edit(tmp_path) -> None
     assert nested.is_error is False
     assert (
         nested.text == f"Created scratchpad://run/deep.csv -> {pad / 'run' / 'deep.csv'} (4 chars)"
-        " — deleted with the session."
+        " — kept for this session (survives restarts)."
     )
     assert (pad / "run" / "deep.csv").read_text(encoding="utf-8") == "a,b\n"
 
@@ -1290,7 +1301,7 @@ async def test_a_scratch_script_is_a_first_class_citizen_of_the_store(tmp_path) 
     assert created.is_error is False
     assert (
         created.text == f"Created scratchpad://probe.sh -> {pad / 'probe.sh'} ({len(script)} chars)"
-        " — deleted with the session."
+        " — kept for this session (survives restarts)."
     )
 
     read = await tools["read"].execute("c", {"path": "scratchpad://probe.sh"}, None, None, context)
@@ -1442,6 +1453,234 @@ async def test_scratchpad_refuse_traversal_absolute_and_directory_targets(tmp_pa
     assert "e.g. 'scratchpad://run/name.md'" in dir_write.text
 
     assert not list(tmp_path.rglob("escape.md"))
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tmp_path) -> None:
+    """The content policy through the REAL tools, which is the only place the
+    wiring is proved: a check that raised correctly but was never called would
+    pass every unit test of the check itself and refuse nothing at runtime.
+
+    Each refusal has to be an ``invalid arguments`` result — the model's own
+    argument at fault, a different fault from a machine failure — and it has to
+    name where the material belongs, because that alternative is what the next
+    call acts on. ``write`` and ``edit`` are driven separately because they
+    share one resolver and diverge on the size arm only.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    segment = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert segment.is_error is True
+    assert segment.details is not None and segment.details["__fault"] == "invalid_arguments"
+    assert "'node_modules' is a build or dependency directory" in segment.text
+    assert "git worktree add" in segment.text
+    # The advice is appended by the shared constant rather than restated per arm,
+    # so it cannot drift between them — and the caller reads it here.
+    assert segment.text.endswith(SCRATCHPAD_ELSEWHERE)
+
+    # The case-varied spelling of the same directory, which on this machine's
+    # case-insensitive volume IS the same directory: this is the reviewer's
+    # repro, and it is pinned through the tool because that is where it was.
+    folded = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://NODE_MODULES/x.js", "content": "module.exports = 1\n"},
+        None,
+        None,
+        context,
+    )
+    assert folded.is_error is True
+    assert folded.details is not None and folded.details["__fault"] == "invalid_arguments"
+    assert "'NODE_MODULES' is a build or dependency directory" in folded.text
+
+    # The FAMILY arm, which is the whole point of matching a SHAPE: this tree was
+    # in no list, and a caller that reaches for it is exactly who the refusal is
+    # for. The segment is named as typed, so the message reads as the URL does.
+    family = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://cmake-build-debug/CMakeCache.txt", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert family.is_error is True
+    assert family.details is not None and family.details["__fault"] == "invalid_arguments"
+    assert "'cmake-build-debug' is a build or dependency directory" in family.text
+
+    # A versioned shared library, whose version rides in the name after the
+    # extension — the shape ``Path.suffix`` cannot see, judged here on the real
+    # tool so the wiring and the matcher are proved together.
+    versioned = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://libfoo.so.1.2", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert versioned.is_error is True
+    assert versioned.details is not None and versioned.details["__fault"] == "invalid_arguments"
+    assert "'.so' is a compiled, archived or model artefact" in versioned.text
+
+    suffix = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://runs/model.pt", "old_text": "a", "new_text": "b"},
+        None,
+        None,
+        context,
+    )
+    assert suffix.is_error is True
+    assert suffix.details is not None and suffix.details["__fault"] == "invalid_arguments"
+    assert "'.pt' is a compiled, archived or model artefact" in suffix.text
+    assert "mktemp -d" in suffix.text
+
+    # The refusal is the model's argument at fault, and none of it reached the
+    # disk: no directory was created on the way to saying no.
+    assert not (pad / "node_modules").exists()
+    assert not (pad / "NODE_MODULES").exists()
+    assert not (pad / "runs").exists()
+    assert not (pad / "cmake-build-debug").exists()
+    assert not (pad / "libfoo.so.1.2").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, monkeypatch) -> None:
+    """The BACKSTOP end to end, and the arm only the pad's own contents can
+    refuse: every name here is ordinary scratch, so nothing but the total can
+    say no. It has to arrive as the model's own argument at fault, like the name
+    arms, because the fix is a decision about where that material lives rather
+    than a machine failure to retry.
+
+    The budget is set from the pad's own ALLOCATED size, which is the walk's unit
+    (a sparse file measures 0), so the boundary is exact on any block size.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    budget = (pad / "bulk.dat").stat().st_blocks * 512
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+
+    refused = await tools["write"].execute(
+        "c", {"path": "scratchpad://x.csv", "content": "a,b\n"}, None, None, context
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert f"{budget:,}-byte ceiling" in refused.text
+    assert refused.text.endswith(SCRATCHPAD_ELSEWHERE)
+    assert not (pad / "x.csv").exists()
+
+    # The same fixture one name apart: overwriting the file that IS the pad's
+    # total is still allowed, because the write REPLACES those bytes rather than
+    # adding to them. A pad at the ceiling must stay workable in place.
+    replaced = await tools["write"].execute(
+        "c", {"path": "scratchpad://bulk.dat", "content": "small\n"}, None, None, context
+    )
+    assert replaced.is_error is False
+    assert (pad / "bulk.dat").read_text() == "small\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_payload_over_the_write_ceiling(tmp_path) -> None:
+    """The SIZE arm, end to end, because it is the one arm that depends on a
+    value computed at the call site rather than on the name. A ceiling that is
+    only unit-tested through ``check_scratchpad_write`` would leave the wiring
+    — ``len(content.encode("utf-8"))`` at the ``write`` handler — unproved.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    refused = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://dump.csv", "content": "x" * (SCRATCHPAD_MAX_WRITE_BYTES + 1)},
+        None,
+        None,
+        context,
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert str(SCRATCHPAD_MAX_WRITE_BYTES) in refused.text
+    assert not (pad / "dump.csv").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_still_writes_ordinary_scratch_with_the_same_fixture(tmp_path) -> None:
+    """The same fixture and the same call, one name apart: the policy must not
+    have cost the pad the writes it exists for. Without this the refusal tests
+    would pass against a resolver that refused everything.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    created = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://notes.md", "content": "still scratch\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert created.is_error is False
+    assert created.text == (
+        f"Created scratchpad://notes.md -> {pad / 'notes.md'} (14 chars)"
+        # The receipt's lifetime clause is the advisory's wording (adopted by
+        # this branch on rebase): the pad is session-SCOPED and rides out a
+        # restart, and "deleted with the session" was read by a measured session
+        # as meaning "like a temp directory" (2026-09-22).
+        " — kept for this session (survives restarts)."
+    )
+
+    # The negatives that must survive the shape rule, through the tool: a name
+    # that merely BEGINS with a refused token is scratch, and it is the case a
+    # rule that matched a substring would have taken away.
+    contained = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules-notes.md", "content": "why it is big\n"},
+        None,
+        None,
+        context,
+    )
+    assert contained.is_error is False
+    assert (pad / "node_modules-notes.md").read_text() == "why it is big\n"
+
+    # ...and neither does a LEAF that merely begins with a token followed by a
+    # file TYPE (M1): `out.json` is data work, while `out/` is the directory the
+    # rule is about.
+    leaf = await tools["write"].execute(
+        "c", {"path": "scratchpad://out.json", "content": "{\n}\n"}, None, None, context
+    )
+    assert leaf.is_error is False
+    assert (pad / "out.json").read_text() == "{\n}\n"
+    assert (pad / "notes.md").read_text(encoding="utf-8") == "still scratch\n"
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_reads_are_not_gated_so_an_old_pad_can_be_cleaned_up(tmp_path) -> None:
+    """Reads are deliberately OUTSIDE the policy, and this pins it. Pads written
+    before the rule are full of exactly the refused names — ``bash`` can put a
+    build tree in the pad with no check at all — and the agent cleaning one up
+    needs to read it. A gate on ``read`` would leave that litter listed by a
+    shell ``ls`` but unreadable through the scheme that is meant to be the way in.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    litter = pad / "node_modules"
+    litter.mkdir(parents=True)
+    (litter / "x.js").write_text("module.exports = 1\n", encoding="utf-8")
+
+    listed = await tools["read"].execute(
+        "c", {"path": "scratchpad://node_modules/"}, None, None, context
+    )
+    assert listed.is_error is False
+    assert "x.js" in listed.text
+
+    read = await tools["read"].execute(
+        "c", {"path": "scratchpad://node_modules/x.js"}, None, None, context
+    )
+    assert read.is_error is False
+    assert "module.exports = 1" in read.text
 
 
 @pytest.mark.asyncio
@@ -1906,7 +2145,8 @@ async def test_only_the_create_receipt_states_the_lifetime(tmp_path) -> None:
         "c", {"path": "scratchpad://perf.md", "content": "a\n"}, None, None, context
     )
     assert first.text == (
-        f"Created scratchpad://perf.md -> {pad / 'perf.md'} (2 chars) — deleted with the session."
+        f"Created scratchpad://perf.md -> {pad / 'perf.md'} (2 chars)"
+        " — kept for this session (survives restarts)."
     )
 
     again = await tools["write"].execute(
@@ -1925,7 +2165,7 @@ async def test_only_the_create_receipt_states_the_lifetime(tmp_path) -> None:
     plain = await tools["write"].execute(
         "c", {"path": "report.md", "content": "a\n"}, None, None, context
     )
-    assert "deleted with the session" not in plain.text
+    assert "kept for this session" not in plain.text
 
 
 @pytest.mark.asyncio
@@ -1966,6 +2206,1537 @@ async def test_an_edit_of_a_missing_plain_file_names_the_next_call(tmp_path) -> 
     assert result.is_error is True
     assert "File does not exist" in result.text
     assert 'write(path="' in result.text
+
+
+# ---------------------------------------------------------------------------
+# scratchpad:// — the temp-root nudge
+# ---------------------------------------------------------------------------
+#
+# The measured incident these cover: a session doing image work wrote its
+# generator to /tmp/lopost.py and its render passes under
+# `mktemp -d /tmp/lopost-XXXXXX`, and nothing at the moment of the write said
+# otherwise — the rule lived only in system.md, which never fires there.
+
+
+def _point_the_nudge_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Aim ``_temp_scratch_hint`` at a temp root the TEST owns.
+
+    ``_temp_scratch_roots`` is a function precisely so this is possible: the
+    alternative is writing into the machine's real ``$TMPDIR`` or ``/tmp``,
+    which is shared with every other process on the host and (under /tmp) is
+    pruned on a three-day clock.
+    """
+    monkeypatch.setattr(
+        builtin,
+        "_temp_scratch_roots",
+        lambda: ((root.resolve(), "the test's own reason"),),
+    )
+
+
+def _nudge_line(target: Path) -> str:
+    """The exact one line the nudge appends, so the assertion cannot drift.
+
+    Takes the TARGET only, because the TARGET is the path the line carries —
+    named once, as the subject the reason clauses hang off. The store's own root
+    is deliberately not in the sentence: D3 dropped it as redundant with the
+    ``where`` receipt a successful scratchpad write already prints and with the
+    ``write``/``edit`` descriptions, so a helper that took it would be pinning a
+    value the line no longer carries.
+    """
+    return (
+        f"[scratch] Your own scratch belongs in scratchpad:// — {target.resolve()} "
+        f"sits directly under a temp root: the test's own reason."
+    )
+
+
+#: The tool card's painted output lane at a 100-column terminal.
+#: ``_append_output_body`` computes it as ``width - 2 - tool_card.OUTPUT_INDENT``
+#: from the card's INNER width — the value ``_build_row`` works in, already
+#: reduced by the transcript's padding — which the design round measured at 96
+#: cells inside a 100-column frame, leaving 92. A longer line is CUT TAIL-FIRST
+#: (``truncate_cells``) and never reflows. The STRICTER reading is taken on
+#: purpose: a reader who derives 96 from the terminal width alone still passes
+#: the property asserted below, and a lane estimate that is too generous is the
+#: one that would let the regression through.
+_CARD_LANE_CELLS_AT_100_COLS = 92
+
+
+@pytest.mark.asyncio
+async def test_the_nudge_names_the_store_inside_the_cards_tail_truncation(
+    tmp_path, monkeypatch
+) -> None:
+    """D1, pinned as a PROPERTY: the card cuts a long line tail-first, so the
+    sentence's order decides whether the operator can act on it at all.
+
+    The first draft put the resolved target first and the remedy last, which put
+    ``scratchpad://`` far outside the lane at EVERY width — unreachable, so the
+    line said nothing in the only surface a person reads. This asserts what the
+    regression would break: the lane-clipped line still names the store. Two path
+    lengths, because the length is what moved the remedy out of reach before:
+    with the remedy FIRST, its cell position does not depend on the path at all.
+    """
+    # Local import: ``tool_card`` pulls Textual in and this module is not a TUI
+    # test — but the emulation has to be the CARD's own cut, not a copy of it.
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    lane = _CARD_LANE_CELLS_AT_100_COLS
+    remedy_at: list[int] = []
+    for extra in ("", "p" * 48):
+        temp_root = tmp_path / extra / "shared-tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        _point_the_nudge_at(monkeypatch, temp_root)
+        target = temp_root / "generator-with-a-realistic-name.py"
+        context, _, tools = _scratchpad_context(tmp_path)
+
+        result = await tools["write"].execute(
+            "c", {"path": str(target), "content": "print(1)\n"}, None, None, context
+        )
+
+        assert result.is_error is False
+        line = result.text.split("\n")[1]
+        assert line == _nudge_line(target)
+        # The cut is REAL here — the line is longer than the lane — so the
+        # assertion below cannot pass by the line happening to fit.
+        assert cell_len(line) > lane, (cell_len(line), line)
+        clipped = truncate_cells(line, lane)
+        assert cell_len(clipped) <= lane
+        assert "scratchpad://" in clipped, clipped
+        remedy_at.append(cell_len(line.split("scratchpad://")[0]))
+
+    # ...and it is not merely inside the lane, it is at a FIXED cell: the remedy
+    # leads, so no path length can push it past the cut.
+    assert remedy_at[0] == remedy_at[1]
+
+
+def test_the_temp_roots_are_resolved_and_name_the_three_day_prune(monkeypatch, tmp_path) -> None:
+    """The helper's own contract, on the host the reason is about. ``gettempdir``
+    is pinned to a distinct dir because on Linux it IS ``/tmp`` — that is the
+    dedupe case below, not this one.
+    """
+    # R8: the gate's DERIVATION is pinned here, before the patch below replaces
+    # the value — every other test in this group sets the constant it wants, so a
+    # wrong platform literal would keep this host's suite and the ubuntu CI
+    # shards green while re-introducing R4's false platform claim.
+    assert builtin._SYSTEM_TMP_IS_PRUNED == (builtin._PLATFORM == "darwin")
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", True)
+    system_tmp = tmp_path / "sys-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: str(system_tmp))
+
+    roots = dict(builtin._temp_scratch_roots())
+
+    assert set(roots) == {system_tmp.resolve(), Path("/tmp").resolve()}
+    # The reason the guide and system.md both give, attached to the root it is
+    # actually true of — macOS's daily cleaner, not the per-user temp dir.
+    assert "three days" in roots[Path("/tmp").resolve()]
+    assert "three days" not in roots[system_tmp.resolve()]
+
+
+def test_duplicate_resolved_temp_roots_collapse(monkeypatch) -> None:
+    """Both candidates spelling the same directory must yield ONE root: a doubled
+    hint would read as two different traps and each would claim its own reason.
+
+    The surviving reason is the SPECIFIC one on macOS, which is the order's
+    whole purpose: unset ``$TMPDIR`` falls back to the directory ``/tmp`` names,
+    so a ``gettempdir``-first candidate list would collapse onto the generic
+    reason on the one host where the three-day prune is true.
+    """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", True)
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: "/tmp")
+
+    roots = builtin._temp_scratch_roots()
+
+    assert len(roots) == 1
+    assert len({root for root, _ in roots}) == len(roots)
+    assert "three days" in roots[0][1]
+
+
+def test_a_linux_host_is_never_told_about_the_macos_prune(monkeypatch, tmp_path) -> None:
+    """R4: ``/tmp`` is on macOS's cleaner list, not on anyone else's. A host whose
+    temp dir is ``/tmp`` because that is simply where temp lives must not be told
+    a fact about a different OS — and on Linux both candidates collapse to that
+    one directory, so this is also the collapsed shape of a non-macOS host.
+    """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", False)
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: "/tmp")
+
+    roots = builtin._temp_scratch_roots()
+
+    assert len(roots) == 1
+    assert "three days" not in roots[0][1]
+
+
+def test_a_non_darwin_host_with_its_own_tmpdir_gets_the_generic_reason(
+    monkeypatch, tmp_path
+) -> None:
+    """``$TMPDIR`` set to something that is not ``/tmp`` — a Linux container, a
+    Windows host — gets the generic reason on BOTH candidates: the prune claim is
+    never made off macOS, even for the entry spelled ``/tmp``.
+    """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", False)
+    system_tmp = tmp_path / "sys-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: str(system_tmp))
+
+    roots = builtin._temp_scratch_roots()
+
+    assert len(roots) == 2
+    assert all("three days" not in why for _, why in roots)
+
+
+@pytest.mark.asyncio
+async def test_write_directly_under_a_temp_root_nudges_toward_the_scratchpad(
+    tmp_path, monkeypatch
+) -> None:
+    """Depth ONE, deliberately: several of this fleet's real agent worktrees
+    live at /private/tmp/<name>, so a nested path is a plausible deliverable and
+    a nudge there would be a false positive on real work."""
+    context, _, tools = _scratchpad_context(tmp_path)
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    target = temp_root / "generator.py"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "print(1)\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    # The receipt is unchanged and the nudge is APPENDED to it, never
+    # substituted: the caller still needs to know what was written where.
+    first, second = result.text.split("\n")
+    assert first == f"Created {target.resolve()} (9 chars)."
+    assert second == _nudge_line(target)
+    # The advice does not touch the file itself.
+    assert target.read_text(encoding="utf-8") == "print(1)\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_under_a_temp_root_nudges_too(tmp_path, monkeypatch) -> None:
+    """Both writers share one helper, so ``edit`` must not be the tool that
+    silently lacks the hint — editing an existing /tmp file is exactly as
+    session-fragile as creating one."""
+    context, _, tools = _scratchpad_context(tmp_path)
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    target = temp_root / "notes.md"
+    target.write_text("alpha\n", encoding="utf-8")
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": str(target), "old_text": "alpha", "new_text": "ALPHA"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Edited {target.resolve()}: 1 hunk(s), 1 replacement(s) applied."
+    assert second == _nudge_line(target)
+    assert target.read_text(encoding="utf-8") == "ALPHA\n"
+
+
+@pytest.mark.asyncio
+async def test_a_deeper_path_under_a_temp_root_is_not_nudged(tmp_path, monkeypatch) -> None:
+    temp_root = tmp_path / "shared-tmp"
+    (temp_root / "deliverable").mkdir(parents=True)
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c",
+        {"path": str(temp_root / "deliverable" / "x.py"), "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_normal_workspace_path_is_not_nudged(tmp_path, monkeypatch) -> None:
+    """The nudge is about a temp root only; the ordinary case stays silent, which
+    is what keeps its cost at zero when it does not fire."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c", {"path": "ws_report.md", "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_scratchpad_target_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The guard is the ``scratchpad://`` TARGET, not where the file lands — so
+    this scratchpad root IS the monkeypatched temp root: the depth-1 and
+    scratchpad-present conditions both hold, and only the target check keeps the
+    tool from telling the agent to move its scratch onto itself."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    approval = RecordingApproval(True)
+    context = _RecordingContext(
+        cwd=str(tmp_path / "ws"),
+        session_id="scratchpad-test",
+        scratchpad_dir=str(temp_root),
+        request_approval=approval,
+        recorder=approval,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["write"].execute(
+        "c", {"path": "scratchpad://x.py", "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert (temp_root / "x.py").read_text(encoding="utf-8") == "x\n"
+
+
+@pytest.mark.asyncio
+async def test_a_host_without_a_scratchpad_gets_no_nudge(tmp_path, monkeypatch) -> None:
+    """Same contract as ``SCRATCHPAD_UNAVAILABLE``: with nowhere better to point
+    the session, the hint has nothing to say and says nothing."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    context = ToolContext(cwd=str(workspace), session_id="no-scratchpad")
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["write"].execute(
+        "c", {"path": str(temp_root / "gen.py"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_nudge_follows_the_resolved_temp_root(tmp_path, monkeypatch) -> None:
+    """macOS makes /tmp a symlink to /private/tmp, so a comparison against the
+    UNRESOLVED spelling never matches and the nudge silently disappears — the
+    no-op class this whole helper exists to avoid. The file is written through
+    the symlinked spelling and the hint still fires on the resolved parent.
+    """
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    link = tmp_path / "tmp-link"
+    link.symlink_to(temp_root)
+    monkeypatch.setattr(
+        builtin, "_temp_scratch_roots", lambda: ((temp_root.resolve(), "the test's own reason"),)
+    )
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = link / "gen.py"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert (temp_root / "gen.py").read_text(encoding="utf-8") == "x\n"
+    assert _nudge_line(target) in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_read_under_a_temp_root_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """R5: the hint is about where a WRITE lands, and the contract says ``read``
+    never reaches it. Reading a temp file is an ordinary act — the reader is not
+    told to move anything — and widening the hint to ``read`` would decorate
+    every read of a temp file with advice about a file it did not create.
+    """
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = temp_root / "gen.py"
+    target.write_text("print(1)\n", encoding="utf-8")
+
+    result = await tools["read"].execute("c", {"path": str(target)}, None, None, context)
+
+    assert result.is_error is False
+    assert "print(1)" in result.text
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_edit_under_a_temp_root_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """R5: the line rides a SUCCESSFUL receipt only. A result that reports a
+    failure has one thing to say — the caller's next move is to fix the call —
+    and advice about where the file belongs would read as part of the
+    diagnosis. ``edit`` of a file that does not exist is that branch: the
+    helper is never reached, and this pins it so a future edit that computes
+    the hint earlier cannot quietly append it to an error.
+    """
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": str(temp_root / "absent.py"), "old_text": "a", "new_text": "b"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "[scratch]" not in result.text
+
+
+# ---------------------------------------------------------------------------
+# scratchpad:// — the scratch-named-directory nudge (the second arm)
+# ---------------------------------------------------------------------------
+#
+# The measured incident these cover (2026-09-22): a session that HAD its own pad
+# and the packaged paragraph in context wrote its interface spec to a file under
+# `minervaai/tmp/` and handed that path to two coder subagents that then read and
+# wrote it. Its reasoning shows no deliberation about the LOCATION at all — it
+# followed the workspace's ambient convention. That directory is a real estate:
+# 634 files / 193 MB at the time of the audit, with two of the same shape beside
+# it at 356 MB and 239 MB, none of them pruned by anything and none of them
+# distinguishable from the operator's own work.
+
+#: The reason the second arm gives, spelled out rather than read off the constant:
+#: the point of the arm is that its reason is a DIFFERENT true statement from the
+#: temp arm's prune, it must be TRUE OF EVERY place the arm fires (a workspace
+#: `tmp/`, a repo `tmp/`, another session's pad), and a test that imported the
+#: constant could not notice any of that. Round 1 rewrote it: the first wording
+#: claimed "the user's own tree", which is false at a foreign pad and was false
+#: under a temp root until the containment guard landed (R1/R2). The sentence is
+#: written WITHOUT its full stop because the shared builder supplies it, exactly as
+#: it does for the temp arm's reason.
+_SCRATCH_DIR_REASON = "it is outside this session, and nothing clears it up when this session ends"
+
+
+#: Every name the arm claims, plus two whose CASE differs: the name is a
+#: convention rather than an identifier, so `.Scratch` is the same directory as
+#: `.scratch` and a test that only spelled them one way would not say so.
+_SCRATCH_DIR_NAMES_UNDER_TEST = [
+    "tmp",
+    ".tmp",
+    "temp",
+    "scratch",
+    ".scratch",
+    "scratchpad",
+    ".scratchpad",
+    "TMP",
+    ".Scratch",
+]
+
+
+def _scratch_dir_nudge_line(target: Path, *, remedy: str = "scratchpad://") -> str:
+    """The exact one line the second arm appends, for either channel."""
+    return (
+        f"[scratch] Your own scratch belongs in {remedy} — {target.resolve()} "
+        f"sits directly in a scratch-named directory: {_SCRATCH_DIR_REASON}."
+    )
+
+
+def _scratch_dir_root_nudge_line(root: Path, *, remedy: str = "scratchpad://") -> str:
+    """The same line for an UNEXPANDED bash target, whose subject is the directory."""
+    return (
+        f"[scratch] Your own scratch belongs in {remedy} — writing directly under "
+        f"{root.resolve()} puts scratch in a scratch-named directory: {_SCRATCH_DIR_REASON}."
+    )
+
+
+def _incident_dir(tmp_path: Path, dirname: str) -> Path:
+    """The incident's shape: a scratch-named directory inside a project folder."""
+    directory = tmp_path / "minervaai" / dirname
+    directory.mkdir(parents=True)
+    return directory
+
+
+def _name_arm_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Aim the TEMP arm at a root the test owns, and hand that root back.
+
+    EVERY name-arm row needs this, and needing it is a consequence of the round-1
+    fix: pytest's ``tmp_path`` lives under the machine's REAL ``$TMPDIR``
+    (measured: ``/private/var/folders/…/T/pytest-of-…``), and the name arm now
+    declines everything inside a temp root (round 1, R1). Without moving the roots
+    aside every fire row would be silent — and, more dangerously, every SILENCE
+    row would pass for a reason the row does not name. This is why the temp-root
+    matrix next door owns its root instead of writing into the machine's, and the
+    name-arm matrix now does the same.
+    """
+    root = tmp_path / "shared-tmp"
+    root.mkdir(exist_ok=True)
+    _point_the_nudge_at(monkeypatch, root)
+    return root
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dirname", _SCRATCH_DIR_NAMES_UNDER_TEST)
+async def test_a_write_into_a_scratch_named_directory_is_nudged(
+    tmp_path, monkeypatch, dirname
+) -> None:
+    """One row per name, in the shape the incident took. The parent IS the named
+    directory (the depth-1 rule the temp arm documents) and the file has a real
+    extension, because BOTH of those are true of the incident and neither is part
+    of the trigger: the name alone decides.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    directory = _incident_dir(tmp_path, dirname)
+    target = directory / "potential-match-comment-export-spec.md"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "spec\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Created {target.resolve()} (5 chars)."
+    assert second == _scratch_dir_nudge_line(target)
+    assert target.read_text(encoding="utf-8") == "spec\n"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_in_a_scratch_named_directory_is_nudged(tmp_path, monkeypatch) -> None:
+    """Both writers share one helper, so `edit` must not be the tool that silently
+    lacks the second arm either — editing a file already sitting in one is exactly
+    as sticky as creating it, and more likely for a file a SUBAGENT was handed.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = _incident_dir(tmp_path, "tmp") / "notes.md"
+    target.write_text("alpha\n", encoding="utf-8")
+
+    result = await tools["edit"].execute(
+        "c", {"path": str(target), "old_text": "alpha", "new_text": "ALPHA"}, None, None, context
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Edited {target.resolve()}: 1 hunk(s), 1 replacement(s) applied."
+    assert second == _scratch_dir_nudge_line(target)
+    assert target.read_text(encoding="utf-8") == "ALPHA\n"
+
+
+@pytest.mark.asyncio
+async def test_a_write_into_the_pad_root_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The pad's own root is commonly spelled `scratchpad`, which IS one of the
+    arm's names, so this row is the containment clause or nothing: without it,
+    every write the protocol asks for would be answered with advice to move the
+    file into the pad it is already in.
+
+    The temp roots are moved aside even though containment is a separate rule:
+    the pad here sits under `tmp_path`, so leaving them would let the row pass as
+    silence for the OTHER reason and stop testing this one.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, pad, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c", {"path": str(pad / "notes.md"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert (pad / "notes.md").read_text(encoding="utf-8") == "x\n"
+
+
+@pytest.mark.asyncio
+async def test_a_tmp_directory_inside_the_pad_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """A `tmp/` the agent makes INSIDE its pad is the pad: it is deleted with the
+    session exactly as the pad root is, so the second arm has nothing to say about
+    it. Containment, not the name, is what decides this — and a session that keeps
+    a `rig` subdirectory under a `tmp/` of its own is using the pad correctly.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, pad, tools = _scratchpad_context(tmp_path)
+    (pad / "tmp").mkdir(parents=True)
+    target = pad / "tmp" / "rig.log"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "run\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert target.read_text(encoding="utf-8") == "run\n"
+
+
+@pytest.mark.asyncio
+async def test_a_deeper_path_in_a_scratch_named_directory_is_not_nudged(
+    tmp_path, monkeypatch
+) -> None:
+    """Depth ONE, the same rule the temp arm states for the same reason: a path
+    nested under a scratch-named directory is a plausible deliverable — this
+    fleet's own worktrees and per-task folders live there — so the false positive
+    on real work is what the rule buys, and `scratch/x.py` is the shallow shape
+    the incident took.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    deeper = _incident_dir(tmp_path, "tmp") / "deliverable"
+    deeper.mkdir()
+
+    result = await tools["write"].execute(
+        "c", {"path": str(deeper / "x.py"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_read_in_a_scratch_named_directory_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The hint is about where a WRITE lands, and `read` never reaches it — which
+    matters more for this arm than for the temp one: a path a SUBAGENT was handed
+    arrives as an ordinary absolute path, so the reader of one must be able to read
+    it without being told to move a file it did not create.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = _incident_dir(tmp_path, "tmp") / "spec.md"
+    target.write_text("spec\n", encoding="utf-8")
+
+    result = await tools["read"].execute("c", {"path": str(target)}, None, None, context)
+
+    assert result.is_error is False
+    assert "spec" in result.text
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_no_pad_means_no_scratch_dir_nudge(tmp_path) -> None:
+    """Same contract as ``SCRATCHPAD_UNAVAILABLE``: with nowhere better to point
+    the session the second arm has nothing to say either, and the name arm must not
+    be the one that forgets it.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (tmp_path / "minervaai" / "tmp").mkdir(parents=True)
+    context = ToolContext(cwd=str(workspace), session_id="no-scratchpad")
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["write"].execute(
+        "c",
+        {"path": str(tmp_path / "minervaai" / "tmp" / "x.py"), "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_second_arm_never_borrows_the_macos_prune(tmp_path, monkeypatch) -> None:
+    """A reason has to be TRUE of the case it is attached to, and the prune is not:
+    a workspace `tmp/` is on no cleaner's list, so claiming three days there would
+    be a false statement about the machine reading it.
+
+    No monkeypatched ``_temp_scratch_roots`` here, deliberately — this row is about
+    the reason each arm carries on THIS host, so the temp arm is read from the
+    shipped table rather than from one this test injected. That also keeps the
+    assertion non-circular: the claim is that the second arm's reason is a
+    statement the temp arm never makes, on any host, for any of its roots.
+    """
+    # The SHIPPED table, read BEFORE the fixture below aims the temp arm at this
+    # test's own root: ``_point_the_nudge_at`` replaces ``_temp_scratch_roots``, so
+    # reading it afterwards measures the INJECTED table and ``/tmp`` is simply not
+    # in it. That is exactly what CI's whole-tree run caught (KeyError) after a
+    # local run whose ``-k`` selection never chose this test's name — the file now
+    # runs whole locally for this matrix.
+    temp_reasons = dict(builtin._temp_scratch_roots())
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = _incident_dir(tmp_path, "tmp") / "x.py"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    dir_line = result.text.split("\n")[1]
+    assert dir_line == _scratch_dir_nudge_line(target)
+    assert "three days" not in dir_line
+
+    assert builtin._SCRATCH_DIR_WHY not in temp_reasons.values()
+    # And the two are told apart on the host where the prune IS true: the machine's
+    # own temp root still gets the more specific reason, so the second arm did not
+    # replace it with something generic.
+    system_reason = temp_reasons[Path("/tmp").resolve()]
+    if builtin._SYSTEM_TMP_IS_PRUNED:
+        assert "three days" in system_reason
+        assert system_reason != builtin._SCRATCH_DIR_WHY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relative",
+    [
+        # Every row here is depth ONE under a name the guard is the only reason for:
+        # with the guard removed each one fires, so each one can tell the guard from
+        # its absence. A row like `build/tmp/deep/x.o` could not — its own parent is
+        # not a name, so it is silent either way.
+        "scratch/x.md",
+        "tmp/x.md",
+        "build/tmp/x.o",
+        ".tmp/x.md",
+    ],
+)
+async def test_a_scratch_named_directory_inside_a_temp_root_is_not_nudged(
+    tmp_path, monkeypatch, relative
+) -> None:
+    """The temp-root family owns everything INSIDE a temp root, and the name arm
+    must claim none of it (round 1, R1). Two separate reasons, and both were live:
+    at depth 1 the temp arm's own reason is the true one (its loop runs first, so
+    this row is the deeper shapes), and deeper in is exactly the "plausible
+    deliverable" class the shipped arm exempts on purpose — this fleet's real
+    worktrees and build rigs live at ``/private/tmp/<name>``. Before the guard all
+    of these fired with a clause that is FALSE there: those paths are in the system
+    temp tree rather than "the user's own tree", and they ARE on a cleaner's list.
+    """
+    temp_root = _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = temp_root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert target.read_text(encoding="utf-8") == "x\n"
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_pad_under_a_temp_root_is_also_silent(tmp_path, monkeypatch) -> None:
+    """The chosen consequence of R1, pinned so that it is a decision rather than an
+    accident (round 2). A FOREIGN session's pad that sits under a temp root is
+    silent too, and that is right: a pad is somebody's pad wherever it lives, so the
+    temp arm's reason would be false about it (a pad IS a session's own area) and
+    this arm's advice — your scratch belongs in the pad — would be wrong about one.
+
+    Reachable through this fleet's own rigs, which put the config dir inside
+    `mktemp -d`. Guard-dependent like the rows above: without the containment it
+    fires, because the parent is named `scratchpad`.
+    """
+    temp_root = _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    foreign = temp_root / "iso-rig" / ".local-operator" / "sessions" / "other" / "scratchpad"
+    foreign.mkdir(parents=True)
+
+    result = await tools["write"].execute(
+        "c", {"path": str(foreign / "x.md"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert (foreign / "x.md").read_text(encoding="utf-8") == "x\n"
+
+
+@pytest.mark.asyncio
+async def test_the_temp_arm_still_owns_depth_one_inside_a_temp_root(tmp_path, monkeypatch) -> None:
+    """The other half of R1: containment takes the NAME arm out of the temp tree, it
+    does not make the area silent. A file directly in the temp root keeps the temp
+    arm's own reason — the statement that IS true there — and the name arm's trap
+    wording never appears on it.
+    """
+    temp_root = _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c", {"path": str(temp_root / "x.md"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert result.text.split("\n")[1] == _nudge_line(temp_root / "x.md")
+    assert "scratch-named directory" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_another_sessions_pad_fires_with_a_location_neutral_reason(
+    tmp_path, monkeypatch
+) -> None:
+    """R2. Containment is per-session by design, so another session's pad root IS a
+    scratch-named directory this session should not write into — but the reason has
+    to be true of it. The wording this replaced claimed "in the user's own tree"
+    (false at a foreign pad) and "nothing removes it with the session" (false about
+    THAT session's pad), so it is asserted here by what it must NOT say as much as
+    by what it must.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    foreign = tmp_path / "sessions" / "another-session" / "scratchpad"
+    foreign.mkdir(parents=True)
+    target = foreign / "notes.md"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    second = result.text.split("\n")[1]
+    assert second == _scratch_dir_nudge_line(target)
+    assert "the user's own tree" not in second
+    assert "scratchpad://" in second
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_pad_root_is_silent_on_both_channels(tmp_path, monkeypatch) -> None:
+    """R5. With a pad root that could not be resolved, BOTH channels used to emit a
+    line (measured on the round-1 base) — telling the session, twice, to move a file
+    into a pad that had just failed to resolve — while no pad at all was silent on
+    both channels but crashed the tool arm. One predicate answers for both now, and
+    its answer is silence for both shapes.
+
+    The failure is injected at ``Path.resolve`` for the pad root alone, because the
+    OS will not produce it from a test directory: measured, a symlink loop and a
+    parent with a 0000 mode both resolve fine under ``strict=False``, so there is
+    no path a test can build that makes the call fail.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, pad, tools = _scratchpad_context(tmp_path)
+    directory = _incident_dir(tmp_path, "tmp")
+    real_resolve = Path.resolve
+
+    def refuse(self: Path, *args, **kwargs):
+        if str(self) == str(pad):
+            raise OSError(13, "Permission denied")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", refuse)
+
+    result = await tools["write"].execute(
+        "c", {"path": str(directory / "x.md"), "content": "x\n"}, None, None, context
+    )
+    shell = await _run_bash(context, f'touch "{directory}/y.md"')
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert "[scratch]" not in shell
+    # The None arm of the same contract, directly: no pad at all is also silence.
+    assert builtin._in_scratch_named_dir((directory / "x.md").resolve(), None, ()) is False
+
+
+# ---------------------------------------------------------------------------
+# the shell channel: the exported path and the bash-side nudge
+# ---------------------------------------------------------------------------
+#
+# The measured asymmetry these cover (audit, 2026-09-21, 400 transcripts): the
+# SHELL created scratch under a temp root in 8,766 calls against 44 that reached
+# the scratchpad, because the shipped nudge fired from `write`/`edit` only and
+# the scheme is unusable from a shell — `mktemp -d` and `nohup … > log` need an
+# absolute PATH before anything can be created.
+
+
+def _bash_stdout(result) -> str:
+    """The stdout section of a bash result, without the wrapper or exit line."""
+    assert not result.is_error, result.text
+    text = result.text
+    start = text.find("--- stdout ---")
+    end = text.find("--- stderr ---")
+    return text[start + len("--- stdout ---") : end if end > start else None]
+
+
+#: Reads the exported path in the CHILD, and again in a grandchild spawned with
+#: no ``env=``. The second read is the one that matters for the clear arm: a
+#: child's environment starts as a copy of the harness's, so a writer that only
+#: SET the variable leaves a pad-less session holding its parent's path, and a
+#: nested session spawned that way carries it further down still. The name comes
+#: from the module constant so a rename cannot leave this probe reading a
+#: variable nothing writes.
+_SCRATCH_ENV_PROBE_SOURCE = """
+import os, subprocess, sys
+from local_operator.scratchpad import SCRATCHPAD_PATH_ENV as k
+
+v = os.environ.get(k)
+print("RAW=" + ("<ABSENT>" if v is None else repr(v)))
+_nested = "import os;k=%r;v=os.environ.get(k);print('<ABSENT>' if v is None else repr(v))" % k
+child = subprocess.run(
+    [sys.executable, "-c", _nested], capture_output=True, text=True, check=False
+)
+print("NO_ENV_CHILD=" + child.stdout.strip())
+"""
+_SCRATCH_ENV_PROBE = f"{shlex.quote(sys.executable)} -c " + shlex.quote(_SCRATCH_ENV_PROBE_SOURCE)
+
+
+async def _bash_scratch_env(context: ToolContext) -> tuple[str, str]:
+    """(the child's value, a no-``env=`` grandchild's value)."""
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-scratch-env", {"command": _SCRATCH_ENV_PROBE}, None, None, context
+    )
+    lines = dict(line.split("=", 1) for line in _bash_stdout(result).strip().splitlines())
+    return lines["RAW"], lines["NO_ENV_CHILD"]
+
+
+@pytest.mark.asyncio
+async def test_the_bash_tool_exports_the_scratchpad_path_in_three_arms(
+    tmp_path, monkeypatch
+) -> None:
+    """``execute_bash`` is the ONE writer of this variable, in the same THREE arms
+    ``LOCAL_OPERATOR_AGENT_MAY_DELEGATE`` is signed in. Each arm is a different
+    bug, and the second is the one that matters:
+
+    * SET — the session has a pad, so the child is told where it is. Without this
+      arm there is no fix at all: a shell cannot resolve ``scratchpad://``, so
+      the pad is unreachable from the channel that creates 9 calls in 10.
+    * CLEARED — the name is inherited from the launcher and this session has
+      none. The child's environment starts as a copy of the harness's own, so a
+      writer that only SET would leave a pad-less session holding its PARENT's
+      path and creating files outside its own store. Asserted on the grandchild
+      too: that is the hop the clear has to hold down.
+    * OMITTED — neither held nor inherited, so the name is not written at all.
+      The presence test is over ``os.environ``, so this arm is only reachable
+      with the name absent from THIS process — which is exactly what the suite's
+      ambient-environment scrub of it guarantees.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    raw, nested = await _bash_scratch_env(context)
+    assert raw == repr(str(pad))
+    assert nested == repr(str(pad))
+
+    # CLEARED: the name is inherited, the session has no pad.
+    monkeypatch.setenv(SCRATCHPAD_PATH_ENV, "/sessions/parent/scratchpad")
+    bare = ToolContext(cwd=str(tmp_path / "ws"), session_id="no-scratchpad")
+    raw, nested = await _bash_scratch_env(bare)
+    assert raw == repr(""), raw
+    assert nested == repr("")
+
+    # OMITTED: nothing to clear, so the name is not handed over at all.
+    monkeypatch.delenv(SCRATCHPAD_PATH_ENV, raising=False)
+    raw, nested = await _bash_scratch_env(bare)
+    assert raw == "<ABSENT>"
+    assert nested == "<ABSENT>"
+
+
+def _bash_nudge_line(target: Path) -> str:
+    """The exact one line the bash nudge appends. Like the write/edit line it
+    carries the RESOLVED target, and the remedy is the exported PATH rather than
+    the scheme — a shell cannot resolve a scheme, and naming a remedy the channel
+    cannot use is the defect this half of the nudge exists to close."""
+    return (
+        f"[scratch] Your own scratch belongs in ${SCRATCHPAD_PATH_ENV} — {target.resolve()} "
+        f"sits directly under a temp root: the test's own reason."
+    )
+
+
+async def _run_bash(context: ToolContext, command: str) -> str:
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute("bash-nudge", {"command": command}, None, None, context)
+    assert not result.is_error, result.text
+    return result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        ("python3 gen.py > {root}/x.log", "x.log"),
+        ("python3 gen.py >> {root}/x.log 2>&1", "x.log"),
+        ("tee {root}/out.txt < /dev/null", "out.txt"),
+        ("mkdir {root}/probe", "probe"),
+        ("touch {root}/notes.md", "notes.md"),
+        ("cp report.md {root}/report.md", "report.md"),
+        ("mv report.md {root}/report.md", "report.md"),
+        ("mktemp {root}/rig.XXXXXX", "rig.XXXXXX"),
+        ('echo "x" > "{root}/quoted.log"', "quoted.log"),
+        ("cat > {root}/notes.md <<'EOF'\nhello\nEOF", "notes.md"),
+        # A shell wrapping the creator still finds it: `sudo` and an assignment
+        # are not the command, and reading them as one hides the commonest way
+        # this fleet runs a creating command.
+        ("sudo mkdir {root}/priv", "priv"),
+        ("env FOO=1 touch {root}/marker", "marker"),
+        ("echo one && mkdir {root}/two", "two"),
+    ],
+)
+async def test_a_command_creating_under_a_temp_root_is_nudged(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """Every CREATING position the contract names, one row each. The heredoc row
+    is the shape the volume measurement is largely made of (a script written to
+    /tmp), and the quoted row is why the scanner dequotes before it resolves."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(context, command.format(root=temp_root))
+
+    lines = [line for line in text.splitlines() if line.startswith("[scratch]")]
+    assert lines == [_bash_nudge_line(temp_root / created)], text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The guide's sanctioned escape hatch: a directory that genuinely needs a
+        # real temp path. Nudging it would fight the guide, so the exemption is
+        # STRUCTURAL — a template-less mktemp has no operand to inspect.
+        "mktemp -d",
+        "mktemp",
+        # A template that carries no X run creates nothing nameable.
+        "mktemp -d {root}/plain",
+        # Reads are not creations.
+        "cat {root}/in.txt",
+        "ls {root}",
+        "rm -rf {root}/x",
+        "grep -r pattern {root}",
+        # Depth TWO: real worktrees live at /private/tmp/<name> on this fleet, so
+        # a nested path is a plausible deliverable rather than scratch.
+        "mkdir -p {root}/deep/dir",
+        "python3 gen.py > {root}/deep/x.log",
+        "cp report.md {root}/deep/report.md",
+        # A source under a temp root is a read; only cp/mv DESTINATIONS count.
+        "cp {root}/report.md report.md",
+        # Nothing to do with a temp root.
+        "echo hi > {root}-ish.txt",
+        'echo "x" > /dev/null',
+    ],
+)
+async def test_a_command_that_does_not_create_under_a_temp_root_is_silent(
+    tmp_path, monkeypatch, command
+) -> None:
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(context, command.format(root=temp_root))
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        ("python3 gen.py > {dir}/x.log", "x.log"),
+        ("python3 gen.py >> {dir}/x.log 2>&1", "x.log"),
+        ("tee {dir}/out.txt < /dev/null", "out.txt"),
+        ("mkdir {dir}/probe", "probe"),
+        ("touch {dir}/notes.md", "notes.md"),
+        ("cp report.md {dir}/report.md", "report.md"),
+        ("mktemp {dir}/rig.XXXXXX", "rig.XXXXXX"),
+        ('echo "x" > "{dir}/quoted.log"', "quoted.log"),
+        ("cat > {dir}/notes.md <<'EOF'\nhello\nEOF", "notes.md"),
+        # A shell wrapping the creator still finds it — the commonest way this
+        # fleet runs a creating command.
+        ("env FOO=1 touch {dir}/marker", "marker"),
+        ("echo one && mkdir {dir}/two", "two"),
+    ],
+)
+async def test_a_command_creating_in_a_scratch_named_directory_is_nudged(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """The second arm's creating positions, one row each, with the target in the
+    incident's `minervaai/tmp/` shape rather than under a temp root. The scan is
+    the SAME code the temp-root matrix next door exercises — these rows are about
+    the predicate — and this is the channel that carries the volume: the audit
+    measured the shell creating scratch 8,766 times against 44 calls into the pad,
+    so an arm that reached `write`/`edit` alone would cover about a tenth of it.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    directory = _incident_dir(tmp_path, "tmp")
+
+    text = await _run_bash(context, command.format(dir=directory))
+
+    lines = [line for line in text.splitlines() if line.startswith("[scratch]")]
+    expected = _scratch_dir_nudge_line(directory / created, remedy=f"${SCRATCHPAD_PATH_ENV}")
+    assert lines == [expected], text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Reads and removals are not creations.
+        "cat {dir}/in.txt",
+        "ls {dir}",
+        "rm -rf {dir}/x",
+        "grep -r pattern {dir}",
+        # Depth TWO.
+        "mkdir -p {dir}/deep/dir",
+        "python3 gen.py > {dir}/deep/x.log",
+        "cp report.md {dir}/deep/report.md",
+        # A source inside one is a read; only cp/mv DESTINATIONS count.
+        "cp {dir}/report.md report.md",
+        # A RELATIVE target is never resolved — the scan has no cwd to resolve it
+        # against, and a path the command does not name is worse than the miss.
+        # This is the honest limit of the arm on the shell channel: the same write
+        # through `write`/`edit` IS resolved against the workspace and does fire.
+        "echo hi > tmp/relative.log",
+        # A directory whose name merely CONTAINS one is not the name.
+        "echo hi > {dir}-ish.txt",
+        # The guide's escape hatch: a template with no X run names nothing.
+        "mktemp -d {dir}/plain",
+    ],
+)
+async def test_a_command_that_does_not_create_in_a_scratch_named_directory_is_silent(
+    tmp_path, monkeypatch, command
+) -> None:
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    directory = _incident_dir(tmp_path, "tmp")
+    (directory / "in.txt").write_text("x\n", encoding="utf-8")
+
+    text = await _run_bash(context, command.format(dir=directory))
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relative", ["scratch/x.md", "build/tmp/x.o"])
+async def test_a_shell_creation_inside_a_temp_root_is_not_nudged(
+    tmp_path, monkeypatch, relative
+) -> None:
+    """R1 on the channel that carries the volume, in the shape the review round
+    executed (``cp a.o /private/tmp/build/tmp/x.o``): the scan must not reach past
+    the temp arm into the name arm inside a temp tree.
+    """
+    temp_root = _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    target = temp_root / relative
+    # The parent is made OUTSIDE the scanned command on purpose: `mkdir -p
+    # "<temp-root>/scratch"` creates a directory DIRECTLY in the temp root, which
+    # the temp arm correctly claims, and that first match would hide the row this
+    # test is about.
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    text = await _run_bash(context, f'cp a.o "{target}"')
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_bash_creation_inside_the_pad_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The shell reaches the pad by its absolute path — `$LOCAL_OPERATOR_SCRATCHPAD`
+    is one, and a receipt prints another — so the second arm meets the pad's own
+    name on every call that uses it. Creating INTO the pad is the answer the
+    advisory exists to give, never the trap, and the guide's private-rig idiom
+    (`mktemp -d` with a pad-local template) is the row that would break first.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, pad, _ = _scratchpad_context(tmp_path)
+    (pad / "tmp").mkdir(parents=True)
+
+    for command in (
+        f"mkdir {pad}/logs",
+        f'touch "{pad}/notes.md"',
+        f'mktemp -d "{pad}/rig.XXXXXX"',
+        f"touch {pad}/tmp/rig.log",
+    ):
+        text = await _run_bash(context, command)
+        assert "[scratch]" not in text, text
+
+
+def test_an_unexpanded_target_names_the_scratch_named_directory(tmp_path, monkeypatch) -> None:
+    """The root arm of the second arm. `for i in 1 2 3; do echo x > <dir>/f$i; done`
+    creates files the scan cannot name, so the subject becomes the directory — which
+    has to NAME the trap rather than refer back to one: this reader was never shown
+    the concrete target the other arm describes (round-1 design finding D2 for the
+    temp arm, and the same sentence shape here).
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    directory = _incident_dir(tmp_path, "tmp")
+
+    line = builtin._bash_scratch_hint(f"for i in 1 2 3; do echo x > {directory}/f$i; done", context)
+
+    assert line == _scratch_dir_root_nudge_line(directory, remedy=f"${SCRATCHPAD_PATH_ENV}")
+    assert "$i" not in line
+    assert "the same trap" not in line
+
+
+@pytest.mark.asyncio
+async def test_a_heredoc_body_is_not_read_as_a_second_creation(tmp_path, monkeypatch) -> None:
+    """A body is DATA being written, not commands being run. Both of these write
+    one file under the temp root, so both nudge exactly ONCE — the row that
+    matters is the second, where a naive scanner would see ``echo hi > x`` inside
+    the body and could pick the wrong target (or claim two)."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(
+        context,
+        "cat > {root}/notes.md <<'EOF'\necho hi > {root}/other.log\nEOF".format(root=temp_root),
+    )
+
+    assert text.count("[scratch]") == 1, text
+    assert _bash_nudge_line(temp_root / "notes.md") in text
+
+
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        # `time` is a shell KEYWORD, so it can stand in front of any command and its
+        # only option is `-p`. It was in `_COMMAND_PREFIXES` as a frozenset and was
+        # dropped when that became the table, which made all three of these silent at
+        # the reviewed head after they had nudged before — the regression both gates
+        # found, and neither side's rows covered it because no row used `time`.
+        ("time mkdir {root}/timed", "timed"),
+        ("time -p touch {root}/timed-p", "timed-p"),
+        ("time cp report.md {root}/timed-cp", "timed-cp"),
+        # ...and the same prefix still leaves a READ alone.
+        ("time cat {root}/in.txt", None),
+        ("time -p rm -rf {root}/x", None),
+    ],
+)
+def test_the_time_prefix_does_not_hide_the_command(tmp_path, monkeypatch, command, created) -> None:
+    """Scanner-level, like the prefix-operand rows next door: `time` is a bash
+    keyword and the shapes are the ones this fleet writes, so what is asserted is
+    the contract (which words count as a command position) rather than a host's
+    shell."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    (temp_root / "in.txt").write_text("x\n", encoding="utf-8")
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    line = builtin._bash_scratch_hint(command.format(root=temp_root), context)
+
+    if created is None:
+        assert line == "", line
+    else:
+        assert line == _bash_nudge_line(temp_root / created), line
+
+
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        # The prefix's OWN operand sits in command position, so a walk that does not
+        # step over it reads that operand as the command name and never sees the
+        # creation: `sudo -u <user> mkdir` (the value of `-u`), `timeout 60 mkdir`
+        # (the duration), `nice -n 10 cp` (the value of `-n`), `nice 10 cp` (the
+        # legacy bare increment). All four are MISSES without the table, which the
+        # table's own comment calls the safe direction but not the documented one —
+        # `_COMMAND_PREFIXES` exists for `sudo mkdir`, and `_bash_scratch_hint`'s
+        # docstring names that shape as covered.
+        ("sudo -u root mkdir {root}/sudoed", "sudoed"),
+        ("timeout 60 mkdir {root}/timed", "timed"),
+        ("nice -n 10 cp report.md {root}/nixed", "nixed"),
+        # GNU's LEGACY bare increment, kept on purpose even though this host's BSD
+        # ``nice`` rejects it (``nice 10 true`` → rc=127). It is the only shape that
+        # puts a bare operand in command position for ``nice``, which is exactly the
+        # skip being pinned, and these rows never execute: the assertion is about
+        # which words the SCAN treats as a command, not about what a host's ``nice``
+        # accepts. The ``timeout 60`` row is GNU-only for the same reason.
+        ("nice 10 touch {root}/niced", "niced"),
+    ],
+)
+def test_a_prefix_commands_own_operand_does_not_hide_the_command(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """Scanner-level rather than executed: `timeout` is GNU coreutils and is absent
+    from a stock macOS, and `sudo -u` asks for a password — neither is a reason for
+    the CONTRACT (which words the scan treats as a creating position) to go
+    untested."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    line = builtin._bash_scratch_hint(command.format(root=temp_root), context)
+
+    assert line == _bash_nudge_line(temp_root / created), line
+
+
+def test_an_unexpanded_target_names_the_temp_root_not_a_fabricated_path(
+    tmp_path, monkeypatch
+) -> None:
+    """`for i in 1 2 3; do echo x > /tmp/f$i; done` produces a target the scan
+    cannot resolve, and printing its "resolved" form invents a path that will never
+    exist: `/private/tmp/f$i`. The advice and the reason do not change — only the
+    subject, which becomes the temp root: a directory that really does exist, and
+    the thing the reader has to recognize. That subject then had to NAME the trap
+    instead of referring back to one (round-1 design finding D2): this arm is shown
+    to a reader who never saw the concrete target beside it, so "the same trap" had
+    no antecedent to resolve against."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    line = builtin._bash_scratch_hint(
+        "for i in 1 2 3; do echo x > {root}/f$i; done".format(root=temp_root), context
+    )
+
+    assert line, "the loop still creates files under the temp root"
+    assert "$i" not in line
+    assert f"writing directly under {temp_root.resolve()} puts scratch in a temp root" in line
+    # The root arm NAMES the trap rather than referring back to one: the reader of
+    # this arm has not been shown the concrete target the other arm describes, so
+    # "the same trap" pointed at nothing (design review round 1, D2).
+    assert "the same trap" not in line
+    assert f"${SCRATCHPAD_PATH_ENV}" in line
+
+
+@pytest.mark.asyncio
+async def test_the_tmpdir_spelling_is_recognised(tmp_path, monkeypatch) -> None:
+    """The shells on this fleet rarely write ``/var/folders/…/T`` literally, they
+    write ``$TMPDIR`` — the same directory by another name, and the one the
+    shell's own expansion produces. ``${TMPDIR}`` is the braced spelling of the
+    same thing and gets its own row because the expansion order is a real
+    difference, not a stylistic one."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: str(temp_root))
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    for command in ("echo hi > $TMPDIR/x.log", "echo hi > ${TMPDIR}/x.log"):
+        text = await _run_bash(context, command)
+        assert text.count("[scratch]") == 1, text
+        assert _bash_nudge_line(temp_root / "x.log") in text
+
+
+def _home_spelling_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A ``HOME`` the test owns, with the name arm's own root fixture in place.
+
+    ``Path.expanduser``/``Path.home`` read ``HOME`` from the environment — the same
+    variable the product hands its child shells — so redirecting it covers BOTH the
+    scan under test and the command's own ``~`` expansion, and no seam has to be
+    opened in the module for the test's benefit. Aiming the temp roots at the
+    test's root is not optional: see ``_name_arm_fixture`` for why a row that
+    skipped it would pass for a reason it does not name.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "segment", "created"),
+    [
+        # The three spellings, and the `${HOME}` row is not a duplicate of the
+        # `$HOME` one: the expansion order is a real difference there, so a helper
+        # that rewrote `${HOME}` into a leftover `${}` would be silent on exactly
+        # this row (the same reason `${TMPDIR}` gets its own row next door).
+        ("echo hi > ~/workspace/minervaai/tmp/tilde.md", "tmp", "tilde.md"),
+        ("echo hi > $HOME/workspace/minervaai/tmp/dollar.md", "tmp", "dollar.md"),
+        ("echo hi > ${HOME}/workspace/minervaai/scratch/braced.sh", "scratch", "braced.sh"),
+        # A different creation POSITION through the same spelling: `mkdir`'s
+        # operand rather than a redirect, so the row fails if the normalisation
+        # reached one position and not the other.
+        ("mkdir ~/workspace/minervaai/tmp/somewhere", "tmp", "somewhere"),
+    ],
+)
+async def test_the_home_spelling_is_recognised(
+    tmp_path, monkeypatch, command, segment, created
+) -> None:
+    """The hole this closes, measured on the released v0.62.3: the SAME write into a
+    scratch-named directory was advised when its target was spelled absolutely and
+    fell SILENT when it was spelled through the home directory — which is how a
+    session spells a home path far more often. `write`/`edit` never had the
+    asymmetry (`_resolve_workspace_path` calls `Path.expanduser`), so these rows pin
+    one channel agreeing with the other rather than two channels disagreeing.
+
+    The command really runs, so the row also proves the two sides agree about WHICH
+    file is meant: the shell's own `~`/`$HOME` expansion picks the file the scan
+    predicted, which is the only thing that lets the assertion name one path.
+    """
+    home = _home_spelling_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    directory = home / "workspace" / "minervaai" / segment
+    (home / "workspace" / "minervaai" / "tmp").mkdir(parents=True, exist_ok=True)
+    (home / "workspace" / "minervaai" / "scratch").mkdir(parents=True, exist_ok=True)
+
+    text = await _run_bash(context, command)
+
+    lines = [line for line in text.splitlines() if line.startswith("[scratch]")]
+    expected = _scratch_dir_nudge_line(directory / created, remedy=f"${SCRATCHPAD_PATH_ENV}")
+    assert lines == [expected], text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ANOTHER user's home is not this scan's to resolve, so the normaliser
+        # DECLINES it and the target keeps the shape it had before this change —
+        # the same refusal `_resolve_workspace_path` makes for `~nosuchuser` (whose
+        # own row lives in test_approval_descriptions.py).
+        "echo hi > ~other/workspace/minervaai/tmp/x.md",
+        # Depth TWO: expanding a home spelling must not reach past the depth-1 rule
+        # the arm documents for the absolute form of the same path.
+        "echo hi > ~/workspace/minervaai/tmp/deep/x.md",
+        # A `~` that is not the LEADING component is a literal directory name.
+        "echo hi > {home}/workspace/minervaai/tmp/~/x.md",
+        # A word that merely CONTAINS a spelling is not the spelling.
+        "echo hi > $HOMEfoo/workspace/minervaai/tmp/x.md",
+        # The relative case, still exactly where it was: the normalisation is an
+        # addition to the absolute test, not a working directory for it.
+        "echo hi > tmp/x.md",
+    ],
+)
+async def test_a_home_spelling_that_names_no_scratch_named_directory_is_silent(
+    tmp_path, monkeypatch, command
+) -> None:
+    """The refusals around the new expansion, one row each.
+
+    Asserted at the SCANNER (``builtin._bash_scratch_hint``) rather than through
+    `_run_bash`, because NONE of these five commands can complete in a real shell:
+    `~other` names no user, `$HOMEfoo` expands to an empty prefix so the redirect
+    lands on an absolute path nothing creates, the two `~/workspace/minervaai/tmp/`
+    rows write into a tree this fixture does not build, and the bare relative row
+    has no `tmp/` under the cwd. A row that failed on its own shell error would be
+    reporting the shell's verdict as the scan's.
+
+    They matter because an expansion is the kind of change whose failures are
+    silent in the OTHER direction: a helper that rewrote too much would nudge a
+    path the command never named, and every row here would still pass if the
+    normaliser were deleted outright. Two of them (the leading-`~`-only rule and
+    the merely-containing word) are the ones a `str.replace`-shaped implementation
+    gets wrong.
+    """
+    home = _home_spelling_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    assert builtin._bash_scratch_hint(command.format(home=home), context) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelling_into_the_pad_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The containment clause, reached through the new expansion.
+
+    With the home directory handed to the session, the pad is a SUBDIRECTORY of it,
+    so a tilde path into the pad now meets the pad's own `scratchpad`/`tmp` name
+    through a spelling that could not reach it before. This row is silent both
+    before and after — it exists so the expansion cannot START nudging the pad, and
+    the temp roots are moved aside because `tmp_path` really does live under the
+    machine's `$TMPDIR`, where the name arm declines everything anyway (see
+    `_name_arm_fixture`).
+    """
+    _point_the_nudge_at(monkeypatch, tmp_path / "shared-tmp")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    context, pad, _ = _scratchpad_context(tmp_path)
+    (pad / "tmp").mkdir(parents=True, exist_ok=True)
+    assert pad.is_relative_to(tmp_path)  # the shape this row depends on
+
+    text = await _run_bash(context, "echo hi > ~/sessions/sess-pad/scratchpad/tmp/rig.log")
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelling_reaches_the_temp_root_arm(tmp_path, monkeypatch) -> None:
+    """The normalisation sits BEFORE the absolute test, so both arms share it.
+
+    With the temp root aimed at the home directory itself, `~/x.log` has to fire
+    the TEMP arm with the temp root's own reason, exactly as `/…/x.log` does. A
+    helper called from the name arm alone would leave this row silent while every
+    row above still passed.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    _point_the_nudge_at(monkeypatch, home)
+    monkeypatch.setenv("HOME", str(home))
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(context, "echo hi > ~/paid.log")
+
+    assert text.count("[scratch]") == 1, text
+    assert _bash_nudge_line(home / "paid.log") in text
+
+
+@pytest.mark.asyncio
+async def test_a_write_through_a_home_spelling_is_nudged(tmp_path, monkeypatch) -> None:
+    """Pin the channel that never had the hole.
+
+    `write`/`edit` resolve through `_resolve_workspace_path`, which calls
+    `Path.expanduser`, so a `~/…` target has always fired here — this row exists so
+    that a later change to the shell normaliser cannot be "harmonised" by teaching
+    THIS channel the shell's old silence.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / "workspace" / "minervaai" / "tmp").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = home / "workspace" / "minervaai" / "tmp" / "pinned.md"
+
+    result = await tools["write"].execute(
+        "c",
+        {"path": "~/workspace/minervaai/tmp/pinned.md", "content": "pinned\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Created {target.resolve()} (7 chars)."
+    assert second == _scratch_dir_nudge_line(target)
+
+
+@pytest.mark.asyncio
+async def test_no_scratchpad_root_means_no_bash_nudge(tmp_path, monkeypatch) -> None:
+    """Same contract as ``SCRATCHPAD_UNAVAILABLE``: with nowhere better to point
+    the session the nudge has nothing to say, and the exported variable is absent
+    in exactly this case — so advising it would name a path that does not exist."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    context = ToolContext(cwd=str(workspace), session_id="no-scratchpad")
+
+    text = await _run_bash(context, f"mkdir {temp_root}/probe")
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_the_bash_nudge_sits_beside_the_credential_notice(tmp_path, monkeypatch) -> None:
+    """Two advisories, one command, and the order is the decision: the credential
+    notice keeps FIRST position because a secret already in the transcript
+    outranks where a scratch file landed. Both sit in the result's head because
+    that is the window the card keeps — a line appended after a long output is
+    the first thing it drops (the measured reason the notice is where it is)."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    # `env` at a command position is the credential guard's own incident shape,
+    # and piping it into `tee` under the temp root is a creation — one command
+    # that trips both advisories, which is the only way to assert their order.
+    text = await _run_bash(context, "env | tee {root}/env.txt".format(root=temp_root))
+
+    lines = text.splitlines()
+    assert lines[0].startswith("exit code:"), lines[:3]
+    assert lines[1].startswith("[credential guard]"), lines[:3]
+    assert lines[2].startswith("[scratch]"), lines[:3]
+
+
+def test_the_bash_description_names_the_exported_path() -> None:
+    """The ONE standing token cost of this change, and it is deliberately small:
+    the description is billed on every request while the nudge and the guide cost
+    nothing until they fire. What it must do is name the PATH variable — the
+    scheme is unreachable from a shell and the packaged prompt's paragraph is far
+    from the moment of decision, so this clause is the only thing in front of the
+    model when it writes a redirect."""
+    description = builtin.build_bash_tool().description
+
+    assert description.startswith("Run a bash command and return its exit code")
+    assert f"${SCRATCHPAD_PATH_ENV}" in description
+    assert "/tmp" in description
 
 
 # ---------------------------------------------------------------------------
@@ -4518,3 +6289,463 @@ async def test_edit_suppression_tail_uses_the_headers_word_for_a_mixed_batch(
     suppressed = 9 - builtin._EDIT_MAX_DETAILED_HUNKS - builtin._EDIT_MAX_COMPACT_HUNKS
     assert str(suppressed) in tail, tail
     assert "refused" in tail, tail
+
+
+# ---------------------------------------------------------------------------
+# the missing-tool advisory
+# ---------------------------------------------------------------------------
+#
+# A `command not found` result is the one moment the model is certain a tool is
+# missing, and it used to be the moment the harness said nothing: the model
+# either guessed a package name for a machine it cannot see or abandoned the
+# task. The advisory points at `guide://system-tools` and carries the rule that
+# the user is asked before anything privileged runs. Its NEGATIVE cases are the
+# interesting ones — a present-but-failing tool must never trigger it.
+
+
+@pytest.mark.asyncio
+async def test_a_missing_command_result_carries_the_install_pointer(tmp_path, monkeypatch) -> None:
+    """The real tool result, which is what the model reads."""
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-missing",
+        {"command": "lop-no-such-tool-xyz --version"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    # ``is_error`` stays False for a non-zero exit — the tool RAN and reported;
+    # only a spawn failure is an error result. The exit code is what discriminates.
+    assert result.is_error is False
+    assert "exit code: 127" in result.text
+    assert "missing tool" in result.text
+    assert "guide://system-tools" in result.text
+    # The name the SHELL printed, not the whole command line.
+    assert "lop-no-such-tool-xyz" in result.text
+    # It rides the result NEXT TO the exit code, not after the output: the tool
+    # card keeps the head of a long result, so an advisory at the end is the
+    # first thing dropped. One line, and it carries the user-consent half too.
+    assert result.text.splitlines()[1] == (
+        "missing tool: the shell did not find `lop-no-such-tool-xyz` — read "
+        "`guide://system-tools`"
+    ), result.text
+    # The CLAIM IS NARROWER THAN "is not installed" on purpose (review R1-7): the
+    # harness observed that a shell could not find the command, and nothing more.
+    # On this fleet the backend daemon's own PATH carries no `/opt/homebrew/bin`,
+    # so a Homebrew tool the user's terminal runs is genuinely invisible there —
+    # and "is not installed" over that evidence would send a model to install a
+    # second copy over a working tool.
+    assert "is not installed" not in result.text, result.text
+    # The user-consent half of the rule is NOT a suffix of this notice: the
+    # console guide owns that wording, and what this test pins is that the
+    # pointer is reachable and one line, in the head window the tool card keeps.
+    # ``test_system_tools_guide_agrees_with_the_console_guide_on_approval``
+    # pins the consent rule where it lives, in the guide this notice names.
+    assert "ask the user" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_present_tool_that_failed_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The worst false positive this notice could have.
+
+    `ffmpeg missing-input.mp4` is a working ffmpeg asked for a file that is not
+    there — the most common failed command in any media task. The shell's "no
+    such command" line is the only evidence that counts, so a `No such file or
+    directory` from the program must stay silent.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-no-file", {"command": "ls definitely-not-here.txt"}, AbortSignal(), None, context
+    )
+
+    # A working tool asked for a file that is not there: non-zero exit, no
+    # "no such command" line, and therefore no advisory. The exit code itself is
+    # NOT asserted: `ls` exits 1 on macOS and 2 on Linux, and pinning one of them
+    # passes locally and fails in CI's container.
+    assert result.is_error is False
+    assert not result.text.startswith("exit code: 0"), result.text
+    assert "missing tool" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_host_without_a_console_gets_no_install_nudge(tmp_path, monkeypatch) -> None:
+    """Gating mirrors the console tool's own `createIf` predicate.
+
+    The install the guide describes needs a pty, so pointing a session at a
+    procedure it cannot perform would send it into the dead end `system.md`
+    already forbids it to paper over. Absent means absent.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: False)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-no-console",
+        {"command": "lop-no-such-tool-xyz --version"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "missing tool" not in result.text, result.text
+    assert "guide://system-tools" not in result.text
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        # EVERY row below is a real shell's real output, read off a shell on this
+        # host or in the round-1 container rather than written from memory —
+        # which is precisely what round 1's R1-1 caught: the row that "covered"
+        # zsh pinned `zsh: command not found: X`, a string zsh never prints.
+        #
+        # bash 3.2 (macOS /bin/bash) and the bash tool's own `/bin/bash -c`.
+        ("/bin/bash: lop-no-such-tool-xyz: command not found\n", "lop-no-such-tool-xyz"),
+        # bash 5 in a non-interactive invocation, which is what the container and
+        # the bash tool's `-c` run produce. The prefix is the interpreter's full
+        # path there, not `bash`, which is why the arm admits any non-space run.
+        ("bash: line 1: tesseract: command not found\n", "tesseract"),
+        ("/usr/bin/bash: line 1: tesseract: command not found\n", "tesseract"),
+        # zsh: line number where the interjection is, name LAST, no space after
+        # the colon. `-c` names the shell; a script names its own path.
+        ("zsh:1: command not found: magick\n", "magick"),
+        ("./probe.zsh:2: command not found: magick\n", "magick"),
+        # zsh's FUNCTION context prints no line number at all (R2-3).
+        ("f: command not found: magick\n", "magick"),
+        # A SCRIPT'S OWN PATH as the prefix, longer than the 64 characters both
+        # arms used to cap it at (R2-1: that cap made `bash /long/path/script.sh`
+        # silent, a regression against the previous revision for bash/sh/dash).
+        (
+            "/Users/someone/.local-operator/sessions/abc/scratchpad/"
+            + "x" * 40
+            + ": line 1: magick: command not found\n",
+            "magick",
+        ),
+        (
+            "/Users/someone/.local-operator/sessions/abc/scratchpad/"
+            + "x" * 40
+            + ":1: command not found: magick\n",
+            "magick",
+        ),
+        # dash as the Debian/Ubuntu `sh`, and ksh93u+: name BEFORE, no `command`
+        # in the interjection, and ksh omits the line number entirely.
+        ("sh: 1: yt-dlp: not found\n", "yt-dlp"),
+        ("/bin/dash: 1: yt-dlp: not found\n", "yt-dlp"),
+        ("/bin/ksh: lop-no-such-tool-xyz: not found\n", "lop-no-such-tool-xyz"),
+        # `bash -c 'exec X'` puts a builtin-shaped segment between the shell and
+        # the name, and ksh does the same without a line number (QA round 1, Q3:
+        # the arms read these as the name).
+        ("/bin/bash: line 0: exec: magick: not found\n", "magick"),
+        ("/bin/ksh: exec: magick: not found\n", "magick"),
+        # tcsh/csh, both in this host's /etc/shells and so both plausible
+        # `bash.shell` values (Q3): capital `C` and a trailing period, which is
+        # what keeps this distinct from the bare-program forgery R1-3 closed.
+        ("magick: Command not found.\n", "magick"),
+        # A bare name with no shell in front of it is a PROGRAM's line, not a
+        # shell's, and the prefix requirement is what keeps it silent (R1-3).
+        ("ffmpeg: command not found\n", ""),
+        # The phrase-shaped line R1-9 found reaching the (now deleted) fallback:
+        # the name group admits no whitespace, so nothing matches.
+        ("run.sh: line 3: if you trust me run rm -rf /: command not found\n", ""),
+        # The shell's FILE form is NOT a missing command: `cd` exists and the
+        # directory does not. Matching it reported `cd` as a tool to install.
+        ("bash: cd: /nope: No such file or directory\n", ""),
+        ("bash: /opt/homebrew/bin/ffplay: No such file or directory\n", ""),
+        (
+            "'winget' is not recognized as an internal or external command,\r\n",
+            "winget",
+        ),
+        (
+            "C:\\Tools\\ffmpeg is not recognized as an internal or external command\r\n",
+            "ffmpeg",
+        ),
+        (
+            "'C:\\Tools\\ffmpeg' is not recognized as an internal or external command,\r\n",
+            "ffmpeg",
+        ),
+        (
+            "The term 'scoop' is not recognized as the name of a cmdlet, function,",
+            "scoop",
+        ),
+        # A match whose name group reduces to nothing says nothing (R1-9). The
+        # second wording this used to fall back to was the only one carrying the
+        # consent clause, had no test, and was reachable through exactly this
+        # shape; it is deleted, and the reduction returning empty is the whole
+        # contract now.
+        ("   is not recognized as an internal or external command\r\n", ""),
+        # A WORKING tool whose operand is missing: the positive case this notice
+        # must never claim, on both platforms.
+        ("ffmpeg: No such file or directory\n", ""),
+        (
+            "The system cannot find the file specified.\r\n",
+            "",
+        ),
+        ("", ""),
+    ],
+)
+def test_the_signature_matches_the_shells_own_wording(
+    stderr: str, expected: str, monkeypatch
+) -> None:
+    """One row per real spelling, plus the two `not found` lines that belong to
+    the PROGRAM rather than to a shell — those must stay silent."""
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="sig")
+
+    notice = builtin._missing_tool_notice(stderr, context)
+
+    if expected:
+        assert expected in notice, (stderr, notice)
+        assert "guide://system-tools" in notice
+    else:
+        assert notice == "", (stderr, notice)
+
+
+def test_the_signature_is_linear_in_the_size_of_the_stderr(monkeypatch) -> None:
+    """A BLOW-UP detector, not a calibrated ceiling — and the headroom is stated.
+
+    Every POSIX arm opens with a bounded character class, so the risk this holds
+    off is a rewrite that backtracks per position instead of per line: the
+    unanchored `[^\n]{1,120}?` lookahead alone measured 687 ms of a 690 ms scan
+    on this input before it was anchored. A quadratic or per-index rewrite takes
+    MINUTES at this size, so the bound only has to separate "milliseconds" from
+    "not milliseconds"; it is set ~15x above the measured cost rather than just
+    above it, because this fleet runs ~25 concurrent sessions and a bound tuned
+    to an idle laptop is the flake ``AGENTS.md`` warns about. What it is NOT is
+    a measurement of the notice's cost on any particular machine — the sibling
+    test below covers the part of that cost which is structural.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="perf")
+    noise = ("progress: wrote 4096 bytes to out.bin\n" * 6000) + "bash: ffmpeg: command not found\n"
+
+    start = time.perf_counter()
+    notice = builtin._missing_tool_notice(noise, context)
+    elapsed = time.perf_counter() - start
+
+    assert "ffmpeg" in notice
+    assert elapsed < 2.0, f"signature scan took {elapsed:.3f}s on {len(noise)} chars"
+
+
+def test_a_stderr_with_no_signature_phrase_is_never_scanned(monkeypatch) -> None:
+    """The common case costs a substring search, and this holds that shape.
+
+    Most bash calls produce stderr with no such phrase in it at all, so the four
+    arms cannot match anything and running them is pure cost. The precondition in
+    ``_missing_tool_notice`` is what makes that case a C-speed ``in`` check, and
+    the separation is ~four orders of magnitude — microseconds against the
+    hundreds of milliseconds a full scan of this input costs — so the assertion
+    is about the CODE PATH rather than about the host: delete the precondition
+    and this fails on any machine, however fast or loaded, because the number
+    stops being a memchr.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="perf")
+    clean = "progress: wrote 4096 bytes to out.bin\n" * 12000  # ~420 KB, no signature
+
+    start = time.perf_counter()
+    notice = builtin._missing_tool_notice(clean, context)
+    elapsed = time.perf_counter() - start
+
+    assert notice == ""
+    assert elapsed < 0.05, f"a signature-free stderr was scanned: {elapsed:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_a_pipeline_that_succeeds_still_carries_the_notice(tmp_path, monkeypatch) -> None:
+    """The commonest way a missing tool hides: a pipeline whose exit code is fine.
+
+    `nope | cat` reports the missing left leg on the shell's own stderr and exits
+    with `cat`'s status, so a notice gated on a non-zero exit would be silent
+    exactly where the shell's line is the ONLY signal on the result (review
+    R1-3). The call-site comment used to claim this notice "cannot fire on a
+    successful command"; it can, and this is the row that holds that comment to
+    the code.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-pipe",
+        {"command": "lop-no-such-tool-xyz --version | cat"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "exit code: 0" in result.text, result.text
+    assert "missing tool" in result.text, result.text
+    assert "lop-no-such-tool-xyz" in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_programs_own_stderr_line_is_not_enough(tmp_path, monkeypatch) -> None:
+    """R1-3, half one: the trigger needs a shell's prefix, not just the phrase.
+
+    A program that PRINTS `ffmpeg: command not found` is a real possibility (the
+    round's probe used `printf`), and the bare form has no shell in front of it,
+    so the prefix requirement added in this round keeps it silent. This is a
+    precision improvement rather than a guarantee — a program can print the
+    shell-prefixed form too — and the module note says so rather than claiming a
+    property the code cannot hold.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-forged",
+        {"command": "printf 'ffmpeg: command not found\\n' >&2"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "missing tool" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_the_notice_sits_under_the_exit_code_on_the_timeout_path(
+    tmp_path, monkeypatch
+) -> None:
+    """The fifth insert case round 1's ordering claim missed (QA round 1, Q5).
+
+    The TIMEOUT head is inserted at position 0 before the advisories are placed,
+    so a literal index put the notice ABOVE `exit code:` — the one path where a
+    model reads a long, truncated result and most needs the shape every other
+    path keeps. The index is computed from the exit-code line now, and this is
+    the row that holds it there.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-timeout",
+        {"command": "lop-no-such-tool-xyz; sleep 30", "timeout": 2},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    lines = result.text.splitlines()
+    head = next(index for index, line in enumerate(lines) if line.startswith("TIMEOUT"))
+    exit_line = next(index for index, line in enumerate(lines) if line.startswith("exit code:"))
+    notice_line = next(
+        index for index, line in enumerate(lines) if line.startswith("missing tool:")
+    )
+    assert head < exit_line < notice_line, lines
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_command_still_carries_the_notice(tmp_path, monkeypatch) -> None:
+    """The abort path reported the shell's line and said nothing about it (Q6).
+
+    A Ctrl-C mid-command is the same "the shell's line is the only signal"
+    situation the rc-0 pipeline decision (R1-3) argues for covering, so the
+    notice rides the abort receipt too. The remaining gap — the detached/job
+    path, whose result is assembled on the job manager's settle path — is stated
+    in ``_missing_tool_notice`` rather than left implicit.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+    signal = AbortSignal()
+
+    async def _abort() -> None:
+        await asyncio.sleep(0.5)
+        signal.abort("user ctrl-c")
+
+    aborter = asyncio.create_task(_abort())
+    try:
+        result = await builtin.execute_bash(
+            "bash-abort",
+            {"command": "lop-no-such-tool-xyz; sleep 30"},
+            signal,
+            None,
+            context,
+        )
+    finally:
+        await aborter
+
+    assert "missing tool" in result.text, result.text
+    assert "lop-no-such-tool-xyz" in result.text, result.text
+
+
+def test_the_signature_scan_returns_nothing_without_a_context() -> None:
+    """It rides a tool result; without a session there is nobody to advise."""
+    assert builtin._missing_tool_notice("bash: ffmpeg: command not found\n", None) == ""
+
+
+def test_the_signature_matches_a_real_shells_real_output(tmp_path: Path) -> None:
+    """Every shell this host HAS, in every invocation shape that reaches the notice.
+
+    Written because the parametrised rows are strings, and a string is only as
+    good as the shell it was copied from: round 1's R1-1 found the zsh row
+    pinned a line zsh never prints, and round 2's R2-1 found the whole test had
+    only ever driven `-c` forms, so a SCRIPT at a long path — the form whose
+    prefix is a path rather than a shell name — was never exercised at all.
+
+    So this drives three shapes per shell:
+
+    * `-c <missing>` — the shell names itself as the prefix.
+    * `<interpreter> <script at a >64-character path>` — the prefix is a PATH.
+      The path is built by ``tmp_path`` rather than hard-coded, so it is as long
+      as the platform's temp root makes it, and the row asserts the length it
+      actually got rather than assuming one.
+    * `-c` nested where the shell has a different context form: zsh's function
+      context prints no line number at all, and bash's `exec` builtin inserts a
+      segment between the shell and the name.
+
+    The shells are probed through ``shutil.which`` rather than assumed at fixed
+    ``/bin`` paths (review R2-2): a host whose zsh is ``/opt/homebrew/bin/zsh``
+    was skipped silently before, and ``assert exercised`` only caught the case
+    where nothing was probed at all. The assertion is on the COMMAND the
+    reduction names, not on the wording, so a shell that changes its message
+    fails here rather than silently switching the notice off.
+    """
+    missing = "lop-no-such-tool-xyz"
+
+    # A directory deep enough that the script's own path clears the 64-character
+    # bound R2-1 was about, built under tmp_path so it is a real path on this
+    # machine rather than a fixture string. `mkdir` with a long name rather than
+    # a loop of short ones: one component is enough and it keeps the path legible
+    # in a failure message.
+    deep = tmp_path / ("probe-" + "x" * 60)
+    deep.mkdir()
+    script = deep / "probe.sh"
+    script.write_text(f"{missing}\n", encoding="utf-8")
+    assert len(str(script)) > 64, f"the long-path row needs a long path, got {len(str(script))}"
+
+    exercised: list[str] = []
+    for name in ("bash", "zsh", "dash", "ksh", "sh", "tcsh"):
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        invocations: list[list[str]] = [[resolved, "-c", f"{missing} --help"]]
+        if name in ("bash", "zsh", "dash", "ksh", "sh"):
+            invocations.append([resolved, str(script)])
+        if name == "bash":
+            invocations.append([resolved, "-c", f"exec {missing}"])
+        if name == "zsh":
+            invocations.append([resolved, "-c", f"f() {{ {missing} --help; }}; f"])
+
+        for argv in invocations:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, check=False, timeout=30
+            )
+            if completed.returncode == 0 or not completed.stderr.strip():
+                continue  # not a shell that reports it this way; the probe moves on
+            match = builtin._MISSING_TOOL_SIGNATURE.search(completed.stderr)
+            assert match is not None, f"{' '.join(argv)} line did not match: {completed.stderr!r}"
+            assert builtin._missing_tool_name(match) == missing, (
+                " ".join(argv),
+                completed.stderr,
+            )
+            exercised.append("::".join(argv))
+
+    # A host with none of these is not a host this harness runs on, and a test
+    # that silently exercised nothing would be the same class of defect as the
+    # row it replaced.
+    assert exercised, "no shell on this host was exercised"
+    assert any("probe.sh" in item for item in exercised), "the long-path script form did not run"

@@ -347,6 +347,51 @@ class TestTheDottedSpellingReachesTheSameLadder:
         assert supported_efforts("claude-opus-4.20250514") == ()
 
 
+class TestTheRadientRouterLadder:
+    """The unrankable ``auto`` sentinel's behaviour across all three rung helpers.
+
+    ``auto`` is deliberately NOT in :data:`EFFORT_ORDER` -- it is not a depth, it
+    delegates the level to the server -- so every helper that ranks a rung has to
+    have a defined answer for it. These are those answers, pinned once for the
+    Radient router ladder (``configure.ROUTER_EFFORT_LADDERS``) rather than
+    discovered by whichever call site happens to exercise them first.
+    """
+
+    #: The ladder the Radient router route builds, spelled here so the assertions
+    #: read as the exact tuple the source ships.
+    LADDER = ("auto", "low", "medium", "high")
+
+    def test_the_cycle_moves_up_out_of_the_sentinel(self) -> None:
+        """A press on the dial from ``auto`` steps to ``low`` -- the sentinel is
+        the floor of the cycle (index 0), and ``next_effort`` uses ``index+1``,
+        which is safe on an unrankable member."""
+        assert next_effort(self.LADDER, "auto") == "low"
+
+    def test_a_bare_press_starts_on_a_real_rung(self) -> None:
+        """Nothing selected starts on ``medium`` -- a real rung, never ``auto``,
+        for the same reason ``none`` is skipped: the discovery press must land on
+        a depth, not on a delegation it cannot see."""
+        assert next_effort(self.LADDER, None) == "medium"
+
+    def test_the_clamp_keeps_the_sentinel_because_the_route_accepts_it(self) -> None:
+        """``auto`` is a MEMBER of this ladder, so a carried ``auto`` is kept
+        rather than clamped away -- the membership check runs before the ranking
+        that skips unrankable words."""
+        assert resolve_effort_in(self.LADDER, "auto", "auto") == "auto"
+
+    def test_an_off_vocabulary_request_falls_back_to_the_ladder_default(self) -> None:
+        """A typo clamps to the ladder's own default, ``auto`` -- which the route
+        accepts, so the fallback is a real answer rather than a dropped level."""
+        assert resolve_effort_in(self.LADDER, "auto", "turbo") == "auto"
+
+    def test_a_rankable_request_is_kept_or_clamped_to_a_real_rung(self) -> None:
+        """A real requested level is honoured; from a real level the clamp skips
+        the unrankable ``auto`` and lands on another real rung."""
+        assert resolve_effort_in(self.LADDER, "auto", "high") == "high"
+        # `xhigh` is not on this ladder; the nearest rankable rung is `high`.
+        assert resolve_effort_in(self.LADDER, "auto", "xhigh") == "high"
+
+
 class TestClampingAgainstAnExplicitLadder:
     """``resolve_effort_in`` — the clamp a caller aims at its OWN ladder.
 

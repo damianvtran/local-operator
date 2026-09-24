@@ -287,6 +287,58 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.ANY,
         desktop_destination="session.fork",
     ),
+    # THE ARCHIVE PAIR AND THE DELETE, in the session-transition family because
+    # that is what they are: `/archive` changes whether the conversation is
+    # OFFERED, `/unarchive` changes it back, `/delete` ends it for good.
+    #
+    # NO ECHO ON ANY OF THE THREE, `/stop`'s rule: the receipt names the state
+    # that ended up in force — and, for `/delete`, what survived — which is
+    # strictly more than the typed word, and nothing here reaches the model.
+    #
+    # `/archive` takes no argument and acts on the CURRENT session, because
+    # that is the only session a terminal is standing in. Archiving another
+    # conversation by name is a bulk/browser gesture and deliberately not built
+    # (see the design record's "what this does not do"); the picker's archived
+    # list is where a user goes to find them again.
+    SlashCommand(
+        "archive",
+        # Kept short for the reason `/model` records: the description column
+        # wraps past ~55 cells and renders a phantom command name in `/help`.
+        # 41 cells, and it names the way BACK rather than the way in, because
+        # the way back is what a user who has just hidden a conversation needs.
+        "Hide from the lists, still resumable by id",
+        desktop_destination="sessions.archive",
+    ),
+    # OFFERED ONLY WHILE THE CURRENT SESSION IS ARCHIVED — the one command in
+    # this registry whose presence depends on session state, filtered out of the
+    # suggestion list by the app (`OperatorApp._slash_suggestions`). Typed when
+    # it does not apply it answers with a sentence rather than silence, which is
+    # what keeps a user who learned the word elsewhere from reading the refusal
+    # as a bug.
+    SlashCommand(
+        "unarchive",
+        "Show this conversation in the lists again",
+        desktop_destination="sessions.unarchive",
+    ),
+    # THE DANGER CONFIRMATION IS A TYPED WORD, not a picked row: `/delete`
+    # explains what will be removed and the user repeats the command with `yes`.
+    # The argument list is an OFFER beside that (`ArgumentMode.OPTIONAL`, like
+    # `/stop`), carrying the one word that completes the confirmation — and it
+    # is what lets the picker PAINT the command as dangerous: the row is marked
+    # ``alert`` and ``delete`` joins ``Editor.DESTRUCTIVE_COMMANDS``, so choosing
+    # it fills the word and a second Enter runs it rather than one Enter
+    # deleting a conversation. `WORD` is the desktop's half: `/delete yes` on the
+    # wire is this command and its argument rather than prose, so the desktop's
+    # own confirm control is what authorises it.
+    SlashCommand(
+        "delete",
+        "Delete this conversation for good; asks to confirm",
+        arguments=ArgumentMode.OPTIONAL,
+        # The word is the confirmation token this command owns. See the comment
+        # above for why the list holds exactly one row.
+        argument_shape=ArgumentShape.WORD,
+        desktop_destination="sessions.delete",
+    ),
     # The switch receipt names the old AND new label — strictly more than the
     # typed selector, which may have been elided to `default`.
     SlashCommand(
@@ -666,7 +718,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # next launch will use. `default` is the half a list cannot teach on its
         # own, because a user has to suspect it exists to go looking for it —
         # the same job `PERSIST_HINT` does on `/model`.
-        "Show or set tool approval mode; add default to keep it",
+        "Show or set tool approval mode for this session",
         arguments=ArgumentMode.OPTIONAL,
         # Trailing text is the mode name, a value this command owns.
         prefixes_text=True,

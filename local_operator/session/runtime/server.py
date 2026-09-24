@@ -51,18 +51,40 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, cast
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from local_operator.harness.types import ImageContent
 
+from local_operator.harness.approval import (
+    AUTHORITY_OPS,
+    admit_increasing,
+    frame_authority,
+    handshake_proof,
+    handshake_proof_ok,
+    is_wire_hex,
+    operator_nonce,
+    request_proof_ok,
+    signature_target,
+)
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
+from local_operator.operator import report_operator_authority
+from local_operator.operator import verify as operator_verify
+from local_operator.operator.trust import (
+    ANCHOR_REFRESH_S,
+    AnchorCache,
+    AnchorLoad,
+    OperatorAnchor,
+    anchor_path,
+    device_is_revoked,
+)
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.publication import PublicationGate
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
@@ -73,6 +95,7 @@ from local_operator.session.runtime.types import (
     EVENT_MUTE_DROP_TYPES,
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
+    OPERATOR_SIGNATURE_CAPABILITY,
     ClientKind,
     ClientLocality,
     SessionRecord,
@@ -181,6 +204,16 @@ async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["I
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
 
+#: How long the per-connection sync task waits for the ON-LOOP frontend bind
+#: before falling back to the off-loop one (``_serve_frontend_sync``).
+#:
+#: 100 ms, from the healthy owner's own distribution rather than a guess: a
+#: healthy owner binds in 4.7-5.0 ms p50 and at most ~15 ms p95, so a healthy attach
+#: never reaches this grace and its bytes on the wire are unchanged. An owner
+#: busy inside a synchronous step of a turn is the case it exists for, and there
+#: the wait has no ceiling of its own — the parked hop is what measured 15.0 s.
+_ONLOOP_BIND_GRACE_S = 0.1
+
 
 def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
     """Encoded bytes this frame occupies on the wire, with the delimiter counted.
@@ -245,6 +278,36 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
     # real value back including its own quotes.
     return _frame_line_bytes(probe) - 2
+
+
+def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
+    """The in-flight stream one queued frame carries a fragment of, or ``None``.
+
+    Compaction folds ADJACENT frames of the same stream into one, and the only
+    thing that decides "same stream" is this key. Two families are delta-grade
+    and mergeable:
+
+    * ``message_update`` — the assistant's visible text, keyed by the message it
+      accumulates into;
+    * ``reasoning_delta`` — the model's private reasoning, keyed by the message
+      it belongs to (the field is ``message_id``, not a whole ``message``: a
+      reasoning frame carries no message, which is also why it is cheap to
+      merge).
+
+    The FAMILY is part of the key, so a text fragment and a reasoning fragment
+    can never fold together — merging the model's thinking into the answer
+    being painted would corrupt the transcript on the viewer's screen, and the
+    two arrive interleaved.
+
+    Everything else returns ``None`` and is left alone: a frame that must not
+    merge is never compared to its neighbour at all.
+    """
+    kind = payload.get("type")
+    if kind == "message_update":
+        return f"message_update:{(payload.get('message') or {}).get('id') or ''}"
+    if kind == "reasoning_delta":
+        return f"reasoning_delta:{payload.get('message_id') or ''}"
+    return None
 
 
 #: Line bytes the shedding stage deliberately leaves UNSPENT.
@@ -876,6 +939,72 @@ async def _maybe_await(result: Any) -> Any:
     return result
 
 
+#: Every control op that can reach an authority-INCREASING sink (issue #1310).
+#:
+#: The set itself lives in ``harness/approval.py`` beside the class predicate,
+#: because the CONSOLE reads it too (it presents the capability on exactly these
+#: frames) and a set that drifted between the two ends would leave a route the
+#: client believes it authorised and the server believes is ordinary. What is
+#: asserted here is the correspondence with THIS module's dispatch: every op
+#: whose dispatch reaches ``SessionHandle.slash`` / ``slash_images`` /
+#: ``run_slash_authoritative`` / ``approval_answer`` — the only ways to
+#: ``_approvals_slash``, ``_set_approve_all`` or a card approval — must appear in
+#: the set, and ``test_approval_authority_seam.py`` re-derives that group from
+#: this file's source so a route added in a new op fails the suite instead of
+#: shipping an unguarded way to loosen a running gate.
+_AUTHORITY_OPS = AUTHORITY_OPS
+
+#: How long a minted challenge stays usable. Short on purpose (revision 2, §2.3
+#: spells 30 s): the window between a surface asking for a challenge and signing
+#: it is one human gesture, and a long window is a long time for a captured
+#: challenge to be spent by somebody else. Expiry is checked at USE, not at mint,
+#: so a challenge that outlives a slow prompt is refused rather than silently
+#: honoured — the surface asks again, which costs one more prompt only in the
+#: case where the first one took half a minute.
+_CHALLENGE_TTL_S = 30.0
+
+#: How many challenges one connection may hold. Bounded because minting is an
+#: ordinary op and therefore unauthenticated beyond the record key: without a
+#: cap, a same-uid child could mint challenges in a loop and grow this runtime's
+#: memory without limit. Eight is far more than a real surface needs (it asks for
+#: one per action, signs it, and consumes it).
+_MAX_CHALLENGES_PER_CONN = 8
+
+#: Bound on unspent challenges for the WHOLE runtime, not per connection.
+#:
+#: The per-connection cap alone is not a bound on a subject that can dial freely:
+#: the session record's ``control_key`` — which is what the very predicate this op
+#: exists for refuses to accept as authority — is readable by the subject, so it
+#: can open as many connections as it likes and hold the per-connection maximum on
+#: each (agent review round 6, R6-4). The design already accepts denial rather than
+#: escalation from that subject, so this is not an escalation either; it is the
+#: difference between a bounded and an unbounded one. Set well above any real
+#: surface's need — one human gesture is one challenge — and expired entries are
+#: pruned before it is consulted, so an idle runtime never refuses a real caller.
+_MAX_LIVE_CHALLENGES = 64
+
+#: How long a runtime may keep trusting the revocation list it read at first need.
+#:
+#: THE SAME OBJECT THE PRODUCT QUOTES, not a second literal that happens to agree
+#: (agent review round 7, M-2). ``trust.ANCHOR_REFRESH_S`` is what the design doc
+#: and `lop operator devices --revoke`'s receipt state to an operator, so a runtime
+#: enforcing its own copy could tell someone a window it does not honour — a
+#: security claim outrunning the code, which is the class this round exists to
+#: remove. Bound here as a module attribute as well, because a test shrinks the
+#: window to zero by patching ONE name and this is the name the cache is built from.
+_ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
+
+#: How long a verified device certificate is remembered. The certificate is
+#: checked lazily and per certificate string; a TTL rather than a permanent cache
+#: because the anchor's revocation list can change under a long-running session.
+_DEVICE_CERT_TTL_S = 300.0
+
+#: Bound on the device-certificate cache. Keyed by an attacker-chosen string, so
+#: an uncapped map is a memory leak with an on-demand trigger; clearing wholesale
+#: on overflow is enough, because the entries are pure recomputable answers.
+_MAX_CACHED_DEVICE_CERTS = 32
+
+
 def _accepts_kw(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes the keyword ``name``.
 
@@ -1014,6 +1143,35 @@ class _ClientConn:
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
+    #: The per-connection operator proof material (issue #1310). The client
+    #: offers a NONCE in its auth frame; this runtime answers with a random salt
+    #: and a proof over both, and later demands the same construction on an
+    #: authority-increasing request. Neither value is secret, and both die with
+    #: the connection, so a proof seen on the wire is worthless on another one.
+    #: Empty when the client offered no nonce — an old console, or one that
+    #: holds no capability for this runtime — which is the fail-closed state.
+    operator_nonce: str = ""
+    operator_salt: str = ""
+    #: The operator-signed device certificate this connection declared in its
+    #: auth frame, or "" when it declared none. NOT yet verified at the point it
+    #: is stored — ``_device_cert_point`` is what resolves it under the anchor,
+    #: with the TTL cache and the revocation check — and every reader goes
+    #: through that, so an unverified string here can only change an answer to
+    #: ``False``. Kept per connection rather than per frame because the report
+    #: needs it before a frame arrives; the SIGNATURE still arrives on the frame
+    #: that claims authority, and is judged there.
+    device_certificate: str = ""
+    #: The per-action challenges this connection has been minted and not yet
+    #: spent, keyed by ``(action, request_id)``. Per CONNECTION for the same
+    #: reason the nonce is: a challenge is authority-bearing material, and one
+    #: minted for a connection must not be spendable on another (a relay, or an
+    #: attacker that merely read the record, would otherwise be able to have a
+    #: challenge minted here and present the signature it harvested there).
+    #: Consumed by ``pop`` on the first frame that uses it, which is the replay
+    #: defence; expired entries are pruned on the next mint so a client that asks
+    #: and never signs cannot grow this map
+    #: (``_MAX_CHALLENGES_PER_CONN`` bounds it either way).
+    operator_challenges: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
     #: This viewer negotiated ``display-history-audit-v1`` and can therefore be
     #: sent the audit fields on a display page. A property of the CONNECTION,
     #: so it is read where the connection is known and never inferred from the
@@ -1058,6 +1216,19 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    #: This connection's CURRENT bind generation, and the mechanism that keeps a
+    #: late on-loop bind from relaying into a connection the off-loop fallback
+    #: already bound (``_serve_frontend_sync``).
+    #:
+    #: An attach that outlasts ``_ONLOOP_BIND_GRACE_S`` is served off-loop, but
+    #: the on-loop bind it abandoned is SHIELDED and cannot be cancelled — it
+    #: still lands in the store and still calls the relay. Without a stamp the
+    #: same connection would see every delta twice, which is not a slow frame but
+    #: a wrong one: the client's exact-``+1`` check reads the duplicate as a gap
+    #: and redials. The generated callback compares the token it was stamped with
+    #: against this field, so bumping it retires every callback created before the
+    #: bump — the fallback's own included, if a THIRD attempt ever supersedes it.
+    bind_token: int = 0
     #: The chain of ops this connection has ADMITTED: each waits for the one
     #: before it, so ordering is preserved, and none of them parks the reader —
     #: which is what lets a ``ping`` be answered while a mutation is still in
@@ -1219,7 +1390,60 @@ class RuntimeServer:
         *,
         kind: str = "tui",
         projection_sink: ProjectionSink | None = None,
+        operator_cap: bytes | None = None,
+        operator_anchor: OperatorAnchor | None = None,
     ) -> None:
+        #: The capability this runtime demands for an authority-INCREASING
+        #: control request, or ``None`` when nothing handed one over (issue
+        #: #1310). Minted by whichever process started this runtime — the
+        #: detached spawn hands it over on an inherited descriptor, the TUI
+        #: passes the one it minted for its own in-process gate — and held ONLY
+        #: here. It is deliberately not a ``SessionRecord`` field and not on the
+        #: handle's projection: everything published in the record is readable
+        #: under this same uid, which is the defect this exists to close.
+        #:
+        #: ``None`` is a supported, fail-closed state rather than a bug: a
+        #: runtime started by an older console, or by a background spawn with no
+        #: console at all, keeps serving every ordinary operation and refuses
+        #: every loosening (see ``_authority_admitted``).
+        self._operator_cap = operator_cap
+        #: The operator ANCHOR, read once and pinned in memory (revision 2).
+        #: ``AnchorCache`` caches the FAILED load as well as the successful one,
+        #: which is the point: re-reading per frame would let a same-uid subject
+        #: race the read, and an attacker who could make the anchor unreadable
+        #: could otherwise force a disk read on every frame it sends.
+        #:
+        #: ``operator_anchor`` is the INJECTION SEAM and mirrors ``operator_cap``:
+        #: a caller that has already resolved an anchor (or a test that must not
+        #: write to the root-owned path, which by construction it cannot) hands
+        #: one in. It is a CONSTRUCTOR ARGUMENT rather than an environment lookup
+        #: on purpose — an env-var anchor is the substitution attack this whole
+        #: design exists to prevent, so the seam is a value the caller passes and
+        #: never a name the process reads (see
+        #: ``test_the_anchor_path_cannot_be_redirected``).
+        self._anchor_cache = (
+            AnchorCache(
+                load=AnchorLoad(
+                    anchor=operator_anchor,
+                    path=anchor_path(),
+                    root_owned=True,
+                    reason="injected by the caller",
+                    exists=True,
+                )
+            )
+            if operator_anchor is not None
+            else AnchorCache(refresh_s=_ANCHOR_REFRESH_S)
+        )
+        #: Verified device certificates, by certificate string, with a TTL — see
+        #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
+        #: ``(point, deadline, device_id)``: the id is kept so REVOCATION can be
+        #: re-checked on a cache hit — see the method, and R6-1.
+        self._device_certs: dict[str, tuple[bytes | None, float, str]] = {}
+        #: Every unspent operator challenge in this runtime, by challenge string,
+        #: with its deadline — the AGGREGATE bound the per-connection maximum
+        #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
+        #: consume, so it never needs a timer and never outlives what it counts.
+        self._live_challenges: dict[str, float] = {}
         #: Live state mirrored into the discovery record. Held here rather
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
@@ -1240,6 +1464,13 @@ class RuntimeServer:
         #: handle: this is the runtime's own decision to leave, which no handle
         #: predicate knows.
         self._leaving = ""
+        #: The update window this runtime has opened (``SessionRecord.updating``),
+        #: kept here so :meth:`note_updating` can dedupe like :meth:`note_leaving`.
+        #: The HANDLE owns the window's admission behaviour and its lock; this is
+        #: only the record's copy, written from the one place that owns the record.
+        self._updating = ""
+        #: The pair a window FAILED to move to, for :attr:`SessionRecord.update_failed`.
+        self._update_failed = ""
         #: Subagent trajectory counts, ``None`` until the handle answers the
         #: probe at least once. Starting at ``None`` rather than 0 is what
         #: makes a runtime whose handle cannot report indistinguishable from
@@ -1294,6 +1525,13 @@ class RuntimeServer:
         #: for tests and for the "did a headless runtime pay for a fold?"
         #: question; 0 after a lifetime with no daemon client is the claim.
         self.projection_sinks_built: int = 0
+        #: How many viewers this runtime attached by binding OFF the session's
+        #: loop because the on-loop bind missed ``_ONLOOP_BIND_GRACE_S``.
+        #: Observable for the same reason ``projection_sinks_built`` is: it is
+        #: the term that says whether the grace is mistuned for a given host. A
+        #: healthy owner answers in one digit of milliseconds, so a nonzero count
+        #: on an idle session is the signal that the grace (or the host) moved.
+        self.frontend_off_loop_binds: int = 0
         # What build this runtime is running, stamped once at construction:
         # the answer cannot change while the process lives, and the record is
         # the channel an attach client reads it from before it dials.
@@ -1322,6 +1560,13 @@ class RuntimeServer:
             conversation_name=seed.conversation_name,
             cwd=seed.cwd,
             model_label=seed.model_label,
+            # THE ONE-SHOT "an update applied" FACT, and this is the only writer
+            # that can publish it: the marker the outgoing runtime left was
+            # consumed at boot (``process._consume_update_marker``) BEFORE this
+            # server existed, so it waits on the handle and is seeded onto the
+            # record here. ``""`` for every ordinary boot, which is also what a
+            # runtime too old to carry the attribute reads as.
+            updated=getattr(handle, "applied_update", "") or "",
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
             # Independent capabilities, each gated by its own condition. The
@@ -1354,6 +1599,18 @@ class RuntimeServer:
                 # breaks the attach outright. See
                 # ``DISPLAY_HISTORY_AUDIT_CAPABILITY``.
                 + (["display-history-audit-v1"] if hasattr(handle, "history_page") else [])
+                # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
+                # always VERIFY an operator or device signature: the anchor is a
+                # file it reads, and the public half is all verification needs.
+                # Deliberately NOT gated on the anchor being installed, which
+                # would make a host mid-onboarding look like a host that cannot
+                # accept a signature at all — a client that then declined to ask
+                # for a challenge would report "not supported" rather than "not
+                # yet installed", and the refusal copy tells the reader to
+                # install it. An uninstalled anchor fails the verification
+                # (``signature_verdict`` returns False for a signature with no
+                # anchor to place it against), which is the honest refusal.
+                + [OPERATOR_SIGNATURE_CAPABILITY]
             ),
             # A runtime is born with no terminal watching it. Stamped at
             # construction rather than left to the first transition, because
@@ -1951,6 +2208,24 @@ class RuntimeServer:
             # signalled runtime with the build sentence (agent review round 4,
             # MAJOR-1).
             "leaving": leaving,
+            # THE UPDATE WINDOW, additive like ``draining`` and ``leaving`` above,
+            # and it is the key that makes an IDLE handover speakable at all: that
+            # rung sends ``draining=False``, so before this key a viewer had
+            # nothing to paint while the one handover that QUEUES messages was in
+            # flight. ``""`` for every departure that is not a window, and for
+            # every runtime older than this key.
+            #
+            # READ OFF THE RECORD rather than taken as an argument, and that is a
+            # correction rather than a shortcut. A parameter here would be a second
+            # copy of a field the server already holds, and — worse — a caller whose
+            # ``announce_retiring`` predates the parameter would take a TypeError
+            # inside the ``except Exception`` that guards a viewer's writer, so the
+            # whole announcement would be swallowed by the failure path meant for
+            # something else (measured: ``test_process_refresh``'s fake registrant
+            # lost its only frame that way). The window is published on the record
+            # BEFORE the announce — that ordering is the window's own contract — so
+            # the record is the one place both ends can read it from.
+            "updating": self._record.updating,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
@@ -2220,6 +2495,14 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
+        # HOW STRONG THE CAPABILITY'S BOUNDARY IS ON THIS HOST, reported rather
+        # than assumed, and reported HERE so every host says it exactly once (the
+        # helper latches): on Linux with ``ptrace_scope=0`` and on Windows a
+        # same-uid process can read this one's memory, so there the capability
+        # raises the cost of the attack instead of closing it. See
+        # ``harness/approval.operator_cap_guarantee`` and the residual section of
+        # ``docs/design/approval-authority.md``.
+        report_operator_authority()
         try:
             # Port 0: the OS picks; the record carries the number. Binding
             # loopback only is the security invariant of the whole design.
@@ -2517,10 +2800,75 @@ class RuntimeServer:
                 logger.debug("runtime receipt reconciliation deferred", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
+        # THE TWO MEASURED FACTS THIS BEAT PUBLISHES, and the clock they are
+        # measured against: ``previous`` is (wall, this process's own CPU time)
+        # as of the last beat, so the pair below separates a runtime that burned
+        # its core from one the host descheduled. Both are read in-process — no
+        # ``ps``/``lsof`` fork per tick, which is the lesson
+        # ``control.py`` records at 201 forks per probe.
+        previous = (time.monotonic(), time.process_time())
         while not self._closed.is_set():
-            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
-            if self._closed.is_set():
-                return
+            # THE WHOLE CYCLE IS GUARDED, INCLUDING THE STAMP, and this is the
+            # previous change's own defect one plane over: ``_watch_stall_beats``
+            # exists because a reporter that dies takes the plane's evidence with it
+            # (the bound fires one deadline later on a healthy runtime, and a
+            # ``faulthandler`` dump cannot show it — a dead TASK has no thread and no
+            # frame). The WORKLOAD tick got that supervision in #1419; this tick, the
+            # SERVING plane's only sign of life, was started as a bare
+            # ``ensure_future`` and every statement before the record write below was
+            # unguarded — so a raise from ``beat`` ended the serving plane's reporter
+            # for the life of the process, with nothing observed, nothing logged and
+            # nothing recorded. The dump would then show what an idle healthy process
+            # shows, which is exactly the reading the census cannot settle.
+            #
+            # ``CancelledError`` IS NOT CAUGHT and needs no arm of its own: it is a
+            # ``BaseException`` since 3.8, so a shutdown (``close`` cancels this task)
+            # still propagates while everything else is logged, RECORDED through
+            # ``note_tick_death`` — the instrument that names a dead reporter in the
+            # dump — and left running. The tick is NOT re-stamped on the failure path,
+            # deliberately: a stamp would claim this plane reported when it did not,
+            # and the honest fail-safe is the one #1419 states — a plane whose
+            # reporter is truly gone goes unreported and the bound fires on its
+            # deadline, with the reason in the dump rather than one leg quietly
+            # switched off.
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                if self._closed.is_set():
+                    return
+                previous_wall, previous_cpu = previous
+                moment = (time.monotonic(), time.process_time())
+                lag_s, cpu_since_beat_s = moment[0] - previous_wall, moment[1] - previous_cpu
+                previous = moment
+                # PROGRESS, REPORTED TO THE STALL BOUND. This loop is the serving
+                # plane's own sign of life, and it carries ONE stamp — the workload's
+                # is its own (``process._beat_stall_watchdog``). The timer is
+                # re-armed for the earliest of the two deadlines, so a tick here
+                # cannot mask a parked workload loop; that is the whole point of
+                # tracking them apart (see ``stall_watchdog``). Deliberately before
+                # the record write below rather than after it: the bound must be
+                # restarted by THIS LOOP HAVING RUN, not by the write having
+                # succeeded — a failed write is self-healing and must not look like a
+                # stall.
+                stall_watchdog.beat(stall_watchdog.SERVING)
+            except Exception:  # noqa: BLE001 — the guard's job is to keep the plane reported
+                logger.warning(
+                    "runtime heartbeat: the SERVING plane's tick failed; the loop keeps "
+                    "running so the plane is still reported, and the death is recorded in "
+                    "the stall dump",
+                    exc_info=True,
+                )
+                # THROUGH THE TOTAL WRITE (``process._record_tick_death``'s sibling
+                # contract): a raise from here would end the very supervision this arm
+                # exists to keep, and this write reaches the dump's own path lookup.
+                try:
+                    stall_watchdog.note_tick_death(
+                        stall_watchdog.SERVING,
+                        "the serving plane's heartbeat raised; the loop continued, so the "
+                        "plane is reported but this tick stamped nothing",
+                    )
+                except Exception:  # noqa: BLE001 — a diagnostic never ends a reporter
+                    logger.debug("could not record the serving tick's death", exc_info=True)
+                continue
             try:
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
@@ -2581,11 +2929,61 @@ class RuntimeServer:
                         # silently dropping the bit and making a working
                         # session broadcast-invisible.
                         started=self._started,
+                        beat_lag_s=lag_s,
+                        cpu_since_beat_s=cpu_since_beat_s,
                     )
             except Exception:  # noqa: BLE001 — a missed heartbeat is self-healing
                 logger.debug("runtime heartbeat failed", exc_info=True)
 
     # -- connections -----------------------------------------------------------
+
+    def _frontend_relay(self, conn: _ClientConn, token: int) -> Callable[[Any], None]:
+        """A canonical-delta relay STAMPED with the bind generation it belongs to.
+
+        One factory for both bind attempts (on-loop and off-loop) so the two
+        cannot drift in what they put on the wire — the frame is built here, in
+        the only place that builds it.
+
+        The stamp is the whole mechanism behind ``_ClientConn.bind_token``: an
+        attach that outlives the grace is served off-loop, but the shielded
+        on-loop bind it abandoned still lands in the store and still calls this
+        callback. Its token is stale by then, so it returns early — without the
+        check the SAME connection would receive every delta twice, and a client
+        reading an exact-``+1`` stream treats a duplicate as a gap and redials.
+        """
+
+        def on_update(update: Any) -> None:
+            if conn.bind_token != token:
+                return
+            payload = update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+            self._relay_frontend_to(conn, payload)
+
+        return on_update
+
+    async def _bind_with_grace(self, bind_task: asyncio.Task[Any]) -> Any | None:
+        """The on-loop bind's subscription if it answers inside the grace, else ``None``.
+
+        ``None`` means HAND OFF, never "failed": the caller binds off-loop
+        instead (``_serve_frontend_sync``), which is the whole point of the grace.
+        A genuine bind failure is NOT swallowed here — it is re-raised out of
+        ``bind_task.result()`` so the caller drops the connection exactly as it
+        always did.
+
+        A METHOD RATHER THAN AN INLINE ``wait_for`` because of the second exit.
+        ``wait_for`` expiring cancels the SHIELD it created, not the task it
+        shielded, so when the timeout's own callback runs before the shield's
+        completion callback the awaiting task is told the grace expired while
+        ``bind_task`` is ALREADY DONE and holding a live subscription. Handing off
+        there would bind this connection twice and then release the landed one,
+        and it would mark a HEALTHY owner window-less — the display window being
+        the one thing the on-loop path carries that the off-loop one cannot.
+        """
+        try:
+            return await asyncio.wait_for(asyncio.shield(bind_task), _ONLOOP_BIND_GRACE_S)
+        except TimeoutError:
+            if bind_task.done() and not bind_task.cancelled():
+                return bind_task.result()
+            return None
 
     async def _serve_frontend_sync(
         self,
@@ -2596,7 +2994,7 @@ class RuntimeServer:
         """Bind one viewer and queue its canonical ``frontend_sync`` frame.
 
         A per-connection task rather than inline work in ``_on_connection``; the
-        reason it is deferred at all is at its creation site. It owns two
+        reason it is deferred at all is at its creation site. It owns three
         invariants:
 
         * **The frame order is the frame order it always was.** Registration and
@@ -2612,23 +3010,25 @@ class RuntimeServer:
           exception in the callback while the connection stayed registered, never
           read and never dropped. As a task it has an owner: the failure drops the
           connection and releases its subscription.
+        * **A busy owner does not hold the bind.** The on-loop bind is given
+          ``_ONLOOP_BIND_GRACE_S``; past it this task binds OFF-LOOP through
+          ``subscribe_frontend_nowait`` and queues the sync without a display
+          window. What that buys is the whole point of the path — measured 15.0 s
+          of control attach against a blocked owner, for a bind whose register
+          half never needed that loop at all.
 
         ``subscribe_frontend`` arrives as a PARAMETER, resolved and
         capability-checked at the creation site: dropping a connection whose
         handle cannot bind belongs on the connection path, where the socket still
-        exists to be closed, not inside a task.
+        exists to be closed, not inside a task. The off-loop capability is read
+        here instead, and its ABSENCE is not a refusal: a single-plane handle (the
+        TUI kind) simply keeps today's behaviour and waits the hop out.
         """
         # Declared before the ``try`` so the failure path can hand the bind task
         # to ``_release_when_landed`` even when the raise happened before it was
         # created (a capability check, a sync-payload build).
         bind_task: asyncio.Task[Any] | None = None
         try:
-
-            def on_update(update: Any) -> None:
-                payload = (
-                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-                )
-                self._relay_frontend_to(conn, payload)
 
             from local_operator.session.frontend_state import (
                 FrontendSubscription,
@@ -2669,16 +3069,19 @@ class RuntimeServer:
             # other connection keep flowing for the same reason, because the
             # wait is on this task rather than on the runtime's loop.
             #
-            # AND THE HOP IS DELIBERATELY LEFT UNBOUNDED, which reads at first
-            # like the opposite of a fix. A budget belongs to a CALLER that is
-            # waiting for an answer; the only caller here is a task nothing
-            # awaits, so a budget buys it nothing and costs a live viewer its
-            # connection (``mobile/tui_handle._on_app``'s unbounded branch
-            # carries that measurement: a viewer dialled into a busy terminal
-            # was welcomed and then killed at 10.01 s with ``owner exited``
-            # while the app was merely busy). The bind therefore lands late
-            # instead, and the interactive budget stays where a caller is
-            # actually waiting.
+            # THE HOP IS BOUNDED NOW, BUT BY A FALLBACK TRIGGER RATHER THAN BY A
+            # FAILURE BUDGET, and the difference is what keeps the old reasoning
+            # intact. A budget belongs to a CALLER waiting for an answer; the only
+            # caller here is a task nothing awaits, so letting the bind FAIL at a
+            # deadline buys nothing and costs a live viewer its connection
+            # (``mobile/tui_handle._on_app``'s unbounded branch carries that
+            # measurement: a viewer dialled into a busy terminal was welcomed and
+            # then killed at 10.01 s with ``owner exited`` while the app was
+            # merely busy). Exceeding ``_ONLOOP_BIND_GRACE_S`` therefore changes
+            # WHO binds, never whether: past the grace this task binds off-loop
+            # and the abandoned hop is released as it lands (``bind_token``, then
+            # ``_release_when_landed``). A healthy owner answers in 4.7-5.0 ms
+            # p50, far inside the grace, so the path taken there is unchanged.
             #
             # The seam is SINGLE for both handle shapes, and that is why no hop
             # is added here: ``ServingSessionHandle.subscribe_frontend`` carries
@@ -2687,7 +3090,7 @@ class RuntimeServer:
             # ``session_loop`` is served inline by
             # ``_handle_call_on_session_loop``, so the TUI kind keeps the hop it
             # already had rather than gaining a second.
-            async def bind() -> Any:
+            async def bind(on_update: Callable[[Any], None]) -> Any:
                 outcome = (
                     subscribe_frontend(on_update, display_window=True)
                     if window_requested
@@ -2706,12 +3109,72 @@ class RuntimeServer:
             # subscriber the session keeps for the life of the process. That is
             # also what makes ``_drop_client``'s ordering — cancel this task, then
             # release the recorded subscription — safe rather than lucky.
-            bind_task = asyncio.ensure_future(bind())
+            bind_task = asyncio.ensure_future(bind(self._frontend_relay(conn, conn.bind_token)))
+            subscription: FrontendSubscription | None
+            bind_started = time.perf_counter()
             try:
-                subscription = cast(FrontendSubscription, await asyncio.shield(bind_task))
+                subscription = await self._bind_with_grace(bind_task)
             except asyncio.CancelledError:
                 self._release_when_landed(bind_task)
                 raise
+            # The grace's own measurement, logged on both hand-off branches
+            # below. It is what answers the design's rollout question — "is the
+            # fallback firing on healthy owners?" — from a production log, since
+            # a healthy owner answers in one digit of milliseconds (p50 4.7-5.0 ms
+            # measured) and would never appear here at all.
+            waited_ms = (time.perf_counter() - bind_started) * 1000.0
+            if subscription is None:
+                bind_off_loop = getattr(self._handle, "subscribe_frontend_nowait", None)
+                if not callable(bind_off_loop):
+                    # A single-plane handle keeps today's behaviour: wait the hop
+                    # out. The grace is then a delay and nothing else, which is
+                    # the honest cost of the only handle that cannot be served
+                    # this way (the TUI kind, whose subscribe goes through the
+                    # app's own loop).
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) and this handle has no "
+                        "off-loop bind — waiting it out",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
+                    subscription = await asyncio.shield(bind_task)
+                else:
+                    #: Counted as well as logged: the counter is the cheap signal
+                    #: a status host can read, the line is the one a human greps.
+                    self.frontend_off_loop_binds += 1
+                    logger.info(
+                        "session runtime: frontend bind for session %s missed the "
+                        "%.0f ms on-loop grace (%.1f ms) — binding off the session "
+                        "loop",
+                        self._record.session_id,
+                        _ONLOOP_BIND_GRACE_S * 1000.0,
+                        waited_ms,
+                    )
+                    # RETIRE THE ABANDONED ATTEMPT BEFORE IT REGISTERS. The bump
+                    # makes every callback stamped before it (the parked on-loop
+                    # bind's, when it lands) return early instead of relaying a
+                    # second copy of every delta into this connection.
+                    conn.bind_token += 1
+                    # ...and its subscription is released as it lands. Registered
+                    # BEFORE the off-loop call, not after: the released callback is
+                    # attached to ``bind_task`` either way, and doing it first means
+                    # a raise or a cancellation anywhere below cannot leave a
+                    # subscription nobody will receive.
+                    self._release_when_landed(bind_task)
+                    # A SECOND ``frontend_sync`` MAY ARRIVE ON THIS CONNECTION
+                    # LATER, and it is not this hand-off binding twice: a viewer
+                    # rehydrates itself at turn end through its own
+                    # ``frontend_sync`` RPC. What the token guard above rules out is
+                    # a DUPLICATE DELTA STREAM, which is what the client's
+                    # exact-``+1`` check reads as a gap (measured on the desk rig:
+                    # ``sync_seqs`` 5 then 46 on one attach, contiguous throughout).
+                    outcome = bind_off_loop(self._frontend_relay(conn, conn.bind_token))
+                    if inspect.isawaitable(outcome):
+                        outcome = await outcome
+                    subscription = cast(FrontendSubscription, outcome)
+            assert subscription is not None, "neither bind path produced a subscription"
             sync = subscription.sync
             # Trajectories are stripped here and re-fetched per job through
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
@@ -2850,15 +3313,17 @@ class RuntimeServer:
             logger.debug("bind-failure announcement write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
-        """Release a viewer subscription whose connection died MID-BIND.
+        """Release a bind's eventual subscription once nothing will receive it.
 
-        ``_drop_client`` cancels this connection's bind task, and the reason a
-        cancelled bind cannot leave a live subscriber is STRUCTURAL rather than
-        argued: the bind is shielded, so the cancel cannot abort it
-        half-registered (``_serve_frontend_sync``), and this runs on the
-        cancellation path to release whatever did register. ``_drop_client``'s
-        ordering follows from it — cancel first, then release the recorded
-        subscription, so nothing is released twice.
+        Two callers, one contract. ``_drop_client`` cancels this connection's
+        bind task, and the reason a cancelled bind cannot leave a live subscriber
+        is STRUCTURAL rather than argued: the bind is shielded, so the cancel
+        cannot abort it half-registered (``_serve_frontend_sync``), and this runs
+        on the cancellation path to release whatever did register. The off-loop
+        fallback reaches here having SUPERSEDED the same bind (``conn.bind_token``)
+        — the shielded attempt still lands, and its subscription is just as
+        unreachable. ``_drop_client``'s ordering follows from it — cancel first,
+        then release the recorded subscription, so nothing is released twice.
 
         A DONE-CALLBACK rather than an await, and the difference matters twice
         over. ``_drop_client`` runs from the reader loop and from shutdown, so
@@ -2951,6 +3416,34 @@ class RuntimeServer:
             if isinstance(raw_consumers, (list, tuple))
             else None
         )
+        # The client's half of the handshake (issue #1310). Only the SHAPE is
+        # checked here — a nonce is not a credential, and an ill-shaped one
+        # degrades to "this client asked for no handshake", which refuses rather
+        # than admits. Nothing is remembered across connections.
+        raw_nonce = frame.get("operator_nonce")
+        client_nonce = raw_nonce if is_wire_hex(raw_nonce) else ""
+        # The salt is minted per connection and only when there is a nonce to
+        # bind it to: a connection that will never be offered a proof does not
+        # need one minted.
+        server_salt = operator_nonce() if client_nonce else ""
+        # THE PAIRED-DEVICE DECLARATION (stage D). A relay says here that a phone
+        # has been paired with THIS machine, and the runtime verifies the
+        # certificate under the pinned anchor before it means anything — an
+        # UNVERIFIED string changes no behaviour, so a forged one is refused
+        # rather than denied service. Nothing crosses on it: the certificate is
+        # public data, and the private half that could make it useful is on the
+        # phone.
+        #
+        # It is DECLARED rather than derived from the frames because one report
+        # needs the answer before any frame arrives: whether this connection can
+        # carry out a loosening, which decides whether `/approvals` tells the
+        # phone it may switch the gate or tells it to find another surface
+        # (``_connection_may_loosen``).
+        raw_device = frame.get("operator_device")
+        device_certificate = (
+            raw_device if isinstance(raw_device, str) and 0 < len(raw_device) <= 4096 else ""
+        )
+
         if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
             writer.close()
             return
@@ -2992,6 +3485,9 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            operator_nonce=client_nonce,
+            operator_salt=server_salt,
+            device_certificate=device_certificate,
         )
         self._clients[id(writer)] = conn
         # A terminal arriving flips ``detached`` (round 1, U2: it was computed
@@ -3419,6 +3915,14 @@ class RuntimeServer:
             return
         self._detached = detached
         self._desktop_delivery = delivery
+        # WHEN the last viewer left, which is a different fact from THAT it did:
+        # the residency policy bounds how long (and how many) detached runtimes
+        # stay warm by evicting the least recently detached, and this is the one
+        # stamp that carries an order (``process._detached_at``,
+        # ``SessionRecord.detached_at``). Cleared on the 0->1 transition so a
+        # runtime being watched is not a keep-alive candidate — the reaper's own
+        # record read is the inverse of this field.
+        self._record.detached_at = time.time() if detached else None
         self._republish()
         if detached and self._pending:
             # A GATE WAS OPENED WHILE SOMEBODY WAS WATCHING, and they have now
@@ -3458,12 +3962,130 @@ class RuntimeServer:
         Deduped like :meth:`set_busy`, and it matters more here: the drain calls
         this once, but a repeat signal or a second drain arm on the same runtime
         must not put a staged write and rename on the far side of a signal.
+
+        A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
+        rule one rung over (its NIT 4) and is required here for the same reason plus
+        one of its own. The reason is the window's: without it the record keeps
+        describing an abandoned move after the runtime has started a NEW one, so a
+        fleet row reads "update failed" about a session that is moving right now.
+
+        The reason it has one of its own is that the record's OTHER half,
+        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
+        keeps the ordinary build phrase by design (``process._abandon_move``), so
+        that field is the only thing separating a handover still waiting from one
+        that was given up, and its readers are the fleet surfaces that print the two
+        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
+        row). A stale failure left beside a freshly latched drain makes that pair
+        report the new attempt as the abandoned one. Cleared here rather than only on
+        a change of phrase, because the second attempt at the same build announces
+        the same words — the case that matters would otherwise be the one it got
+        wrong.
+
+        WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
+        ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
+        the bound it spent on the detail), which is the account an issue report
+        cites, and the field is re-published if THIS attempt fails too. The handle's
+        own memo is NOT part of that account — it is the WINDOW rung's
+        (``serving.ServingSessionHandle.note_update_failed``, written by
+        ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
+        rung's ONE permitted retry: the pair is refused only once ``_update_retried``
+        already holds it, so the memo stops a THIRD attempt rather than "re-opening a
+        window that burned its bound") and the drain rung deliberately does
+        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
         """
-        if self._leaving == phrase:
+        superseded = bool(phrase) and bool(self._record.update_failed)
+        if superseded:
+            self._record.update_failed = ""
+        if self._leaving == phrase and not superseded:
             return
         self._leaving = phrase
         self._record.leaving = phrase
         self._republish()
+
+    def note_updating(self, pair: str) -> None:
+        """Publish that an UPDATE WINDOW is open for ``pair`` (``""`` clears it).
+
+        THE ONE WRITER of ``SessionRecord.updating``, so the record and the handle's
+        admission state cannot drift: ``serving.ServingSessionHandle.begin_update``
+        and ``end_update`` both reach it through the server they hold, and a runtime
+        whose handle is not this server's (a reduced host) simply never publishes.
+
+        Written THROUGH to the record in the same synchronous step as the
+        assignment, like :meth:`note_leaving` and for a sharper version of its
+        reason: the window is about a second long, so a field that waited for the
+        15 s heartbeat would be published only AFTER the handover it describes had
+        ended — and the surfaces that read a record would never once see a session
+        mid-update, which is the whole feature.
+
+        Deduped like :meth:`set_busy`. Idempotent on the clear, because both
+        ``end_update`` and :meth:`note_update_failed` close a window and neither can
+        tell whether the other already has.
+        """
+        if self._updating == pair:
+            return
+        self._updating = pair
+        self._record.updating = pair
+        if pair:
+            # A NEW WINDOW SUPERSEDES THE LAST FAILURE (agent review round 1, NIT 4).
+            # Without this the record keeps describing an abandoned move for the rest
+            # of the process's life — a fleet row that says "update failed" about a
+            # session which has since moved on, or is moving right now — because
+            # nothing else clears the field: the success arm's exit takes the whole
+            # record away, and the abandon arm is what writes it. The field is
+            # re-published by ``note_update_failed`` if THIS attempt fails too.
+            self._record.update_failed = ""
+        self._republish()
+
+    async def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
+        """Publish that the window for ``pair`` ran out of its bound.
+
+        THE FAILURE HAS TO BE REPORTABLE, which is the operator's own requirement
+        ("indicate that the update failed so that it can be reported as an issue and
+        addressed"), and it is stated twice on purpose, because the two surfaces
+        answer different questions and either alone is a hole:
+
+        * the RECORD (``update_failed``) is what a front end that was not watching
+          at the time can still read — the TUI's fleet row, ``lop sessions``, the
+          phone's projection, the desktop feed. It is also what says the runtime is
+          still SERVING, which is the part a person acts on;
+        * the INCIDENT ROW is the durable account in the conversation, carrying
+          ``types.UPDATE_FAILED_CAUSE`` so every surface that repeats a cause can
+          render it as a sentence (``incidents.CUT_OFF_CAUSES``). Without it the
+          bounded window would be exactly the silent failure the bound was written
+          to prevent — the shape of QA round 1, Q-2, where the overdue handover
+          shipped with a token nothing could render.
+
+        NEVER RAISES. The caller is the rung that has just decided to KEEP this
+        runtime serving, and a runtime that stayed is a successful outcome even if
+        its own bookkeeping could not be written.
+        """
+        self._updating = ""
+        self._record.updating = ""
+        self._update_failed = pair
+        self._record.update_failed = pair
+        self._republish()
+
+        session = getattr(self._handle, "_session", None)
+        journal = getattr(session, "journal_incident", None)
+        if not callable(journal):
+            return
+        write_incident = cast(Callable[..., Awaitable[None]], journal)
+        from local_operator import incidents
+        from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
+
+        # THE BOUND THE CALLER ACTUALLY ENFORCED, which is why it is a parameter
+        # (design review round 1, D2): two arms publish this token with two different
+        # bounds, and the shared sentence names none of them, so the failure reports
+        # its own number here or it reports no number at all. Rendering the window's
+        # constant instead told the operator that an update which had spent fifteen
+        # minutes in the drain gave up "within 5s".
+        rendered = incidents.render_cut_off_reason(
+            UPDATE_FAILED_CAUSE, detail=incidents.update_failed_detail(pair, bound)
+        )
+        try:
+            await write_incident(UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered)
+        except Exception:  # noqa: BLE001 — a failure notice never breaks the runtime
+            logger.warning("could not journal the failed update", exc_info=True)
 
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
@@ -3542,6 +4164,11 @@ class RuntimeServer:
                 leaving=self._leaving,
                 started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
+                # ATTACHMENT, not visibility: the reaper's own term 3, and the
+                # fact the keep-alive cap charges a slot on. Published from the
+                # same read as ``detached`` because the two answers come from one
+                # snapshot of ``_clients`` (see ``_visible_attach_surfaces``).
+                watching=bool(self.attach_clients()),
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,
             )
@@ -3635,6 +4262,21 @@ class RuntimeServer:
         See :meth:`_visible_attach_surfaces` for why the machine-wide answer
         wins where it exists and the renderer's flag is the fallback where it
         does not.
+
+        AN EMPTY ``session_id`` IS NOT EVIDENCE AGAINST THIS SESSION. The
+        publisher blanks the field whenever it cannot vouch for which
+        conversation the window shows (``server/utils/desktop_presence.py``), and
+        a renderer-report lapse blanks it too, so denial on an empty name reads
+        absence of evidence as evidence against — which is precisely what told
+        the operator's own focused, visible app that nobody was at a screen.
+        The per-connection flag is the per-session answer, and it is set by a
+        heartbeat that names THIS session's subscription, so falling through to
+        it is also the pre-presence behaviour the docstring above promises an
+        older app: byte-identical for an old UI.
+
+        The denied direction is preserved where the record IS evidence: an app
+        naming a DIFFERENT conversation still denies, which is what stops it
+        suppressing a background session's banner while showing someone else.
         """
         try:
             from local_operator.session.runtime.presence import desktop_presence
@@ -3644,6 +4286,8 @@ class RuntimeServer:
             logger.debug("could not read the desktop presence", exc_info=True)
             return conn.desktop_visible
         if not presence.present:
+            return conn.desktop_visible
+        if not presence.session_id:
             return conn.desktop_visible
         record = getattr(self, "_record", None)
         session_id = str(getattr(record, "session_id", "") or "")
@@ -3666,6 +4310,69 @@ class RuntimeServer:
             )
             else frozenset()
         )
+
+    def attached_surfaces(self) -> frozenset[str]:
+        """Which KINDS of interface can PRESENT a card the operator will see.
+
+        Sibling of :meth:`watching_surfaces`, NOT a replacement. That one answers
+        "is a person looking at this session right now" and is the whole of rung 1
+        of the notification ladder (``docs/DESKTOP_API.md``, "The notification
+        eligibility ladder"). This one answers "is there an interface that could
+        show this session a question, and that the operator returns to" — the
+        question the MODEL needs, because a question asked now is answered when
+        they look, not when they are looking.
+
+        FOCUS IS DELIBERATELY ABSENT, and it must not be "tidied" into agreement
+        with :meth:`_visible_attach_surfaces`. Focus flaps with window z-order,
+        and this answer is rendered into the persisted system-prompt tail
+        (``prompts_api.build_system_blocks``), so every flap would move a block
+        the model carries on every request. A window that is merely not frontmost
+        still holds a mounted pane this conversation can be painted into.
+
+        THE DESKTOP CLAUSE IS THE LEASE AND NOTHING ELSE (round 1, MINOR 5). It
+        used to read ``lease and (desktop_visible or desktop_can_notify)`` — the
+        ``attach_clients()`` clause, on the theory that both asked "could this
+        front end present something". That theory costs the model-facing answer
+        its stability: ``desktop_visible`` is the app's ``visible &&
+        focused``, so on a host with no OS-notification channel
+        (``can_notify`` false — the JSON transport, browser dev) the clause
+        collapses to ``visible``, and raising and lowering the window flips the
+        persisted block and writes a ``[session-state]`` row. The lease is what
+        the question actually asked for: it is renewed by a heartbeat that names
+        THIS session's subscription and is withdrawn when the pane leaves
+        (``desktop_watch``), so "lease live" IS "a pane holds this
+        conversation", with no window state and no notification capability in
+        it. ``can_notify`` belongs to reachability (:meth:`notification_surfaces`)
+        and ``visible`` to attention; neither is attachment.
+
+        The reaper's own count (:meth:`attach_clients`) keeps the extra clause:
+        it answers a RESIDENCY question, where an app that can neither show nor
+        notify is not a reason to stay up, and the two are now deliberately not
+        the same expression.
+
+        A terminal attach is counted even while it is displaying ANOTHER session
+        (``terminal_displaying`` False): the connection is the process that can
+        paint the card the moment the operator switches back to it. This asks
+        about presentation, not about attention.
+        """
+        attached: set[str] = set()
+        # SNAPSHOT BEFORE ITERATING (C8): read from the session's loop while the
+        # runtime's own loop registers and drops clients in this dict — the same
+        # hazard ``attach_clients`` documents.
+        for conn in list(self._clients.values()):
+            if conn.kind != "attach":
+                continue
+            if conn.surface == "desktop":
+                if self._desktop_lease_live(conn):
+                    attached.add("desktop")
+            else:
+                attached.add("attach")
+        if self.watch_supported and self.phone_watchers > 0:
+            # Reported as ``viewer`` rather than ``daemon``, for the reason given
+            # on :meth:`watching_surfaces`: a relay being dialled is true of every
+            # session on a machine running ``lop mobile``.
+            attached.add("viewer")
+        return frozenset(attached)
 
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
@@ -3712,6 +4419,303 @@ class RuntimeServer:
             # machine running `lop mobile`) with "a person is looking".
             watching.add("viewer")
         return frozenset(watching)
+
+    def _authority_admitted(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
+        """Whether this frame may reach an authority-INCREASING sink.
+
+        True for every frame that is not in :data:`_AUTHORITY_OPS` — the
+        overwhelming majority of traffic, and the set whose authorization really
+        is the record key alone. For an increasing frame, the answer comes from
+        :func:`local_operator.harness.approval.admit_increasing`, which consults
+        BOTH sources: THIS CONNECTION's proof of the runtime's spawn capability,
+        and a verified OPERATOR or DEVICE signature (issue #1310 revision 2; the
+        run-scoped supervisor credential joins them in stage E).
+
+        The connection is taken rather than reached for because both sources are
+        bound to it: the client's nonce came in on the auth frame that created
+        ``conn`` and the salt was minted for it, so a capability proof is only
+        ever valid where it was produced — and a challenge is minted per
+        connection for the same reason, so a signature harvested on one socket
+        cannot be presented on another.
+
+        The classification is by OP plus the fields that op carries, and it is
+        deliberately NOT by the handle method or by the resulting value: a frame
+        is judged before anything is dispatched, so a refused request cannot
+        have had a partial effect on the way to being refused.
+        """
+        if frame.get("op") not in _AUTHORITY_OPS:
+            return True
+        authority = frame_authority(frame)
+        if authority is None or authority == "ordinary":
+            return True
+        # TWO SOURCES, COMBINED IN THE STDLIB-ONLY MODULE (revision 2). The
+        # runtime maps the frame to two facts and the PREDICATE answers: the
+        # spawn capability's per-connection proof (the interactive console, which
+        # must stay prompt-free), and a verdict on an operator/device signature
+        # (the attached pane, the desktop backend for a session it did not start,
+        # the CLI for a background-started run, and — stage D — the phone). The
+        # crypto that produces the verdict stays in ``local_operator.operator
+        # .verify``, which imports ``cryptography`` lazily; this method never
+        # learns how a signature is checked.
+        capability = request_proof_ok(
+            supplied=frame.get("operator_cap"),
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        )
+        signature = self._operator_signature_verdict(frame, conn)
+        admitted = admit_increasing(capability=capability, signature=signature)
+        if not admitted:
+            # Logged because the two refusals have different causes and only
+            # one of them is an attack: a capability miss is a follower or a
+            # model-authored child, a FALSE signature verdict is somebody
+            # presenting a signature that did not hold.
+            logger.info(
+                "control: refused an authority-increasing %s (capability=%s signature=%s) on "
+                "session %s",
+                frame.get("op"),
+                capability,
+                signature,
+                self._record.session_id,
+            )
+        return admitted
+
+    def _operator_signature_verdict(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
+        """``True``/``False`` when a signature was offered, ``None`` when not.
+
+        THE CHALLENGE IS CONSUMED HERE, before verification, and that is the
+        replay defence rather than a detail: a popped challenge cannot be
+        presented a second time, so a captured signature (and the ``operator_sig``
+        that carries it) has exactly one use. Pop-then-fail also means a client
+        whose signature was refused must ask for a NEW challenge, which it does
+        on its next attempt — the alternative, verifying first and popping on
+        success, would let a flood of replays re-verify forever and would let a
+        race present one challenge twice.
+
+        A missing challenge is a refusal rather than "not offered": a frame that
+        CARRIES a signature is claiming authority, and a claim with no live
+        challenge behind it is exactly what a replay looks like.
+        """
+        target = signature_target(frame)
+        if target is None:
+            return None
+        supplied = frame.get("operator_sig")
+        if supplied is None:
+            return None
+        action, request_id = target
+        entry = conn.operator_challenges.pop((action, request_id), None)
+        if entry is None:
+            return False
+        challenge, expires_at = entry
+        if time.monotonic() > expires_at:
+            return False
+        # The runtime-wide count follows the CONSUME as well as the mint: a
+        # challenge handed back here is spent, and leaving it in the aggregate
+        # would let a subject that never signs slowly fill the runtime's budget
+        # with dead entries it minted itself.
+        self._live_challenges.pop(challenge, None)
+        loaded = self._anchor_cache.get()
+        anchor = loaded.anchor if loaded.usable else None
+        device_spki = self._device_cert_point(frame.get("operator_cert"), anchor)
+        return operator_verify.signature_verdict(
+            action=action,
+            session_id=self._record.session_id,
+            request_id=request_id,
+            challenge=challenge,
+            signature_hex=supplied,
+            operator_spki=anchor.spki if anchor is not None else None,
+            operator_key_id=frame.get("operator_key_id") or "",
+            operator_cert=frame.get("operator_cert"),
+            device_spki=device_spki,
+            now=int(time.time()),
+        )
+
+    def _device_cert_point(self, certificate: object, anchor: Any) -> bytes | None:
+        """The device point behind a certificate, verified once per TTL.
+
+        A SHORT TTL rather than a permanent cache, and lazily rather than at
+        startup, for the two facts the design names: most sessions never see a
+        device frame, and a certificate can be REVOKED (an edit to the root-owned
+        anchor) — an unlimited cache would keep honouring a revoked phone for the
+        lifetime of a session that can run for days. The cache is keyed by the
+        certificate string, so a different certificate is always verified rather
+        than matched against a stale answer.
+        """
+        if not isinstance(certificate, str) or not certificate:
+            return None
+        if anchor is None:
+            return None
+        cached = self._device_certs.get(certificate)
+        now = time.monotonic()
+        if cached is not None and cached[1] > now:
+            # REVOCATION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
+            # review round 6, R6-1 — the second half of it, and the half the
+            # certificate TTL alone does not cover). What is cached is the
+            # EXPENSIVE half: the signature and expiry verification, which cannot
+            # change. Whether the certificate's device is REVOKED can, and it is
+            # the operator's own action — so it is read from the anchor every time
+            # rather than frozen for `_DEVICE_CERT_TTL_S`. Without this, a device
+            # revoked while a runtime was running kept acting for up to five
+            # minutes after the anchor re-read that was meant to stop it.
+            point, _deadline, device_id = cached
+            if point is None:
+                return None
+            return None if device_is_revoked(anchor, device_id) else point
+        parsed = operator_verify.read_device_cert(certificate)
+        point = operator_verify.verify_device_cert(
+            certificate, operator_spki=anchor.spki, now=int(time.time()), parsed=parsed
+        )
+        device_id = parsed.device_id if parsed is not None else ""
+        if point is not None:
+            # A certificate that names a REVOKED device is refused here, at the
+            # point its identity is known: ``verify_device_cert`` deliberately
+            # knows nothing about revocation (it checks a signature and an
+            # expiry), and the revocation list is a property of the anchor.
+            if device_is_revoked(anchor, device_id):
+                point = None
+        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id)
+        if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
+            # Bounded: a client can present a new certificate string on every
+            # frame, and an unbounded cache keyed by attacker-chosen strings is a
+            # memory leak with an on-demand trigger.
+            self._device_certs.clear()
+        return point
+
+    def _connection_may_loosen(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
+        """Whether THIS connection has PROVEN it may loosen this session's gate.
+
+        ``True``, or ``None`` for "it has not said", which the sentence builders
+        read as the conservative branch. Never ``False``: a follower and a
+        capable console must not be indistinguishable by accident, and the
+        distinction that matters is "proved" vs "did not".
+
+        WHY NOT ``_authority_admitted`` ON A SYNTHETIC FRAME. That predicate
+        reads the proof off the ``frame`` it is handed, and a frame constructed
+        here has none — so it answered a constant ``False`` and told a console
+        that had just loosened the gate that loosening "has to come from the
+        window that started it" (agent review round 3, R3-1 = UX U10 = QA Q6:
+        measured on production objects, on both the desktop and the phone).
+        Passing the REQUEST frame instead is not a fix either: the request is
+        ordinary, so an ordinary op would answer "may loosen" for a follower.
+
+        What CAN be verified here is the HANDSHAKE proof: HMAC over THIS
+        connection's nonce and salt, computable only by a process holding the
+        capability. A client that spawned this runtime has both; a follower, an
+        impostor holding the rewritten record, and a relay forwarding someone
+        else's frames do not — the proof is bound to the connection's own nonce
+        and salt, so another connection's proof does not verify here.
+
+        AND THE OPERATOR SOURCE (revision 2). A LOCAL connection to a runtime with
+        a usable anchor may loosen too — it asks for a challenge, signs it, and
+        the signature costs one presence gesture. That is precisely the capability
+        this revision restores, so reporting ``None`` here would tell an attached
+        pane that loosening has to come from the window that started the session
+        while the pane is about to do it successfully.
+
+        ``local`` was once the whole of the condition, and the paragraph that said so
+        described stage D as unlanded (it was read by exactly the person reasoning
+        about a phone's refusal, so it is corrected rather than left: UX round 6,
+        U8). Stage D IS on this branch, and what widened is one call down: see
+        ``_local_operator_available``, which answers ``True`` for a REMOTE
+        connection whose device certificate verifies under the anchor — the phone,
+        whose authority does not depend on who spawned the runtime.
+        """
+        if self._local_operator_available(frame, conn):
+            return True
+        if self._operator_cap is None:
+            return None
+        supplied = frame.get("operator_handshake")
+        if not is_wire_hex(supplied) or not conn.operator_nonce or not conn.operator_salt:
+            # Not proved: an unchanged client (the field is optional and
+            # additive), a follower, or a relay. The conservative sentence is
+            # the right answer for all three, and for a capable client on an
+            # older build it is only cosmetically wrong until it updates.
+            return None
+        if not handshake_proof_ok(
+            supplied=supplied,
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        ):
+            return None
+        return True
+
+    def _local_operator_available(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
+        """Whether THIS connection could carry out a loosening by signing.
+
+        Reads the anchor through the runtime's own cache, so the answer is the
+        same anchor the seam will verify against and cannot drift from it. The
+        server's own capability is deliberately NOT consulted: it is the
+        SPAWNER's proof, and the point of the revision is that a connection
+        without it can still hold authority.
+
+        THREE ANSWERS, and the third is what stage D widened — this predicate is
+        the single line the earlier revision named as the one that would:
+
+        * LOCAL, on a host with a usable anchor: yes. One presence gesture, and
+          an attached pane or the desktop backend is precisely the capability
+          this revision restores.
+        * REMOTE without a paired device: no. The relay cannot mint a signature,
+          and answering yes would put ``/approvals auto`` in a report on a
+          surface that cannot carry it out — the dead end UX round 2 removed.
+        * REMOTE with a device certificate that VERIFIES under the anchor: yes.
+          That is the phone, and it is the whole point of the stage: its
+          authority does not depend on who spawned the runtime.
+        """
+        del frame
+        if conn.locality == "local":
+            return self._anchor_cache.get().usable
+        return self._paired_device_can_sign(conn)
+
+    def _paired_device_can_sign(self, conn: _ClientConn) -> bool:
+        """Whether this connection declared a device certificate the anchor vouches for.
+
+        Goes through ``_device_cert_point`` rather than a verification of its own,
+        and that is the load-bearing part: that helper is where the certificate is
+        checked under the anchored key, where the anchor's REVOCATION list is
+        consulted, and where the TTL cache lives. A second verification path here
+        could answer "yes" for a phone the seam would then refuse — the same class
+        of drift the refusal copy's single-sentence rule exists to prevent.
+        """
+        loaded = self._anchor_cache.get()
+        anchor = loaded.anchor if loaded.usable else None
+        if anchor is None or not conn.device_certificate:
+            return False
+        return self._device_cert_point(conn.device_certificate, anchor) is not None
+
+    def _expire_challenges(self, conn: _ClientConn, now: float) -> None:
+        """Drop this connection's spent-by-time challenges before minting another.
+
+        Pruning on MINT rather than on a timer: there is no background task here
+        on purpose (a runtime that woke on a timer to sweep a per-connection map
+        would be paying for every idle viewer), and the failure mode pruning
+        prevents — a client that asks and never signs — is bounded by
+        ``_MAX_CHALLENGES_PER_CONN`` in any case.
+
+        The runtime-wide map is pruned on the same two events (a mint and a
+        consume), and it needs no timer for the same reason: every entry it holds
+        is one of the entries in some connection's map, so anything it can forget
+        has already been forgotten here, and any VALUABLE entry has a deadline.
+
+        THE RE-INSERTION BELOW CANNOT GROW THAT MAP (agent review round 7, N-2),
+        which is worth the half-sentence because it reads as though it could: it
+        refreshes deadlines only for entries ALREADY COUNTED AT MINT — a challenge
+        in this connection's map was inserted into the runtime map by the mint that
+        created it, under the ``_MAX_LIVE_CHALLENGES`` check — and the second loop
+        drops the expired ones. So the map's size is what the bound says it is,
+        whether or not this runs.
+        """
+        stale = [key for key, (_, deadline) in conn.operator_challenges.items() if deadline < now]
+        for key in stale:
+            conn.operator_challenges.pop(key, None)
+        for challenge, deadline in [
+            (value[0], value[1]) for value in conn.operator_challenges.values()
+        ]:
+            self._live_challenges[challenge] = deadline
+        for challenge in [
+            challenge for challenge, deadline in self._live_challenges.items() if deadline < now
+        ]:
+            self._live_challenges.pop(challenge, None)
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
@@ -3780,6 +4784,83 @@ class RuntimeServer:
                 raise ValueError(
                     "this viewer is still connecting to the session; the request was not "
                     "run — retry once the interface has connected"
+                )
+
+            # THE TWO REFUSALS, AND WHY THE READINESS ONE RUNS FIRST (rebase onto
+            # main, 2026-09-19). Upstream added the sync-pending gate above at the
+            # same seam this branch added the authority check to. They answer
+            # different questions: that one is "is this connection authoritative
+            # yet at all?", this one is "may THIS caller remove the gate?". Running
+            # the readiness gate first keeps its semantics intact — a follower
+            # that has not received the sync gets the retryable connect copy
+            # rather than the authority copy, which would be wrong advice for an
+            # op it will be allowed to run a moment later. The authority check is
+            # NOT skipped for what the priority and connection-local sets admit:
+            # ``approval_answer`` is in neither today, and if a future base puts it
+            # there, the check below still sees it.
+            #
+            # THE ONE SEAM WHERE THE GATE'S AUTHORITY IS DECIDED (issue #1310).
+            #
+            # `control_key` — published 0600 in the session record — is the
+            # whole authorization story for ORDINARY operations and stays that
+            # way. An authority-INCREASING one additionally demands the
+            # per-session operator capability, which exists only in the memory
+            # of the process that started this runtime and in the console that
+            # typed the command. A model-authored `bash` call runs as this same
+            # uid, can read the record, and can dial this loopback port; it
+            # cannot hold a value that was never written anywhere it can read.
+            #
+            # HERE rather than at each sink, because every route in the tree —
+            # the daemon's HTTP command surface, the phone relay, a peer send,
+            # a follower terminal, the CLI — arrives at the handle through this
+            # method. A second dispatch route added later is covered by
+            # construction, and `tests/unit/session/runtime/
+            # test_approval_authority_seam.py` fails if one appears that reaches
+            # a sink without being classified below.
+            #
+            # The refusal is raised rather than answered inline so it reuses the
+            # existing `{"op": "error"}` reply the branches below already
+            # produce: one shape for the client to surface, and the copy names
+            # the one-step remedies (see OPERATOR_AUTHORITY_REQUIRED_NOTICE).
+            #
+            # A TYPED refusal, not a bare `ValueError`, and the code is what
+            # makes it survivable: every route that carries a control request
+            # (the desktop command surface, the desktop card route, the relay,
+            # the attach screen) can name this outcome instead of guessing from
+            # the message, and the copy reaches the operator verbatim rather
+            # than being reported as "the runtime is unreachable" or "the
+            # question expired" (agent review round 1 R1-2 = design D1 = UX U4 =
+            # QA Q1, from four independent rounds on the same defect).
+            if not self._authority_admitted(frame, conn):
+                logger.warning(
+                    "session runtime: refused an authority-increasing request "
+                    "(op %r) from %s at %s",
+                    op,
+                    conn.kind,
+                    conn.writer.get_extra_info("peername"),
+                )
+                from local_operator.session.errors import (
+                    OperatorAuthorityRequired,
+                    OperatorAuthorityUnconfigured,
+                )
+
+                # WHICH REFUSAL, from the op rather than from prose: a card
+                # answer is refused as a card (the question is still parked, and
+                # a deny works from here), a slash is refused as a command. The
+                # far side rebuilds the same sentence from this token, so the
+                # copy never travels as text (UX round 2, U8).
+                #
+                # AND WHICH HOST, from the anchor rather than from a guess (UX
+                # round 6, U1/U2): with no USABLE anchor the two named remedies
+                # cannot run, so the refusal has to name the command that lands
+                # one. ``usable`` is exactly the predicate the seam above used to
+                # decide this caller could not be admitted, read from the same
+                # cached load, so the sentence and the decision cannot disagree.
+                anchored = self._anchor_cache.get().usable
+                raise (
+                    OperatorAuthorityRequired(trigger=op)
+                    if anchored
+                    else OperatorAuthorityUnconfigured(trigger=op)
                 )
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
@@ -4039,6 +5120,69 @@ class RuntimeServer:
                     raise ValueError("event muting requires an attach connection")
                 conn.events_muted = op == "event_mute"
                 detail = "delta-grade events muted" if conn.events_muted else "events resumed"
+            elif op == "operator_challenge":
+                # THE ORDINARY OP THAT LETS A SURFACE THAT IS NOT THE SOCKET PEER
+                # SIGN (revision 2, §2.3). Ordinary by construction — it grants
+                # nothing on its own; the signature it is used to produce is what
+                # carries authority — so it needs no proof of its own and rides
+                # the record key like every other control op.
+                #
+                # Handled HERE rather than in ``_dispatch`` because the binding
+                # is per CONNECTION and the dispatcher deliberately has no
+                # ``conn`` (the same reason ``watch_job`` and ``event_mute`` are
+                # here). Two things are bound beyond that: the action, which
+                # chooses what the signature will be accepted FOR, and the
+                # request id, which for an ``approve`` is the card and for a
+                # loosening is whatever the client chose. All four are baked into
+                # the signed message, so a challenge cannot be moved between them.
+                action = str(frame.get("action") or "")
+                if action not in ("loosen", "approve"):
+                    raise ValueError("action must be 'loosen' or 'approve'")
+                request_id = frame.get("request_id", "")
+                if not isinstance(request_id, str):
+                    raise ValueError("request_id must be a string")
+                now = time.monotonic()
+                self._expire_challenges(conn, now)
+                if len(conn.operator_challenges) >= _MAX_CHALLENGES_PER_CONN:
+                    raise ValueError("too many unspent operator challenges on this connection")
+                if len(self._live_challenges) >= _MAX_LIVE_CHALLENGES:
+                    # THE AGGREGATE BOUND (agent review round 6, R6-4). The
+                    # per-connection maximum alone bounds a socket, and the
+                    # subject this predicate gates can dial as many as it likes;
+                    # this is the term that makes the volume bounded rather than
+                    # merely denied. A real surface raises one prompt per human
+                    # gesture, so reaching this is the abuse it exists for.
+                    raise ValueError("too many unspent operator challenges on this runtime")
+                challenge = secrets.token_hex(32)
+                conn.operator_challenges[(action, request_id)] = (
+                    challenge,
+                    now + _CHALLENGE_TTL_S,
+                )
+                self._live_challenges[challenge] = now + _CHALLENGE_TTL_S
+                await self._send_to(
+                    conn,
+                    {
+                        # AN ``ack`` FRAME, NOT AN ``operator_challenge`` ONE, and
+                        # that is a protocol requirement rather than a style
+                        # choice: ``AttachClient``'s reader routes replies by
+                        # ``req`` but only admits the op names ``ack``, ``error``
+                        # and ``result`` (``attach_client.py``), so a reply
+                        # carrying a NEW op would fall through every branch and
+                        # tear down the whole connection — taking the caller's
+                        # in-flight request with it, which is exactly the "old
+                        # front end must keep working" guarantee the additive
+                        # design exists to keep. The two fields are additive on
+                        # an existing frame shape, so a client built before the
+                        # op existed (which never asks for a challenge) is
+                        # unaffected, and a client that does ask reads them off
+                        # the ack.
+                        "op": "ack",
+                        "req": req,
+                        "challenge": challenge,
+                        "expires_s": int(_CHALLENGE_TTL_S),
+                    },
+                )
+                return
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -4050,6 +5194,13 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    # Whether THIS connection PROVED it may loosen the gate,
+                    # or ``None`` for "it has not said" (design round 2 D10, UX
+                    # round 2 U9; corrected in agent review round 3, R3-1): the
+                    # reports a routed command returns must not offer a command
+                    # this connection would be refused, and must not deny one it
+                    # could carry.
+                    may_loosen=self._connection_may_loosen(frame, conn),
                 )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
@@ -4129,17 +5280,29 @@ class RuntimeServer:
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
                 AttachmentUnavailable,
+                OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
                 RuntimeRetiring,
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
             if isinstance(
-                exc, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)
+                exc,
+                (
+                    AttachmentUnavailable,
+                    OperatorAuthorityRequired,
+                    ProfileRegistryUnavailable,
+                    RuntimeRetiring,
+                ),
             ):
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+                if isinstance(exc, OperatorAuthorityRequired) and exc.trigger:
+                    # A token from a closed set, never text: the far side picks
+                    # the sentence that matches the frame it refused (a refused
+                    # command vs a refused card).
+                    frame["error_trigger"] = exc.trigger
             if isinstance(exc, RuntimeRetiring) and exc.trigger:
                 # WHICH DEPARTURE, as one of the enumerated tokens — the same
                 # shape as ``error_count`` below, and for the same reason: the
@@ -4696,6 +5859,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        may_loosen: bool | None = None,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -4753,6 +5917,12 @@ class RuntimeServer:
                 kwargs["locality"] = locality
             if _accepts_kw(run, "consumers"):
                 kwargs["consumers"] = consumers
+            if _accepts_kw(run, "may_loosen"):
+                # The connection's own property, read where the connection is
+                # known — the same reason ``consumers`` is (design round 2 D10,
+                # UX round 2 U9).
+                kwargs["may_loosen"] = may_loosen
+
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
@@ -5146,14 +6316,25 @@ class RuntimeServer:
             self._enqueue_client_frame(conn, frame)
 
     def _compact_event_queue(self, conn: _ClientConn) -> bool:
-        """Fold the two compactible frame families in place.
+        """Fold the delta-grade and compose frame families in place.
 
-        Merges runs of same-message ``message_update`` frames, and keeps only
-        the NEWEST ``tool_call_compose`` per ``tool_call_id``.
+        Merges runs of same-stream ``message_update`` and ``reasoning_delta``
+        frames, and keeps only the NEWEST ``tool_call_compose`` per
+        ``tool_call_id``. Which frames belong to one stream is
+        :func:`_mergeable_delta_key`'s rule, and it is the only family-specific
+        thing here: the size accounting below is delta-sized and therefore
+        family-agnostic.
 
         Both are lossless by construction. For ``message_update`` the later
         event's ``message`` already contains the earlier one's text, and
         concatenating ``delta`` preserves the append contract UIs rely on. For
+        ``reasoning_delta`` there is no accumulated payload at all — the frame
+        carries one fragment, a ``message_id`` both frames agree on, and the
+        same concatenation reproduces the two fragments in arrival order. This
+        matters as much as it does for text: reasoning arrives once per token,
+        and a long-thinking turn is thousands of frames, so without the fold a
+        stalled viewer's FIFO fills with incompressible reasoning frames and is
+        dropped — the same failure the compose fold below was written for. For
         ``tool_call_compose`` the argument is the one ``_fold_live_event``
         (``frontend_state.py``) already relies on for the reconnect seed: a
         compose frame is a SNAPSHOT of a call being dictated (``tool_name``,
@@ -5296,17 +6477,17 @@ class RuntimeServer:
             ):
                 data = frame.get("data") or {}
                 prior = previous.get("data") or {}
-                if (
-                    data.get("type") == "message_update"
-                    and prior.get("type") == "message_update"
-                    and (data.get("message") or {}).get("id")
-                    == (prior.get("message") or {}).get("id")
-                ):
+                merge_key = _mergeable_delta_key(data)
+                if merge_key is not None and merge_key == _mergeable_delta_key(prior):
                     # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
                     # merged frame re-serializes the unchanged accumulated
                     # ``message`` — hundreds of KB — on every merge, which is
                     # quadratic in queue depth: one 64-frame compaction
                     # serialized 67.4 MB and took 152 ms on the runtime loop.
+                    # A ``reasoning_delta`` frame has no ``message`` to re-dump,
+                    # so the same arithmetic is simply cheap there; it is the
+                    # SAME arithmetic, which is what keeps the reasoning family
+                    # from needing an accounting of its own.
                     # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
                     # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
                     # dropped it — manufacturing the very false disconnect this
@@ -5443,7 +6624,21 @@ class RuntimeServer:
             # what the once-per-episode latch exists to preserve.
             self._frame_cap_warned = False
             return
-        ordinary = self._projection_payload()
+        # BUILD AND CAP THE FRAME OFF THE EVENT LOOP. ``_projection_payload``
+        # runs ``cap_projection_frame``, which serialises a payload that can sit
+        # near the 1 MB wire cap; on the loop that is measured to park the whole
+        # runtime — 13 of 50 runtime-stall dumps in one 24 h window hold the loop
+        # thread in ``json.dumps -> _frame_bytes -> cap_projection_frame``, and
+        # one of those fired the 300 s stall bound and killed the runtime. The
+        # build is a pure function of the projection the fold publishes, so it
+        # belongs in a worker: ``_push`` is a coalesced repaint, never a
+        # request/response, so nothing waits on it within a turn.
+        #
+        # ONLY THE BUILD MOVES. ``_send_to`` stays on the loop and says why
+        # itself (the writer and its lock are loop-owned objects), and the
+        # per-connection frames are derived from ``ordinary`` on the loop after
+        # the hop returns, so the wire bytes are unchanged.
+        ordinary = await asyncio.to_thread(self._projection_payload)
         await asyncio.gather(
             *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )
@@ -5498,12 +6693,101 @@ class RuntimeServer:
         return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
-        """The welcome form of a push: one full projection to one connection."""
+        """The welcome form of a push: one frame to one connection.
+
+        The ONE frame that may also carry the operator capability's handshake
+        proof (issue #1310) — deliberately here and not in ``_projection_frame``,
+        which every repaint goes through: the proof is per CONNECTION and belongs
+        to the frame that decides whether the client will present anything at
+        all. A client that sees no proof (this runtime holds no capability, or
+        the client offered no nonce) presents nothing, which is the fail-closed
+        reading of a runtime nobody handed one to.
+
+        WHICH frame is the welcome is ``_welcome_frame``'s decision, not this
+        method's: a full-TUI/desktop attach reads the projection for its
+        identity and discards the payload, and that payload is built and capped
+        inline on the serving loop.
+        """
         conn.sending_welcome = True
         try:
-            await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
+            frame = self._welcome_frame(conn)
+            proof = self._welcome_operator_proof(conn)
+            if proof is not None:
+                # Salt alongside the proof, because the client needs both
+                # nonces to build its own proof and only the PROOF is
+                # credential-shaped: the salt is a value it just chose for a
+                # connection that will not outlive this list.
+                frame["operator_salt"] = conn.operator_salt
+                frame["operator_proof"] = proof
+            await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
+
+    def _welcome_frame(self, conn: _ClientConn) -> dict[str, Any]:
+        """The welcome for THIS connection: identity-only, or the full projection.
+
+        The split is by who READS the payload, which is a property of the client
+        rather than of the daemon. A connection that asked for the canonical
+        frontend AND the raw event stream is a full terminal or the desktop, and
+        the only client of that shape builds ``AttachClient`` with
+        ``on_projection = lambda _projection: None`` — it consumes the welcome
+        for identity and nothing else. Phone and daemon connections asked for
+        no canonical frontend, are the clients that render the projection, and
+        keep their welcome byte-identical.
+
+        ``None`` from ``_slim_welcome_frame`` (a reduced handle with no seed)
+        falls back to the full projection rather than guessing at identity.
+        """
+        if conn.wants_events and conn.wants_frontend:
+            slim = self._slim_welcome_frame()
+            if slim is not None:
+                return slim
+        return self._projection_frame(conn, self._projection_payload())
+
+    def _slim_welcome_frame(self) -> dict[str, Any] | None:
+        """The identity-only welcome, or ``None`` when the handle has no seed.
+
+        WHY IT EXISTS. ``_projection_payload`` builds and CAPS a whole projection
+        for the welcome, and the attach clients above read none of it — every byte
+        past the identity is serialized, walked by the cap tiers and discarded.
+        On the fixtures that is 0.7 ms of CPU, which is NOT why this exists: it
+        exists because ``_push_to`` calls it INLINE on the serving loop, once per
+        connection, and a field dump has caught ``cap_projection_frame`` on that
+        thread's stack (``lop-mobile-registrant`` ← ``_push_to`` ←
+        ``_on_connection``, runtime-stall-42983.log). A frame nobody reads is not
+        worth any chance of that.
+
+        THE PAYLOAD IS ``_identity_projection()``, the SAME object the send
+        ceiling substitutes when a projection cannot be written at all — one
+        notion of "identity only" rather than two that drift, and it keeps the
+        empty collections that make the frame a valid projection of its own op
+        for a client rebuilding it field by field.
+
+        The client accepts this op (``attach_client`` treats ``welcome`` exactly
+        as it treats ``projection``); an older client that only knew the
+        projection op never reaches here.
+        """
+        if getattr(self._handle, "session_projection_seed", None) is None:
+            return None
+        return {"op": "welcome", "data": self._identity_projection()}
+
+    def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
+        """This connection's handshake proof, or ``None`` when there is none to give.
+
+        MUTUAL, and that direction is the point: the console must be able to
+        tell a real runtime from an endpoint that merely has the record's
+        ``control_port`` written into it. A rewritten record points the console
+        at an impostor, and an impostor cannot compute this proof — it does not
+        hold the capability — so the console presents nothing. See
+        ``harness/approval._proof`` for the attack this closes.
+        """
+        if not conn.operator_nonce or not conn.operator_salt:
+            return None
+        if self._operator_cap is None:
+            return None
+        return handshake_proof(
+            self._operator_cap, client_nonce=conn.operator_nonce, server_salt=conn.operator_salt
+        )
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating

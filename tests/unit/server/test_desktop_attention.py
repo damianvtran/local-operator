@@ -10,6 +10,7 @@ shared receipt clock depends on.
 
 import asyncio
 import contextlib
+import os
 import sqlite3
 import uuid
 from types import SimpleNamespace
@@ -21,6 +22,19 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.server.routes import capabilities, desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
+
+# A 12-character id in exactly the shape a session id has, but uppercase.
+#
+# Written out as a literal rather than derived from a live id with ``.upper()``,
+# and that is a fix rather than a style choice: ids are ``uuid4().hex[:12]``, so
+# roughly one draw in ``(16/10)**12`` (~282) contains no letter at all, and
+# ``.upper()`` of such an id is that id unchanged -- a perfectly VALID session.
+# The arms below then demand a rejection for a real conversation (and a 422 for
+# a real batch item), so they redden a shard at a rate rare enough to pass review
+# and recur in CI. Uppercase hex cannot be a generated id (``.hex`` only ever
+# emits lowercase), so this id is refused for its CASE on every draw, which is
+# the arm under test.
+UPPERCASE_SESSION_ID = "ABCDEF012345"
 
 
 def _publish(root, session_id: str, anchor: str, kind: str = "complete") -> str:
@@ -62,7 +76,7 @@ async def test_only_a_real_user_session_in_this_root_can_be_acknowledged(tmp_pat
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     token = _publish(tmp_path, sid, "result-1")
-    for bogus in ("../../etc", "not-hex", "a" * 12, sid.upper(), ""):
+    for bogus in ("../../etc", "not-hex", "a" * 12, UPPERCASE_SESSION_ID, ""):
         with pytest.raises(KeyError):
             await pool.acknowledge_attention(bogus, token)
     # A valid-shaped id that is not a session on disk is equally unknown.
@@ -150,6 +164,51 @@ async def test_the_route_refuses_a_superseded_token_with_a_machine_code(tmp_path
         unknown = await client.post(route, json={"completion_token": str(uuid.uuid4())})
         assert unknown.status_code == 409
         assert unknown.json()["detail"] == "unknown completion token"
+
+
+@pytest.mark.asyncio
+async def test_a_late_publication_supersedes_the_token_a_client_already_holds(
+    tmp_path, monkeypatch
+):
+    """The completion the ladder lands is LATE, and that is what makes a held token stale.
+
+    A client renders a conversation, reads it, and holds that receipt. The session
+    then finishes a turn whose publish lost to a busy store and the in-process
+    republish ladder lands it seconds later -- a NEW sequence for the same
+    conversation, published after the client rendered. The held receipt must
+    therefore be refused with the 409 the client re-arms from, and NOT answered
+    200: both shipped clients latch on a resolved `seen`, so a silent success here
+    is exactly how the operator's checkmark stayed cleared over an unread result.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "synthetic-desktop-token")
+    app = FastAPI()
+    app.include_router(desktop_sessions.router)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    sid = await pool.create(str(tmp_path))
+    store = AttentionStore(tmp_path / "attention.db")
+
+    held = _publish(tmp_path, sid, "result-1")
+    assert (await pool.acknowledge_attention(sid, held))["unseen"] is False
+    # The ladder's publication, which lands after the client rendered and read.
+    late = _publish(tmp_path, sid, "result-2")
+    assert store.state(f"session/{sid}")["unseen"] is True
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": f"Bearer {os.environ['LOCAL_OPERATOR_DESKTOP_TOKEN']}"},
+    ) as client:
+        route = f"/v1/desktop/sessions/{sid}/seen"
+        refused = await client.post(route, json={"completion_token": held})
+        assert refused.status_code == 409
+        assert refused.json()["detail"]["code"] == "superseded_completion_token"
+        assert store.state(f"session/{sid}")["unseen"] is True, "a refusal marks nothing read"
+
+        caught_up = await client.post(route, json={"completion_token": late})
+        assert caught_up.status_code == 200
+        assert caught_up.json()["result"]["unseen"] is False
+        assert store.state(f"session/{sid}")["unseen"] is False
 
 
 @pytest.mark.asyncio
@@ -505,7 +564,7 @@ async def test_the_bulk_route_refuses_a_malformed_batch_with_422(tmp_path, monke
             "missing": {},
             "over the cap": {"items": [item] * 501},
             "short id": {"items": [dict(item, session_id="abc")]},
-            "uppercase id": {"items": [dict(item, session_id=sid.upper())]},
+            "uppercase id": {"items": [dict(item, session_id=UPPERCASE_SESSION_ID)]},
             "non-uuid token": {"items": [dict(item, completion_token="now")]},
             # `extra="forbid"` like every other Input in this module: a
             # conversation identity is DERIVED, so a caller cannot name one.

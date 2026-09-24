@@ -76,7 +76,9 @@ import pytest
 from PIL import Image
 
 import local_operator.tools.builtin as builtin
+from local_operator.harness.types import ToolContext
 from local_operator.tools.builtin import execute_bash, execute_read
+from local_operator.variables import VariableStore
 
 # Cadence of the liveness probe.
 HEARTBEAT_S = 0.02
@@ -84,6 +86,17 @@ HEARTBEAT_S = 0.02
 #: wakes. Servicing the tools' completion callbacks costs it up to 12.7 ms per
 #: sample; running the image workload on the loop costs it 512-725 ms.
 MAX_LOOP_CPU_S = 0.08
+
+#: A credential-pass call at least this large must run OFF the loop thread.
+#:
+#: Every legitimate on-loop pass in ``tools/builtin`` is bounded by a released
+#: pipe chunk (64 KiB — the live-job mirror) or a display-sized tail (8 KiB — the
+#: emit snapshot, the abort and timeout receipts), so the SETTLED stream is the
+#: only multi-megabyte one and a threshold in between names it exactly. It is a
+#: structural rule rather than a CPU budget on purpose: the settled pass over
+#: this module's 20 MB anchor-free fixture costs ~39 ms of thread CPU, i.e. it is
+#: INVISIBLE to :data:`MAX_LOOP_CPU_S`, and the arm below says so.
+_LARGE_PASS_BYTES = 1 << 20
 
 
 class LoopCpuProbe:
@@ -208,16 +221,48 @@ async def test_oversized_bash_output_keeps_the_loop_live(
 ) -> None:
     """A command that prints megabytes settles without freezing the frame.
 
-    The oversized tail (join, decode, spill write, elide) is the part that
-    moved into a thread, and the fixture size is what makes it expensive: 20 MB
-    costs 80 ms of CPU plus a spill write. Most of that is the write, so on
-    this path the structural assertion is the one with teeth — see the module
-    docstring on which half owns which shape.
+    The oversized tail (join, decode, credential pass, spill write, elide) is
+    the part that moved into a thread, and the fixture size is what makes it
+    expensive: 20 MB costs 80 ms of CPU plus a spill write. Most of that is the
+    write, so on this path the structural assertions are the ones with teeth —
+    see the module docstring on which half owns which shape.
+
+    **The context is what makes the pass half bite (QA round 1, Q1).** With
+    ``context=None`` the pass is a NO-OP: ``_redact_tool_text`` returns its input
+    untouched, so the fixture never paid the cost these assertions are about and
+    a pass moved back onto the loop would have left this arm GREEN. Measured
+    with the pass re-run at the settled call site on the loop: 0.0609 s of loop
+    CPU against this module's 0.08 s ``MAX_LOOP_CPU_S`` — still under, because a
+    pass over this fixture's 4 MiB of anchor-free text costs ~39 ms. So the
+    bound alone cannot own this step on this fixture, and the arm asserts the
+    THREAD the pass ran on instead, which is load-independent and exact.
+
+    Why the fixture is left anchor-free, rather than made expensive for the
+    pass: an anchor- bearing line would raise the HEAD-side worst sample to
+    25-56 ms (the live mirror and pipe filter redact the anchored release), i.e.
+    a 1.4-3x margin under the bound where the module's calibration claims 6x —
+    trading a load-independent assertion for one that can flake.
     """
     big = tmp_path / "big.txt"
     big.write_text("x" * (20 * 1024 * 1024) + "\n")
 
-    spy = OffLoopSpy(monkeypatch, "_decode_chunks", "_bash_oversized_streams")
+    spy = OffLoopSpy(monkeypatch, "_decode_and_redact_streams", "_bash_oversized_streams")
+    loop_thread = threading.get_ident()
+    large_on_loop: list[int] = []
+    large_off_loop: list[int] = []
+    # Spied on the STORE's pass seam rather than on ``_redact_tool_text``: with no
+    # store that wrapper returns its input untouched, so a spy there would record
+    # a call the session never paid — which is the defect (Q1) this arm exists to
+    # stop, and it has to be visible here as "the pass never ran".
+    real_pass = VariableStore.redact_with_report
+
+    def pass_spy(store_self, text):
+        if len(text) >= _LARGE_PASS_BYTES:
+            landing = large_off_loop if threading.get_ident() != loop_thread else large_on_loop
+            landing.append(len(text))
+        return real_pass(store_self, text)
+
+    monkeypatch.setattr(VariableStore, "redact_with_report", pass_spy)
     probe = LoopCpuProbe()
     probe.start()
     try:
@@ -226,13 +271,21 @@ async def test_oversized_bash_output_keeps_the_loop_live(
             {"command": f"cat '{big}'", "timeout": 60},
             None,
             None,
-            None,
+            ToolContext(cwd=str(tmp_path), variables=VariableStore(cwd=str(tmp_path))),
         )
     finally:
         await probe.stop()
 
     assert not result.is_error, result.text
     spy.assert_all_off_loop()
+    assert large_off_loop, (
+        "no large pass call was observed at all: the fixture is not paying the "
+        "credential pass, so this arm proves nothing about it"
+    )
+    assert not large_on_loop, (
+        f"a {large_on_loop}-byte credential pass ran on the loop thread: the "
+        "settled stream is back on the render loop"
+    )
     assert probe.samples, "heartbeat never woke"
     assert probe.worst < MAX_LOOP_CPU_S, (
         f"the loop thread burned {probe.worst:.3f}s of CPU without yielding while "

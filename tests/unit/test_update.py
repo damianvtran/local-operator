@@ -485,6 +485,117 @@ def test_installer_invocation_leaves_third_party_binaries_named() -> None:
     )
 
 
+def test_an_in_place_install_attests_before_it_rewrites_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3: pip and pipx have no generation to install into, so they rewrite in place.
+
+    This is the one install path that still takes runtimes with it (see
+    ``perform_upgrade``'s own docstring), and the reason the attestation lives in it:
+    the site-packages tree under a running fleet is rewritten where it stands, the
+    runtimes importing from it die mid-turn and cannot record anything themselves —
+    and a measured install did exactly that to every session on this machine on
+    2026-09-15, with the unwatched half staying down until they were resumed by hand.
+
+    The ORDER is the assertion that matters: the marker must be on disk BEFORE the
+    installer runs, because afterwards the party that could say what happened is the
+    party that was killed. The marker itself must name the mechanism and the front end
+    that asked for it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4246,
+        kind="daemon",
+        session_id="pipsession",
+        conversation_name="pipsession",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+
+    order: list[str] = []
+    real_attest = update_mod.note_doomed_runtimes
+
+    def observing_attest(tree: Path, **kwargs: object) -> object:
+        order.append("attest")
+        return real_attest(tree, **kwargs)  # type: ignore[arg-type]
+
+    def observing_installer(argv: list[str], *, executable: str | None = None) -> int:
+        order.append("install")
+        return 0
+
+    monkeypatch.setattr(update_mod, "note_doomed_runtimes", observing_attest)
+    monkeypatch.setattr(update_mod, "_run_installer", observing_installer)
+
+    perform_upgrade(
+        target="0.28.0",
+        kind=InstallKind.PIP,
+        prefix=sys.prefix,
+        executable=sys.executable,
+    )
+
+    assert order == ["attest", "install"], order
+    marker = registry.read_stop_marker(session_dir(root, record.session_id))
+    assert marker is not None, "the install must attest for the runtimes it displaces"
+    assert marker["deliberate"] is False
+    assert marker["mechanism"] == "in-place-install"
+    assert marker["actor"] == "lop update"
+    assert marker["session_id"] == "pipsession"
+    assert marker["pid"] == 4246
+
+
+def test_a_failed_in_place_install_withdraws_the_attestation_it_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR 2 on the install path: a failed install leaves no verdict behind.
+
+    The marker is staged before the installer runs, and a non-zero exit means the
+    upgrade did NOT happen — the caller raises ``UpdateError``, so the operator is
+    told it failed. The marker would say the opposite, for the whole RUN it is keyed
+    to: an unrelated crash an hour later would render as "its install was being
+    replaced in place". The report wins, and the artifact has to agree with it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4247,
+        kind="daemon",
+        session_id="pipfailed",
+        conversation_name="pipfailed",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+    monkeypatch.setattr(update_mod, "_run_installer", lambda *a, **k: 1)
+
+    with pytest.raises(UpdateError):
+        perform_upgrade(
+            target="0.28.0",
+            kind=InstallKind.PIP,
+            prefix=sys.prefix,
+            executable=sys.executable,
+        )
+
+    assert (
+        registry.read_stop_marker(session_dir(root, record.session_id)) is None
+    ), "an install that failed must not leave a verdict saying it took the tree"
+
+
 def test_perform_upgrade_refuses_editable_and_unknown() -> None:
     with pytest.raises(UpdateError, match="repo .venv"):
         perform_upgrade(target="0.28.0", kind=InstallKind.EDITABLE, run=lambda _: 0)
@@ -1243,12 +1354,160 @@ class TestServiceDaemonRefresh:
         assert refresh.lines == ()
 
     def test_a_timeout_is_a_warning(self) -> None:
+        """A kill with NOTHING announced still says a daemon may be STOPPED.
+
+        The child can die before it announces anything (a wedge inside its first
+        repair, or a build whose announcements predate these lines), and this is the
+        sentence that has to stand on its own then. It may not name a daemon it does
+        not know, and it may not lose the recovery 0.61.4's reload failure preserved.
+        """
         with (
             patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
             patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)),
         ):
             refresh = update_mod.refresh_service_daemons_after_upgrade()
-        assert refresh.warnings == ("warning: daemon refresh timed out",)
+        assert len(refresh.warnings) == 1
+        warning = refresh.warnings[0]
+        assert warning.startswith("warning: the daemon refresh did not finish within")
+        assert "was stopped" in warning
+        assert "may now be STOPPED" in warning
+        assert "`lop tunnel install`" in warning, "the recovery is still named"
+
+    def test_the_bound_names_the_daemon_the_child_was_repairing(self) -> None:
+        """The killed child's own announcement is what makes the line actionable.
+
+        REPRODUCED against a real launchd job before this fix (macOS 27.0.0,
+        ``gui/501``, scratch label, a stale plist): the bound killed the child with
+        the ``bootout`` already issued, the job left the domain, the plist was
+        rewritten, and the upgrade's only line was *"warning: daemon refresh timed
+        out"* — no daemon, no state, no recovery. The child is the only side that
+        knows where it was, so its announcement comes back out of the output
+        ``subprocess.run`` captured before the kill. It arrives as BYTES even under
+        ``text=True`` (measured), which is why the fixture below is bytes.
+        """
+        stdout = (
+            "refreshing: mobile :: lop mobile install\n"
+            "refreshing: tunnel :: lop tunnel install\n"
+        )
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=stdout.encode())
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        warning = refresh.warnings[0]
+        assert "while the tunnel daemon was being repaired" in warning
+        assert "run `lop tunnel install` to bring it back" in warning
+        assert "mobile" not in warning, "the LAST announcement is the one in flight"
+
+    def test_a_half_written_announcement_names_no_daemon(self) -> None:
+        """A marker the child was killed mid-write must not become a daemon's name.
+
+        The daemon would be invented and the recovery command absent, which is a
+        worse sentence than the one that admits it does not know.
+        """
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=b"refreshing: tun")
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert "may now be STOPPED" in refresh.warnings[0]
+        assert "while the" not in refresh.warnings[0]
+
+    def test_a_healthy_run_does_not_print_the_announcements(self) -> None:
+        """They are for a KILLED child, not for every upgrade.
+
+        Both streams are filtered: the child writes the marker to stdout, and a
+        summary that printed progress on every upgrade would be a new line of noise
+        on a step that is deliberately silent when nothing changed.
+        """
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="refreshing: tunnel :: lop tunnel install\ntunnel daemon: refreshed\n",
+            stderr="refreshing: tunnel :: lop tunnel install\nwarning: other\n",
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.lines == ("tunnel daemon: refreshed",)
+        assert refresh.warnings == ("warning: other",)
+
+    def test_a_dead_child_cannot_report_an_announcement_as_its_failure(self) -> None:
+        """A non-zero exit whose last output is the marker reports the exit, not it.
+
+        The annotations are this side's progress, never the child's answer — the
+        failure detail is a sentence for the operator and an announcement is not one.
+        """
+        completed = subprocess.CompletedProcess(
+            [], 3, stdout="refreshing: tunnel :: lop tunnel install\n", stderr=""
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.warnings == ("warning: could not refresh installed daemons: exit 3",)
+
+    def test_the_child_announces_each_daemon_before_it_repairs_it(self, monkeypatch) -> None:
+        """The announcement is written BEFORE the repair, and flushed.
+
+        This is the whole mechanism: a kill can land at any point in a repair, so the
+        line has to be out of the child's buffer before the first `launchctl` call of
+        that daemon's reload — an announcement printed afterwards would never be read
+        for the daemon that was actually down. Checked by snapshotting what the child
+        had WRITTEN at the moment each repair ran, which is what the parent sees when
+        it kills the pipe.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from local_operator import launchd
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
+        from local_operator.wakes import install as wakes_install
+
+        written: list[str] = []
+        buffer = io.StringIO()
+
+        def repair_for(name: str):
+            def repair() -> launchd.PlistRefresh:
+                written.append(buffer.getvalue())
+                return launchd.PlistRefresh(name=name, kind="current")
+
+            return repair
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        for module, name in (
+            (mobile_install, "mobile"),
+            (browser_install, "browser bridge"),
+            (tunnel_install, "tunnel"),
+            (wakes_install, "wakes supervisor"),
+        ):
+            monkeypatch.setattr(module, "refresh_plist_if_stale", repair_for(name))
+
+        with redirect_stdout(buffer):
+            assert update_mod.daemons_refresh_command() == 0
+
+        steps = update_mod._refresh_steps()
+        names = tuple(name for name, _recovery, _repair in steps)
+        assert names == ("mobile", "browser bridge", "tunnel", "wakes supervisor")
+        assert len(written) == len(names), "every daemon was repaired once"
+        announcements = [
+            update_mod._refresh_announcement(name, recovery) for name, recovery, _repair in steps
+        ]
+        for index, announcement in enumerate(announcements):
+            # Already written when THIS repair runs, and no later daemon announced
+            # yet: the marker is a position, and a position read out of order would
+            # name the wrong daemon in the killed child's report.
+            assert f"{announcement}\n" in written[index]
+            for later in announcements[index + 1 :]:
+                assert later not in written[index]
+        assert buffer.getvalue().splitlines() == announcements
 
     def test_the_services_run_before_the_mobile_bounce(self) -> None:
         """The order the plist repair makes load-bearing.
@@ -1391,11 +1650,25 @@ class TestServiceDaemonRefresh:
                 )
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        # NOTHING was repaired, so the child's only output is its per-daemon
+        # announcements — the progress lines the upgrade summary strips. The
+        # contract this test has always asserted (no repair, no line about one)
+        # is unchanged; what the run says out loud is now pinned exactly.
+        assert captured.out.splitlines() == [
+            update_mod._refresh_announcement(name, recovery)
+            for name, recovery, _repair in update_mod._refresh_steps()
+        ]
         assert captured.err == ""
 
     def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
-        """One line per daemon that CHANGED; silence for one already current."""
+        """One line per daemon that CHANGED; silence for one already current.
+
+        Each daemon is ANNOUNCED before it is repaired (the line the parent reads
+        back out of a killed child — see ``update._PROGRESS_PREFIX``), so the pinned
+        output below is announcement, report, announcement, … The summary's lines
+        are still only the daemons that CHANGED: the browser bridge and the tunnel
+        were current and failed respectively, and neither gets one.
+        """
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
@@ -1419,7 +1692,11 @@ class TestServiceDaemonRefresh:
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
         assert captured.out.splitlines() == [
+            update_mod._refresh_announcement("mobile", "lop mobile install"),
             "mobile daemon: refreshed a stale LaunchAgent and restarted it",
+            update_mod._refresh_announcement("browser bridge", "lop browser install"),
+            update_mod._refresh_announcement("tunnel", "lop tunnel install"),
+            update_mod._refresh_announcement("wakes supervisor", "lop wake install"),
             "wakes supervisor daemon: refreshed a stale LaunchAgent and restarted it",
         ]
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
@@ -2196,11 +2473,22 @@ def test_from_snapshot_builds_the_mobile_bundle_before_installing(
     assert "lop-update: mobile web bundle: built" in capsys.readouterr().out
 
 
-def test_from_snapshot_without_node_still_installs(
+def test_from_snapshot_without_node_refuses_to_install_a_ui_less_generation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No Node is a documented skip, never a failed update: the daemon heals
-    itself at `lop mobile install` on a host that has one."""
+    """No Node, and web sources present: the update REFUSES rather than flipping.
+
+    This test used to assert the opposite — no Node was a documented skip that
+    installed anyway, on the theory that the daemon heals itself at `lop mobile
+    install` on a host that has Node. The measured record says the healing never
+    happened: the skip is exactly the path that flipped generations
+    0.61.13-0.61.16, 0.61.18 and 0.62.0 to `current` with no UI, exit 0, a phone
+    answering 503 and `lop mobile status` still reporting `healthy: yes`. A
+    snapshot with web sources and no servable dist is now a failed update whose
+    remedy is printed; the tolerance that remains is for a tree with NO web
+    sources at all (see
+    :func:`test_from_snapshot_without_web_sources_still_installs`).
+    """
     snapshot = tmp_path / "snapshot"
     web = snapshot / "local_operator" / "mobile" / "web"
     web.mkdir(parents=True)
@@ -2218,10 +2506,248 @@ def test_from_snapshot_without_node_still_installs(
         ),
         patch.object(update_mod, "_generation_upgrade", return_value=0),
     ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == [], "a generation with no UI must never be flipped to current"
+    captured = capsys.readouterr()
+    assert (
+        "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
+        in captured.out
+    )
+    assert "skipped (node not installed; build at `lop mobile install`)" in captured.out
+    assert "refusing to install this build" in captured.err
+    assert "lop mobile install" in captured.err, "the refusal names the remedy"
+
+
+def test_from_snapshot_does_not_install_when_the_bundle_build_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE DEFECT, in one reading: a failed bundle build must not install.
+
+    ``snapshot_bundle`` returns a status STRING and never raises, and the caller
+    printed it and installed anyway — so a snapshot whose bundle did not build
+    was flipped to `current` with no UI and exit 0. The status here is the exact
+    spelling ``snapshot_bundle`` produces on a failed build, and the install
+    call is asserted ABSENT rather than merely expected to be harmless: the
+    generation flip is the damage.
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(
+            install_mod, "snapshot_bundle", return_value="FAILED (pnpm build failed: boom)"
+        ),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == [], "the install call must not be made at all"
+    captured = capsys.readouterr()
+    # The status keeps its own line on stdout; the refusal does NOT re-splice it
+    # (design round 1, D1), so the two are asserted on the streams they belong to.
+    assert "FAILED (pnpm build failed: boom)" in captured.out
+    assert "FAILED (pnpm build failed: boom)" not in captured.err
+    assert "refusing to install this build" in captured.err
+    # One vocabulary for the thing that is missing (D3): the sentence says "mobile
+    # web UI" and does not spend "bundle"/"UI"/"generation" on the same object.
+    assert "mobile web UI to serve" in captured.err
+    assert "generation" not in captured.err
+    # The primary remedy is named unconditionally; the npx clause only where npx
+    # resolves, exactly as `_pin_mismatch` builds its own route list — so the
+    # assertion moves with the host rather than pinning a command this machine may
+    # not have (the same shape the bundle-bound suite uses for its routes).
+    assert "lop mobile install" in captured.err
+    assert ("npx --yes pnpm@11.22.0" in captured.err) == (install_mod._shim_argv("npx") is not None)
+    assert ("pnpm@11.22.0" in captured.err) == (install_mod._shim_argv("npx") is not None)
+
+
+def test_from_snapshot_refusal_names_a_typed_fetch_only_for_an_exact_pin(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A range pin must not be advertised as something the reader can fetch (D2).
+
+    ``_runner_or_refusal`` refuses to auto-fetch a range, so recommending
+    ``npx --yes pnpm@^11`` in the same breath says "we will not do this" and then
+    "you do it" — and ``pnpm@^11`` is not a version ``npx`` can be asked for. For
+    a range the refusal names the pin as a range and says a by-hand fetch has to
+    name a concrete version; the typed ``npx`` command is offered only for an
+    exact pin.
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text('{"packageManager":"pnpm@^11"}', encoding="utf-8")
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(install_mod, "snapshot_bundle", return_value="FAILED (boom)"),
+        patch.object(update_mod, "install_into_generation") as install,
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    install.assert_not_called()
+    err = capsys.readouterr().err
+    assert "pins a range (`pnpm@^11`)" in err
+    assert "name a concrete version" in err
+    assert "npx --yes pnpm@^11" not in err, "a range is not something the reader can fetch"
+
+
+def test_from_snapshot_refusal_reclaims_a_temporary_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal path must reclaim a ref snapshot's extracted tree.
+
+    ``--from-snapshot <ref>`` is the form that EXTRACTS: ``resolve_snapshot``
+    untars the archive into ``$TMPDIR/lop-snapshot-*`` and marks the source
+    ``temporary=True``, and the ``finally`` that removes it is the only thing
+    standing between repeated refused updates and a full /tmp (~95 MB per
+    extract, measured). The guard's early return used to sit ABOVE that
+    ``finally``, so every refusal leaked one — invisible to the directory-form
+    tests, where ``temporary`` is False and nothing is ever extracted.
+
+    The tree is asserted GONE, not merely "the install did not run": the leak is
+    the finding.
+    """
+    snapshot = tmp_path / "extract"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=SnapshotSource(path=snapshot, ref="main", temporary=True),
+        ),
+        patch.object(
+            install_mod, "snapshot_bundle", return_value="FAILED (pnpm build failed: boom)"
+        ),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == []
+    assert not snapshot.exists(), "a refused ref snapshot leaked its extracted tree"
+    assert "refusing to install this build" in capsys.readouterr().err
+
+
+def test_from_snapshot_refusal_survives_an_unremovable_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reclaim must not turn the refusal into a traceback.
+
+    ``_remove_tree`` is best-effort by contract, and the refusal's own exit code
+    and message are what the caller acts on — an exception out of the ``finally``
+    would replace a clear refusal with a traceback and a different exit status.
+    """
+    snapshot = tmp_path / "extract"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=SnapshotSource(path=snapshot, ref="main", temporary=True),
+        ),
+        patch.object(install_mod, "snapshot_bundle", return_value="FAILED (boom)"),
+        patch.object(update_mod, "_remove_tree", return_value=False),
+        patch.object(update_mod, "install_into_generation") as install,
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    install.assert_not_called()
+
+
+def test_from_snapshot_refuses_a_truncated_web_tree_with_no_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `web/` tree that lost its manifest is BROKEN, not UI-less.
+
+    ``_bundle_state`` answers ``missing-sources`` for any tree with neither
+    `dist/` nor `package.json`, so a tolerance keyed on that classifier alone
+    treats a shallow copy that kept ``web/src/`` and dropped the manifest as "no
+    UI either way" and installs it. It is not "no UI either way" — it is a web
+    tree that cannot build, which is the state the guard exists to refuse. The
+    `web/` DIRECTORY is what distinguishes the two, so that is what the guard
+    keys on.
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    (web / "src").mkdir(parents=True)
+    (web / "src" / "main.tsx").write_text("export {};\n", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == [], "a web tree that cannot build must not be installed"
+    assert "refusing to install this build" in capsys.readouterr().err
+
+
+def test_from_snapshot_without_web_sources_still_installs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tolerance the guard KEEPS: a tree with no web directory installs.
+
+    ``snapshot_bundle`` says ``skipped (no web sources in snapshot)`` for such a
+    tree, and there is no UI for the snapshot to be missing — so refusing it
+    would break the non-web snapshots this command legitimately installs. Both
+    halves are asserted, because a guard that refused everything would pass the
+    tests above and be just as wrong.
+
+    The tolerance keys on ``web/`` being ABSENT rather than on ``package.json``:
+    see :func:`test_from_snapshot_refuses_a_truncated_web_tree_with_no_manifest`,
+    the shallow-copy case the classifier alone would have waved through.
+    """
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "local_operator").mkdir(parents=True)
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
         assert update_mod._snapshot_command("main") == 0
 
     assert installed == [snapshot]
     assert (
-        "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
+        "lop-update: mobile web bundle: skipped (no web sources in snapshot)"
         in capsys.readouterr().out
     )

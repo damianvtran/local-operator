@@ -55,7 +55,12 @@ The bearer has **two sources**, and they exist for two different daemons:
    environment. Such a daemon mints `claim_key = secrets.token_urlsafe(32)` at
    startup and publishes it in its **discovery record** at
    `<config>/run/serve/<pid>.json`, `0600` inside a `0700` directory — the same
-   boundary that already protects a session's `control_key`. Main reads the
+   boundary that already protects a session's `control_key`. That boundary is the
+   whole story for a session's ORDINARY operations; the operations that increase
+   a running gate's authority are additionally gated on a per-session operator
+   capability that is never written to any record (issue #1310, see
+   `docs/design/approval-authority.md`), which is why this section governs the
+   daemon and not the approval gate. Main reads the
    record, finds the daemon, confirms `instance_id`, and presents the key once
    to `POST /v1/desktop/claim` as `Authorization: Bearer <claim_key>`. The key
    is never returned by a route, never logged, and never written anywhere but
@@ -157,7 +162,32 @@ contains an API key, access token, refresh token, or complete stored grant.
   storage provider. The mock test transport is not an end-user provider.
   `configured` means credential presence, **not** a successful connection test.
 - `GET /v1/auth/status`: redacted stored account identities and credential types.
-  Environment credentials are not removable stored accounts.
+  Environment credentials are not removable stored accounts. The result also
+  carries `radient_login` and `tunnel_remedy`, because a row can be `configured`
+  with an unexpired access token and still be refused by the identity provider.
+  **Both are objects, not strings.** `radient_login` is
+  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"}` — the
+  same shape as the `login` object on `GET /v1/desktop/tunnel` — and
+  `tunnel_remedy` is `{"command": str, "url": str}` or `null`, the same shape as
+  `remedy` there. A renderer written from a sentence that called them a state and
+  a command reads a dict where it expects a string.
+  `unknown` means the check could not run and never means "the login is dead".
+  The verdict is decided from this machine's own credential store, but it is not
+  free of the network: a stored access token outside its refresh skew makes the
+  store attempt a refresh, which is a POST to a token endpoint. That one call is
+  bounded (`tunnels/report.py`'s `REFRESH_WAIT_S`, 2 s) and a non-`ok` verdict is
+  reused for the window the store's own cascade blocks a failed credential for
+  (`VERDICT_TTL_S`, 60 s), so a partitioned network costs this poll one bounded
+  wait per window and the answer on expiry is `unknown`. Both bounds exist
+  because this route is polled beside an interactive login form.
+  `login_required` here is the SAME condition `POST /v1/desktop/radient` types as
+  `grant_invalid` (401 `radient_credential_refused`): both key on the store's own
+  dead-grant verdict (`CredentialInvalidError`), which this branch also widened
+  to cover a token endpoint that answers in prose (Radient's
+  `{"error": "Token refresh failed: refresh token is expired or revoked"}`). A
+  renderer may treat the two as one state; the vocabulary differs because this
+  one is the tunnel's persisted reason (the park file, `lop tunnel status` and
+  the phone's 503 all use it) and that one is a per-request refusal code.
 - `POST /v1/auth/login` with `{provider: <method id>}` starts a login operation.
 - `GET /v1/auth/operations/{id}` returns `id`, `provider`, `state`, `message`,
   `auth_url`, `instructions`, `input_required`, `prompt_id`, and `expires_in`.
@@ -184,6 +214,38 @@ provider destinations and HTTP loopback URLs are accepted. Device instructions
 are display/copy content; input-required prompts are paste controls. The
 QwenCloud usage-OAuth method also requires its inference API key; a device grant
 alone is not an inference credential.
+
+## Tunnel state
+
+- `GET /v1/desktop/tunnel`: this machine's remote-access state, read-only, as
+  `lop tunnel status --json` reports it. `result.configured` is false when no
+  tunnel is enrolled on this machine (every other field is then a null/empty
+  placeholder, and the connector state is the literal `not configured`).
+  `result.cloud.source` is always `cached` here: the route answers about THIS
+  machine and never waits on an upstream call, which is also the only kind of
+  answer available when the login or the network is what is broken.
+  `result.connector.state` is one of `parked`, `connected`, `connecting`,
+  `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
+  caller asked not to probe the loopback gateway); `result.login.state` is one
+  of `ok`, `login_required`, `unknown`, where `unknown` means the check could not
+  run and never means "the login is dead". `result.remedy` is
+  `{"command": str, "url": str}` or `null`: the command that clears the
+  condition, with the console URL that belongs beside it. The remedy is a
+  terminal command, so the UI shows it rather than running it, and this route has
+  no write half. It is an OBJECT rather than a bare string for that reason — the
+  URL travels with the command.
+  **`connector.detail` names no command.** It is one surface-neutral sentence
+  that this route, `lop tunnel status` and the park file all print verbatim, and
+  the TUI renders it too, so a command baked into it would be a slash command
+  handed to a desktop callout (or a shell command handed to a composer). A
+  renderer that wants to offer the fix appends `remedy.command` in its own
+  surface's spelling: `lop login radient` in a shell, `/login radient` in the
+  app's composer. The same applies to `radient_login`/`tunnel_remedy` on
+  `GET /v1/auth/status`.
+
+There is no SSE frame for this. It changes when a person signs in or edits the
+console, so the app polls it on open and refetches when a sign-in it started
+settles; a new frame kind would carry minutes-old news.
 
 ## Settings
 
@@ -818,6 +880,28 @@ must be able to say so: `503` with `{"detail": {"code": "runtime_unreachable",
 from a `503` that is the server not answering at all. Clients key on the `code`; the sentence rides along
 for the ones that do not.
 
+A control call against an owner that IS reachable but does not answer inside
+the desktop control envelope (`DESKTOP_CONTROL_ATTACH_S`, 3 s over the whole
+dial + sync) is answered `503` with `{"detail": {"code": "runtime_busy",
+"message": <the same sentence>, "retryable": true, "retry_after_ms": 2000}}` and
+a `Retry-After: 2` header, instead of spending 15 s on the welcome and answering
+`runtime_unreachable`. `runtime_busy` means the runtime is alive and busy (a loop
+mid-turn, a long synchronous step): resending the SAME request id is safe
+(admissions are at-most-once by the receipt journal) and will very likely
+succeed shortly. `runtime_unreachable` keeps its meaning — nothing could be
+dialled — and carries no retry fields. Every field is additive: a client that
+predates them reads the unchanged sentence.
+
+The 3 s is PER CALL, and it starts once the call holds the facade's bind lock.
+Control calls to one conversation still dial one at a time, so a second call
+issued while the first is waiting on the same silent owner is refused after
+about twice the envelope (measured: 3,034 ms then 6,046 ms, both
+`runtime_busy`), and N concurrent calls stack to about N × 3 s. Reads are not
+part of this queue. `retry_after_ms` (2 s) is deliberately shorter than the
+envelope: it is the pause before the next attempt, and the retry spends its own
+3 s waiting for the owner, so refuse + pause cycles keep three attempts inside
+a 20 s client deadline.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -867,9 +951,30 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    Because nothing is cut, the snapshot can no longer report
    `cursor_missing: true` — an evicted or replaced cursor is not a state this
    frame can be in. An EMPTY page still means "reconcile through `/history`":
-   that is now exactly the case where the paired state carries no `history_cursor`
-   at all (no frontend refresh or checkpoint yet), and readers depend on that
-   signal, so it is preserved deliberately rather than inferred.
+   that is now exactly the case where a LIVE owner's paired state carries no
+   `history_cursor` at all (no frontend refresh or checkpoint yet), and readers
+   depend on that signal, so it is preserved deliberately rather than inferred.
+   A COLD frame (`cold: true`) carries the filled page too — the same tail
+   `/history` serves — so first paint of a conversation with no live runtime
+   needs no second round trip. A non-empty page beside a `cold_reason` is how a
+   renderer knows this backend fills it and may skip the duplicate `/history`.
+   Key that on the PRESENCE of `cold_reason`, never on its value. The FIRST
+   cold frame for a live-but-busy owner usually carries `cold_reason:
+   "no-runtime"`, not `owner-silent`: the attempt that classifies the owner
+   queues behind any control dial on the same facade (4/4 frames measured while
+   a `/warm` or send was in flight), and the frame goes out before it records
+   the classification. `no-runtime` beside `attaching: true` therefore means
+   "not classified yet", not "no pid holds this conversation". The
+   `frontend.replace` that follows carries the classified token or `cold:
+   false`. A cold snapshot's `cursor_missing` is always `false`: the page is
+   the unanchored tail (no `before_id`, no `through_id`), and only an anchored
+   read can find its cursor missing. This holds whether the page is empty or
+   not.
+   A read waits at most `READ_FIRST_FRAME_GRACE_S` (50 ms) for its attach to an
+   existing owner; a busy owner is painted cold with `attaching: true` and the
+   attach carries on behind the frame, ending in a `frontend.replace` whose
+   `cold` flag is the verdict (`false` once it lands, or the classified
+   `cold_reason` if it does not).
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
@@ -1049,22 +1154,25 @@ build 200 cold facades and 200 SQLite poll loops, and would take the
 
 The envelope's SHAPE is the session stream's (`epoch`, `seq`, `type`, `payload`,
 plus `session_id` on the types that concern one session) so the relay needs no
-new parser. `session_id` is absent on `open` and `catalogue`: the feed is not a
-session, and a fabricated id would make `observe(sessionId, frame)` look like it
-had one to attribute a catalogue event to.
+new parser. `session_id` is absent on `open`, `catalogue` and `authoring`: the
+feed is not a session, and a fabricated id would make
+`observe(sessionId, frame)` look like it had one to attribute a catalogue event
+to.
 
 ```jsonc
 {"epoch":"…","seq":12,"type":"open",
  "payload":{"subscription_id":"…","heartbeat_seconds":15,"lease_seconds":45,
             "watch_ttl_seconds":45,"catalogue_revision":98123,
+            "authoring_revision":7,
             "attention":{"session/<id>":{ /* AttentionState */ }}}}
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
-{"epoch":"…","seq":16,"type":"session_status","session_id":"<12 hex>",
+{"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
+{"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
-{"epoch":"…","seq":17,"type":"heartbeat","payload":{"ts":1699999999.5}}
-{"epoch":"…","seq":18,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
+{"epoch":"…","seq":18,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
 - **`notification.payload` is the per-session payload**, built by the SAME
@@ -1179,6 +1287,37 @@ had one to attribute a catalogue event to.
   fleet starting, a batch finishing — costs one refetch, not N: the causes
   collapse into a single bump per tick and anything arriving later in the same
   tick is carried by the next one (~100 ms).
+- **`authoring`** is the same shape for the two AUTHORING registries —
+  `agents/<id>/agent.yml` (the profiles and roles the `agent` tool writes) and
+  `teams/<id>/team.yml` — on the same 1 s cadence, with the same monotone
+  `revision` that `open` reports as `authoring_revision`. It exists because
+  nothing in this feed used to mention either: a session could create a team or a
+  profile and the sidebar's Teams/Agents lists kept showing the state they were
+  mounted with until a refresh or a tab switch re-mounted them. As with
+  `catalogue`, the frame says only "your lists are stale" — the client's existing
+  fetch is the answer — and at most one frame is published per tick, so four
+  profiles authored by one plan cost one refetch.
+
+  **Its trigger is the CONTENT of the rows, projected onto the lines a user
+  AUTHORED.** The token is the row name set of each registry plus a `crc32` of
+  each row's authored lines; the per-turn keys an ordinary turn rewrites in place
+  (`last_message`, `last_message_datetime`, `current_working_directory`) are
+  dropped before the digest. That projection is load-bearing rather than tidy:
+  `update_agent_state` dumps the whole row to `agent.yml` on every turn, so a
+  digest of the raw bytes would publish on every turn of every chat and refetch
+  the sidebar's two lists once a turn — the exact defect this channel removes.
+  Pinned both ways in `tests/unit/server/test_desktop_feed.py`: a turn that
+  rewrites `agent.yml`, and a `save_agent_state` that rewrites `system_prompt.md`
+  with identical bytes, must publish NOTHING; an edit to what a row SAYS must
+  publish exactly one frame. A profile's `system_prompt.md` — where the `agent`
+  tool keeps its instructions — is deliberately not a term, since it is not what
+  either list renders.
+
+  **A same-size in-place edit whose `mtime_ns` does not move is missed** — the
+  per-row term is guarded by a stat, exactly like the catalogue token, and the
+  refetch on window focus and on mount is the backstop for both. What a row's
+  file being READ costs is bounded the same way: a probe re-reads a row only when
+  that row's stat moved.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
@@ -1226,6 +1365,24 @@ app's first `GET /v1/desktop/sessions` creates `run/mobile` 0700 on a machine th
 has never run a session. That is pre-existing at the base commit and unchanged
 here, and it is why an absent run directory is not a statement that no runtime has
 ever published.
+
+### The cost of the authoring probe, stated rather than discovered
+
+The `authoring` token is the one term on this feed whose cost is **O(profiles +
+teams)**, and saying so here is deliberate: a reader who finds an O(n) probe
+unstated will read it as a regression of the four-stat tick and "fix" it by
+deleting the per-row term — re-opening the defect the channel closes.
+
+The shape of the cost is one `readdir` per registry plus **one `os.stat` per
+row**; a row's metadata file is READ only when that row's stat moved, so an idle
+probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
+is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
+its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
+on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
+other probe here. The projection is a line filter rather than a YAML parse for
+the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,
+which is not affordable once a second beside the doorbell.
 
 ### The burst ceiling
 
@@ -1375,6 +1532,22 @@ eligible.
    question, and using it to suppress meant "this machine can banner" read as "a
    human is reading X": with the panel on X and the window behind another app,
    every OS surface went quiet while nobody was looking.
+
+   This rung reads ATTENTION ("a person is looking right now") and must keep
+   reading it. The runtime also publishes `RuntimeServer.attached_surfaces()` —
+   "an interface could PRESENT a question", with no focus in it and the desktop
+   clause reduced to the LEASE ("a pane holds this conversation"), which is what
+   keeps that answer from moving when a window is raised — and that is a
+   different question serving
+   different consumers: the model's `<interactivity>` block and the gate's park
+   decision, never suppression. Routing on it here would silence the banner for
+   a conversation nobody is looking at, which is what this rung exists to catch
+   (see `docs/design/attached-interface-signal.md`).
+
+   A record whose `session_id` is EMPTY is absence of evidence, not evidence
+   against the session: the publisher blanks the field whenever it cannot vouch
+   for which conversation the window shows, so `_desktop_visible` falls through
+   to the connection's own per-session flag rather than denying.
 2. **A notify-capable desktop app** on this host claims the completion kind —
    the feed above composes it, so the runtime and the TUI stay silent.
 3. **A TUI is running anywhere on this machine** — its 1 s background announcer
@@ -1457,6 +1630,7 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

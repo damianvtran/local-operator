@@ -239,7 +239,8 @@ TranscriptView {
 /* Blocks: zero outer margin, zero padding — no declarations here by design
  * (the minimalism defense asserts their absence; anything uniform here would
  * be the "blank row between everything" regression). */
-TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ToolCard, WakeBlock,
+TranscriptBlock, UserBlock, NoticeBlock, RichBlock, AssistantBlock, ReasoningBlock, ToolCard,
+WakeBlock,
 PeerMessageBlock {
     width: 1fr;
     height: auto;

@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +79,15 @@ INBOX_NAME = "inbox.jsonl"
 #: at its call site in ``session._run_turn_pipeline``); the string is left as the
 #: boot drain's promise rather than stretched to describe both, because the
 #: over-claim needs a row no send can write.
+#:
+#: AND THE BOOT DRAIN HAS TO EXIST FOR THE PROMISE TO HOLD, which is the half
+#: that was missing until 0.61.19: a row spooled by a DRAINING runtime named no
+#: one who would raise a successor, so a headless session could retire with the
+#: message held and no runtime ever coming for it (measured 2026-09-21 — three
+#: rows, no successor, no owner). ``serving._spool_for_successor`` therefore
+#: records the turn as OWED (``local_operator.wakes.spooled``) and the wake
+#: supervisor, whose whole job is to make a runtime exist for a session, raises
+#: one for it. The promise is unchanged; what changed is that a process keeps it.
 SPOOL_RECEIPT_WAKE = "held for the next runtime — it runs it"
 SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
 
@@ -333,6 +343,101 @@ def _parse(raw: bytes) -> list[InboxLine]:
         if isinstance(payload, dict):
             lines.append(InboxLine.from_json(payload))
     return lines
+
+
+def settle_owed_turn(session_dir: Path, *, cwd: str = "") -> None:
+    """Make the owed-turn record agree with this session's spool, after a drain.
+
+    Called by both drains once they have finished with the spool, and it settles
+    in BOTH directions because the spool is the authority and the record is a
+    claim about it:
+
+    * the spool still holds a row that asks for a turn → the record must EXIST
+      (a raise is still owed). It usually does — the writer put it there — but a
+      supervisor that read the file while ``drain_inbox`` had it emptied (the
+      deferral path re-appends what it will not deliver) can have cleared it in
+      that window, and re-noting here is what closes that hole (review round 1,
+      R1-4).
+    * the spool no longer holds one → drop the record, judged against the value
+      this call read so a row that lands meanwhile re-arms it instead of being
+      deleted under (``clear_spooled_turn``'s compare-and-delete guard).
+
+    Best-effort: the drain's own delivery has already happened by the time this
+    runs, and a store that cannot be written (or a config dir this process cannot
+    see) must not turn a delivered message into a failed turn. The cost of
+    leaving a record behind is one engage the supervisor should not have made; the
+    cost of raising here is the turn.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.wakes.spooled import (
+        clear_spooled_turn,
+        note_spooled_turn,
+        read_spooled_turn,
+        spool_owes_turn,
+    )
+
+    try:
+        root = config_dir()
+        session_id = session_dir.name
+        if spool_owes_turn(session_dir):
+            if read_spooled_turn(root, session_id) is None:
+                note_spooled_turn(root, session_id, cwd=cwd)
+            return
+        record = read_spooled_turn(root, session_id)
+        if record is not None:
+            clear_spooled_turn(root, session_id, expected_updated_at_ms=record.get("updated_at_ms"))
+    except Exception:  # noqa: BLE001 — a bookkeeping failure is not a delivery failure
+        logger.debug("could not settle the owed turn for %s", session_dir, exc_info=True)
+
+
+def drop_owed_turn(session_dir: Path) -> None:
+    """Drop this session's owed-turn record because NO raise can discharge it.
+
+    The one case that calls it is the boot drain's deferral: a session with no
+    durable history keeps its PEER rows until the owner's first turn
+    (``process._drain_inbox_into``'s ``requires_engagement`` branch), so every
+    runtime raised for that record would boot, defer the same rows and exit —
+    real work, hourly, that delivers nothing (review round 1, R1-10). The spool
+    row is untouched and the owner's first turn still drains it, which is the
+    deferral the sender's receipt actually describes.
+
+    TWO GUARDS, because this is the third unguarded unlink in the circuit and the
+    first two both took a fix in review (QA round 2, R2-Q2):
+
+    * IT REFUSES WHEN THE SPOOL HOLDS THE OWNER'S OWN WORDS. A ``SOURCE_USER`` row
+      is dischargeable by exactly the raise this function is declining — the
+      successor's boot drain RUNS it, durable history or not — so a record that
+      arrived for one must survive; the deferral judgement is about the peer rows
+      beside it. Without this guard the drop would delete a record the owner's own
+      prompt had just written, which is defect (B) once more, this time caused by
+      the fix for R1-10 rather than by the cap.
+    * AND IT PASSES ``expected_updated_at_ms``, the same compare-and-delete the
+      reconciler and :func:`settle_owed_turn` pass: the record is judged from the
+      read a moment earlier, so a record that has changed since is left for the
+      next pass rather than unlinked on a stale judgement. What the guard narrows
+      is the window, from the whole deferral to the unlink itself.
+
+    Best-effort, like every other write on this path.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.wakes.spooled import (
+        clear_spooled_turn,
+        read_spooled_turn,
+        spool_has_owner_row,
+    )
+
+    try:
+        if spool_has_owner_row(session_dir):
+            return
+        root = config_dir()
+        record = read_spooled_turn(root, session_dir.name)
+        if record is None:
+            return
+        clear_spooled_turn(
+            root, session_dir.name, expected_updated_at_ms=record.get("updated_at_ms")
+        )
+    except Exception:  # noqa: BLE001 — see settle_owed_turn
+        logger.debug("could not drop the owed turn for %s", session_dir, exc_info=True)
 
 
 def peek_inbox(session_dir: Path) -> list[InboxLine]:
@@ -608,3 +713,126 @@ def _read_all(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+# -- the update window's handover marker ---------------------------------------
+#
+# The inbox file above carries the MESSAGES a leaving runtime spooled. This
+# carries the FACT that a handover was in flight, and the two are separate files
+# because they have different lifetimes and different readers:
+#
+#   * the spool is read by the successor's own delivery path and is EMPTY until
+#     somebody sends something;
+#   * the marker is written by the window's OPEN and read (once) by the
+#     successor's BOOT, whether or not a single message was queued.
+#
+# WHY A FILE AND NOT A FIELD. The pair has to cross a process boundary in the
+# one direction the record cannot serve: the predecessor's record is gone by the
+# time the successor imports, and the successor's own record is written before
+# any of this could be consulted (``_bind_boot_instrumentation`` runs before the
+# inbox drain). The session directory is the only durable handover surface both
+# ends already share, and the predecessor ALREADY owns it.
+#
+# IT SURVIVES A FAILED WINDOW ON PURPOSE, in one direction only: the runtime that
+# opens a window clears this marker when it aborts (``end_update``), so a marker
+# that outlives its writer is evidence of a process that died mid-move. The
+# successor still reports the update as applied, which is the honest reading —
+# it IS running the newer build — and is exactly the case the operator could
+# never see before this existed.
+UPDATE_WINDOW_NAME = "update-window.json"
+
+
+def update_window_path(session_dir: Path) -> Path:
+    return session_dir / UPDATE_WINDOW_NAME
+
+
+def write_update_window(session_dir: Path, pair: str) -> bool:
+    """Record that an update window is moving to ``pair``. ``False`` on failure.
+
+    Written through a temporary in the same directory and renamed into place, so
+    a reader can never observe a half-written marker (the window opens
+    synchronously inside the idle decision, where there is no second rung to
+    retry from). Failure is NOT fatal to the window: the messages still spool and
+    the successor still runs them — what is lost is only the "updated" fact, which
+    is the cheaper half.
+
+    THE TEMPORARY NAME IS UNIQUE PER WRITER, and that is a fix rather than
+    tidiness (agent review round 1, MINOR 4). ``path.with_suffix('.tmp')`` — the
+    obvious spelling, and the hazard ``model/catalogue.py`` documents for the same
+    construct — is ONE name for every writer of one session directory, and two
+    runtimes can serve one directory: that is exactly the shape a blocked loop
+    provokes, where the supervisor spawns a replacement while the predecessor is
+    still in its exit leg. Measured against that shape (2 writers x 3000 writes):
+    **59** reads of an absent-or-corrupt marker, and **2374** writes reporting
+    failure (``FileNotFoundError: update-window.tmp -> update-window.json`` — the
+    other writer had already renamed it away). The two failure modes are both
+    silent in the direction that matters: a writer whose ``os.replace`` installs
+    the other's truncated file returns ``True``, and the successor then publishes
+    no ``updated`` fact at all.
+
+    ``mkstemp`` also gives O_EXCL, so two writers cannot open the same temporary
+    in the first place. The temporary is removed on every failure path: a leaked
+    ``.tmp`` inside a session directory is a file nothing else knows about.
+    """
+    path = update_window_path(session_dir)
+    fd = -1
+    tmp = ""
+    try:
+        # ``dir=`` puts the temporary on the same filesystem, which is what makes
+        # the ``os.replace`` below atomic.
+        fd, tmp = tempfile.mkstemp(dir=session_dir, prefix=UPDATE_WINDOW_NAME + ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # ``os.fdopen`` takes ownership of ``fd``; ``stream`` marks that here so
+            # the ``finally`` below does not close a descriptor the file object
+            # already closed.
+            fd = -1
+            json.dump({"pair": pair, "pid": os.getpid()}, handle)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        logger.warning(
+            "could not write the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False
+    finally:
+        if fd >= 0:  # pragma: no cover - only the failed-fdopen path reaches this
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass  # the rename moved it, which is the success path
+            except OSError:  # pragma: no cover - a leaked temp is not worth a raise
+                logger.debug("could not remove the marker temporary %s", tmp, exc_info=True)
+
+
+def read_update_window(session_dir: Path) -> str:
+    """The pair a handover was moving to, or ``""`` when no marker is present.
+
+    An unreadable or malformed marker reads as absent rather than raising: a boot
+    must not fail because a sidecar from an older or killed build is malformed,
+    and the cost of missing one is a fact that is merely nice to have.
+    """
+    try:
+        raw = json.loads(update_window_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    pair = raw.get("pair") if isinstance(raw, dict) else ""
+    return pair if isinstance(pair, str) else ""
+
+
+def clear_update_window(session_dir: Path) -> bool:
+    """Remove the marker, whether or not one is there. ``True`` if it was."""
+    try:
+        update_window_path(session_dir).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning(
+            "could not clear the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False

@@ -88,6 +88,20 @@ def add_parser(subparsers: Any) -> None:
     list_parser = actions.add_parser("list", help="Names and descriptions; never values")
     list_parser.add_argument("--json", action="store_true")
 
+    migrate_parser = actions.add_parser(
+        "migrate-env",
+        help="Move a plaintext credentials.env into the encrypted store (name-reporting only)",
+    )
+    # `--dry-run` is the DEFAULT-SAFE way to run this: the plaintext file is the
+    # only copy of most of these values until the store has them, so an operator
+    # should be able to see exactly which names would be created, and where, as
+    # many times as they like before committing to it. The flag writes nothing.
+    migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the names and destinations without writing anything",
+    )
+
     describe_parser = actions.add_parser("describe", help="Metadata for one secret; never a value")
     describe_parser.add_argument("name")
     describe_parser.add_argument("--json", action="store_true")

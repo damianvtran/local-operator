@@ -36,6 +36,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     NoticeEvent,
+    ReasoningDeltaEvent,
     RetryStartEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -98,6 +99,17 @@ def printable_event(event: AgentEvent, *, session_id: str | None = None) -> dict
             "message_id": event.message.id,
             "delta": event.delta,
         }
+    elif isinstance(event, ReasoningDeltaEvent):
+        # Explicit for the reason the branch above is: a supervisor's per-line
+        # filter reads these fields by NAME, and the reasoning channel is the
+        # one they use to see the model working before it answers. There is no
+        # accumulated payload to strip here -- the event carries one fragment --
+        # so the shaping is the field list itself.
+        payload: dict[str, Any] = {
+            "type": "reasoning_delta",
+            "message_id": event.message_id,
+            "delta": event.delta,
+        }
     else:
         payload = strip_provider_payload(event.model_dump(mode="json"))
     # THE STAMP GOES ON WHATEVER THIS FUNCTION RETURNS, on every branch. It used
@@ -144,6 +156,10 @@ class PrintRenderer:
         self.failed: bool = False
         self.last_assistant_text: str = ""
         self._streaming_assistant: bool = False
+        #: Whether this model call's reasoning phase has already announced
+        #: itself on stderr. One line per phase, not per fragment -- see
+        #: :meth:`_render` for why exec does not stream the text itself.
+        self._reasoning_announced: bool = False
         #: The attached session, held so an auth-error line can name the active
         #: provider in its recovery hint. ``None`` until :meth:`attach`.
         self._session: SessionProtocol | None = None
@@ -215,11 +231,34 @@ class PrintRenderer:
                 # this is the "streamed via print" path.
                 sys.stdout.write(event.delta)
                 sys.stdout.flush()
+        elif isinstance(event, ReasoningDeltaEvent):
+            # The phase is ANNOUNCED once, dim, on stderr -- NOT streamed.
+            #
+            # Two contracts decide this. stdout is the run's payload (the answer
+            # in text mode, one JSON line per event with ``--json``), so
+            # reasoning must never touch it: a caller piping the answer into a
+            # file would get the model's private thoughts concatenated to it.
+            # And stderr is progress chrome read by a human, where one line per
+            # TOKEN would bury every tool row in a wall of thinking -- the TUI
+            # gets away with a live block because it repaints a region instead of
+            # appending lines. The reasoning CONTENT is fully available on the
+            # JSON channel, one ``reasoning_delta`` line per fragment, which is
+            # where a program that wants it should be reading.
+            #
+            # ``markup=False`` and the style passed as a style for the same
+            # reason the notice branch states at length: this text is
+            # model-authored, and a ``[`` in it would otherwise be Rich markup.
+            if event.delta and not self._reasoning_announced:
+                self._reasoning_announced = True
+                self.console.print("· thinking…", style="dim", highlight=False, markup=False)
         elif isinstance(event, MessageEndEvent):
             if self.stream_text and self._streaming_assistant:
                 self._streaming_assistant = False
                 sys.stdout.write("\n")
                 sys.stdout.flush()
+            # The phase is over for this call, so the next one announces itself
+            # again (a tool-loop turn reasons before each of its calls).
+            self._reasoning_announced = False
         elif isinstance(event, ToolExecutionStartEvent):
             # Sanitised for the same reason the TUI card is: tool_name, intent
             # and args are all model-controlled, and an erase-display escape in

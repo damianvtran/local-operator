@@ -433,6 +433,7 @@ _CALL_COLUMNS = (
     "purpose",
     "duration_ms",
     "ttft_ms",
+    "first_reasoning_ms",
     "preparation_ms",
     "outcome",
     "usage_reported",
@@ -469,6 +470,16 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("purpose", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("duration_ms", "REAL NOT NULL DEFAULT -1"),
     ("ttft_ms", "REAL NOT NULL DEFAULT -1"),
+    # How long after the stream started the model's FIRST reasoning fragment
+    # arrived, or -1 when the turn never reasoned at all. Its own column rather
+    # than a refinement of ``ttft_ms``: the two measure different waits on the
+    # same call (first thing the model said vs first thing the user could see),
+    # and 86.5% of deepseek-flash turns reason, so this is the wait the operator
+    # actually sits through on the first visible motion of a reasoning model.
+    # ``ttft_ms`` keeps its name and meaning untouched so historical comparisons
+    # survive. A turn that never reasoned reads -1 — the same "no sample"
+    # sentinel as its neighbours, never a fabricated 0 ms.
+    ("first_reasoning_ms", "REAL NOT NULL DEFAULT -1"),
     ("preparation_ms", "REAL NOT NULL DEFAULT -1"),
     ("outcome", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("usage_reported", "INTEGER NOT NULL DEFAULT 1"),
@@ -846,6 +857,7 @@ def _row_values(
         snapshot.purpose,
         snapshot.duration_ms,
         snapshot.ttft_ms,
+        snapshot.first_reasoning_ms,
         snapshot.preparation_ms,
         snapshot.outcome,
         int(snapshot.usage_reported),
@@ -1651,8 +1663,23 @@ class AnalyticsStore:
 
     def upsert_session_name(
         self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
-    ) -> None:
+    ) -> bool:
         """Record (or update) a session's human name for the per-session table.
+
+        Returns True when the statement ran and committed, False when the write
+        was DROPPED: no connection, an empty id or name, or SQLite refusing the
+        statement past its ``busy_timeout``. True does NOT mean the row now
+        holds ``name`` — the rank gate below may legitimately keep a better
+        incumbent, and that is a SUCCESS, not a drop.
+
+        Why a return value and not a raise: this call never raises by design (a
+        lost name costs a slightly-wrong ledger, while a raise here would be a
+        broken turn — see the guards at the bottom), so without a signal a
+        caller cannot tell a name the database committed from one it never saw.
+        ``record_batch``/``record_tool_calls`` answer the same question by
+        returning the number of rows they wrote; this returns a flag because a
+        rank-gated no-op writes zero rows while being a success, which a count
+        could not distinguish.
 
         RANK-GATED, which is the whole reason this is not a plain upsert. The
         ledger is now mirrored from several sources that do not arrive in
@@ -1679,10 +1706,10 @@ class AnalyticsStore:
         surface, so the guard belongs here too.
         """
         if not session_id or not name:
-            return
+            return False
         conn = self._connect()
         if conn is None:
-            return
+            return False
         try:
             conn.execute(
                 "INSERT INTO session_names (session_id, name, updated_at_ms, rank) "
@@ -1695,6 +1722,8 @@ class AnalyticsStore:
             conn.commit()
         except Exception:  # noqa: BLE001
             logger.debug("analytics: session name upsert failed", exc_info=True)
+            return False
+        return True
 
     def session_names_present(self) -> set[str]:
         """Every session id that already carries a ledger name.
@@ -2944,7 +2973,12 @@ class AnalyticsStore:
             # column is judged independently — the old statements each re-scanned
             # the session to drop rows whose OWN column was the "no sample"
             # ``-1`` sentinel, and a shared ``AND x >= 0`` would silently start
-            # requiring all three samples at once. An absent column (a
+            # requiring all three samples at once. ``first_reasoning_ms`` is
+            # deliberately NOT one of them: it is a recorded column with its own
+            # reader's job to come, and widening this tuple would shift the
+            # positional ``fields`` projection below (the oracle in
+            # ``test_session_report_equivalence`` pins the equivalence of the
+            # whole report key for key). An absent column (a
             # pre-timing ledger) still reads count 0 with NULL mean/min/max
             # rather than a fabricated 0 ms.
             timing_columns = [

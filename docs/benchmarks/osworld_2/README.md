@@ -353,9 +353,30 @@ filling on a clock rather than on workload:
 > outside. The `~6.8 MB/s` fill rate quoted in the 0.46.11 release notes was
 > inferred from the disk series, not measured at a process. Do not re-derive it.
 
+> **Two corrections, both measured 2026-09-21.** (1) `/var/lib/snapd/cache`
+> is **4096 bytes** on this image and clearing it reclaims nothing; the ~10 GB
+> is `*.partial` downloads in `/var/lib/snapd/snaps`. The bullets below and the
+> fix section further down carry the correction; the earlier revision of both
+> named the cache directory as the consumer, and a reclamation built on it
+> reclaimed nothing while reporting success. (2) `AWS_ROOT_VOLUME_SIZE` is
+> **INERT** — the guest's root filesystem measured **30,993,747,968 bytes** in
+> both a 40 GiB and a 120 GiB volume, because the adapter builds
+> `DesktopEnv(...)` without `volume_size=`, so upstream's `expand_guest_volume`
+> never runs.
+
 The measured consumer is **snapd**, inside the guest:
 
-- `/var` is 15G of the 29G disk, and `/var/lib/snapd/cache` **alone is 9.7 GB**
+- `/var` is 15G of the 29G disk, and the space is what snapd's **downloader**
+  writes: `/var/lib/snapd/snaps` went 7.9 GB → 9.9 GB → 10.6 GB in ~50 s while
+  free space went 2.2 GB → 0.2 GB → **0**, and the files growing there were
+  `<name>_<rev>.snap.xdelta3-<old>-to-<new>.partial` — a pending refresh
+  revision being downloaded beside the installed ones (`kf6-core24_64`
+  209 MB → 1.17 GB, `audacity_1239` 128 MB → 399 MB).
+- `/var/lib/snapd/cache`, named here as the consumer until 2026-09-21, measured
+  **4096 bytes**. It *is* documented as snapd's working download cache, which is
+  exactly why it looks like the right target and is not: this snapd streams its
+  refreshes, deltas included, straight into the `snaps` directory as `*.partial`
+  files and leaves the cache directory empty.
 - `snap changes` shows `Auto-refresh 9 snaps` and `Pre-download novnc`, both
   fired at boot
 - the AMI ships ~93% full, so a few GB of snap downloads exhausts it
@@ -374,17 +395,33 @@ number of GiB:
 --infra AWS_ROOT_VOLUME_SIZE=120
 ```
 
-Measured effect: a 100 GiB volume moved the first failure from t+424s to
-**t+1936s**. It does not fully fix the problem, and the reason is geometry —
-the root **partition** stays 29.5G inside that 100 GiB disk, with ~70 GiB
-unallocated, because the AMI carries no `growpart` and
-`apt-get install cloud-guest-utils` cannot run on a disk with no free space to
-download into. The extra GiB bought time only because a larger volume's
-filesystem happens to start with more slack, not because the partition grew.
+Measured effect — and **measured 2026-09-21 to be INERT**: the guest's root
+filesystem is **30,993,747,968 bytes (28.9 GiB)** in a 40 GiB volume *and* in a
+120 GiB volume, episode after episode. `guest-preparation.json` carries both
+numbers, so this is checkable from any bundle: `filesystem_bytes` is the same
+number every time, while `disk_bytes` is 42,949,672,960 (40 GiB) and
+128,849,018,880 (120 GiB) respectively. The partition is never grown because
+the adapter constructs `DesktopEnv(...)` **without `volume_size=`**, so
+upstream's `expand_guest_volume` (`desktop_env/providers/volume.py`:
+`growpart`, `partprobe`, `resize2fs`) is never called — a bigger volume, the
+same filesystem inside it, and nothing to download into once that filesystem is
+full.
 
-Since 0.46.12 the adapter reclaims the space itself at episode start, which
-addresses the cause rather than the symptom — see below. `AWS_ROOT_VOLUME_SIZE`
-remains available as an independent lever.
+An earlier revision of this section credited a 100 GiB volume with moving the
+first failure from t+424s to **t+1936s**. Whatever that run measured, it was not
+a partition growing: the reason geometry was suspected — "the root partition
+stays 29.5G inside that 100 GiB disk, with ~70 GiB unallocated, because the AMI
+carries no `growpart` and `apt-get install cloud-guest-utils` cannot run on a
+disk with no free space" — is now the measured END state of every run, at every
+volume size. Do not read a longer run as the volume buying room.
+
+The value is still accepted (validated at `prepare`, stamped into the evidence
+manifest when set) and setting it is harmless. What it is not is a lever for
+this failure. The one-line change that would make it a lever — passing
+`volume_size=` to the `DesktopEnv` construction — is NOT made here: it changes
+the guest's hardware contract inside the benchmark, and the reclamation below
+addresses the cause instead. See "Growing the partition is deliberately not
+done".
 
 It is infra rather than a task field for the same reason as the instance type:
 task files are **content-hash verified**, so editing `volume_size` invalidates
@@ -528,20 +565,59 @@ uses), and does three things, in an order that is load-bearing:
 2. **Hold snap auto-refresh** (`snap refresh --hold=forever`, falling back to
    `snap set system refresh.hold=<far future>` on snapd older than 2.58). This
    stops a *new* refresh starting.
-3. **Clear `/var/lib/snapd/cache`** — pure download scratch, documented by
-   Canonical as "the working cache … used to minimise download size and speed-up
-   refreshes". Deleting it costs a re-download and nothing else.
+3. **Clear the download scratch** — snapd's `*.partial` incomplete downloads in
+   `/var/lib/snapd/snaps`, and the contents of `/var/lib/snapd/cache`.
 
-Every privileged step is exactly one `echo <password> | sudo -S bash -c
-'<fragment>'`, with all of the work — the `snap changes` loop, the
-`find /var/lib/snapd/cache -mindepth 1 -delete` — inside the privileged inner
-shell. That shape is not cosmetic: the control server runs as an unprivileged
-user, so a glob like `/var/lib/snapd/cache/*` expanded by the *outer* shell
-matches nothing against a `drwx------ root:root` directory and `rm -rf` of the
-literal name exits 0, and an `xargs … echo pw | sudo -S snap abort` pipeline
-parses as `xargs echo` piped into one id-less `sudo`. Both were real defects
-that reported `ok` while doing nothing, caught only by re-running the E2E with
-the cache directory genuinely owned by root.
+   The second directory is the one this step used to target alone, and it is the
+   correction that matters most here: `/var/lib/snapd/cache` is documented by
+   Canonical as the working cache "used to minimise download size and speed-up
+   refreshes", and it measured **4096 bytes** on this image. The bytes are in
+   `/var/lib/snapd/snaps`, as `*.partial` files beside the installed revisions
+   (measured: that directory going 7.9 GB → 9.9 GB → 10.6 GB while free space
+   went to **0**). Both are pure download scratch — deleting a partial costs a
+   re-download and nothing else — and the installed `.snap` revisions are left
+   alone: one of those is an application, mounted through a loop device, and
+   deleting it is an uninstall rather than housekeeping.
+
+Every privileged step runs one fragment inside one privileged `bash -c`, reached
+through the same **candidate ladder** upstream's own `expand_guest_volume` uses
+(`desktop_env/providers/volume.py`): `sudo -n` first, then the value of
+`OSWORLD_CLIENT_PASSWORD`, then — only when that value is itself one of
+upstream's two documented development defaults — the other one. Each rung's
+outcome is recorded in the step's detail as a chain
+(`escalation=agentless>supplied`, or `escalation=agentless>supplied>upstream-default`),
+so a reader can tell "the operator's value was refused and the image's own
+documented default opened the guest" from "the operator's value worked". On a
+step that succeeded the chain ends on the rung that authenticated; on one that
+failed it ends on the last rung tried, and the collected output says why — a
+`sudo: …` line means the candidates were refused, anything else is the
+fragment's own failure. No password value is recorded anywhere.
+
+**`OSWORLD_CLIENT_PASSWORD` must be a value the image accepts, and getting this
+wrong is not a warning.** Measured 2026-09-21: with a rejected value, *every*
+privileged step above fails (`sudo: no password was provided` / `sudo: 1
+incorrect password attempt`), snapd keeps downloading, the guest's root
+filesystem reaches 0 bytes free at ~t+383 s, the control server dies with
+`OSError: [Errno 28] No space left on device` writing a screenshot, and the
+episode ends minutes later on an opaque transport error. Four paid episodes went
+that way. The adapter therefore **refuses the episode at preparation time** when
+a reclamation step did not land — before upstream's environment is constructed
+and before any model spend — naming the failing steps and this knob. The
+partial `guest-preparation.json` is still written, so the evidence of why the
+episode ended survives the refusal.
+
+With the correct value the identical episode completed, was scored, and served
+200 on all 50 screenshots.
+
+Every privileged step's shell shape is not cosmetic: the control server runs as
+an unprivileged user, so a glob like `/var/lib/snapd/cache/*` expanded by the
+*outer* shell matches nothing against a `drwx------ root:root` directory and
+`rm -rf` of the literal name exits 0, and an `xargs … echo pw | sudo -S snap
+abort` pipeline parses as `xargs echo` piped into one id-less `sudo`. Both were
+real defects that reported `ok` while doing nothing, caught only by re-running
+the E2E with the cache directory genuinely owned by root. A glob is therefore
+used only INSIDE the privileged shell (the `*.partial` suffix), where it is the
+privileged shell that expands it.
 
 The design constraints are worth stating explicitly, because each is a line a
 future change could cross without noticing:
@@ -550,20 +626,30 @@ future change could cross without noticing:
   changes the task, the scoring, the applications available, or anything the
   model observes. Clearing a package manager's download cache is housekeeping;
   **uninstalling** an application a task might need is not, so no command may
-  ever `snap remove` or `apt-get purge` anything. A test asserts that.
-- **It fails soft, per step.** A missing binary, a denied `sudo`, an
-  unreachable control server, or a guest that answers slowly are each recorded
-  and stepped over. An episode that would otherwise have worked must never be
-  destroyed by a hygiene step, and a whole-pass budget keeps a wedged guest from
-  eating the reset timeout.
-- **It is conditional.** Free space is measured on every episode, but the
-  reclamation only runs below **12 GiB free** — set above snapd's largest
-  measured appetite (the 9.7 GB cache), so a guest that can already absorb a
-  full auto-refresh is left untouched. A guest whose free space cannot be
-  measured *is* reclaimed: the protection must not go missing exactly when the
-  guest is least healthy.
+  ever `snap remove`, `apt-get purge`, or delete an installed `.snap` revision.
+  A test asserts that.
+- **It is fail-soft per step and fail-LOUD about an unprepared guest.** A
+  missing binary, a denied `sudo`, an unreachable control server, or a guest
+  that answers slowly are each recorded as a step outcome rather than thrown
+  out of the pass, and a whole-pass budget keeps a wedged guest from eating the
+  reset timeout. But a reclamation step that did NOT land is the measured
+  signature of a guest that will die mid-episode, so the caller refuses the
+  episode on it (see above). The distinction is deliberate: recording without
+  acting is what the four dead episodes were.
+- **It is conditional, and "still short of space afterwards" is not a failure.**
+  Free space is measured on every episode, but the reclamation only runs below
+  **12 GiB free** — set above snapd's largest measured appetite (the ~9.9 GB of
+  delta downloads), so a guest that can already absorb a full auto-refresh is
+  left untouched. A guest whose free space cannot be measured *is* reclaimed:
+  the protection must not go missing exactly when the guest is least healthy.
+  After a SUCCESSFUL reclamation the guest still sits at ~2.2 GB free (measured
+  on the run that completed and scored) — far below the threshold — so the
+  guard cannot be the threshold. What is checked is whether the hold and the
+  clear landed; a guest that is healthy but short of space warns, it does not
+  abort, because aborting on it would refuse every healthy episode.
 - **It is observable.** Free space before and after, the filesystem and
-  whole-disk sizes, and every step's outcome are written to
+  whole-disk sizes, every step's outcome, and the `blocking_steps` the refusal
+  was raised on are written to
   `<run-root>/osworld-cache/<episode-id>/guest-preparation.json`. "The guest had
   N bytes free at the start" is the fact a later
   `environment returned no screenshot frame` has to be read against, and it must
@@ -578,8 +664,9 @@ future change could cross without noticing:
 the in-place `sfdisk` alternative rewrites the root partition table where a
 wrong start sector destroys the guest. A hygiene step that can fail *hard* is
 exactly what this must not be. The disk-vs-filesystem geometry is **reported**
-instead, read-only, since that pair of numbers is what tells the next reader
-whether `AWS_ROOT_VOLUME_SIZE` bought anything.
+instead, read-only — and that pair of numbers is what made the
+`AWS_ROOT_VOLUME_SIZE` claim above checkable from any bundle: 30,993,747,968 in
+a 40 GiB volume says the override never reached the filesystem.
 
 ### Upstream is sealed after the first reset
 
@@ -656,12 +743,17 @@ The pieces, and what each guarantees:
   `local-operator` itself may be editable without breaking discovery — only
   the adapter distribution is resolved this way — but installing it as a
   wheel too keeps one interpreter's provenance uniform, and a wheel is what
-  the committed lock describes. Note that the harness version in evidence is
-  *not* affected either way: `_harness_version` (`scripts/run_episode.py`)
-  deliberately prefers the checkout's `pyproject.toml` over
-  `importlib.metadata` precisely because install metadata goes stale on a
-  development checkout, and it reports the running tree's version under both
-  install modes.
+  the committed lock describes. The harness version in evidence is read from
+  the **running install**, never from this checkout: `_harness_version`
+  (`scripts/run_episode.py`) resolves it through
+  `local_operator.update.installed_build`, and `harness_git_revision` comes from
+  the same install's own ``.lop-source`` record, falling back to a digest of
+  that version when no commit was recorded. Install metadata is the *right*
+  answer and a working tree is the wrong one: a campaign that ran a 0.61.11
+  interpreter over a copy of this tree sealed every one of its bundles as
+  **0.61.9**, the version in the shared checkout's working tree — which is not
+  the build that ran — so a checkout sitting beside the script may not answer
+  for the build under any install mode.
 - **Exact-distribution discovery.** Before launch, `worker_argv` re-resolves
   both spawn boundaries symlink-free, verifies the release manifest, and
   re-hashes the workspace. At load, `distribution_digest` hashes every RECORD
@@ -1090,17 +1182,19 @@ Prerequisites: the gated inputs fetched into a durable inputs root, the
 adapter built and installed per
 [`benchmarks/osworld_v2_adapter/README.md`](../../../benchmarks/osworld_v2_adapter/README.md),
 and the one-time AWS objects (TTL role, security group) created by hand. The
-credential store (`~/.local-operator/credentials.env`, mode 600) must carry
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` — the store resolver
-deliberately does **not** fall back to the process environment or to
-`~/.aws`, so a name absent from that file is missing even if the shell
-exports it. Use a scoped key: `ec2:RunInstances, DescribeInstances,
+encrypted secret store (`~/.local-operator/secrets/store.db`, the one
+`lop secret set` writes) must carry `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` as agent secrets — the store resolver reads the
+encrypted store first and deliberately does **not** fall back to the process
+environment or to `~/.aws`, so a name absent from the store is missing even if
+the shell exports it. (A legacy `credentials.env` is still read as a transition
+fallback until it is migrated with `lop secret migrate-env`.) Use a scoped key: `ec2:RunInstances, DescribeInstances,
 DescribeImages, DescribeVolumes, TerminateInstances, CreateTags`,
 `scheduler:CreateSchedule, DeleteSchedule, ListSchedules`, and `iam:PassRole`
 on the TTL role. Presence-only check, never printing a value:
 
 ```sh
-grep -cE '^(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)=.' ~/.local-operator/credentials.env  # expect 2
+lop secret list | grep -cE '(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)'  # expect 2
 ```
 
 **1. Pre-audit — must print `[]`.**
@@ -1150,6 +1244,18 @@ them to the guest, so no S3, HTTP server, or HF token is involved.
 `osworld-public-evaluation` is upstream's documented default password for
 every OSWorld 2.0 image. `OSWORLD_TTL_SECONDS=2700` is the 1800 s wall budget
 plus the 900 s slack, which is the manual step §2 explains.
+
+**`OSWORLD_CLIENT_PASSWORD` must be a value the image accepts, and it is not
+optional bookkeeping.** Every privileged preparation step reaches `sudo` with it
+(the candidate ladder above), and a value this image rejects fails all of them —
+measured 2026-09-21, four paid episodes: `sudo: no password was provided` on
+every step, the guest's root filesystem reaching 0 bytes free,
+`OSError: [Errno 28] No space left on device` on the next screenshot, and a
+transport error minutes later. Such an episode is now REFUSED at preparation,
+naming the step and this knob, so a wrong value costs an instance launch and a
+re-run rather than a billed episode. If a run stops with that refusal, read
+`<run-root>/osworld-cache/<episode-id>/guest-preparation.json` — the failing
+steps, their status and the escalation chain are in it.
 
 **3. Post-audit and bundle verification.**
 

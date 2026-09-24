@@ -39,6 +39,7 @@ from local_operator.providers.oauth.openai import (
     identity_from_id_token,
 )
 from local_operator.providers.oauth.pkce import create_pkce_challenge, create_pkce_pair
+from local_operator.providers.oauth.radient import refresh_radient_token
 from local_operator.providers.oauth.xai import validate_xai_endpoint
 
 pytestmark = pytest.mark.asyncio
@@ -546,6 +547,171 @@ class TestATerminalGrantIsToldFromAnOutage:
             '"The provided authorization grant is invalid"}'
         )
         assert is_terminal_grant_response(400, body) is True
+
+    #: The exact body the operator's own endpoint returned for a refresh token
+    #: it had revoked, recorded when the connector crash-looped for ~9 hours on
+    #: it (870 restarts, one identical sentence each). Prose in the `error`
+    #: FIELD rather than an RFC 6749 code -- which every code-shaped rule reads
+    #: as retryable, and retrying a revoked grant is exactly the loop.
+    RADIENT_DEAD_GRANT = '{"error": "Token refresh failed: refresh token is expired or revoked"}'
+
+    def test_the_live_radient_body_is_terminal(self) -> None:
+        assert is_terminal_grant_response(401, self.RADIENT_DEAD_GRANT) is True
+
+    @pytest.mark.parametrize(
+        "error_field",
+        [
+            # The direction the incident's body uses, and the one the first
+            # version handled.
+            "Token refresh failed: refresh token is expired or revoked",
+            # ...and the ordinary English paraphrase, which the first version
+            # still read as RETRYABLE (review round 1, m1) — one wording away
+            # from the same nine-hour crash loop.
+            "Invalid refresh token",
+            "Expired refresh token",
+            "The refresh token was revoked",
+            # Separators and the joined form: a provider's field can carry any
+            # of the three, and the first version accepted only `_` and a
+            # space.
+            "refresh-token-expired",
+            "refresh_token no longer valid",
+            "refresh token expired",
+        ],
+    )
+    def test_every_spelling_of_a_dead_refresh_token_is_terminal(self, error_field: str) -> None:
+        """A dead grant is a dead grant whichever way the field spells it.
+
+        Every case here is a 401 with prose in the `error` FIELD, which is how
+        Radient states it; the point of the widening is that the RULE (a free
+        text field that names a refresh token and calls it dead) does not depend
+        on the word order or the punctuation the provider happened to choose.
+        """
+        body = json.dumps({"error": error_field})
+        assert is_terminal_grant_response(401, body) is True
+
+    @pytest.mark.parametrize(
+        "error_field",
+        [
+            # The PLURAL, which is the shape a policy sentence takes: the grant
+            # is fine, and the tokens are rotated. Neither half of the
+            # verdict-first alternative was anchored to a word end, so this read
+            # as a dead grant (review round 2, m4 — measured on the round-2 head).
+            "the session expired; refresh tokens are rotated per use",
+            "expired refresh tokens are pruned nightly",
+        ],
+    )
+    def test_a_plural_refresh_token_is_not_the_dead_singular(self, error_field: str) -> None:
+        """`\b` after `token`, on the verdict-first alternative only.
+
+        The FIRST alternative deliberately has no boundary there —
+        `refresh[-_ ]?token` has to reach the joined camel spelling, which has no
+        boundary after `token` — but the second one matches both halves as WORDS,
+        so nothing stopped it matching a longer word — and a false PERMANENT
+        verdict is the expensive direction, as the class docstring below prices
+        it: `CredentialInvalidError` deprioritises a LIVE account in `/usage`, the
+        routing cascade and `model/configure.py` until the operator re-logs in.
+        The singular form of the same sentence is asserted right beside it, so
+        the boundary is pinned as a boundary rather than as a narrower rule.
+        """
+        body = json.dumps({"error": error_field})
+        assert is_terminal_grant_response(401, body) is False
+        singular = error_field.replace("tokens", "token")
+        assert is_terminal_grant_response(401, json.dumps({"error": singular})) is True
+
+    @pytest.mark.parametrize(
+        "error_field",
+        [
+            "refresh token is not expired yet",
+            "the refresh token isn't expired",
+            # ...and the typographic apostrophe, which is what a UI copy-paste
+            # or a smart-quoting client actually sends. The contraction has no
+            # word boundary before its `n`, which is why the guard keys on the
+            # apostrophe rather than on `\\bn't\\b`.
+            "the refresh token isn\u2019t expired",
+            "refresh token was not revoked",
+        ],
+    )
+    def test_a_grant_being_described_as_still_good_is_not_a_verdict(self, error_field: str) -> None:
+        """The mirror case the widening has to keep out: a NEGATED verdict.
+
+        "... refresh token is not expired yet" describes a working grant, and a
+        rule that matched the verdict word wherever it found it would deprioritise
+        a live account in `/usage`, the routing cascade and `model/configure.py`
+        until the operator re-logged in — the expense the narrowness of this
+        pattern exists to avoid, arriving from the other direction.
+        """
+        body = json.dumps({"error": error_field})
+        assert is_terminal_grant_response(401, body) is False
+
+    def test_a_joined_camel_case_field_is_read_as_an_unknown_code_not_as_prose(self) -> None:
+        """The one spelling this widening deliberately does NOT reach, pinned.
+
+        `{"error": "RefreshTokenExpired"}` is a joined verdict, and the field
+        parser lowercases the value it returns (`_oauth_error_code` — RFC 6749
+        codes are lowercase), so by the time a rule reads it, `refreshtokenexpired`
+        is shape-identical to a machine code. The accepted rule for those is that
+        an UNRECOGNISED code stays retryable: a code we do not know is one we
+        cannot judge, and treating every long lowercase token as a verdict is how
+        a provider's `ratelimited` becomes a dead account in `/usage`.
+
+        The joined form IS matched where there is no parseable field at all — the
+        fallback scan over the whole body — so this is a recorded boundary rather
+        than an untested gap, and both halves are asserted.
+        """
+        joined = json.dumps({"error": "RefreshTokenExpired"})
+        assert is_terminal_grant_response(401, joined) is False
+        assert is_terminal_grant_response(401, "token endpoint said: RefreshTokenExpired") is True
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # The verdict is a CODE: whatever its prose says, the code decides,
+            # so `invalid_request` (our bug) is not read as a dead token just
+            # because its description mentions one.
+            '{"error":"invalid_request","error_description":"refresh token is invalid"}',
+            '{"error":"invalid_scope","error_description":"the refresh token was revoked"}',
+            # A code we do not know stays retryable, as before.
+            '{"error":"ratelimited"}',
+            # Prose that says nothing about the refresh token is not a verdict.
+            '{"error": "something went wrong"}',
+            # A 200-shaped or empty body has no verdict to read.
+            "",
+        ],
+    )
+    def test_prose_is_only_a_verdict_when_it_names_a_dead_refresh_token(self, body: str) -> None:
+        """The widening is narrow on purpose, and this is the narrowness.
+
+        A false "permanent" verdict is expensive: `CredentialInvalidError`
+        deprioritises a LIVE account in `/usage`, the routing cascade and
+        `model/configure/` until the operator re-logs-in, so only a body that
+        names a refresh token AND calls it dead may produce one -- and a body
+        that names a code at all keeps that code's meaning.
+        """
+        assert is_terminal_grant_response(400, body) is False
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_a_dead_refresh_token_in_prose_is_not_read_on_a_provider_fault(
+        self, status: int
+    ) -> None:
+        """The 4xx gate holds for prose exactly as it does for codes: a 5xx is
+        the provider being unwell, and its body is not a verdict about anyone's
+        grant."""
+        assert is_terminal_grant_response(status, self.RADIENT_DEAD_GRANT) is False
+
+    async def test_radient_refresh_raises_the_terminal_type(self) -> None:
+        """The provider path end to end, against the real incident body: the
+        refusal has to reach the store as `InvalidGrantError`, because that is
+        what becomes `CredentialInvalidError` and what stops the retrying."""
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, text=self.RADIENT_DEAD_GRANT)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(InvalidGrantError) as caught:
+                await refresh_radient_token({"refresh": "revoked"}, http_client=client)
+        # The wording a user greps for is unchanged: classification does not
+        # restyle anyone's error string.
+        assert "Radient refresh failed: HTTP 401" in str(caught.value)
 
     @pytest.mark.parametrize(
         "status, body",
@@ -1157,7 +1323,7 @@ def test_cli_hides_an_api_key_and_echoes_an_oauth_code(
 ) -> None:
     """Round 1 F2: an API key must not be echoed into the terminal scrollback.
 
-    ``CredentialManager`` and the web-search CLI already read this same class of
+    The credential prompt and the web-search CLI already read this same class of
     value through ``getpass``; the login prompt used ``input()``, and making the
     paste-a-key providers work is what made that path reachable for nine real
     provider keys.

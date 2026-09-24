@@ -175,12 +175,19 @@ _PROVISIONAL_CLEANUP_ACTION = "close-session"
 DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
     {
         "AWS_INSTANCE_TYPE": "aws_instance_type_override",
-        # The root volume the guest's own snapd fills from boot (a 9.7 GB
-        # download cache plus an auto-refresh; NOT the x11grab recorder an
-        # earlier revision named -- no ffmpeg process was ever found on a
-        # failing guest). A score run on a larger disk survives past the
-        # ~t+383s exhaustion wall that truncated earlier runs, so it is not
-        # comparable to one that hit it, and the bundle has to say so on its own.
+        # The root volume the guest's own snapd fills from boot (measured
+        # 2026-09-21: ~10 GB of `*.partial` delta downloads in
+        # /var/lib/snapd/snaps, NOT the 4096-byte /var/lib/snapd/cache an
+        # earlier revision named, and NOT the x11grab recorder the revision
+        # before that named -- no ffmpeg process was ever found on a failing
+        # guest). The override is DISCLOSED but INERT as the adapter stands:
+        # the guest's filesystem measured 30,993,747,968 bytes in both a 40 GiB
+        # and a 120 GiB volume, because `DesktopEnv(...)` is constructed without
+        # `volume_size=`, so upstream's `expand_guest_volume` never runs. It is
+        # disclosed anyway, and deliberately: a run whose operator asked for
+        # different guest hardware must be identifiable from its bundle alone,
+        # and the disclosure is what makes a later adapter that DOES act on the
+        # size comparable to the runs before it.
         "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
         # Network policy changes comparability too: older adapters must refuse
         # this request rather than seal a disabled-policy claim while enabling it.

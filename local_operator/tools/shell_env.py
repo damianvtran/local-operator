@@ -54,8 +54,9 @@ Both modes keep the harness's INTENTIONAL injections, and the strict mode
 carries them through deliberately rather than by omission. What those are
 differs per tool — the ``bash`` child gets ``NON_INTERACTIVE_ENV``, the
 session credential store's ``credential_env()`` and the delegation allowance
-(``LOCAL_OPERATOR_AGENT_MAY_DELEGATE``), while the ``eval`` worker gets
-its own protocol channel — and each spawn site passes them as ``injections``
+(``LOCAL_OPERATOR_AGENT_MAY_DELEGATE``); the scratchpad path goes to BOTH
+children — while the ``eval`` worker additionally gets its own protocol
+channel — and each spawn site passes them as ``injections``
 because they are values the harness decides to hand over, not names it happens
 to have inherited:
 
@@ -73,6 +74,15 @@ to have inherited:
   exactly as an empty one does. The third grant, and here for the same reason as
   the other two — it is a value the harness decides to hand over, not one the
   child happens to have inherited.
+* ``LOCAL_OPERATOR_SCRATCHPAD`` — this session's own scratchpad root as an
+  absolute path, handed to BOTH children (the ``bash`` shell and the ``eval``
+  worker, which is why it is signed in ``scratchpad``'s one helper rather than at
+  either spawn site). Same THREE arms as the allowance above, and the clear arm
+  matters for the same reason: a nested session that inherited its parent's path
+  would write outside the store it was told to use. It is exported at all because
+  the standing rule names a URL scheme and a SHELL cannot resolve one — measured
+  2026-09-21, the shell channel created scratch under a temp root ~9:1 over the
+  tools that can take the scheme.
 * the session credential store's ``credential_env()`` — the value the agent is
   meant to *use* without being able to *read* it. The store is the grant; this
   module does not second-guess it.

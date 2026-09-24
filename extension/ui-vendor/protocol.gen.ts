@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (10 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 2affc0e1919dabc60b59cec150c7cd0c3b18c045b20abedc065bc3fd04f66542
+// Inputs sha256: 4f90fff1c5ec8ca4cfd0feb5377fc66ddefc5bbb24dc92170e259bec5b50569b
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -13,7 +13,7 @@ export const PROTO_VERSION = 1 as const;
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
 // the compatibility floor). Generated so the popup's update line and the
 // daemon's agree by construction.
-export const EXPECTED_EXTENSION_VERSION = '0.1.18' as const;
+export const EXPECTED_EXTENSION_VERSION = '0.1.20' as const;
 // The ONE spelling of the "a newer extension exists" advisory. `{have}` and
 // `{want}` are the reported and the expected extension versions; the
 // contingency is on the Chrome Web Store because nothing here can know what the
@@ -58,15 +58,18 @@ export enum ErrorCode {
   INTERNAL = 'internal',
 }
 
-// Methods NO build of this extension can serve, and the reason each is in the
-// vocabulary anyway: `download` needs a destination the harness chooses, and
-// Chrome refuses a tab-scoped `chrome.debugger` session the only two CDP
-// primitives that could give it one (`Page.setDownloadBehavior` answers
-// -32000 "Cannot not access browser-level commands", `Browser.setDownloadBehavior`
-// -32601; no browser target is attachable). Measured on Chrome 153.0.8010.53 —
-// docs/design/browser-file-transfer.md §17.1. Generated, so a method added there
-// cannot silently become "the extension forgot a handler".
-export const EXTENSION_CANNOT_SERVE: string[] = ['download'];
+// The capabilities the OPERATOR owns, and the ONE spelling of each switch. Off
+// by default, and only a human gesture in the extension's options page can turn
+// one on (`consent.ts`). Generated from Python's `CAPABILITY_SWITCH_LABEL` and
+// `CAPABILITY_SWITCH_PERMISSION` so the options page, the extension's refusal
+// copy and the harness's refusal copy cannot name different switches. `permission`
+// is the Chrome permission the switch must request before it can be on (empty
+// when the capability needs none), which is what makes a switch that READS ON
+// while its permission is missing impossible to report as available.
+export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: string }> = {
+  "download": { label: 'Allow downloads', permission: 'downloads' },
+  "upload": { label: 'Allow uploads', permission: '' },
+};
 
 export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
@@ -138,6 +141,14 @@ export interface Pong { event: 'pong'; }
 export interface Capabilities {
   event: 'capabilities'; methods: string[]; version: string;
 }
+// Which servable methods the OPERATOR has switched off, in a SEPARATE event
+// because every envelope is extra="forbid": a new key on an existing event is
+// closed by an already-released daemon, while an unknown event is dropped. An
+// empty `methods` has three remedies (update / turn the switch on / un-wedge)
+// and this is what separates the middle one.
+export interface CapabilitySwitches {
+  event: 'capability_switches'; disabled: string[]; version: string;
+}
 export interface TabClosed { event: 'tab_closed'; tab: string; }
 export interface TabUpdate { event: 'tab_update'; tab: string; url: string; title: string; }
 export interface AwaitingOrigin { event: 'awaiting_origin'; id: string; origin: string; }
@@ -148,5 +159,5 @@ export interface OriginDecision {
 }
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
-  | Unpair | OriginDecision | Capabilities;
+  | Unpair | OriginDecision | Capabilities | CapabilitySwitches;
 export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role;

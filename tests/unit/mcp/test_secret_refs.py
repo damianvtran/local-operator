@@ -31,14 +31,28 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     config = tmp_path / "config"
     config.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    # Exercise the real encrypted store WITHOUT launching a persistent broker,
+    # the seam the sibling encrypted-credentials fixture pins. A live broker is
+    # process-wide, so a store read that reaches it can be served or denied by
+    # whatever another test left running — which made resolution here
+    # intermittently empty. Resolution must not depend on a daemon the test never
+    # started.
+    monkeypatch.setattr("local_operator.secrets.client.ensure_broker", lambda *a, **kw: False)
     return config
 
 
 def _store(config: Path, values: dict[str, str]) -> None:
-    """Write the credential store the Settings > API credentials surface writes."""
-    (config / "credentials.env").write_text(
-        "".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8"
-    )
+    """Write the ENCRYPTED store, the one the resolution path now reads.
+
+    Was a ``credentials.env`` writer; the plaintext leg is gone, so a test that
+    wants a key to resolve must put it where the production writer (MCP sign-in /
+    the credentials surface) puts it.
+    """
+    from local_operator.secrets import access
+
+    store = access.open_store(config, create=True)
+    for key, value in values.items():
+        store.set(key, value.encode("utf-8"))
 
 
 def _project(tmp_path: Path, servers: dict[str, Any]) -> Path:
@@ -105,7 +119,6 @@ class TestReferenceRule:
         # Never the reference text passed through as if it were a value, and
         # never the store's location for the reader to wander into.
         assert "${HUBSPOT_TOKEN}" not in message
-        assert "credentials.env" not in message
 
     def test_an_empty_stored_value_counts_as_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -120,9 +133,9 @@ class TestReferenceRule:
     def test_a_key_only_in_the_process_environment_does_not_resolve(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # Deliberate: CredentialManager.get_credential falls back to os.environ,
-        # and that fallback is NOT used here — a project config is untrusted
-        # input, and the daemon's environment is not the credentials surface.
+        # Deliberate: the process environment is never consulted here — a
+        # project config is untrusted input, and the daemon's environment is not
+        # the credentials surface.
         _isolate(monkeypatch, tmp_path)
         monkeypatch.setenv("ONLY_IN_ENV", SENTINEL)
 
@@ -153,10 +166,10 @@ class TestReferenceRule:
         resolved = resolve_config_secrets("handwritten", _http({"X-Literal": value}))
 
         assert resolved.headers == {"X-Literal": value}
-        # Untouched also means the store is not CREATED: the read is a stat and
-        # an early return on a missing file, never a ``CredentialManager`` (whose
-        # constructor writes an empty credentials file).
-        assert not (config / "credentials.env").exists()
+        # Untouched also means no store is CREATED: the read is a stat and an
+        # early return on a missing file, never a construction that would
+        # initialise one as a side effect of reading.
+        assert not (config / "secrets" / "store.db").exists()
 
     def test_a_mixed_value_is_refused_rather_than_half_applied(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -181,7 +194,7 @@ class TestReferenceRule:
         cfg = _stdio({"LOG_LEVEL": "debug"})
 
         assert resolve_config_secrets("plain", cfg) is cfg
-        assert not (config / "credentials.env").exists()
+        assert not (config / "secrets" / "store.db").exists()
 
     def test_the_store_mapping_stays_wrapped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         # Finding R2: the mapping is built on every referenced connect, so it

@@ -54,7 +54,6 @@ from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
-from local_operator.credentials import CredentialManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
@@ -528,6 +527,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # Operator authority (issue #1310, revision 2). Registration is stdlib-only
+    # for the same reason `secret`'s is: `lop --version` must not load
+    # Security.framework, the CNG stack or `cryptography`, and the verbs that do
+    # live in `operator/handlers.py`, imported only when a verb is dispatched.
+    from local_operator.operator.cli import add_parser as add_operator_parser
+
+    add_operator_parser(subparsers)
+
+    # Device pairing (stage D of the same design). Registered beside
+    # `operator` because it is the same trust root seen from the other end — the
+    # operator signs the certificate, the phone holds the key — and stdlib-only
+    # for the identical reason: `lop --version` must not load the keychain.
+    from local_operator.operator.pair import add_parser as add_pair_parser
+
+    add_pair_parser(subparsers)
+
     # QwenCloud console session cookie: the credential the personal Token Plan
     # usage window needs and no login flow can mint (a browser session cookie
     # cannot be refreshed headlessly). stdlib-only registration, same rule.
@@ -662,7 +677,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "sessions",
         help=(
             "List active lop sessions and their resource usage; "
-            "`sessions cleanup` previews or runs the session cleanup policy"
+            "`sessions cleanup` previews or runs the session cleanup policy; "
+            "`sessions reclaim` previews or ends runtimes nothing can reach"
         ),
         parents=[parent_parser],
     )
@@ -747,6 +763,56 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="remove directories that never got a transcript (overrides config)",
     )
     cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions reclaim`: the external door to the residency sweep — the
+    # same pass the wake supervisor runs on its own cadence, for the case where
+    # the thing an operator wants ended is not one session but the RESIDENCY
+    # itself. A runtime that published no record cannot be listed here, cannot
+    # be stopped with `lop stop`, and cannot be reached by any client; before
+    # this command the only way to find one was `ps`. A sub-subcommand of
+    # `sessions` rather than a top-level verb because it is the third question
+    # about the fleet (`sessions` lists it, `send` talks to it, `reclaim`
+    # bounds it) and it reads the same discovery namespaces.
+    #
+    # IT IS A DRY RUN UNLESS THE CALLER SAYS OTHERWISE, and the confirmation
+    # that a real run asks for is not a formality: it is the same process-
+    # table question the sweep asks twice before it signals anything.
+    reclaim_parser = sessions_subparsers.add_parser(
+        "reclaim",
+        help="End session runtimes nothing can reach (dry run; --yes to act)",
+        description=(
+            "Find live session runtimes that no discovery record, no viewer, no "
+            "attach and no existing config root can reach, and ask them to leave "
+            "with SIGTERM. The runtime finishes any turn in flight first (its own "
+            "signal drain, bounded by SIGNAL_DRAIN_S) — this command never sends "
+            "SIGKILL. Any runtime with a record, an attached interface, a live root "
+            "it does not own, or CPU spent inside the confirm window is refused."
+        ),
+        parents=[parent_parser],
+    )
+    reclaim_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list what would be reclaimed, without signalling anything",
+    )
+    reclaim_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="do not ask for confirmation before signalling",
+    )
+    reclaim_parser.add_argument(
+        "--confirm-s",
+        type=_confirm_window,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how long to watch before signalling (default: 60, minimum: 50). The "
+            "window is the safety property: a runtime that gains a record, an attach "
+            "or CPU inside it is dropped from the pass, and a window too short to "
+            "measure CPU would drop one of the four refusals"
+        ),
+    )
+    reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -1233,6 +1299,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "are available either way. --yolo remains an explicit approval override."
         ),
     )
+    exec_parser.add_argument(
+        "--supervisor-fd",
+        type=int,
+        dest="supervisor_fd",
+        default=None,
+        help=(
+            "Write this run's operator capability to this inherited descriptor so the "
+            "supervisor holding the other end can APPROVE the cards this run parks "
+            "(stage E). Requires --control; refused with --background. Descriptor "
+            "numbers only — the value never touches argv, the environment or a file."
+        ),
+    )
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -1456,6 +1534,7 @@ def credential_update_command(args: argparse.Namespace) -> int:
     """
     from local_operator.ansi import strip_control_sequences
     from local_operator.cli_style import ERROR, WARNING, paint
+    from local_operator.providers.key_prompt import prompt_for_provider_key
     from local_operator.providers.registry import PROVIDER_REGISTRY, env_key_name
 
     # Warn when the key is not one the registry knows, with the closest match \u2014
@@ -1477,9 +1556,13 @@ def credential_update_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    credential_manager = CredentialManager(config_dir())
+    # ``prompt_for_provider_key`` writes a provider-class STORE row and creates
+    # nothing: the prompt moved out of the deleted ``CredentialManager`` (PR2b),
+    # whose construction used to recreate the plaintext ``credentials.env`` this
+    # consolidation retires — on a host that had already migrated and deleted the
+    # file (R5). Nothing this command does needs the file.
     try:
-        credential_manager.prompt_for_credential(args.key, reason="update requested")
+        prompt_for_provider_key(args.key, reason="update requested")
     except KeyboardInterrupt:
         # 130 is the shell's SIGINT convention; the message is one quiet line,
         # not the red stack-trace panel the generic handler would have drawn.
@@ -1495,8 +1578,16 @@ def credential_update_command(args: argparse.Namespace) -> int:
 
 
 def credential_delete_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(config_dir())
-    credential_manager.set_credential(args.key, "")
+    """Remove a credential from the provider-class store namespace.
+
+    Deletes the ``LOP_PROVIDER_<KEY>`` store row. The plaintext file is left
+    untouched — a value that only ever lived there still has a reader during the
+    transition — but a store row the modern writer created is what this command
+    is expected to remove.
+    """
+    from local_operator.providers.registry import remove_provider_key
+
+    remove_provider_key(args.key)
     return 0
 
 
@@ -3313,6 +3404,32 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
+def _confirm_window(text: str) -> int:
+    """argparse type for ``sessions reclaim --confirm-s``: seconds, with a floor.
+
+    A SHORTER WINDOW IS A SWEEP WITH NO CPU RUNG, not a faster sweep: the CPU
+    budget is ``max(BUSY_CPU_FLOOR_S, BUSY_CPU_FRACTION * elapsed)``, so below
+    ``MIN_ACTIONABLE_CONFIRM_S`` the floor dominates and no measurement can
+    exceed it. ``0`` was the worst case and it was reachable — ``--confirm-s 0``
+    parsed (the type was a non-negative int) and skipped the watch entirely, and
+    QA round 1 (Q2) measured a process with 90.4 s of cumulative CPU being
+    admitted and SIGTERMed at that window, having been correctly refused at the
+    default one (6.30 s spent per 60 s against a 1.2 s budget). The floor is
+    derived from those two constants rather than restated, so it moves with them.
+    ``--dry-run`` remains available for looking without a window at all.
+    """
+    from local_operator.session.runtime.reclaim import MIN_ACTIONABLE_CONFIRM_S
+
+    value = int(text)
+    if value < MIN_ACTIONABLE_CONFIRM_S:
+        raise argparse.ArgumentTypeError(
+            f"the confirm window must be at least {MIN_ACTIONABLE_CONFIRM_S:.0f}s, "
+            f"got {value}: a shorter window cannot measure CPU, so the sweep would "
+            "act on two sightings with no separation and no CPU refusal in between"
+        )
+    return value
+
+
 def _cleanup_row(candidate: Any, verb: str) -> str:
     """One decision, with what a user needs to judge it: name, age, size."""
     # Budgeted to 100 columns with a 12-hex id, the origin column and the
@@ -3506,6 +3623,117 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     return 3 if result.errors else 0
 
 
+def sessions_reclaim_command(args: argparse.Namespace) -> int:
+    """``lop sessions reclaim [--dry-run] [--yes] [--confirm-s N]``.
+
+    The operator's door to the external residency sweep
+    (:mod:`local_operator.session.runtime.reclaim`) — the same pass the wake
+    supervisor runs on its own cadence, exposed because the supervisor retires
+    when nothing is fireable and because a person asking "what is still holding
+    memory" should not have to wait for a wake to be due.
+
+    Order of operations is LIST, WAIT, CONFIRM, SIGNAL. The wait is the point: the
+    sweep's decision is taken from TWO sightings of the process table, so this
+    command watches for ``--confirm-s`` seconds (default ``reclaim.CONFIRM_S``)
+    between them and drops anything that gained a record, an attach or CPU in
+    between. A runtime whose record appears while the operator is reading the
+    listing is therefore never signalled.
+
+    Exit codes: 0 looked (dry run, or nothing to reclaim) or reclaimed; 2 refused
+    (confirmation declined, or no terminal and no ``--yes``); 3 signalled but at
+    least one runtime had not gone within the wait.
+    """
+    import json as _json
+
+    from local_operator.session.runtime.reclaim import (
+        CONFIRM_S,
+        EXIT_WAIT_S,
+        Sightings,
+        reclaim_runtimes,
+    )
+
+    root = config_dir()
+    confirm_s = CONFIRM_S if args.confirm_s is None else float(args.confirm_s)
+    sightings = Sightings()
+
+    # PASS 1 — the listing. Same call, same rule, nothing signalled: what the
+    # operator reads here is produced by the code that later acts, so the two
+    # cannot disagree about which runtimes are candidates.
+    preview = reclaim_runtimes(root, apply=False, sightings=sightings, confirm_s=confirm_s)
+    candidates = preview.reclaimed + preview.pending
+
+    def row(item: Any, verb: str) -> str:
+        return (
+            f"  {verb} pid {item.process.pid:<7} session {item.session_id or '<unknown>':<24} "
+            f"root {item.config_root or '<unknown>':<40} "
+            f"alive {item.process.age_s / 3600.0:.1f}h cpu {item.process.cpu_s:.1f}s"
+        )
+
+    if args.json:
+        print(_json.dumps(preview.to_json(), indent=2))
+        return 0
+
+    print(preview.summary())
+    if args.dry_run:
+        for item in candidates:
+            print(row(item, "would reclaim"))
+        print(
+            f"nothing was signalled (dry run); a real run watches {confirm_s:.0f}s before it acts, "
+            "and drops anything that gains a record, an attach or CPU in that window"
+        )
+        return 0
+
+    if not candidates:
+        print("nothing to reclaim: every live session runtime is either recorded or refused")
+        return 0
+
+    for item in candidates:
+        print(row(item, "will reclaim"))
+    confirmed: bool | None = None
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "refusing: not a terminal and --yes was not given, so nothing was signalled",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            answer = input(f"end {len(candidates)} unreachable runtime(s)? type 'yes' to confirm: ")
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        confirmed = answer.strip().lower() == "yes"
+        if not confirmed:
+            print("not confirmed; nothing was signalled")
+            return 2
+
+    # PASS 2 — the confirm window elapses, then the SAME memory is asked to act.
+    # The decision is not re-derived from this listing: the second pass re-censuses
+    # and re-reads the records, so a runtime that became reachable in between is
+    # refused by the same rungs that refused the others, and the CPU delta the pass
+    # measures is over the window the operator just waited out.
+    if confirm_s > 0:
+        print(f"watching {confirm_s:.0f}s for a record, an attach or CPU before signalling...")
+        time.sleep(confirm_s)
+    report = reclaim_runtimes(
+        root, apply=True, sightings=sightings, confirm_s=confirm_s, wait_s=EXIT_WAIT_S
+    )
+    print(
+        f"signalled {len(report.signalled)} runtime(s); {len(report.exited)} gone within "
+        f"{EXIT_WAIT_S:.0f}s"
+    )
+    for item in report.exited:
+        print(row(item, "gone    "))
+    for item in report.signalled:
+        if item in report.exited:
+            continue
+        # A signalled runtime that is still there is NOT a failure: its own drain is
+        # bounded by SIGNAL_DRAIN_S and finishing a turn can take that long. Reported
+        # as still-leaving rather than as an error, because "it did not die" is what
+        # the drain is for.
+        print(row(item, "leaving "))
+    return 3 if len(report.exited) < len(report.signalled) else 0
+
+
 def _positive_int(value: str) -> int:
     """Argparse type for counts where 0 or negative is a typo, not a request.
 
@@ -3537,6 +3765,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "reclaim":
+        return sessions_reclaim_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer
@@ -3608,6 +3839,26 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the turn the drain is finishing (U1/U2, PR #1141).
     leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
     show_leaving = any(leaving.values())
+    # The same rule as LEAVING and WHY above, and the same reason it must be a
+    # SEPARATE column rather than part of that one: a session mid-update is alive,
+    # accepting messages, and about to run them (``types.UPDATING``) — the operator
+    # reading that row must not be told to re-send what is already queued.
+    updating = {row["session_id"]: (row.get("updating") or "") for row in rows}
+    failed = {row["session_id"]: (row.get("update_failed") or "") for row in rows}
+    # THE COLUMN PRINTS WHENEVER ANY ROW HAS SOMETHING TO SAY ABOUT A MOVE, and a
+    # FAILED one counts. A fleet whose only news is an abandoned update used to drop
+    # the column entirely and list that session exactly as an ordinary idle one — the
+    # defect design review round 1 (D1) measured against this renderer.
+    show_updating = any(updating.values()) or any(failed.values())
+    # THE THIRD STATE (design review round 1, D1), gated and separate for the reasons
+    # the two above state: it is not a departure and not an update, it is a runtime
+    # whose own bound fired, dumped and could not end it — stalled with the turn still
+    # inside, and only ``lop stop`` ends it. Without this the listing rendered such a
+    # session exactly as an ordinary idle one, which is the half of the operator's rule
+    # (a runtime is a person's to end once it can no longer finish) that a listing
+    # carries.
+    held = {row["session_id"]: bool(row.get("stall_held")) for row in rows}
+    show_held = any(held.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3620,6 +3871,10 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
+    if show_updating:
+        header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
+    if show_held:
+        header += f" {'STALLED':<{HELD_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3664,11 +3919,59 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+
+        if show_updating:
+            # The cell is RENDERED from the row's pair through the ONE phase reader
+            # (``types.update_phase``/``update_short``), so the copy here, the info
+            # panel and the phone cannot drift into three vocabularies for one state —
+            # and so the FAILED phase reaches this surface at all (design review round
+            # 1, D1, where the row rendered blank).
+            cell = _updating_cell(
+                updating.get(row["session_id"]) or "", failed.get(row["session_id"]) or ""
+            )
+            # MARKED, unlike the cells above: the value here is a BUILD LABEL, so a
+            # silent cut hands the reader a plausible version for a session that is on
+            # a different one (design review round 1, D3 — ``updating →
+            # 0.59.11.dev3+g1`` cut to a real-looking ``0.59.11``). ``_clamp_reason_cell``
+            # already carries that argument for WHY; this is the same mark applied to
+            # the one column whose text is an identifier rather than prose.
+            said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
+        if show_held:
+            # AFTER the updating cell, because the header appends ``STALLED`` after
+            # ``UPDATING`` (agent review round 2, MAJOR-3): emitted the other way round
+            # the two values sat under each other's headers on every row that carries
+            # both — the held cell an updating value, and vice versa. The record's own
+            # phrase is a full sentence and belongs in the notice; a list column carries
+            # the fact, in the words the panel uses, so one state does not acquire two
+            # vocabularies across the two surfaces a reader compares (the rule
+            # ``STOP_RUNG_LABELS`` states for the stop rungs).
+            said_held = HELD_CELL if held.get(row["session_id"]) else ""
+            line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
-def _clamp_reason_cell(summary: str) -> str:
+def _updating_cell(updating: str, failed: str = "") -> str:
+    """The fleet cell for a row's update fields. ``""`` when it carries no move.
+
+    The IMPORT IS FUNCTION-LOCAL on purpose, for the reason the column widths are
+    not imported at all: this module keeps session internals out of its module
+    scope so ``lop``'s CLI can start without paying for the runtime (see the
+    header). One string formatter reached only on the arm that has a moving session
+    is the whole cost of that here.
+
+    THE PHASE IS READ, NOT ASSUMED. Both fields go through ``types.update_phase``, so
+    a FAILED window renders its own cell instead of a blank one and the precedence
+    between an open window, a failed one and an applied one lives in one place.
+    """
+    from local_operator.session.runtime.types import update_phase, update_short
+
+    phase, pair = update_phase(updating, "", failed)
+    return update_short(phase, pair) if phase else ""
+
+
+def _clamp_reason_cell(summary: str, width: int | None = None) -> str:
     """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
@@ -3716,13 +4019,23 @@ def _clamp_reason_cell(summary: str) -> str:
     and a value nothing had to cut is not edited at all (review round 2, N2 —
     recorded as the rule, not changed, because trimming it would be a second,
     invisible edit on a cell that is already correct).
+
+    ``width`` IS A PARAMETER because a second column needs the same mark (design
+    review round 1, D3): the UPDATING cell is a BUILD LABEL, and a silent cut of
+    ``updating → 0.59.11.dev3+g1`` hands the reader a real-looking ``0.59.11`` for a
+    session that is on a different build. Everything above is about the WHY column,
+    which is where the mark was first argued; the arithmetic is the same one, which
+    is why this is a parameter rather than a second function. It defaults to
+    ``WHY_COLUMN_WIDTH`` at CALL time rather than in the signature, because this
+    function is defined above that constant.
     """
-    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= (WHY_COLUMN_WIDTH if width is None else width):
         return summary
     # The marker's OWN measured width, not a hard-coded 1: the budget is
     # arithmetic, so a future marker must not be able to push the cell over.
     marker = "…"
-    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+    budget = WHY_COLUMN_WIDTH if width is None else width
+    return _cut_to_cells(summary, budget - _cell_len(marker)) + marker
 
 
 def _cut_to_cells(text: str, budget: int) -> str:
@@ -4991,7 +5304,7 @@ def _state_cell(state: str) -> str:
 #: Width of `lop sessions`' trailing WHY column, in display CELLS.
 #:
 #: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
-#: exiting cleanly while this turn was running, and nothing recorded a stop``
+#: exiting cleanly while this turn was running, and no stop was asked for``
 #: is 104 cells — and an unbounded column re-flows the whole table on a normal
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
@@ -5022,7 +5335,39 @@ WHY_COLUMN_WIDTH = 48
 #: module keeps session internals out of its module scope on purpose (see the
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
+#: What the ``STALLED`` column says, and the width the header needs. The cell names
+#: the state and the remedy in the register the panel uses (``HELD_STATE_WORD``),
+#: because the fact is one the reader must be able to act on from a listing — ONE word
+#: for it on all three surfaces (the panel, the dump and this cell), and no "stalled"
+#: under a header that already says it (design review round 2, D7).
+HELD_CELL = "bound held; lop stop"
+HELD_COLUMN_WIDTH = len(HELD_CELL)
 LEAVING_COLUMN_WIDTH = 51
+
+#: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
+#:
+#: A SECOND COLUMN RATHER THAN A WORD IN ``LEAVING``, and that is the feature rather
+#: than a layout choice: the two fields are opposite promises. A ``leaving`` row says
+#: this runtime will not take a message ("send it again once the new build is up");
+#: an ``updating`` row says it ALREADY HAS it and runs it when the successor
+#: boots. Folding them into one cell would make the operator re-send a message that
+#: is queued — the exact harm the window exists to prevent (``types.UPDATING``).
+#:
+#: Sized from ``types.update_short``, whose pair is the wide part and which is why
+#: the cell names only the NEW build: 26 is ``"updating → "`` (11 cells) plus the
+#: longest label ``BuildStamp.label()`` can produce — ``0.59.11`` and ``@`` and the
+#: 7-character ref git itself abbreviates to, so 15. The failed phase's cell is
+#: shorter and carries no pair on purpose (see that function): its move did not
+#: happen, so naming a build there would read as one that did.
+#:
+#: Like ``LEAVING_COLUMN_WIDTH`` the number is written out rather than imported
+#: (this module keeps session internals out of its module scope on purpose, see the
+#: header) and is pinned against the vocabulary by
+#: ``tests/unit/session/runtime/test_updating_vocabulary.py``.
+#:
+#: Appears only when some row carries one, exactly like LEAVING and WHY: a listing
+#: with no runtime mid-update is byte-for-byte what it was before.
+UPDATING_COLUMN_WIDTH = 26
 
 
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.
@@ -5626,6 +5971,26 @@ def mobile_command(args: argparse.Namespace) -> int:
         print(f"installed:    {'yes' if result['installed'] else 'no'}")
         print(f"password set: {'yes' if result['password_set'] else 'no'}")
         print(f"healthy:      {'yes' if result['healthy'] else 'no'}")
+        # A healthy daemon with no bundle serves a 503 to every authenticated GET
+        # ("mobile web bundle not built"), so `healthy: yes` on its own reads as
+        # fine while the phone has no UI at all — the state generations
+        # 0.61.13-0.61.16, 0.61.18 and 0.62.0 were flipped into. One line, naming
+        # the remedy, rather than a redesign of this output.
+        #
+        # Gated on `installed`: on a machine that never set the portal up there is
+        # no phone and no 503, so the line would read as a fault report where the
+        # only correct advice is "you have not set this up yet" (design round 1,
+        # D4). The label leads with the STATE rather than the classifier token, so
+        # it is true on its own; the token stays in the parenthesis, where it is
+        # the classifier's own name (D5).
+        bundle = result.get("bundle")
+        if result["installed"] and bundle in ("buildable", "missing-sources"):
+            detail = (
+                "buildable — run `lop mobile install`"
+                if bundle == "buildable"
+                else "no web sources to build from"
+            )
+            print(f"bundle:       not built ({detail})")
         gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
         print(f"log:          {result['log']}")
@@ -6248,10 +6613,9 @@ def agents_delete_command(
             resolve_radient_credential_sync,
         )
 
-        credential_manager = CredentialManager(config_dir)
         config_manager = ConfigManager(config_dir)
         base_url = _radient_hub_base_url(config_manager)
-        api_key = resolve_radient_credential_sync(credential_manager, base_url)
+        api_key = resolve_radient_credential_sync(config_manager.config_dir, base_url)
         if not api_key:
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
             return 1
@@ -6274,17 +6638,20 @@ def agents_delete_command(
 # --- Additive subcommand handlers (rewrite) --------------------------------
 
 
-def _build_auth_stack(config_dir: Path) -> tuple[Any, Any]:
-    """(auth_store, credential_manager) for the login handlers.
+def _build_auth_stack(config_dir: Path) -> tuple[Any, Path]:
+    """``(auth_store, config_dir)`` for the login handlers.
+
+    The second element is the config ROOT the store-first readers resolve
+    under, not the ``CredentialManager`` that used to carry it: PR2b deleted
+    that class and ``AuthStore``/``list_logins`` take the path directly.
 
     Lazy import of the providers stream's AuthStore — the CLI module top
     level must never depend on it.
     """
     from local_operator.providers.auth_store import AuthStore
 
-    credential_manager = CredentialManager(config_dir)
-    auth_store = AuthStore(credential_manager=credential_manager)
-    return auth_store, credential_manager
+    auth_store = AuthStore(config_dir=config_dir)
+    return auth_store, config_dir
 
 
 def login_command(args: argparse.Namespace) -> int:
@@ -6294,9 +6661,9 @@ def login_command(args: argparse.Namespace) -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return 1
-    auth_store, credential_manager = _build_auth_stack(config_dir())
+    auth_store, config_dir_path = _build_auth_stack(config_dir())
     try:
-        return run_login(getattr(args, "provider", None), credential_manager, auth_store)
+        return run_login(getattr(args, "provider", None), config_dir_path, auth_store)
     finally:
         auth_store.close()
 
@@ -6308,7 +6675,7 @@ def logout_command(args: argparse.Namespace) -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return 1
-    auth_store, _credential_manager = _build_auth_stack(config_dir())
+    auth_store, _config_dir = _build_auth_stack(config_dir())
     try:
         return run_logout(args.provider, auth_store)
     finally:
@@ -6322,9 +6689,9 @@ def login_status_command() -> int:
     except ImportError:
         print("\n\033[1;31mError: provider login support is not available in this build\033[0m")
         return 1
-    auth_store, credential_manager = _build_auth_stack(config_dir())
+    auth_store, config_dir_path = _build_auth_stack(config_dir())
     try:
-        return list_logins(auth_store, credential_manager)
+        return list_logins(auth_store, config_dir_path)
     finally:
         auth_store.close()
 
@@ -7121,7 +7488,6 @@ def mcp_command(args: argparse.Namespace) -> int:
 async def create_session(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: "AgentRegistry",
     *,
     has_ui: bool = False,
@@ -7141,7 +7507,6 @@ async def create_session(
     return await _create_session(
         args,
         config_manager,
-        credential_manager,
         agent_registry,
         has_ui=has_ui,
         defer_mcp_wiring=defer_mcp_wiring,
@@ -7178,7 +7543,6 @@ def _apply_run_in(run_in: Optional[str]) -> Optional[int]:
 async def _run_headless_repl(
     args: argparse.Namespace,
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: "AgentRegistry",
 ) -> int:
     """Plain-stream REPL for non-tty stdout or ``--no-tui``.
@@ -7213,9 +7577,7 @@ async def _run_headless_repl(
         logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     console = Console(stderr=True, highlight=False)
-    session = await create_session(
-        args, config_manager, credential_manager, agent_registry, has_ui=False
-    )
+    session = await create_session(args, config_manager, agent_registry, has_ui=False)
     renderer = PrintRenderer(stream_text=True)
     unsubscribe = renderer.attach(session)
     console.print(
@@ -7250,7 +7612,6 @@ async def _run_headless_repl(
 
 def _preflight_hosting_model(
     config_manager: ConfigManager,
-    credential_manager: CredentialManager,
     agent_registry: "AgentRegistry",
     current_agent: Optional[Any],
     args: argparse.Namespace,
@@ -7354,7 +7715,7 @@ def _preflight_hosting_model(
         # Every other path keeps fail-fast, but with the WHOLE quickstart at
         # once (item A1/U1) — the old message named only "Hosting platform is
         # not configured" and the user fixed it one error at a time.
-        _print_first_run_quickstart(credential_manager)
+        _print_first_run_quickstart()
         return 1
     except ValueError as exc:
         # A model-resolution error (hosting set, no default known): fatal on
@@ -7370,10 +7731,10 @@ def _preflight_hosting_model(
     except Exception:  # noqa: BLE001 — unknown providers pass through
         return None
 
-    return _preflight_api_key(hosting, credential_manager, require_key=require_api_key)
+    return _preflight_api_key(hosting, config_manager.config_dir, require_key=require_api_key)
 
 
-def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
+def _print_first_run_quickstart() -> None:
     """One complete message naming hosting, model AND key at once (item A1/U1).
 
     The fail-fast paths (headless REPL, exec, non-tty) reach this when nothing
@@ -7415,7 +7776,7 @@ def _print_first_run_quickstart(credential_manager: CredentialManager) -> None:
 
 
 def _preflight_api_key(
-    hosting: str, credential_manager: CredentialManager, *, require_key: bool = True
+    hosting: str, config_dir: Path | None, *, require_key: bool = True
 ) -> int | None:
     """Verify that the provider has a credential source.
 
@@ -7424,7 +7785,8 @@ def _preflight_api_key(
     failover; doing network refresh here can turn a transient OAuth failure
     into a false "API key is required" startup error that prevents access to
     the TUI's login command. With no stored row, the AuthStore cascade still
-    checks environment and legacy ``credentials.env`` keys.
+    checks the exported environment (the legacy ``credentials.env`` file is no
+    longer a rung, PR2a).
 
     Providers that need no key (ollama, test) and anything the provider
     registry cannot answer pass through — a preflight must never block a
@@ -7453,7 +7815,7 @@ def _preflight_api_key(
         from local_operator.providers.auth_store import AuthStore
         from local_operator.providers.registry import credential_provider_id
 
-        auth_store = AuthStore(credential_manager=credential_manager)
+        auth_store = AuthStore(config_dir=config_dir)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -7553,7 +7915,6 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
 
         base_dir = config_dir()
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager(base_dir)
         from local_operator.agents import AgentRegistry  # lazy: heavy module
 
         agent_registry = AgentRegistry(base_dir)
@@ -7563,7 +7924,6 @@ async def _run_with_scheduler(run_fn, *run_args) -> int:
         scheduler_service = SchedulerService(
             agent_registry=agent_registry,
             config_manager=config_manager,
-            credential_manager=credential_manager,
             env_config=get_env_config(),
             operator_type=OperatorType.CLI,
             verbosity_level=(
@@ -7938,10 +8298,9 @@ def main() -> int:
                     resolve_radient_credential_sync,
                 )
 
-                credential_manager = CredentialManager(base_dir)
                 config_manager = ConfigManager(base_dir)
                 base_url = _radient_hub_base_url(config_manager)
-                api_key = resolve_radient_credential_sync(credential_manager, base_url)
+                api_key = resolve_radient_credential_sync(config_manager.config_dir, base_url)
                 if not api_key:
                     print(
                         "\n\033[1;31mError: RADIENT_API_KEY is required to push to Radient\033[0m"
@@ -8078,6 +8437,14 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "operator":
+            from local_operator.operator.cli import main as operator_main
+
+            return operator_main(args)
+        elif args.subcommand == "pair":
+            from local_operator.operator.pair import main as pair_main
+
+            return pair_main(args)
         elif args.subcommand == "qwencloud-ticket":
             return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":
@@ -8297,6 +8664,17 @@ def main() -> int:
                 # missing attribute must read as "off", never raise.
                 control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
+                # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
+                # Its absence was a real gap rather than a tidy-up: `run_session`
+                # reads the field off this ExecArgs object — not off the argparse
+                # Namespace — so omitting it here made `--supervisor-fd` a flag that
+                # parsed, validated, and then silently did nothing: the run minted no
+                # capability and wrote nothing upward, and a supervisor waited out
+                # its whole timeout. Found by the e2e cell that drives a real
+                # supervised run (`test_a_supervised_run_is_approved_through_the_
+                # handoff`), which is why that cell exists rather than an in-process
+                # probe (agent review round 6, R6-5).
+                supervisor_fd=getattr(args, "supervisor_fd", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast
@@ -8322,7 +8700,7 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return 1
-                key_result = _preflight_api_key(hosting, CredentialManager(base_dir))
+                key_result = _preflight_api_key(hosting, base_dir)
                 if key_result is not None:
                     return key_result
             return run_exec(args.command, exec_args)
@@ -8364,7 +8742,6 @@ def main() -> int:
             return 1
 
         config_manager = ConfigManager(base_dir)
-        credential_manager = CredentialManager(base_dir)
 
         # Override config with CLI args where provided
         config_manager.update_config_from_args(args)
@@ -8481,7 +8858,6 @@ def main() -> int:
         # path keeps its fatal check — a scripted run has no login prompt).
         preflight_result = _preflight_hosting_model(
             config_manager,
-            credential_manager,
             agent_registry,
             current_agent,
             args,
@@ -8681,8 +9057,8 @@ def main() -> int:
             from local_operator.providers.auth_store import AuthStore
             from local_operator.providers.controller import ProviderController
 
-            tui_auth_store = AuthStore(credential_manager=credential_manager)
-            tui_controller = ProviderController(tui_auth_store, credential_manager)
+            tui_auth_store = AuthStore(config_dir=config_manager.config_dir)
+            tui_controller = ProviderController(tui_auth_store, config_manager.config_dir)
             try:
                 # BIND BY KEYWORD. ``_run_with_scheduler`` forwards *args
                 # positionally, so a positional controller lands in whatever
@@ -8774,7 +9150,6 @@ def main() -> int:
                 _run_headless_repl,
                 args,
                 config_manager,
-                credential_manager,
                 agent_registry,
             )
         )

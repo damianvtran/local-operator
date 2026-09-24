@@ -21,6 +21,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamUsageEvent,
     TextContent,
@@ -35,9 +36,16 @@ async def _noop(tool_call_id: str, *_args: object) -> ToolResult:
 
 
 def _fn(session_id="sess-1"):
+    # These recorder tests bypass __init__; preserve an ordinary root stream's
+    # default so they exercise recording without inventing fork activity.
     fn = object.__new__(SessionStreamFn)
     fn._session_id = session_id
+    fn._counts_as_child_request = False
     return fn
+
+
+def test_recorder_fixture_defaults_to_root_stream() -> None:
+    assert _fn()._counts_as_child_request is False
 
 
 def _request():
@@ -263,6 +271,74 @@ def test_records_serving_model_not_session_primary(tmp_path):
     assert "anthropic" not in agg.by_provider
     rec.close()
     store.close()
+
+
+def test_records_first_reasoning_ms_against_the_stream_start(tmp_path):
+    """The reasoning wait is recorded next to ``ttft_ms``, on the same origin.
+
+    Both are stamped by the wrapper off one monotonic clock started where the
+    stream is entered, so the reasoning gap is a subtraction -- which is the
+    whole point of recording the second number: before it existed, the operator's
+    own ledger could not see the wait they were complaining about (the fragment
+    never reached the harness, so nothing timed it).
+    """
+    import sqlite3
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-r")
+    usage = Usage(input_tokens=10, output_tokens=5, context_tokens=10)
+    asyncio.run(
+        _drain(
+            fn,
+            _request(),
+            [
+                StreamReasoningDelta(delta="weighing the options"),
+                StreamTextDelta(delta="answer"),
+                StreamEndEvent(stop_reason="stop", usage=usage),
+            ],
+        )
+    )
+    rec.flush_for_test()
+    row = (
+        sqlite3.connect(tmp_path / "a.db")
+        .execute("SELECT ttft_ms, first_reasoning_ms FROM calls")
+        .fetchone()
+    )
+    assert row[0] >= 0, "ttft_ms keeps its meaning: the first text delta"
+    assert row[1] >= 0
+    # The fragment was streamed BEFORE the text, and both are stamped from one
+    # monotonic clock, so the reasoning instant cannot follow the text one.
+    assert row[1] <= row[0]
+
+
+def test_a_turn_that_never_reasoned_records_minus_one(tmp_path):
+    """No reasoning is a SAMPLE, not a zero: ``-1``, matching its neighbours.
+
+    A 0 ms would claim the model reasoned instantly, which is not what happened
+    and would drag every mean toward a phase that never ran.
+    """
+    import sqlite3
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-n")
+    usage = Usage(input_tokens=10, output_tokens=5, context_tokens=10)
+    asyncio.run(
+        _drain(
+            fn,
+            _request(),
+            [StreamTextDelta(delta="answer"), StreamEndEvent(stop_reason="stop", usage=usage)],
+        )
+    )
+    rec.flush_for_test()
+    row = (
+        sqlite3.connect(tmp_path / "a.db")
+        .execute("SELECT ttft_ms, first_reasoning_ms FROM calls")
+        .fetchone()
+    )
+    assert row[0] >= 0
+    assert row[1] == -1
 
 
 def test_records_primary_success_under_primary(tmp_path):

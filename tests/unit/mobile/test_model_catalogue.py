@@ -14,7 +14,6 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from local_operator.credentials import CredentialManager
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.model.catalogue import default_cache_dir
 from local_operator.paths import config_dir
@@ -96,20 +95,20 @@ def test_cold_radient_oauth_models_refresh_parse_and_cache_off_loop(monkeypatch,
         assert first.json() == {
             "models": [
                 {
+                    "selector": "radient/auto",
+                    "provider": "radient",
+                    "model_id": "auto",
+                    "name": "Automatic",
+                    "label": "Auto",
+                    "connected": True,
+                    "aggregated": True,
+                },
+                {
                     "selector": "radient/anthropic/mobile-fixture",
                     "provider": "radient",
                     "model_id": "anthropic/mobile-fixture",
                     "name": "Mobile fixture",
                     "label": "radient/anthropic/mobile-fixture",
-                    "connected": True,
-                    "aggregated": True,
-                },
-                {
-                    "selector": "radient/auto",
-                    "provider": "radient",
-                    "model_id": "auto",
-                    "name": "Automatic",
-                    "label": "radient/auto",
                     "connected": True,
                     "aggregated": True,
                 },
@@ -128,13 +127,18 @@ def test_cold_radient_oauth_models_refresh_parse_and_cache_off_loop(monkeypatch,
             assert row.data["refresh"] == "fixture-rotated"
 
 
-@pytest.mark.parametrize("storage", ["login", "legacy"])
+@pytest.mark.parametrize("storage", ["login", "store-row"])
 def test_openrouter_stored_key_lists_real_catalogue(monkeypatch, storage):
     if storage == "login":
         with contextlib.closing(AuthStore()) as store:
             store.upsert_credential("openrouter", {"type": "api_key", "key": "fixture-key"})
     else:
-        CredentialManager(config_dir()).set_credential("OPENROUTER_API_KEY", "fixture-key")
+        # The second sanctioned flow writes a provider-class store ROW (PR2a):
+        # ``lop credential update`` used to write the plaintext file, which is no
+        # longer read.
+        from local_operator.providers.registry import store_provider_key
+
+        store_provider_key("OPENROUTER_API_KEY", "fixture-key", base=config_dir())
 
     def models(_transport, request):
         assert str(request.url) == "https://openrouter.ai/api/v1/models"
@@ -279,13 +283,12 @@ def test_admitted_empty_set_fetches_nothing_at_all(monkeypatch):
     """
     import asyncio
 
-    from local_operator.credentials import CredentialManager
     from local_operator.providers.controller import ProviderController
 
     calls = []
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda *args: calls.append(args))
     with contextlib.closing(AuthStore()) as store:
-        controller = ProviderController(store, CredentialManager(config_dir=config_dir()))
+        controller = ProviderController(store, config_dir())
         entries, statuses = asyncio.run(controller.live_catalogue(providers=set()))
     assert entries == []
     assert statuses == {}

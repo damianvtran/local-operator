@@ -34,7 +34,7 @@ TYPICAL USE
 
 .. code-block:: python
 
-    service = ClassificationService(manager=credentials, settings=config.values)
+    service = ClassificationService(config_dir=config_dir, settings=config.values)
     if service.enabled:
         recommendation = await service.recommend_resources(
             RecommendationRequest(

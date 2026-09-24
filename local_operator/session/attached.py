@@ -19,6 +19,7 @@ this facade without clearing the painted transcript.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import time
@@ -51,6 +52,7 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     PeerMessageDeliveredEvent,
+    ReasoningDeltaEvent,
     RetryEndEvent,
     RetryStartEvent,
     SteeringDeliveredEvent,
@@ -86,7 +88,7 @@ from local_operator.session.cold_model import (
     resolve_context_metadata,
     synthesise_cold_state,
 )
-from local_operator.session.errors import MoveIndeterminate
+from local_operator.session.errors import MoveIndeterminate, OperatorAuthorityRequired
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -190,6 +192,43 @@ COLD_FALLBACK_S = 8.0
 #: owner lands the welcome and the sync inside it by three orders of magnitude;
 #: a stalled one does not, and the read does not care.
 READ_ATTACH_BUDGET_S = 2.0
+
+#: How long a desktop READ route waits for its (background) attach before it
+#: answers from the durable facade.
+#:
+#: ``READ_ATTACH_BUDGET_S`` still bounds the ATTEMPT; this bounds only how much of
+#: it the first paint pays. The attempt runs as a single-flight task on the
+#: bridge (``DesktopSessionBridge.acquire``), so a read that outlives this grace
+#: answers cold and the attach lands behind it as the rollover frame the renderer
+#: already consumes. Before this split every snapshot/``/history``/``/events`` of a
+#: busy owner paid the full 2 s (4 s when two reads serialised on the bridge lock,
+#: and 17-20 s behind a control attach — measured with a SIGSTOPped runtime).
+#:
+#: 50 ms because a HEALTHY owner's attach is dial + sync + history cut, measured
+#: at 17 ms p50 / 29 ms p95 on this fleet at load ~100, so a live owner still
+#: paints its first frame live; and because the operator's budget for the whole
+#: open is 300 ms, of which the snapshot's own encode is 10-40 ms.
+READ_FIRST_FRAME_GRACE_S = 0.05
+
+#: The whole envelope a DESKTOP CONTROL call (``/warm``, ``/messages``, every
+#: control route) gives an EXISTING owner to welcome and sync before it is told
+#: the runtime is busy.
+#:
+#: Not ``FRONTEND_SYNC_FOREGROUND_S``: that 15 s is the TUI's envelope for a user
+#: watching a slash command in a terminal, and the TUI's own redial arithmetic
+#: derives from it (``tui/app.py``), so it stays. The desktop renderer instead
+#: cuts every control call at 20 s (``DESKTOP_CONTROL_DEADLINE_MS``) and, before
+#: this, a live-but-silent owner consumed 15 s of that on the welcome alone and
+#: then answered a generic 503 at 15.0-15.7 s. A healthy owner welcomes and syncs
+#: in tens of milliseconds, so 3 s only ever expires against an owner whose loop
+#: is genuinely not answering — and the answer it produces is the typed
+#: ``RuntimeUnresponsiveError``, which the route turns into a RETRYABLE
+#: ``runtime_busy`` refusal. Retrying is safe: admissions are at-most-once by the
+#: receipt journal, keyed by the client's request id.
+#:
+#: Scoped to ``surface == "desktop"`` (see ``_foreground_envelope``); every other
+#: surface keeps the historical envelope.
+DESKTOP_CONTROL_ATTACH_S = 3.0
 
 #: How long a read's RETAINED dial may wait for its canonical sync before the
 #: socket is abandoned.
@@ -519,6 +558,7 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
         MessageStartEvent,
         MessageUpdateEvent,
         MessageEndEvent,
+        ReasoningDeltaEvent,
         HistoryDeltaEvent,
         ToolCallComposeEvent,
         ToolExecutionStartEvent,
@@ -883,6 +923,32 @@ def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
     return True
 
 
+def _accepts_updating(callback: Any) -> bool:
+    """Whether ``callback`` can be handed the ``updating`` keyword.
+
+    ASKED BEFORE THE CALL, because the call is inside a blanket ``except Exception``
+    (agent review round 1, NIT 3). The drain callback is a HOST's function — in this
+    tree always the app's own ``_on_runtime_draining``, but the seam is a public one
+    (``session/protocol.py``), and a host written against the one-argument contract
+    would raise ``TypeError`` into the guard that exists to keep a viewer's failure
+    from breaking the pump. It would then lose the WHOLE notice — including the drain
+    sentence it used to receive — and report nothing but a ``logger.debug``.
+
+    ``VAR_KEYWORD`` counts as accepting it: a host that takes ``**kwargs`` is not
+    surprised by one more. An unreadable signature reads as NO, which degrades to the
+    pre-change behaviour rather than to silence.
+    """
+    if callback is None:
+        return False
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins, partials, C callables
+        return False
+    if "updating" in parameters:
+        return True
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -987,7 +1053,14 @@ class AttachedSession:
         #: ``LEAVING_ON_SIGNAL``, because the frame's own ``reason``/``to`` decide
         #: (:func:`types.drain_phrase_for_frame`) and have done since design round
         #: 4, D9 (agent review round 5, MINOR-2).
-        self._drain_callback: Callable[[str], Any] | None = None
+        #: The drain/window callback: the frame's leaving PHRASE, plus the update
+        #: window's build pair as a keyword ("" when the frame carries no window).
+        self._drain_callback: Callable[..., Any] | None = None
+        #: Whether ``_drain_callback`` accepts that keyword, resolved once when it is
+        #: set: the call site is inside a blanket exception guard, so the answer has
+        #: to be known BEFORE the call rather than discovered by catching a TypeError
+        #: (see :func:`_accepts_updating`).
+        self._drain_callback_takes_updating: bool = False
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -1129,6 +1202,9 @@ class AttachedSession:
         self._buffered_events: list[AgentEvent[Any]] = []
         self._ready_for_events = False
         self._approval_handler: ApprovalGate | None = None
+        #: Where a REFUSED gate reply goes when the host has a surface for it
+        #: (see ``set_gate_refusal_handler``): unset means "log it".
+        self._gate_refusal_handler: Callable[[BaseException], None] | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
@@ -1191,6 +1267,11 @@ class AttachedSession:
         # the authoritative op, and the owner's confirmed count replaces the
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
+        # "What this signature is about to authorise", from ``effect_copy``, for the
+        # app to paint while the presence prompt is up — see
+        # ``set_operator_prompt_notice`` for why this pane is the surface that has
+        # to carry it and why nothing else can.
+        self._operator_prompt_notice: Callable[[str], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
         # Esc-recall's twin of the pair above: the synchronous protocol method
         # answers optimistically from local state and the owner's REJECTION —
@@ -2354,7 +2435,9 @@ class AttachedSession:
             self._can_go_cold or self._recovering or (client is not None and client.connected)
         )
 
-    async def attach_existing(self, *, budget: float | None = None) -> bool:
+    async def attach_existing(
+        self, *, budget: float | None = None, control_budget: float | None = None
+    ) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
         Desktop read/subscription requests use the cold viewer's recovery policy
@@ -2384,6 +2467,15 @@ class AttachedSession:
         ``None`` (the default) is the CONTROL envelope every existing caller
         keeps: one attempt on the foreground envelope, and a raise when the
         owner does not serve it.
+
+        ``control_budget`` narrows that CONTROL attempt to a DEADLINE over the
+        whole dial + sync, for the desktop's control routes
+        (``DESKTOP_CONTROL_ATTACH_S``). An owner that accepts the socket and
+        never welcomes — the SIGSTOPped/busy shape — used to hold the request
+        for ``ACK_TIMEOUT_S`` (15 s) on the welcome alone; the deadline covers
+        the welcome too, and an expiry is raised as the typed
+        :class:`RuntimeUnresponsiveError` (the runtime is alive and busy), which
+        the route answers as a retryable ``runtime_busy``. Ignored in read mode.
 
         The return value is the same question in both modes — is this facade
         attached — so a read that served cold answers ``False`` while leaving the
@@ -2449,8 +2541,37 @@ class AttachedSession:
                 if budget is not None:
                     self._note_read_cold_reason(record, owner)
                 return False
+            if budget is not None:
+                # CLASSIFIED BEFORE THE DIAL, not only after it. The desktop read
+                # no longer waits for this attempt (it answers after
+                # ``READ_FIRST_FRAME_GRACE_S`` while the dial carries on behind
+                # it), so a frame taken mid-dial would otherwise fall back to
+                # ``no-runtime`` — "no pid holds the lease" — about a pid whose
+                # record is in hand. The record already says which of the two
+                # live tokens is true; the attempt below re-classifies on its
+                # outcome and clears it on success.
+                self._note_read_cold_reason(record, owner)
             if budget is None:
-                await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
+                if control_budget is None:
+                    await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
+                    return True
+                try:
+                    await self._bind_to(
+                        record,
+                        sync_timeout=control_budget,
+                        deadline=time.monotonic() + control_budget,
+                    )
+                except TimeoutError as error:
+                    # The DIAL'S expiry (``_connect_client``'s wrap around the
+                    # welcome) arrives as a bare ``TimeoutError`` (and a lapsed
+                    # re-assert ack as ``OwnerAckTimeout``, also one), while the
+                    # sync wait's already arrives typed as
+                    # ``RuntimeUnresponsiveError`` and passes through untouched.
+                    # Both say the same thing about a record that is live: the
+                    # runtime is there and did not answer inside the envelope.
+                    # Anything else (a refused dial, a socket that died) is not
+                    # busy and keeps its own class.
+                    raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from error
                 return True
             await self._attach_existing_for_read(record, budget=budget)
             return not self.is_cold
@@ -3568,7 +3689,15 @@ class AttachedSession:
                 return
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
-            self._install_frontend(frontend.snapshot, publish=True)
+            # A READ publishes its rollover AFTER ``_finish_sync``, the ordering
+            # ``_await_late_sync`` already keeps and for its reason: the desktop
+            # bridge no longer waits for a read's attach before painting
+            # (``READ_FIRST_FRAME_GRACE_S``), so a stream is usually open when
+            # this sync lands, and a rollover published from
+            # ``_install_frontend`` would carry ``cold: true`` — the facade has
+            # not finished syncing at that instant — over a now-live owner.
+            # Every other caller keeps its historical ordering.
+            self._install_frontend(frontend.snapshot, publish=not retain_unsynced)
             await self._load_frontend_history(frontend)
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
@@ -3576,6 +3705,10 @@ class AttachedSession:
             self._deliberate_stop = False
             self._stopped_announced = False
             self._runtime_ready.set()
+            if retain_unsynced:
+                store = self._frontend_store
+                assert store is not None, "_install_frontend just installed the store"
+                store.replace_and_notify(frontend.snapshot)
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
             # not leak the half-open socket or inherit its queued epoch suffix.
@@ -3943,6 +4076,15 @@ class AttachedSession:
             ),
             on_retiring=lambda frame: (
                 self._on_retiring_frame(frame) if self._client is client else None
+            ),
+            # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
+            # round 6, D3). This client is the pane a human is standing at when the
+            # machine's key raises its presence prompt, so it is the one surface
+            # where naming the session and the effect changes a decision. Scoped to
+            # THIS client for the same reason `on_retiring` is: a copy about one
+            # connection must not paint on a conversation another has adopted.
+            on_operator_prompt=lambda copy: (
+                self._on_operator_prompt(copy) if self._client is client else None
             ),
         )
         try:
@@ -5621,6 +5763,11 @@ class AttachedSession:
         )
 
     async def _run_approval(self, pending: PendingRequest) -> None:
+        #: Whether this answer was produced WITHOUT a person (the background
+        #: branch below). Read by the refusal arm, which must not re-arm in that
+        #: case: an answer nobody waits on would be re-produced immediately and
+        #: the gate would spin (issue #1310, UX review round 3, U12).
+        answered_without_a_person = True
         try:
             handler = self._approval_handler
             client = self._client
@@ -5629,6 +5776,7 @@ class AttachedSession:
             if self._gates_detached and self._background_approval:
                 approved = True
             elif handler is not None:
+                answered_without_a_person = False
                 approved = await call_approval_gate(handler, pending.title, pending.detail)
             else:
                 return
@@ -5637,6 +5785,57 @@ class AttachedSession:
             self.preserve_viewer_gate_reply()
             await client.approval_answer(pending.request_id, approved)
             self._gate_answered_key = self._gate_identity(pending)
+        except OperatorAuthorityRequired as error:
+            # THE THIRD DOOR (design round 2, D9). This is NOT the
+            # first-valid-answer-wins race the arm below describes: the owner
+            # answered promptly and deliberately, refusing THIS pane's approval
+            # because the pane is not the window that started the session
+            # (issue #1310). Swallowing it as a race left the card parked with no
+            # message anywhere — measured with a real client on a real socket, no
+            # exception, no notice, the tool call still blocked. Surfaced through
+            # the host's own surface when it has one.
+            logger.warning("gate reply refused by the owner: %s", error)
+            notify = self._gate_refusal_handler
+            if notify is not None:
+                with contextlib.suppress(Exception):
+                    notify(error)
+            # PUT THE CARD BACK, or the sentence that names a deny names an
+            # action this surface cannot take (UX review round 3, U12). The dock
+            # card resolves on the keypress, so a refused Allow left the pane
+            # with no card, inert keys and a blocked tool call — and no repaint
+            # could re-deliver it, because ``_apply_pending_gate`` returns early
+            # while ``_gate_key`` still equals the identity of the card it
+            # already knows about. Clearing the key and asking for the gate
+            # again is what makes "deny it from here" true rather than a
+            # consolation; the operator who presses Allow twice gets the same
+            # refusal and the same notice, which is the honest outcome on a pane
+            # that cannot allow.
+            if not answered_without_a_person:
+                # THE KEY GOES BACK WITH THE ARM. ``_gate_reply_is_current``
+                # requires ``_gate_key`` to equal this pending's identity, so an
+                # arm that CLEARED it delivered a card whose every answer was
+                # discarded: the operator pressed DENY on the card that had just
+                # come back and nothing happened — no notice, the runtime's card
+                # still parked, the tool still blocked (agent review round 4,
+                # R4-1 = QA Q8 = design D17 = UX U12).
+                #
+                # Restored HERE rather than left to the next projection push,
+                # because no repaint is owed after a refusal and none arrives on
+                # its own: the fix only lands on the push after the one that
+                # happens to carry the same card. It is the same identity
+                # ``_apply_pending_gate`` compares, so a later update carrying
+                # this card returns early instead of replacing the task the
+                # operator is looking at.
+                #
+                # The card is the one that was REFUSED, not whatever the
+                # projection holds: the refusal is about this request, and a
+                # store that has not caught up (or a client whose pending gate
+                # never arrived) must not decide whether the operator can answer
+                # it.
+                self._gate_key = self._gate_identity(pending)
+                self._gate_task = None
+                self._keep_gate_reply = False
+                self._maybe_start_gate(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
@@ -6178,7 +6377,7 @@ class AttachedSession:
         """
         self._refresh_callback = callback
 
-    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[..., Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.
 
         Fired from the ``retiring`` frame itself, so the operator hears it
@@ -6197,17 +6396,24 @@ class AttachedSession:
         be painted with the build's notice; design round 4, D9: the frames that
         carry no key at all). Only a frame that establishes NEITHER trigger
         reaches the host as ``""``.
+
+        ``updating`` (the window's build pair) is passed as a KEYWORD and only to a
+        callback that accepts it — see :func:`_accepts_updating`. A host written
+        against the one-argument contract keeps receiving every phrase it used to.
         """
         self._drain_callback = callback
+        self._drain_callback_takes_updating = _accepts_updating(callback)
 
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
 
-        The frame is additive twice over: a runtime older than the ``draining``
+        The frame is additive three times over: a runtime older than the ``draining``
         field is therefore read as the idle handover, which is the pre-change
-        behaviour and paints nothing, and a runtime older than ``leaving`` has
-        its trigger read off the frame's ``reason``/``to`` by
-        :func:`types.drain_phrase_for_frame`.
+        behaviour and paints nothing, a runtime older than ``leaving`` has its
+        trigger read off the frame's ``reason``/``to`` by
+        :func:`types.drain_phrase_for_frame`, and a runtime older than ``updating``
+        has no window to announce — an idle handover from it is as silent as it was
+        before this key existed.
 
         THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
         ``""`` on the grounds that an absent phrase is "the build handover, the
@@ -6220,7 +6426,7 @@ class AttachedSession:
         they decide; a frame that names neither trigger still yields ``""``, and
         the host paints the sentence that is true of any drain.
         """
-        if not frame.get("draining"):
+        if not frame.get("draining") and not frame.get("updating"):
             return
         callback = self._drain_callback
         if callback is None:
@@ -6232,7 +6438,24 @@ class AttachedSession:
             # (agent review round 5, NIT-1). The client remembers the same phrase
             # for the refusals it decodes, from the same helper — see
             # ``AttachClient._raise_for_reply_error``.
-            callback(drain_phrase_for_frame(frame))
+            #
+            # ``updating`` RIDES ALONGSIDE THE PHRASE rather than through it. The
+            # idle handover announces with ``draining=False`` — it is not draining
+            # anything, it is moving — so before this key it never reached the host
+            # at all, and the one handover that QUEUES the operator's message was
+            # the one they were told nothing about (``types.UPDATING``).
+            #
+            # PASSED ONLY WHEN THE CALLBACK CAN TAKE IT (agent review round 1, NIT 3).
+            # The call sits inside a blanket ``except Exception``, so a host whose
+            # callback predates the keyword would take a ``TypeError`` there and lose
+            # the ENTIRE notice — including the drain sentence it used to get — with
+            # nothing but a ``logger.debug`` to show for it. A one-argument host now
+            # gets the phrase and no window, which is exactly the pre-change behaviour.
+            phrase = drain_phrase_for_frame(frame)
+            if self._drain_callback_takes_updating:
+                callback(phrase, updating=str(frame.get("updating") or ""))
+            else:
+                callback(phrase)
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 
@@ -6640,9 +6863,21 @@ class AttachedSession:
                         # legacy ``.session.pid`` mirror raises merely because a
                         # pid is NOT DEAD, and an unreadable claim raises with
                         # ``pid=None``. None of those implies a process that will
-                        # ever publish a record — a recycled pid or a candidate
-                        # publishing an unattachable one (protocol < 5, no
-                        # ``FRONTEND_CAPABILITY``) reaches this raise forever.
+                        # ever publish a record — a LEGACY claim (no birth fields,
+                        # written by an older build), or a candidate publishing an
+                        # unattachable one (protocol < 5, no
+                        # ``FRONTEND_CAPABILITY``), reaches this raise forever.
+                        #
+                        # A RECYCLED PID USED TO BE ON THAT LIST AND IS NOT ANY
+                        # MORE (2026-09-21). The claim now records the birth token
+                        # of the process that wrote it
+                        # (``procstate.same_birth``), so a pid the kernel has
+                        # handed to a stranger proves the WRITER gone: the raise
+                        # is not reached, the claim is recoverable, and the engage
+                        # path spawns instead of waiting out its deadline. What
+                        # remains here is the cell above — a claim carrying no
+                        # identity, where this build cannot tell and so must not
+                        # take the claim.
                         #
                         # That shape used to latch the facade indefinitely,
                         # because this raise was counted as PROGRESS and
@@ -6891,6 +7126,38 @@ class AttachedSession:
         count to the authoritative one. ``None`` disarms it.
         """
         self._cancel_resolution = resolver
+
+    def _on_operator_prompt(self, copy: str) -> None:
+        """Hand the effect sentence to the app, or log it when the app has no slot.
+
+        The fallback is not silence: ``logger.info`` is exactly what
+        ``AttachClient`` did before any production site passed a callback, so a
+        host that installs nothing loses nothing it had — and every host that DOES
+        install one (the TUI, today) gains the sentence on screen while the prompt
+        is up.
+        """
+        if self._operator_prompt_notice is None:
+            logger.info("attach: %s", copy)
+            return
+        self._operator_prompt_notice(copy)
+
+    def set_operator_prompt_notice(self, handler: Callable[[str], None] | None) -> None:
+        """Install the app's handler for "what this signature is about to authorise".
+
+        WHY THIS EXISTS (UX round 6, U3 = design round 6, D3). ``effect_copy`` builds
+        the one sentence that names the session and the effect, and ``AttachClient``
+        fires it through ``on_operator_prompt`` — which no production construction
+        site passed, so the sentence took the fallback branch and became a log line.
+        The mitigation the design names for its prompt-misread residual ("make the
+        copy name session + effect") therefore reached no human on any surface. The
+        OS sheet cannot carry it either (`SecKeyCreateSignature` takes no parameters
+        dictionary; ``kSecUseOperationPrompt`` was deprecated in macOS 11), so the
+        product's own surfaces are the whole of it — and this is the pane's.
+
+        Called with the operator-facing sentence from the connection's reader thread;
+        an app that installs nothing keeps the log line rather than silence.
+        """
+        self._operator_prompt_notice = handler
 
     # -- SessionProtocol runtime role --------------------------------------
     # This facade owns no loop: turns execute in the runtime process on the
@@ -8108,6 +8375,19 @@ class AttachedSession:
         """
         return [dict(row) for row in self.frontend_state.model_catalogue]
 
+    def set_gate_refusal_handler(self, handler: Callable[[BaseException], None] | None) -> None:
+        """Where a REFUSED gate reply goes, for a host that has somewhere to say it.
+
+        Separate from the approval handler because it answers a question that
+        arises AFTER that handler returned: the pane pressed the key, and the
+        owner refused the answer. Without a channel the refusal was swallowed by
+        the race arm below and the operator watched a card do nothing (design
+        round 2, D9 — the third door round 1's D1 named, verified with a real
+        client on a real socket). A host with no surface for it leaves this unset
+        and the refusal is logged.
+        """
+        self._gate_refusal_handler = handler
+
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler
         self._maybe_start_gate()
@@ -8185,11 +8465,17 @@ class AttachedSession:
             await asyncio.gather(refresh, return_exceptions=True)
         if self._gate_task is not None:
             self._gate_task.cancel()
-        if self._recovery_task is not None and self._recovery_task is not asyncio.current_task():
+        recovery = self._recovery_task
+        if recovery is not None and recovery is not asyncio.current_task():
             # The takeover callback adopts the real Session and disposes this
-            # facade FROM the recovery task. Cancelling the current task there
-            # interrupts adoption halfway through and strands the lease winner.
-            self._recovery_task.cancel()
+            # facade FROM the recovery task. Cancelling or joining the current
+            # task there interrupts adoption halfway through and strands the
+            # lease winner.
+            recovery.cancel()
+            # Cancellation is cooperative: without joining, an in-flight retry
+            # sleep can outlive this facade until the app's event loop closes.
+            # Wait here so normal TUI shutdown leaves no recovery task pending.
+            await asyncio.gather(recovery, return_exceptions=True)
         if self._client is not None:
             if self._client not in self._snapshot_clients:
                 self._client.close()
