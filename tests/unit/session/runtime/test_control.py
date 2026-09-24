@@ -1117,6 +1117,59 @@ async def test_a_runtime_that_is_already_leaving_is_asked_before_it_is_stopped(
 
 
 @pytest.mark.asyncio
+async def test_a_leaving_latch_loses_to_a_beat_that_stopped_arriving(no_signals) -> None:
+    """2026-09-24: the latch's promise needs a loop that can still reach the boundary.
+
+    The rung is first because a drain is real work — but it is also a PROMISE the
+    operator cannot verify ("it leaves by itself, nothing to do"), and the drain is
+    finished by the runtime's own event loop. A beat that stopped arriving past
+    ``HEARTBEAT_TIMEOUT_S`` is the fleet's own answer that this owner is not reporting
+    (``registry.classify``), and a wedged runtime never reaches the boundary it is
+    latched to: the peer report was 5.6 hours of a runtime still described to the
+    operator as one that needed nothing from them.
+
+    THREE FACTS, and the cell is only correct with all three: a latch on a REPORTING
+    runtime is still skipped, byte for byte as before; the same latch on a lapsed beat
+    no longer skips, so the ladder reaches the rung that can end it (the socket rung —
+    a wedged runtime is silent there and the signal rungs are reached instead, which
+    is what ``test_force_escalates_past_a_fresh_heartbeat_on_record_identity`` covers
+    against a real pid rather than this in-process double); and the override is
+    NAMED in the receipt rather than the stop happening under a promise it contradicted.
+    """
+    from local_operator.session.runtime.types import (
+        HEARTBEAT_TIMEOUT_S,
+        LEAVING_FOR_BUILD,
+    )
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    try:
+        reporting = _record_for(record, busy=False, leaving=LEAVING_FOR_BUILD)
+        outcome = await control.stop_session(reporting, timeout_s=3.0, _root=config_dir())
+        assert outcome.method == "draining", outcome.line
+        assert handle.stops == [], "a latch on a reporting runtime is still left alone"
+        assert no_signals[0] == []
+
+        lapsed = _record_for(
+            record,
+            busy=False,
+            leaving=LEAVING_FOR_BUILD,
+            heartbeat_at=time.time() - (HEARTBEAT_TIMEOUT_S + 60.0),
+        )
+        stopped = await control.stop_session(lapsed, timeout_s=3.0, _root=config_dir())
+        assert stopped.method == "socket", stopped.line
+        assert handle.stops == [True], "the ladder reached the rung that ends it"
+        assert LEAVING_FOR_BUILD in stopped.line, stopped.line
+        assert (
+            "heartbeat stopped" in stopped.line
+        ), f"the override has to be said, not silent: {stopped.line!r}"
+        assert no_signals[0] == [], "the socket rung still ends it without a signal"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
 async def test_the_refusal_quotes_the_drains_own_reason(no_signals) -> None:
     """The refusal is trigger-agnostic, because the drain now is (PR #1108).
 
