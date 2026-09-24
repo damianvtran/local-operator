@@ -4045,6 +4045,78 @@ def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None
     assert rs._only_fully_masked([partial], f"PASSWORD=tok{REDACTION_MARKER}")[0].exposed is False
 
 
+def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
+    """A DSN copy plus a SECOND, bare mention of the same ``$VAR`` is CONTAINED.
+
+    The DSN rule masks the copy inside the URL and deliberately leaves a bare
+    ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
+    the fragment test found that survivor under the hit's own value and read it as
+    a partial mask — the loud ``rotate it`` notice for a value that never was
+    credential material. The exposed decision site is now the third place the
+    predicate is consulted (the masking floor and the registration floor are the
+    others), which is the whole of the fix: no word-list change reaches it, because
+    the value is correctly a placeholder already.
+
+    Every literal is built by concatenation on purpose — a credential-shaped
+    literal written into a source file is exactly what the scrubber is for.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    reference = "$" + "GITLAB_" + "TOKEN"
+    head = f"{scheme}://u:{reference}@gitlab.com/db"
+
+    # The second mention is the trigger; the first line alone is the control.
+    duplicated = f"{head}\n# token is {reference}"
+    masked, hits = scrub_shapes_with_hits(duplicated)
+    assert REDACTION_MARKER in masked, "the DSN copy must still be masked"
+    assert (
+        rs.shape_report(hits).reached_model is False
+    ), f"a duplicated placeholder files a rotation demand: {masked!r}"
+
+    _, single_hits = scrub_shapes_with_hits(head)
+    assert rs.shape_report(single_hits).reached_model is False
+
+
+def test_a_duplicated_real_secret_still_escalates() -> None:
+    """The conservative direction the fix must NOT trade away.
+
+    A genuinely half-masked real secret — the marker over the head of the value
+    and its own characters readable in a second, unmasked mention — is a real
+    survivor and must keep asking for a rotation. A JSON manifest would carry any
+    earlier victim of a placeholder check; the ticket expected this arm before merge.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    secret = "qA2S3n7x9" + "Zk4Wm1B4dR6"  # noqa: S105 - fabricated, assembled here
+    text = f"{scheme}://u:{secret}@gitlab.com/db\n# pw is {secret}"
+
+    _, hits = scrub_shapes_with_hits(text)
+    (hit,) = [h for h in hits if h.label == "dsn-password"]
+    assert hit.exposed is True
+    assert rs.shape_report(hits).reached_model is True
+
+
+def test_a_degenerate_single_repeated_character_run_is_contained() -> None:
+    """A 64-character run of ONE repeated character is a placeholder, not a secret.
+
+    Zero entropy and a distinct-character count of 1; no real token is spelled
+    that way. The existing predicate already classes it a placeholder (the single
+    repeated character clause), so the fix covers it with no new discriminator —
+    recorded here because the ticket asked for its disposition to be read rather
+    than assumed.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    degenerate = "b" * 64
+    assert rs.is_placeholder_component(degenerate) is True
+    text = f"{scheme}://u:{degenerate}@gitlab.com/db\n# token is {degenerate}"
+    _, hits = scrub_shapes_with_hits(text)
+    assert rs.shape_report(hits).reached_model is False
+
+
 def test_a_mask_that_stopped_inside_a_credential_is_an_exposure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
