@@ -1585,3 +1585,56 @@ def test_worker_exit_record_follows_the_config_dir_override(
     assert (override / "logs" / exec_mode.JOBS_FILE).exists()
     records = exec_mode.read_job_records()
     assert any(r["id"] == "jobx" and r["exit_code"] == 0 for r in records)
+
+
+def test_build_worker_argv_threads_workstream_to_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--background --workstream` is the same request run elsewhere.
+
+    The flag decides which ``origin.json`` the run gets, so a value lost at the
+    process boundary is not a cosmetic loss: the workstream the operator asked
+    for would come back hidden, and nothing in the worker's log would say why.
+    Crossed twice on purpose — the worker's argv, and the worker's own
+    session-factory namespace, which is the last hop before the stamp.
+    """
+    argv = build_worker_argv("w", ExecArgs(workstream=True))
+    assert "--workstream" in argv
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
+    assert parsed.workstream is True
+    # Opt-in: a run that did not ask is not published as one.
+    assert "--workstream" not in build_worker_argv("bare", ExecArgs())
+
+    seen: dict[str, Any] = {}
+
+    def fake_create_session(session_args, *managers, **kwargs):
+        seen["workstream"] = getattr(session_args, "workstream", "<field missing>")
+        return None
+
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
+    monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
+    exec_worker._default_session_factory(parsed)
+    assert seen["workstream"] is True
+
+
+def test_the_foreground_factory_carries_workstream_to_the_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The foreground half of the same journey: ExecArgs -> the narrow namespace.
+
+    ``session_factory._prepare`` receives only this namespace, so a field left
+    out here is a flag that parses, validates and silently does nothing — the
+    failure mode `--supervisor-fd` had before a real supervised run caught it.
+    """
+    seen: dict[str, Any] = {}
+
+    def fake_create_session(session_args, *managers, **kwargs):
+        seen["workstream"] = getattr(session_args, "workstream", "<field missing>")
+        return None
+
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
+    monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
+    exec_mode._make_default_session_factory(ExecArgs(workstream=True))()
+    assert seen["workstream"] is True

@@ -8741,6 +8741,16 @@ def main() -> int:
                 # getattr, like the additive flags above it: `exec` is not the
                 # only subcommand routed through this Namespace in tests, and a
                 # missing attribute must read as "off", never raise.
+                # NOT implied by ``--workstream``, deliberately. Every exec run
+                # already publishes its discovery record and serves the control
+                # socket (``exec_control`` — publication and gate installation
+                # are separate), so a workstream row is followable and steerable
+                # without this flag. What ``--control`` adds is an APPROVAL
+                # POSTURE: gates park for up to a day instead of being denied,
+                # and a ``--tools`` declaration stops standing as the approval.
+                # Implying it silently parked the fan-out shape
+                # (`--workstream --background --tools bash,write`) on its first
+                # write (PR #1436 agent review round 1, F1).
                 control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
                 # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
@@ -8754,6 +8764,12 @@ def main() -> int:
                 # handoff`), which is why that cell exists rather than an in-process
                 # probe (agent review round 6, R6-5).
                 supervisor_fd=getattr(args, "supervisor_fd", None),
+                # THE OPERATOR'S OWN REQUEST THAT THIS RUN BE A WORKSTREAM
+                # (`lop exec --workstream`), carried to `session_factory._prepare`
+                # through the narrow namespace: absent, the run is ephemeral and
+                # hidden exactly as before. In `STARTUP_FIELDS`, so the detached
+                # worker is told the same thing.
+                workstream=bool(getattr(args, "workstream", False)),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast

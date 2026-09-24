@@ -94,11 +94,14 @@ from local_operator.paths import config_dir
 # how one surface ends up finding a fork the other cannot.
 from local_operator.resume import SessionRow, format_age
 from local_operator.session.preview import (
+    AGENT_OPENED_MARK,
     GAP_TEXT,
+    USER_GUTTER_MARK,
     SessionPreviews,
     clip_to_height,
     demark,
     grep_context,
+    opener_gutter,
     wrap_turns,
 )
 from local_operator.session.search_index import SoftSearchIndex, search_digests
@@ -1603,7 +1606,7 @@ def _age_value(age: str) -> str:
     return age[: -len(" ago")] if age.endswith(" ago") else age
 
 
-def _clocks_row(started: str, worked: str, width: int) -> str:
+def _clocks_row(started: str, worked: str, width: int, *, agent_opened: bool = False) -> str:
     """The ``started … · last worked …`` row, fitted to exactly one row.
 
     THE UNIT IS THE VALUE, so it is the last thing to lose. ``format_age`` says
@@ -1620,14 +1623,23 @@ def _clocks_row(started: str, worked: str, width: int) -> str:
     shows ``1033d`` rather than ``last worked 10…``. The last rung is truncated
     rather than trusted, because the pane width is measured and this function
     must never emit two rows.
+
+    ``agent_opened`` appends `` · agent-opened`` (the desktop's literal, #448)
+    for a workstream row, and it outranks ``started``: the row it decorates is
+    one the preview would otherwise present as the operator's own, which is the
+    2026-09-18 incident (PR #1436 design review round 1, D1). So the ladder
+    sheds ``started`` before the mark, and the mark before ``last worked``.
     """
     value = _age_value(worked)
     both = f"started {_age_value(started)} · last worked {value}"
-    if cell_len(both) <= width:
-        return both
     labelled = f"last worked {value}"
-    if cell_len(labelled) <= width:
-        return labelled
+    rungs = [both, labelled]
+    if agent_opened:
+        suffix = f" · {AGENT_OPENED_MARK}"
+        rungs = [both + suffix, labelled + suffix, labelled]
+    for rung in rungs:
+        if cell_len(rung) <= width:
+            return rung
     return truncate_cells(value, width)
 
 
@@ -2714,7 +2726,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # the READ (see ``_meta_row``): asking here would ask with the wrong
             # number. `_pane_height()` with no read is the conservative answer and
             # changes nothing about the lines this returns.
-            return wrap_turns(turns, self._pane_width() - PREVIEW_BODY_INDENT, self._pane_height())
+            return wrap_turns(
+                turns,
+                self._pane_width() - PREVIEW_BODY_INDENT,
+                self._pane_height(),
+                first_user_gutter=opener_gutter(row.opened_by),
+            )
         except Exception:  # pragma: no cover - a broken transcript must not stop the paint
             return []
 
@@ -3005,7 +3022,18 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   because then two rows differing only here are not the same row on
     #:   screen. Its desktop consumer is a separate renderer with its own
     #:   refresh, not this signature.
-    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s", "degraded")
+    #: * `opened_by` is the one excluded field that is IMMUTABLE BY CONSTRUCTION:
+    #:   it is read from the session's `origin.json`, which is written once when
+    #:   the directory is created (`agent_shell.stamp_agent_shell_session`) and
+    #:   never rewritten — the same "written once, at directory creation"
+    #:   property the origin-verdict cache rests on. Two ticks of one open
+    #:   picker therefore cannot see it differ, so no repaint can be missed by
+    #:   omitting it. The PREVIEW pane does paint it (the first user turn's
+    #:   gutter and the `· agent-opened` meta suffix, design round 1 D1), and
+    #:   that changes nothing here: this signature decides whether the RESULTS
+    #:   list repaints, and the pane is repainted from the selected row on
+    #:   every cursor move regardless.
+    _SIGNATURE_EXCLUDED = ("mtime", "created_at", "heartbeat_age_s", "degraded", "opened_by")
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form
     # checked only that every signature NAME is a real field, which catches a
@@ -3357,7 +3385,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
             created = row.created_at
         started = format_age(max(0.0, self._now - created)) if created else "·"
         worked = format_age(max(0.0, self._now - row.mtime))
-        out.append(_clocks_row(started, worked, width) + "\n", style=muted)
+        out.append(
+            _clocks_row(started, worked, width, agent_opened=row.opened_by is not None) + "\n",
+            style=muted,
+        )
         # Omitted ENTIRELY when there is no checkpoint (D7), rather than drawn
         # as a bare `· · ·` that reads as a load that never resolved. Measured:
         # on all 113 rows that have one, both model and cwd are present, so the
@@ -3415,7 +3446,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
             window = [("marker", GAP_TEXT), *window]
         for kind, text in window:
             if kind == "gutter":
-                ink = "accent" if text.endswith("you") else "success"
+                # By the USER GLYPH, not the word ``you``: an agent-opened
+                # session's first user turn is gutted ``▸ coder`` (D1), and it is
+                # still a user-role turn — keyed on the word it took lop's ink
+                # and read as the assistant speaking.
+                ink = "accent" if text.startswith(USER_GUTTER_MARK) else "success"
                 out.append(
                     f"{text}\n",
                     style=Style(color=theme_mod.semantic_color(ink), bold=True),
