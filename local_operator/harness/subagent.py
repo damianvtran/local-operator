@@ -81,16 +81,18 @@ tools the parent had already enabled while being refused the ability to enable
 more (:func:`_child_mcp_wiring`). Nothing in either path grants an edit, a
 write or an execution the allowlist denies.
 
-``jobs`` is a SECOND, CONDITIONAL exception, on a different principle. It
-observes and cancels the child's OWN background jobs — it spawns nothing
-(that is ``task``) and dies with the child's job manager — so it crosses no
-boundary the prune protects. But a child can only produce a background job
-while its ``bash`` retains ``background``, and the bash receipt tells the
-model to poll such a job with ``jobs(op='peek')``. So the invariant is: a
-child keeps ``jobs`` IFF it can still background a bash command. The prune
-below re-adds ``jobs`` exactly under that condition (:func:`_can_background`),
-which is what stops a non-delegating role or grandchild that backgrounds a
-long command from looping forever on ``Tool not found: jobs``.
+``jobs`` and ``wait`` are a SECOND, CONDITIONAL exception, on a different
+principle. They observe, cancel and block on the child's OWN background jobs —
+they spawn nothing (that is ``task``) and die with the child's job manager —
+so they cross no boundary the prune protects. But a child can only produce a
+background job while its ``bash`` retains ``background``, and the bash receipt
+tells the model to poll such a job with ``jobs(op='peek')``. So the invariant
+is: a child keeps ``jobs`` and ``wait`` IFF it can still background a bash
+command. The prune below re-adds them exactly under that condition
+(:func:`_can_background`), which is what stops a non-delegating role or
+grandchild that backgrounds a long command from looping forever on ``Tool not
+found: jobs`` — and, for ``wait``, from blocking on it with a foreground
+``sleep`` that no hub note can interrupt.
 
 Approvals the child asks for carry ``ToolContext.job_id`` — the id of the job
 this child IS — so a host can scope an approval decision to the delegated
@@ -2342,8 +2344,23 @@ async def _construct_child_session(
     # ``task``/``wait``/``wake`` keep their treatment: ``jobs`` polling is
     # non-blocking and is the advertised path, so sparing ``jobs`` alone is the
     # minimal correct fix, and a child that must not fan out still cannot.
+    #
+    # ``wait`` rides the SAME invariant, for the reason ``jobs`` alone did not
+    # cover: ``jobs`` can observe a background job but cannot BLOCK on one, so a
+    # child that backgrounded a long command had only two ways to await it —
+    # re-peek in a loop, or a foreground ``sleep N; tail log``. The second is
+    # what child f7318cc06bdd did for hours (2026-09-24), and a foreground bash
+    # is not a tool boundary, so each of its parent's hub notes waited out a
+    # 15-30 min sleep. ``wait`` is the blocking primitive that is NOT deaf: it
+    # returns on the job settling, on a hub note (``queue_aside`` marks the
+    # peer-arrival event it parks on) and on a steer. It spawns nothing, and it
+    # is scoped to THIS child's own job manager: an id that resolves through the
+    # shared comms registry to a sibling is not in ``child.jobs`` and is refused
+    # as ``unknown job`` (pinned in tests/unit/session/test_child_wait.py).
+    # ``wake`` stays pruned: a child's session ends after one prompt, so a wake
+    # it armed would be silently lost.
     if _can_background(tools):
-        drop = drop - {"jobs"}
+        drop = drop - {"jobs", "wait"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
     # A DECLARED parent inventory carries down, or a bounded session could reach
     # an excluded tool by delegating to a child that never heard of the bound.
