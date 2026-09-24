@@ -33,6 +33,7 @@ import { Spinner } from "../components/spinner";
 import { navigate } from "../router";
 import {
 	applySessionPin,
+	clearSessionPinMark,
 	retainSessionListStream,
 	useSessions,
 } from "../store";
@@ -137,11 +138,18 @@ function NewMark({ visible }: { visible: boolean }) {
 function SessionCard({
 	s,
 	home,
+	pinned,
 	onLongPress,
 	ref,
 }: {
 	s: SessionSummary;
 	home: string;
+	/* The pin as RENDERED — the user's unanswered mark over the daemon's
+	   confirmed flag. A separate input from `s.pinned` on purpose: a row may
+	   show its ★ long before the daemon confirms the pin, and the mark must
+	   never be mistaken for the fact that decides which section the row renders
+	   in. */
+	pinned: boolean;
 	/* A long-press opens the pin action sheet for this row. Passed in rather
 	   than handled here so the card stays a pure presentation of one summary and
 	   the gesture's timer lives with the screen that owns the sheet — and so the
@@ -364,8 +372,12 @@ function SessionCard({
 				    broken or finished, because the pin is the DURABLE fact and the state
 				    glyph is the volatile one — so the pin moves, not the state. The ★ is
 				    also the shape the ★ Pinned heading uses, so the mark and its section
-				    cannot disagree about what it means. */}
-				{s.pinned ? (
+				    cannot disagree about what it means.
+
+				    Drawn from the RENDERED pin, not `s.pinned`: the reader's own press
+				    must show its ★ in the commit that handles the tap, while the row
+				    itself waits for the daemon (the mark/section split in `store.ts`). */}
+				{pinned ? (
 					<span
 						className="shrink-0 text-meta text-accent"
 						aria-label="pinned"
@@ -459,7 +471,7 @@ function ThemePicker({
 }
 
 export function SessionListScreen() {
-	const { sessions, connected } = useSessions();
+	const { sessions, connected, pinMarks } = useSessions();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
 	const [query, setQuery] = useState("");
@@ -491,7 +503,17 @@ export function SessionListScreen() {
 	   the sidebar, where a pin lifts the row out of the section it ranked into.
 	   The RANKING is untouched — each group keeps the daemon's order, so pinning
 	   never reorders a section and the FLIP settle below has nothing to animate
-	   when a row merely joins the pinned list at the top. */
+	   when a row merely joins the pinned list at the top.
+
+	   THE PARTITION IS THE DAEMON'S, NEVER THE READER'S PRESS. `sessions`
+	   carries confirmed pins only; a press the server has not answered for is a
+	   MARK (`pinMarks`), which draws the ★ and nothing else. Splitting them is
+	   the fix for the rows that moved under the reader: this partition is what
+	   REORDERS the list, and the browser answers a reorder under the reader with
+	   a scroll adjustment of its own — +88.0px on a successful pin, −51.0px at
+	   100% / −101.5px at 200% on a refused one (QA Q13/D18). Rows now move once,
+	   when the daemon confirms; a refusal reorders nothing because nothing ever
+	   moved. */
 	const pinned = visible.filter((session) => session.pinned);
 	const rest = visible.filter((session) => !session.pinned);
 	const active = rest.filter((session) => session.section === "active");
@@ -500,18 +522,26 @@ export function SessionListScreen() {
 		? sessions.find((session) => session.session_id === pinTarget) ?? null
 		: null;
 
-	/* Optimistic, then confirmed: the row moves the instant the user acts, and
-	   the daemon's next list repaint (which `set_pins` already woke) is the
-	   authority. A failed POST restores the truth via that same repaint. */
-	const togglePin = async (sessionId: string, pinned: boolean) => {
+	/* The pin to RENDER for a row: the reader's unanswered mark over the daemon's
+	   confirmed flag. One helper for the ★, the sheet's wording and the value a
+	   press will send, so the row's mark and the action offered on it cannot
+	   disagree about the pin's state. */
+	const renderedPin = (session: SessionSummary) =>
+		pinMarks.get(session.session_id) ?? Boolean(session.pinned);
+
+	/* The ★ shows what the reader asked for; only the daemon may move the row.
+	   A failed POST clears the mark, so the ★ falls back in the same commit as
+	   the reason for it. */
+	const togglePin = async (sessionId: string, pinnedNext: boolean) => {
 		setPinError("");
-		applySessionPin(sessionId, pinned);
+		applySessionPin(sessionId, pinnedNext);
 		setPinTarget(null);
 		try {
-			await setSessionPin(sessionId, pinned);
+			await setSessionPin(sessionId, pinnedNext);
 		} catch (e) {
 			/* Surface it rather than swallow: an unreachable daemon must not read as
-			   "the pin took". The next repaint corrects the row either way. */
+			   "the pin took". The row never moved, so only the mark has to go. */
+			clearSessionPinMark(sessionId);
 			refusedRow.current = sessionId;
 			setPinError(String((e as Error).message ?? e));
 		}
@@ -524,7 +554,11 @@ export function SessionListScreen() {
 	   painted one way and read out another (review round 3, NIT 1). Gated on what
 	   is VISIBLE (D5) and on the STORE's pins (D6): the caption names a row the
 	   reader can see, and a search that merely hides the pinned rows must not
-	   bring it back. */
+	   bring it back. It reads the CONFIRMED pins, so a press the daemon has not
+	   answered for leaves the caption up: the ★ Pinned section it points at does
+	   not exist until the pin is confirmed, and retiring the caption for a mark
+	   alone would take away the only thing explaining the gesture, with nothing
+	   to replace it. */
 	const showPinHint = visible.length > 0 && !sessions.some((session) => session.pinned);
 
 	/* One predicate for the REFUSAL band, spelled exactly as the hint's is: the
@@ -546,6 +580,7 @@ export function SessionListScreen() {
 			key={s.session_id}
 			s={s}
 			home={home}
+			pinned={renderedPin(s)}
 			onLongPress={() => setPinTarget(s.session_id)}
 			ref={(el) => {
 				if (el) cardRefs.current.set(s.session_id, el);
@@ -605,24 +640,46 @@ export function SessionListScreen() {
 	/* THE ONE DELIBERATE MOVE: a refusal that lands over the row the reader
 	   pressed would hide the very row the reason is about, so that row — and
 	   only that row — is scrolled just clear below the band. Anywhere else the
-	   scroll is left alone. Measured against the band's layout box
-	   (`offsetHeight`), not its rect, because its entrance transform is still
-	   running in this frame. Before paint (useLayoutEffect) so the reader never
-	   sees the row covered first. */
+	   scroll is left alone, and the move is the MINIMUM that clears the band.
+	   Measured against the band's layout box (`offsetHeight`), not its rect,
+	   because its entrance transform is still running.
+
+	   MEASURED ONCE THE LIST HAS SETTLED, not in the commit the text arrives
+	   (QA Q15/D20). It used to run right there, which was the wrong layout to
+	   ask: that commit still carried the optimistic LIFT the press had just
+	   made, so the pressed row's rect was the pre-lift one and the "is this row
+	   under the band" test was answered about a frame the reader never saw —
+	   and since the effect was keyed on the text, it never ran again. Two
+	   frames later the row is drawn where it will stay (a refusal reorders
+	   nothing now), and any repaint already in flight has landed in between.
+	   Idempotent by construction: after the write the row is clear of the band,
+	   so nothing further is written even if the frames run again. */
 	useLayoutEffect(() => {
+		if (!pinErrorText) return;
+		/* Read and clear in the commit that carries the text, so the id is the
+		   pressed row and cannot be overwritten by a later press before the
+		   frames below run. */
 		const id = refusedRow.current;
 		refusedRow.current = null;
-		const main = mainRef.current;
-		const band = pinErrorRef.current;
-		const row = id ? cardRefs.current.get(id) : undefined;
-		if (!pinErrorText || !main || !band || !row) return;
-		const top = main.getBoundingClientRect().top;
-		const bandBottom = top + band.offsetHeight;
-		const rect = row.getBoundingClientRect();
-		/* Under the band: the row's top is covered and some of it is on screen. */
-		if (rect.top < bandBottom && rect.bottom > top) {
-			main.scrollTop -= bandBottom - rect.top;
-		}
+		if (!id) return;
+		let frame = requestAnimationFrame(() => {
+			frame = requestAnimationFrame(() => {
+				const main = mainRef.current;
+				const band = pinErrorRef.current;
+				const row = cardRefs.current.get(id);
+				if (!main || !band || !row) return;
+				const top = main.getBoundingClientRect().top;
+				const bandBottom = top + band.offsetHeight;
+				const rect = row.getBoundingClientRect();
+				/* Under the band: the row's top is covered and some of it is on
+				   screen. A row scrolled clear of the viewport (or scrolled past,
+				   the reason already behind the reader) is left alone. */
+				if (rect.top < bandBottom && rect.bottom > top) {
+					main.scrollTop -= bandBottom - rect.top;
+				}
+			});
+		});
+		return () => cancelAnimationFrame(frame);
 	}, [pinErrorText]);
 	useEffect(() => {
 		getDirectories()
@@ -829,7 +886,7 @@ export function SessionListScreen() {
 					<button
 						type="button"
 						onClick={() =>
-							pinRow && void togglePin(pinRow.session_id, !pinRow.pinned)
+							pinRow && void togglePin(pinRow.session_id, !renderedPin(pinRow))
 						}
 						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left text-body active:bg-surface"
 					>
@@ -837,8 +894,13 @@ export function SessionListScreen() {
 							★
 						</span>
 						{/* The verb names the state it will SET, so a second look at the same
-						    row reads the outcome rather than a description of the store. */}
-						{pinRow?.pinned ? "Unpin from the top" : "Pin to the top"}
+						    row reads the outcome rather than a description of the store —
+						    and it is read from the RENDERED pin, so the sheet describes what
+						    the reader can see on the row (a mark included) instead of what the
+						    daemon has confirmed so far. */}
+						{pinRow && renderedPin(pinRow)
+							? "Unpin from the top"
+							: "Pin to the top"}
 					</button>
 				</div>
 			</Sheet>

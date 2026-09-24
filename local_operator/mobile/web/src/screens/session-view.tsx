@@ -39,6 +39,7 @@ import { useCompletionView } from "../use-completion-view";
 import { AgentScreen } from "./agent-view";
 import {
 	applySessionPin,
+	clearSessionPinMark,
 	retainProjectionStream,
 	retainSessionListStream,
 	useProjection,
@@ -108,21 +109,30 @@ function Header({
 	   construction rather than by two reads of the pin file. `undefined` (an
 	   older daemon, or a session the list has not carried yet) reads as unpinned,
 	   which is the honest default: the button then offers to pin, and the next
-	   list repaint corrects it if that was wrong. */
-	const { sessions } = useSessions();
-	const pinned = Boolean(
-		sessions.find((row) => row.session_id === sessionId)?.pinned,
-	);
+	   list repaint corrects it if that was wrong.
+
+	   The MARK the user just made wins over the confirmed flag for what this
+	   control RENDERS, exactly as it does for the list row's ★: the press must
+	   answer immediately. Only the list's own sectioning waits for the daemon —
+	   see the mark/section split in `store.ts` for why a row must not move until
+	   the pin is confirmed. */
+	const { sessions, pinMarks } = useSessions();
+	const row = sessions.find((r) => r.session_id === sessionId);
+	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
 	const [pinError, setPinError] = useState("");
 	const togglePin = async () => {
 		setPinError("");
 		const next = !pinned;
-		/* Optimistic, then confirmed — the list row moves at once and the daemon's
-		   next repaint is the authority. */
+		/* Optimistic mark, then confirmed: the ★ flips at once and the daemon's
+		   next repaint is the authority for the list. */
 		applySessionPin(sessionId, next);
 		try {
 			await setSessionPin(sessionId, next);
 		} catch (e) {
+			/* A refusal takes the mark back with it. The list would otherwise keep
+			   showing a ★ the daemon never accepted until its next repaint, which
+			   is the one thing this screen cannot promise. */
+			clearSessionPinMark(sessionId);
 			setPinError(String((e as Error).message ?? e));
 		}
 	};
