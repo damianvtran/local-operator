@@ -72,7 +72,7 @@ from local_operator.redaction_shapes import (
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
-from local_operator.variables import VariableStore
+from local_operator.variables import VariableStore, redact_secret_values
 from tests.unit.secrets.credential_shape_corpus import (
     COMPACT_TOKEN_PAIR,
     COUNT_QUALIFIER_NAMES,
@@ -1183,18 +1183,29 @@ def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
     The older KNOWN-value rule holds whatever a registered value needs, because a
     registered value is a credential the session was told about and publishing it
     in two halves is the leak that rule exists to prevent. So the filter's total
-    hold is ``max(_PIPE_HOLD_LIMIT, len(value) + _PIPE_DEFERRAL_LIMIT)`` — a bound
-    over what the SESSION knows, never over what the child prints, which is the
-    property the cap is for. Asserted with a NON-EMPTY secret on purpose: an empty
-    one exercises only the first term, which is how this limit came to be
-    documented as the whole bound in the first place.
+    hold is ``max(_PIPE_HOLD_LIMIT, hold + widest spelling)`` — a bound over what
+    the SESSION knows, never over what the child prints, which is the property the
+    cap is for. Asserted with a NON-EMPTY secret on purpose: an empty one
+    exercises only the first term, which is how this limit came to be documented
+    as the whole bound in the first place.
+
+    **The second term is the SPELLING window, and it is 4x the value at the top
+    of its range** (round-1 review, F1/F4): the value rule no longer holds the
+    value's own bytes, it holds :func:`~local_operator.redaction_shapes.\
+    stream_hold_window` — the widest spelling, capped at ``_STREAM_HOLD_LIMIT`` —
+    plus the spelling the cut is being moved off. So the bound asserted here is
+    ``max(limit, window + widest spelling)``, which is a bound on what the SESSION
+    knows and is what makes the line-terminator leak unrepresentable rather than
+    merely unobserved. The old ``size + _PIPE_DEFERRAL_LIMIT`` shape is kept for
+    the sizes where the window is the value (a value whose widest spelling is the
+    escaped form is 4x, so the two agree only below the floor).
 
     ``getattr`` because this row is a guard on the filter as a whole rather than a
-    discriminator for this change — the rule it measures predates it and the
-    numbers are the same on the pre-fix source, so it must not fail there for a
-    missing symbol.
+    discriminator for this change: the SHAPE rule it measures predates it, so it
+    must not fail on a source where the value-window symbols do not exist.
     """
     limit = getattr(builtin, "_PIPE_HOLD_LIMIT", builtin._PIPE_DEFERRAL_LIMIT)
+    window = getattr(redaction_shapes, "stream_hold_window", None)
     worst = 0
     for size, read in ((1_000, 4096), (5_000, 4096), (24_576, 65536), (30_000, 65536)):
         secret = ("q7Xk2m" * (size // 6 + 1))[:size]
@@ -1210,9 +1221,13 @@ def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
         assert (
             secret not in b"".join(published).decode()
         ), f"a registered value of {size} B was published at {read} B reads"
-        assert peak <= max(
-            limit, size + builtin._PIPE_DEFERRAL_LIMIT
-        ), f"holding a {size} B value at {read} B reads took {peak} B"
+        if window is None:  # a pre-window source: the old, smaller bound
+            ceiling = max(limit, size + builtin._PIPE_DEFERRAL_LIMIT)
+        else:
+            ceiling = max(
+                limit, window([secret]) + redaction_shapes.longest_redaction_form([secret])
+            )
+        assert peak <= ceiling, f"holding a {size} B value at {read} B reads took {peak} B"
         worst = max(worst, peak)
     assert (
         worst > limit
@@ -2616,6 +2631,478 @@ def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
     redactor.feed(lines.encode())
     assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
     assert end_spy.calls == 0, f"the END classifier was asked about {end_spy.calls} prose lines"
+
+
+# --- the exact-VALUE pass: which SPELLINGS of a known value are masked -------
+#
+# The incident these pin: an agent could not read a hostname the mask kept
+# replacing, so it printed the value REVERSED and walked straight past the
+# filter. A value's reversal, base64, hex, escape, percent and separator forms
+# are all the same credential, so all of them are masked; the negative half — an
+# ordinary string that merely LOOKS transformed must stay byte-identical — is as
+# much of the contract as the positive half, because this pass runs over every
+# tool result and a mask that eats ordinary output blinds the agent.
+
+#: Synthetic and opaque on purpose: no scheme, no issuer prefix, no spelling the
+#: SHAPE table recognises. What these tests measure is the exact-value policy,
+#: so a value the shape pass could mask by itself would prove nothing.
+SPELLED_VALUE = "q7fh2zp4mx9wk3ta6bn1dv8rs5"
+
+
+def _spellings(value: str) -> dict[str, str]:
+    """The cheap transforms of ``value``, in the spellings a command emits.
+
+    One place, so the family list cannot drift between the mask tests and the two
+    SWEEP tests (every offset, both chunked surfaces): the round-1 blocker was a
+    family that the sweep never saw because the corpus omitted it — the value's
+    own line terminator — so a missed family is the failure mode this dict exists
+    to prevent.
+    """
+    import base64
+    import json
+    import urllib.parse
+
+    raw = value.encode()
+    standard = base64.b64encode(raw).decode()
+    urlsafe = base64.urlsafe_b64encode(raw).decode()
+    pairs = [f"{byte:02x}" for byte in raw]
+    grouped = " ".join("".join(pairs[i : i + 2]) for i in range(0, len(pairs), 2))
+    quoted = urllib.parse.quote(value, safe="")
+    escaped_json = json.dumps(value)[1:-1]
+    return {
+        "verbatim": value,
+        "reversed (the incident's evasion)": value[::-1],
+        "base64": standard,
+        "base64 unpadded": standard.rstrip("="),
+        "base64 urlsafe": urlsafe,
+        "base64 urlsafe unpadded": urlsafe.rstrip("="),
+        "hex lower": raw.hex(),
+        "hex upper": raw.hex().upper(),
+        "hex, space-separated pairs": " ".join(pairs),
+        "hex, two-space-separated pairs": "  ".join(pairs),
+        "hex, xxd's 2-byte groups": grouped,
+        "backslash-x escaped": "".join(f"\\x{b:02x}" for b in raw),
+        "backslash-x escaped, upper digits": "".join(f"\\x{b:02X}" for b in raw),
+        "percent-encoded": quoted,
+        "percent-encoded, form": urllib.parse.quote_plus(value, safe=""),
+        "percent-encoded, lower-case digits": re.sub(
+            r"%[0-9A-Fa-f]{2}", lambda match: match.group(0).lower(), quoted
+        ),
+        "json escaped": escaped_json,
+        "json escaped, upper-case digits": re.sub(
+            r"\\u[0-9A-Fa-f]{4}", lambda match: match.group(0).upper(), escaped_json
+        ),
+        "space-spread": " ".join(value),
+        "dash-spread": "-".join(value),
+        "newline-spread": "\n".join(value),
+    }
+
+
+#: Values the sweeps run every family over. Three shapes on purpose: an opaque
+#: secret (the common case), one carrying the characters the encoders actually
+#: escape (so the percent and JSON families are not silently the verbatim string
+#: in a dedupe), and a MULTI-LINE value — the round-1 blocker was a registered
+#: value whose own line terminator made each line look like a decidable prefix
+#: to a line-oriented release point.
+SPELLED_SWEEP_VALUES = (
+    ("opaque", SPELLED_VALUE),
+    ("reserved characters", "p4/w+x=y?z&k n9"),
+    ("multi-line", '{"a": "' + SPELLED_VALUE + '",\n"b": "second line",\n"c": "third"}'),
+)
+
+
+@pytest.mark.parametrize("label", sorted(_spellings(SPELLED_VALUE)))
+def test_every_cheap_spelling_of_a_registered_value_is_masked(label: str) -> None:
+    """Every enumerated spelling, one case each, so a family cannot rot silently.
+
+    Parametrised rather than looped on purpose: a loop that stops early on the
+    first failure hides which families were never reached, and the whole point
+    of a closed spelling list is that each entry is inspectable on its own.
+    """
+    spelling = _spellings(SPELLED_VALUE)[label]
+    text = f"printed={spelling} done"
+    masked = redact_secret_values(text, [SPELLED_VALUE])
+    assert spelling not in masked, f"{label} survived the mask"
+    assert masked == "printed=[redacted] done"
+
+
+def test_the_incidents_own_evasion_is_a_regression_case() -> None:
+    """The reverse-printed hostname that started this, spelled as it was printed.
+
+    Not a generic reversal test: the incident's value is a HOSTNAME, printed
+    reversed because the mask kept replacing it, which is the deliberate
+    control bypass the policy has to contain rather than the accident it also
+    catches.
+    """
+    host = "qa-app.qa.gominerva.com"
+    assert host[::-1] == "moc.avrenimog.aq.ppa-aq"
+    masked = redact_secret_values(f"host is {host[::-1]}", [host])
+    assert "moc.avrenimog" not in masked
+    assert masked == "host is [redacted]"
+
+
+def test_a_value_under_the_floor_keeps_its_verbatim_coverage_only() -> None:
+    """The over-masking floor, stated as a contract rather than left implied.
+
+    A short value's permutations are strings ordinary output already contains
+    (``atled`` is ``delta`` backwards), so they are not enumerated. What must
+    not change is the pre-existing guarantee: the value ITSELF is still masked.
+    """
+    short = "k3y-8812"
+    assert len(short) < redaction_shapes._TRANSFORM_MIN_VALUE_LEN
+    assert redaction_shapes.credential_forms(short) == (short,)
+    assert redact_secret_values(f"id={short}", [short]) == "id=[redacted]"
+
+
+def test_ordinary_text_that_looks_transformed_is_left_byte_identical() -> None:
+    """The negative half: over-masking is a defect in this codebase.
+
+    Deliberately includes text that a naive "looks encoded" rule would eat — a
+    base64 blob, a hex dump, an escaped JSON body, a percent-encoded URL — and
+    the reversal of a real word, which is what a short value's family would
+    have masked.
+    """
+    ordinary = (
+        "payload=aGVsbG8gd29ybGQgdGhpcyBhIGJhc2U2NCBibG9i",
+        "0000  51 37 66 68 32 7a 70 34  6d 78 39 77 6b 33 74 61",
+        '{"note": "caf\\u00e9 \\"quoted\\" \\\\ path"}',
+        "https://example.test/a%20b/c%2Fd?x=1",
+        "the delta between atled and delta is nil",
+    )
+    for text in ordinary:
+        assert redact_secret_values(text, [SPELLED_VALUE]) == text
+
+
+def test_every_spelling_of_a_longer_value_is_masked_before_a_prefix_value() -> None:
+    """Longest-first ordering, preserved one level down under normalisation.
+
+    A value that is a prefix of another must not run first and leave the longer
+    one's remainder on screen — and the same rule has to hold for the SPELLINGS,
+    which is the part normalisation could silently get wrong.
+    """
+    shorter = SPELLED_VALUE
+    longer = SPELLED_VALUE + "EXTRA9TAIL"
+    for transform in (lambda text: text, lambda text: text[::-1]):
+        masked = redact_secret_values(
+            f"{transform(shorter)} {transform(longer)}", [shorter, longer]
+        )
+        assert transform(longer) not in masked
+        assert transform(shorter) not in masked
+        assert masked.count(REDACTION_MARKER) == 2
+
+
+def test_the_spelling_list_is_closed_and_bounded() -> None:
+    """A structural bound: the pass runs on every result, so its cost is a contract.
+
+    Asserted on the LIST rather than on a wall clock (see AGENTS.md, "Prefer a
+    structural invariant to a numeric one"): the number of spellings per value
+    is what makes the pass bounded, and a family added later without a bound
+    fails here rather than in a review conversation about CPU.
+    """
+    forms = redaction_shapes.credential_forms(SPELLED_VALUE)
+    assert len(forms) <= 24, f"the policy grew to {len(forms)} spellings per value"
+    assert len(set(forms)) == len(forms), "a duplicated spelling costs a whole-text search"
+    assert forms == tuple(sorted(forms, key=len, reverse=True)), "longest first"
+    # A longer value's escaped form is the widest term in the hold window, and a
+    # caller sizes its window from this — so it must be derived, not guessed.
+    assert redaction_shapes.longest_redaction_form([SPELLED_VALUE]) == max(len(f) for f in forms)
+
+
+@pytest.mark.parametrize("value_label,value", SPELLED_SWEEP_VALUES)
+@pytest.mark.parametrize("label", sorted(_spellings(SPELLED_VALUE)))
+def test_the_stream_masker_masks_a_spelling_split_at_every_offset(
+    value_label: str, value: str, label: str
+) -> None:
+    """The chunk-boundary hole, swept at every split point rather than sampled.
+
+    A window-sized hold is a claim about what can straddle a cut, so a test that
+    tried three offsets would pass with a window that happens to be long enough
+    for those three. Swept exhaustively, for every family, because the hold is
+    sized from the WIDEST spelling while the leak happens at the narrowest cut —
+    and over THREE VALUES, because a family that is the verbatim string for an
+    alphanumeric value (every percent and JSON spelling, by dedupe) is not
+    actually exercised by it, and because a multi-line value carries a line
+    terminator INSIDE the spelling, which is the case that got past the
+    line-oriented release point.
+    """
+    spelling = _spellings(value)[label]
+    payload = f"prefix {spelling} suffix\n"
+    for offset in range(len(payload) + 1):
+        masker = redaction_shapes.StreamMasker([value])
+        published = masker.push(payload[:offset]) + masker.push(payload[offset:])
+        published += masker.push("", final=True)
+        assert spelling not in published, f"{value_label}/{label} leaked at {offset}"
+        assert REDACTION_MARKER in published, f"{value_label}/{label} unmasked at {offset}"
+
+
+def test_the_stream_masker_delays_nothing_when_no_value_is_registered() -> None:
+    """The window is sized from the value set, so an empty set costs no latency."""
+    masker = redaction_shapes.StreamMasker([])
+    assert masker.push("a line with no terminator") == "a line with no terminator"
+    assert masker.withheld == 0
+
+
+def test_the_pipe_does_not_rebuild_its_spellings_when_the_values_are_unchanged() -> None:
+    """F5: the per-read cost of the policy, pinned structurally.
+
+    ``refresh`` runs once per 64 KiB read, and rebuilding every value's spelling
+    list there is real work — measured at ~21 µs for one ordinary secret before
+    this, and tens of ms for an oversized value, per read, for as long as the
+    value stays registered. The list is a pure function of the value set, so an
+    unchanged set must not recompute it: asserted on the object identity of the
+    list rather than on a wall clock (AGENTS.md, "Prefer a structural invariant
+    to a numeric one"), which also survives a slower or faster host.
+    """
+    redactor = builtin._PipeRedactor([SPELLED_VALUE])
+    first = redactor.forms
+    redactor.refresh([SPELLED_VALUE])
+    redactor.refresh([SPELLED_VALUE, SPELLED_VALUE])
+    assert redactor.forms is first, "an unchanged value set rebuilt the spelling list"
+    redactor.refresh([SPELLED_VALUE, "additional-credential-9931"])
+    assert redactor.forms is not first, "a widened value set must re-derive the list"
+    assert any("additional-credential-9931" in form for form in redactor.forms)
+
+
+def test_a_non_string_entry_is_skipped_rather_than_raised_on() -> None:
+    """F6: the docstring's promise, which the code did not keep.
+
+    ``sorted(..., key=len)`` applies ``len`` while it builds the list, so a
+    truthy non-``str`` entry raised ``TypeError`` from inside the mask — the one
+    failure a redaction pass must never have, because it turns a tool result
+    into a tool crash. The filter now lives in the generator.
+
+    The calls below are deliberately OFF-CONTRACT (the signature is
+    ``Iterable[Optional[str]]``), which is the point: the list is built by a
+    caller this module cannot see, and a bug in that builder is what the runtime
+    guard is for. ``cast`` rather than a widened signature, so the contract stays
+    meaningful for the callers the type checker actually protects.
+    """
+    assert redaction_shapes.scrub_values("ordinary text", cast("list[Any]", [123])) == (
+        "ordinary text"
+    )
+    assert redaction_shapes.scrub_values("ordinary text", cast("list[Any]", [None, b"bytes"])) == (
+        "ordinary text"
+    )
+    assert redaction_shapes.scrub_values("text", [""]) == "text"
+    assert redaction_shapes.credential_forms("") == ()
+
+
+def test_the_straddle_search_finds_only_a_form_that_spans_the_cut() -> None:
+    """The cut rule's search, on its own — it is shared by both chunked surfaces.
+
+    A one-character or empty form cannot straddle a position, and a form that
+    ends exactly AT the cut is fully released (nothing is split by it), so only a
+    form that begins strictly before the cut and ends strictly after it may move
+    the cut back.
+    """
+    find = redaction_shapes.straddling_form_start
+    assert find("xxABCxx", 4, ["ABC"]) == 2
+    assert find("xxABCxx", 2, ["ABC"]) == -1  # ends exactly at the cut: not split
+    assert find("xxABCxx", 6, ["ABC"]) == -1  # starts after the cut
+    assert find("ABC", 1, ["A"]) == -1  # a one-character form cannot straddle
+    assert find("", 0, ["ABC"]) == -1
+    assert find("abcabc", 4, ["abc"]) == 3  # the LATER occurrence straddles
+
+
+def test_a_transformed_spelling_split_across_feeds_is_still_masked_in_the_pipe() -> None:
+    """The bash pipe filter's cut rule, over every family, every value, every offset.
+
+    The pipe already held back for a verbatim value; a spelling is LONGER than
+    the value it comes from (the escaped form is four characters per byte), so
+    the cut could land inside one and publish it in two unmasked halves — in the
+    live view, which is the one surface no later pass re-reads. Swept per family
+    rather than once per value, so a family added to the policy is swept here the
+    day it is added.
+    """
+    for value_label, value in SPELLED_SWEEP_VALUES:
+        for label, spelling in _spellings(value).items():
+            payload = f"before {spelling} after\n".encode()
+            for offset in range(len(payload) + 1):
+                redactor = builtin._PipeRedactor([value])
+                published = redactor.feed(payload[:offset]) + redactor.feed(payload[offset:])
+                published += redactor.feed(b"", final=True)
+                assert (
+                    spelling.encode() not in published
+                ), f"{value_label}/{label} leaked in the stream when split at {offset}"
+
+
+@pytest.mark.parametrize("value_label,value", SPELLED_SWEEP_VALUES)
+def test_a_value_whose_spelling_carries_a_line_terminator_is_not_released_a_line_at_a_time(
+    value_label: str, value: str
+) -> None:
+    """F1/Q1: the line rule alone is not a guarantee, and this is the proof.
+
+    The release point publishes every complete LINE, which is decidable only for
+    a spelling that cannot CONTAIN a line terminator. A registered multi-line
+    value (a pretty-printed service-account JSON, a multi-line ``.env``) and the
+    ``\\n``-joined spelling both carry one, so a line-aligned writer made each of
+    the value's own lines look like a decidable prefix and the value was published
+    line by line into the live card and the job's peek tail — the one surface
+    nothing re-reads, so no later pass can repair it: a LINE is not one of the
+    enumerated spellings.
+
+    Fed every split point rather than line-aligned or byte-aligned samples, and
+    read BEFORE the stream ends: that is the surface the defect was measured on
+    (the live card and the peekable job tail while the command runs), and the
+    window's whole job is to hold a partial spelling back until it is complete.
+    The completed stream is checked in the same loop as the no-regression half.
+    """
+    spellings = (("the value itself", value), ("the newline-spread spelling", "\n".join(value)))
+    for spelling_label, spelling in spellings:
+        raw = spelling.encode()
+        for split in range(1, len(raw)):
+            redactor = builtin._PipeRedactor([value])
+            live = redactor.feed(raw[:split]).decode()
+            where = f"{value_label}/{spelling_label} split at {split}"
+            assert spelling not in live, f"{where}: the spelling painted live"
+            assert value not in live, f"{where}: the value painted live"
+            for line in value.splitlines():
+                assert line not in live, f"{where}: a value line painted live"
+            completed = live + redactor.feed(raw[split:]).decode()
+            completed += redactor.feed(b"", final=True).decode()
+            assert spelling not in completed, f"{where}: the completed stream published it"
+            assert value not in completed, f"{where}: the completed stream published the value"
+
+
+@pytest.mark.parametrize("chunk", [7, 64, 333, 4096])
+def test_the_spelling_window_floor_does_not_close_an_open_key_block(chunk: int) -> None:
+    """The floor above composed with the PEM line loop: a registered value must not
+    make an unrelated key block publish its body.
+
+    ``len(text) - hold`` is an arbitrary offset, so a floor applied as-is cut
+    mid-line in the ordinary case, where every release used to end on a line. The
+    short fragment it left at the START of the next release (``+Q\\n``) is a line
+    ``_mask_open_key_block`` reads as prose, so the block CLOSED on it and the rest
+    of the body went out raw — measured when this change was folded onto the
+    linear-PEM and unterminated-block work: 8 of 34 streams leaked, up to 1,873 of
+    2,000 body lines, with one 26-character value registered, against 0 without
+    one. The floor now retreats to a line boundary. Uses the PEM section's
+    armour helpers below (built from parts; see ``_pem_grammar_is_live``).
+    """
+    _pem_grammar_is_live()
+    stream = ("preamble line\n" + _PEM_HEADER + _body_lines(400) + _PEM_END + "after\n").encode()
+    redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+    assert redactor.hold > 0, "no window is held, so this proves nothing"
+    published = b"".join(
+        redactor.feed(stream[i : i + chunk]) for i in range(0, len(stream), chunk)
+    ) + redactor.feed(b"", final=True)
+    leaked = _published_body_lines(published.decode())
+    assert leaked == [], f"{len(leaked)} body lines published at {chunk}-byte reads"
+
+
+@pytest.mark.parametrize("terminated", [True, False], ids=["with-end", "unterminated"])
+def test_a_body_line_wider_than_the_cap_does_not_close_an_open_key_block(
+    terminated: bool,
+) -> None:
+    """Round-2 review R2-1: the floor's line retreat is bounded by the cap (memory
+    must not depend on what the child prints), so on an UNWRAPPED body line — one
+    wider than ``_PIPE_DEFERRAL_LIMIT``, which ``pem_body_line`` accepts — the floor
+    still cut mid-line, and the few characters it left at the start of the next
+    release were a "line" the block loop read as prose. The block closed and every
+    following body line went out raw: 20 of 20 at most widths in this sweep with a
+    value registered, 0 with none, on the head before the start-side fragment rule.
+
+    The widths sweep the floor's offset across the line's last characters (16
+    consecutive widths put the cut at every fragment length below the body floor)
+    and the 7-byte read is a paced writer; the line is built from the base64
+    alphabet so it is body-shaped at any width.
+    """
+    _pem_grammar_is_live()
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    tail = _PEM_END + "after\n" if terminated else ""
+    for width in range(builtin._PIPE_DEFERRAL_LIMIT + 1, builtin._PIPE_DEFERRAL_LIMIT + 17):
+        wide = (alphabet * (width // len(alphabet) + 1))[:width]
+        stream = ("pre\n" + _PEM_HEADER + wide + "\n" + _body_lines(20) + tail).encode()
+        redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+        assert redactor.hold > 0, "no window is held, so this proves nothing"
+        published = b"".join(
+            redactor.feed(stream[i : i + 7]) for i in range(0, len(stream), 7)
+        ) + redactor.feed(b"", final=True)
+        text = published.decode()
+        leaked = _published_body_lines(text)
+        assert leaked == [], f"width {width}: {len(leaked)} body lines published"
+        assert wide not in text, f"width {width}: the wide body line published"
+
+
+@pytest.mark.parametrize("value_length", [12, 20, 27, 49])
+def test_a_cut_inside_a_crlf_pair_does_not_close_an_open_key_block(value_length: int) -> None:
+    """Round-2 review R2-1's CRLF cell: a cut between ``\\r`` and ``\\n`` hands the
+    next release a lone ``\\n``, an empty line the block loop reads as prose. On
+    the head before the start-side fragment rule a CRLF block at 333-byte reads
+    published 7, 42, 31 and 44 body lines for these value lengths (the hold moves
+    the floor, so the length picks the alignment), and 0 with no value.
+    """
+    _pem_grammar_is_live()
+    stream = (
+        "pre\r\n"
+        + _PEM_HEADER.replace("\n", "\r\n")
+        + _body_lines(200).replace("\n", "\r\n")
+        + _PEM_END.replace("\n", "\r\n")
+        + "after\r\n"
+    ).encode()
+    redactor = builtin._PipeRedactor(["SYNTH-" + "q" * (value_length - 6)])
+    assert redactor.hold > 0, "no window is held, so this proves nothing"
+    published = b"".join(
+        redactor.feed(stream[i : i + 333]) for i in range(0, len(stream), 333)
+    ) + redactor.feed(b"", final=True)
+    leaked = _published_body_lines(published.decode())
+    assert leaked == [], f"{len(leaked)} body lines published"
+    assert published.decode().endswith("after\r\n"), "the stream's tail was not released"
+
+
+#: The RFC 1421 header lines a legacy-encrypted PEM carries between its armour and
+#: its body (``ssh-keygen -m PEM -N …``, ``openssl rsa -traditional -des3``). Each is
+#: PROSE to the body grammar, and that is the point: they close the open-block state.
+_LEGACY_PEM_HEADERS = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D4E5F6071\n\n"
+
+
+@pytest.mark.parametrize(
+    "block_headers", [_LEGACY_PEM_HEADERS, "\n"], ids=["legacy-encrypted", "blank-separator"]
+)
+def test_the_window_floor_does_not_split_a_whole_block_under_the_cap(block_headers: str) -> None:
+    """Round-3 review R3-1 / QA round-2 Q2-1: the floor must not cut INTO a complete
+    block that fits the cap, because main holds that block whole.
+
+    Once END is in the buffer the floor (``len(text) - hold``) lands inside the
+    block, the first release carries the header and a non-body line that closes the
+    open-block state, and the held tail (body lines + END, with no header in front
+    of it for the table to match) goes out raw. Read BEFORE end of stream, because
+    that is the live card and the ``jobs(op='peek')`` tail — the surface the loop's
+    output hook never repairs; the settled result was clean on every tree. On the
+    head before the fix: 2 body lines at 7- and 4,096-byte reads and at every
+    two-chunk split offset that leaves the block whole in the second read, for this
+    26-character UNRELATED value; 0 with no value and 0 on main.
+    """
+    _pem_grammar_is_live()
+    # Output AFTER the block, longer than the hold, so the held tail is pushed out by
+    # an ordinary release while the command still runs — with only a short trailing
+    # line it would ride the final release instead, and a live-only assertion would
+    # pass on the unfixed head.
+    trailer = "".join(f"post line {index:02d} of ordinary output\n" for index in range(8))
+    stream = ("pre\n" + _PEM_HEADER + block_headers + _body_lines(26) + _PEM_END + trailer).encode()
+    assert len(stream) < builtin._PIPE_DEFERRAL_LIMIT, "the block must fit the cap"
+
+    def published_after(parts: list[bytes]) -> tuple[str, str]:
+        redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+        assert redactor.hold > 0, "no window is held, so this proves nothing"
+        assert redactor.hold < len(trailer), "the trailer must push the held tail out live"
+        live = b"".join(redactor.feed(part) for part in parts)
+        settled = live + redactor.feed(b"", final=True)
+        assert settled.decode().endswith(trailer), "the stream's tail was not released"
+        return live.decode(), settled.decode()
+
+    for chunk in (7, 4096):
+        parts = [stream[i : i + chunk] for i in range(0, len(stream), chunk)]
+        live, settled = published_after(parts)
+        leaked = _published_body_lines(live)
+        assert leaked == [], f"{len(leaked)} body lines published live at {chunk}-byte reads"
+        assert _published_body_lines(settled) == [], f"body lines in the tail at {chunk}"
+    leaking = [
+        split
+        for split in range(1, len(stream))
+        if _published_body_lines(published_after([stream[:split], stream[split:]])[0])
+    ]
+    assert leaking == [], f"{len(leaking)} of {len(stream) - 1} split offsets published body lines"
 
 
 # --- the store: containment, and the incident path ---------------------------

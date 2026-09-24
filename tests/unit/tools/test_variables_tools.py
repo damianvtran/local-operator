@@ -279,3 +279,60 @@ async def test_bash_injects_session_credentials_and_redacts_them_from_output() -
     assert not result.is_error, result.text
     assert "super-secret-value-xyz" not in result.text
     assert "[redacted]" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label,render",
+    (
+        ("xxd, the DEFAULT spaced dump", "xxd"),
+        ("xxd -p, the contiguous dump", "xxd -p"),
+        ("od -An -tx1", "od -An -tx1"),
+    ),
+)
+async def test_bash_masks_the_spaced_hex_a_dump_tool_prints(label: str, render: str) -> None:
+    """F2, through the real tool: a dump is an accident path, and it is a leak.
+
+    ``xxd -p`` emits contiguous hex and was covered; plain ``xxd`` emits 2-byte
+    GROUPS, and ``od -An -tx1`` emits single-space byte pairs — neither is the
+    contiguous spelling, so both walked past the mask while the shipped evidence
+    drove ``xxd -p``. Measured on the round-1 head: masked=False for both, through
+    the settled result and through the live pipe.
+
+    Skipped where the tool is absent (the Windows CI probes), because the shape
+    under test is the tool's own spelling and a substitute would prove nothing.
+
+    The value is 15 characters so its whole spelling lands on ONE ``xxd`` line:
+    ``xxd`` wraps at 16 bytes with a fresh offset prefix, so a longer value's dump
+    has no contiguous needle spanning it — the stated residual in
+    ``credential_forms``, not something this test can assert.
+    """
+    import shutil
+
+    tool = render.split()[0]
+    if shutil.which(tool) is None:
+        pytest.skip(f"{tool} is not on this host")
+    from local_operator.tools.builtin import execute_bash
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd="/tmp", env={})
+    store.store_credential("LO_TEST_SECRET", "dump-me-7f3a2c12", "command")
+    ctx = ToolContext(cwd="/tmp", variables=store)
+    result = await execute_bash(
+        "bash-dump",
+        {"command": f'printf "%s" "$LO_TEST_SECRET" | {render}'},
+        None,
+        None,
+        ctx,
+    )
+    assert not result.is_error, result.text
+    value = "dump-me-7f3a2c12"
+    contiguous = value.encode().hex()
+    spellings = (
+        contiguous,
+        " ".join(contiguous[index : index + 4] for index in range(0, len(contiguous), 4)),
+        " ".join(f"{byte:02x}" for byte in value.encode()),
+    )
+    for spelling in spellings:
+        assert spelling not in result.text, f"{label}: the hex spelling survived the mask"
+    assert "[redacted]" in result.text, label

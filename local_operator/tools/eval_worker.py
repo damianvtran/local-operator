@@ -65,6 +65,13 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+# The one mask policy, for the streaming frames. ``redaction_shapes`` is
+# stdlib-only by contract (it is imported from the CLI startup path), so this
+# adds no dependency the worker would not otherwise need to output anything — and
+# importing it here rather than re-implementing the loop is what keeps a streamed
+# frame masked by the same spelling list as the settled response.
+from local_operator.redaction_shapes import StreamMasker
+
 # The ONE type/key/response vocabulary, shared with the parent and the desktop
 # route. Imported at module level, before ``_enable_cwd_imports``, so it resolves
 # to the installed distribution exactly like every other harness import here.
@@ -684,6 +691,32 @@ def _execute(namespace: dict[str, Any], code: str) -> str | None:
     return _safe_repr(value)
 
 
+def _ledger_values() -> tuple[str, ...]:
+    """Values retrieved through ``local_operator.secrets``, for a stream masker.
+
+    Empty when that module was never imported — the same ``sys.modules`` check
+    :func:`_scrub_secrets` makes, and exactly correct for the same reason: nothing
+    obtained a value through a module that was never loaded, so there is provably
+    nothing to hold back.
+
+    Raises when the module IS loaded and its ledger cannot be read. That is
+    deliberate and the caller must treat it as a fault: an empty list here would
+    mean "no values to mask", which is the one reading that publishes a secret
+    the session is holding.
+    """
+    runtime = sys.modules.get("local_operator.secrets.runtime")
+    if runtime is None:
+        return ()
+    return tuple(runtime.registered_values())
+
+
+#: What a streamed frame carries when the withheld flag is set, so the operator
+#: reading the job tail can tell "this cell prints nothing" from "this cell's
+#: output could not be vouched for". The final response is unaffected: it goes
+#: through :func:`_scrub_secrets`, which has its own fail-closed path.
+_WITHHELD_FRAME_TEXT = "[streamed output withheld: the secret redaction ledger could not be read]"
+
+
 class _StreamingTextIO(_CappedTextIO):
     """A capped sink that also forwards each write to the parent immediately.
 
@@ -697,11 +730,29 @@ class _StreamingTextIO(_CappedTextIO):
     It still caps and still accumulates: the final response stays byte-for-byte
     what a non-streaming run would produce, so streaming changes only WHEN the
     parent learns something, never WHAT it ends up with.
+
+    **The frames are masked through a WINDOW, not per write.** Masking each write
+    on its own publishes a value split across two writes in two unmasked halves —
+    neither half matches, because neither half is the value — and the parent
+    appends the frames to a background job's tail, which ``jobs(op='peek')``
+    JOINS back into the single string the model reads. So the frames go through
+    :class:`~local_operator.redaction_shapes.StreamMasker`, which publishes only
+    what is decidable and holds a bounded tail back (see that class for the bound
+    and for what it does not cover). ``release_held`` publishes the tail; the
+    settled response carries the whole text either way.
     """
 
     def __init__(self, limit: int, emit: Callable[[str], None]) -> None:
         super().__init__(limit)
         self._emit = emit
+        #: ``None`` until a ledger read fails; sticky, like the bash pipe
+        #: filter's withheld flag and for the same reason — once the value set
+        #: cannot be vouched for, no later frame may be published either.
+        self._withheld = False
+        try:
+            self._masker: StreamMasker | None = StreamMasker(_ledger_values())
+        except BaseException:  # noqa: BLE001 — see the fault contract below
+            self._masker = None
 
     def write(self, value: str) -> int:
         written = super().write(value)
@@ -717,8 +768,51 @@ class _StreamingTextIO(_CappedTextIO):
             # an exception raised inside ``print`` would do. The frame is
             # advisory; the authoritative copy rides the final response.
             with contextlib.suppress(Exception):
-                self._emit(_scrub_secrets(value))
+                published = self._mask(value)
+                if published:
+                    self._emit(published)
         return written
+
+    def _mask(self, value: str) -> str:
+        """The text this write may contribute to a frame, masker applied.
+
+        Refresh-then-push, in that order and per write: a cell may retrieve a
+        value BETWEEN two writes (``t = secrets["T"]`` then ``print(t)``), so a
+        value set read once when the sink was built would be blind to the very
+        value the masker exists to catch. The read is behind the same
+        ``sys.modules`` deferral ``_scrub_secrets`` uses, so a worker that never
+        touched a secret pays nothing here.
+
+        A ledger that cannot be read withholding the frame is the FAIL-CLOSED
+        direction: losing a progress frame costs the live view, publishing one
+        would cost a credential.
+        """
+        if self._withheld:
+            return ""
+        try:
+            current = _ledger_values()
+        except BaseException:  # noqa: BLE001 — deliberate fail-closed path
+            self._withheld = True
+            return _WITHHELD_FRAME_TEXT
+        if self._masker is None:
+            return ""
+        self._masker.refresh(current)
+        return self._masker.push(value)
+
+    def release_held(self) -> None:
+        """Release the held tail as one last frame, if any is still held.
+
+        Called once the cell has finished. Without it the tail the window held
+        back is never published, and a streamed cell would silently lose its
+        final bytes from the live view — the window delays publication, it must
+        not drop it. The settled response is unaffected either way.
+        """
+        if self._withheld or self._masker is None:
+            return
+        with contextlib.suppress(Exception):
+            tail = self._masker.push("", final=True)
+            if tail:
+                self._emit(tail)
 
 
 def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
@@ -780,6 +874,16 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         # Background threads left behind by arbitrary Python code cannot issue
         # tool calls between cells using an expired turn's authority.
         _ACTIVE_BRIDGE = ("", False)
+    # RELEASE WHAT THE WINDOW HELD BACK, before the response is assembled. A
+    # streamed frame is masked through a bounded hold-back window (see
+    # _StreamingTextIO), so the bytes inside the window are not yet published at
+    # the moment the cell returns — flushing here is what keeps "delayed" from
+    # becoming "dropped" for the last few hundred characters of a cell's output.
+    # A no-op on the non-streaming sinks, which have no window at all.
+    for sink in (stdout, stderr):
+        release = getattr(sink, "release_held", None)
+        if release is not None:
+            release()
     # EVERY model-visible channel of the response passes the secret scrubber,
     # at the single point where the response is assembled rather than at each
     # producer. `result` is already scrubbed by `_safe_repr`; it is re-scrubbed
