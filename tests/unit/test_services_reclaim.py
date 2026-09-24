@@ -110,9 +110,7 @@ def test_a_foreign_answer_is_squatted_and_names_the_stranger(
     probe_env: dict[str, Any],
 ) -> None:
     """The incident's ``identity-mismatch``: somebody else is on the address."""
-    probe_env["state"]["answer"] = _Response(
-        b'{"result":{"instance_id":"a-different-process"}}'
-    )
+    probe_env["state"]["answer"] = _Response(b'{"result":{"instance_id":"a-different-process"}}')
     probe = services.probe_address(_record(instance_id="instance-one"))
     assert probe.verdict == services.SQUATTED
     assert probe.answered_as == "a-different-process"
@@ -219,9 +217,7 @@ def test_the_spawn_contract_is_matched_as_words_not_a_substring() -> None:
     assert services.is_serve_command(SERVE_ARGV)
     assert services.is_serve_command("/Users/damian/.local/bin/lop serve --port 1111")
     assert not services.is_serve_command("grep -rn local_operator.cli serve src/")
-    assert not services.is_serve_command(
-        "/bin/zsh -c python -m local_operator.cli services status"
-    )
+    assert not services.is_serve_command("/bin/zsh -c python -m local_operator.cli services status")
 
 
 # --------------------------------------------------------------------------- #
@@ -267,11 +263,7 @@ def test_status_says_none_serving_rather_than_none_running(
     monkeypatch.setattr(
         services,
         "serve_daemon_reports",
-        lambda *a, **k: [
-            services.ServeDaemonReport(
-                record=record, state="wedged", probe=None
-            )
-        ],
+        lambda *a, **k: [services.ServeDaemonReport(record=record, state="wedged", probe=None)],
     )
     rendered = "\n".join(services.status_lines())
     assert "serve daemons: none serving (1 recorded, not serving its address)" in rendered
@@ -327,13 +319,19 @@ def _reclaim(
             answers.append(value)
         return value
 
-    reports = records if records is not None else [
-        services.ServeDaemonReport(
-            record=_record(pid=pid),
-            state="live",
-            probe=services.AddressProbe(verdict, "" if verdict == services.SERVING else "silent"),
-        )
-    ]
+    reports = (
+        records
+        if records is not None
+        else [
+            services.ServeDaemonReport(
+                record=_record(pid=pid),
+                state="live",
+                probe=services.AddressProbe(
+                    verdict, "" if verdict == services.SERVING else "silent"
+                ),
+            )
+        ]
+    )
 
     def _probe(_record: Any) -> services.AddressProbe:
         return services.AddressProbe(verdict, "" if verdict == services.SERVING else "silent")
@@ -766,9 +764,7 @@ def test_a_daemon_that_begins_serving_is_refused_at_the_last_reading() -> None:
     The brand re-read cannot see a daemon that starts answering between the
     confirmation and the signal — the recovery this command must not punish.
     """
-    outcome, kills = _reclaim(
-        probe_script=[services.DEAF, services.DEAF, services.SERVING]
-    )
+    outcome, kills = _reclaim(probe_script=[services.DEAF, services.DEAF, services.SERVING])
     assert kills == []
     assert outcome.problem == "serving"
     assert "began answering" in "\n".join(outcome.lines)
@@ -818,9 +814,9 @@ def test_every_row_verdict_has_one_sentence_and_one_adjective() -> None:
         services.STALE,
         services.STRAY,
     }
-    assert services.SERVING not in services.VERDICTS, (
-        "a serving daemon gets the ordinary `serve daemon` row, not a stuck one"
-    )
+    assert (
+        services.SERVING not in services.VERDICTS
+    ), "a serving daemon gets the ordinary `serve daemon` row, not a stuck one"
     for entry in services.VERDICTS.values():
         assert "{address}" in entry.row
         assert entry.phrase and " " not in entry.phrase
@@ -857,9 +853,7 @@ def test_an_address_that_changes_occupant_is_refused() -> None:
     operator is told which two readings disagreed and told to run it again, rather
     than being sent into the signal on a verdict the address no longer supports.
     """
-    outcome, kills = _reclaim(
-        probe_script=[services.DEAF, services.DEAF, services.SQUATTED]
-    )
+    outcome, kills = _reclaim(probe_script=[services.DEAF, services.DEAF, services.SQUATTED])
     assert kills == []
     assert outcome.problem == "changed"
     assert "changed while this was being confirmed" in "\n".join(outcome.lines)
@@ -942,7 +936,7 @@ def test_the_launcher_proof_survives_the_procname_label_and_the_app_entrypoint()
     # And the app's pre-exec wrapper, which the search admits: no nameable pid is
     # ever that bash (the plan execs), and its argv still carries the entry point.
     assert services.is_serve_command(
-        "bash -c exec \"$@\" owned-serve /Users/me/.local/bin/python "
+        'bash -c exec "$@" owned-serve /Users/me/.local/bin/python '
         "-c from local_operator.cli import main; main() serve --port 1111"
     )
 
@@ -956,6 +950,7 @@ def test_the_wait_answers_from_its_last_read() -> None:
     so this exact input returned DOUBT and the report printed "the process table
     could not be read" over a reading that had already answered.
     """
+
     def _scripted(values: list[bool | None]):
         queue = list(values)
 
@@ -967,9 +962,7 @@ def test_the_wait_answers_from_its_last_read() -> None:
 
         return _read
 
-    blipped = services._await_exit(
-        4242, _scripted([None, None, True]), _no_sleep, 0.001, 0.0005
-    )
+    blipped = services._await_exit(4242, _scripted([None, None, True]), _no_sleep, 0.001, 0.0005)
     assert blipped is False, "the last read said still-there, so the answer is still-there"
     # And the other two answers still come through, so this is three-valued rather
     # than merely "never None".
