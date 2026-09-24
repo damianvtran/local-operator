@@ -19,11 +19,17 @@ executable spec of this table.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable, Sequence
 
 from lop_osworld_v2_adapter.provisioning import resolve_proxy_policy
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
-from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
+from local_operator.evaluation.adapters.api import (
+    Requirement,
+    ResolvedSecret,
+    ScopedInfraValue,
+    SecretRef,
+)
 
 # ---------------------------------------------------------------------------
 # Always-on requirements. These exist because the worker environment is
@@ -223,12 +229,15 @@ def _evaluator_text(descriptor: TaskDescriptor) -> str:
     return repr(descriptor.evaluator) if descriptor.evaluator is not None else ""
 
 
-def derive_requirements(
-    descriptor: TaskDescriptor, *, infra_values: tuple[ScopedInfraValue, ...] = ()
-) -> tuple[Requirement, ...]:
-    """Derive requirements after policy, retaining legacy behavior on omission."""
+def _baseline_requirements() -> tuple[Requirement, ...]:
+    """The ALWAYS-ON layer: what every episode needs, whatever its task is.
 
-    enable_proxy = resolve_proxy_policy(infra_values, task_proxy=bool(descriptor.proxy))
+    These are properties of the worker environment and of the selected cloud
+    provider rather than of any task, so they are declared for every episode --
+    including one whose task is not yet known, which is what lets
+    ``inspect_requirements`` answer before the runner names the task.
+    """
+
     out: list[Requirement] = []
 
     for name in _AWS_SECRETS:
@@ -239,6 +248,28 @@ def derive_requirements(
         out.append(_requirement(name, kind="infra", required=True))
     for name in _OPTIONAL_INFRA:
         out.append(_requirement(name, kind="infra", required=False))
+
+    # The gated HF corpus is materialised into the workspace at build time, so
+    # HF_TOKEN is NOT required at episode time. It is optional here for the
+    # case where a host wants to re-fetch rather than use the pinned corpus.
+    out.append(_requirement("HF_TOKEN", kind="secret", required=False))
+    return tuple(out)
+
+
+def derive_task_requirements(
+    descriptor: TaskDescriptor, *, infra_values: tuple[ScopedInfraValue, ...] = ()
+) -> tuple[Requirement, ...]:
+    """The TASK-DERIVED layer: what THIS task adds to the always-on baseline.
+
+    Every requirement whose presence is a function of the task's own fields is
+    declared here. It is the layer :func:`require_supplied` refuses over, and
+    the reason is structural: this set is knowable only once a descriptor
+    exists, so no earlier boundary can see it -- ``inspect_requirements`` runs
+    before the task is named and therefore answers from the baseline alone.
+    """
+
+    enable_proxy = resolve_proxy_policy(infra_values, task_proxy=bool(descriptor.proxy))
+    out: list[Requirement] = []
 
     if is_judged(descriptor):
         out.append(_requirement(_JUDGE_SECRET, kind="secret", required=True))
@@ -291,17 +322,129 @@ def derive_requirements(
     if "controllers.website" in source_text or "WEBSITE_HOST_SUFFIX" in source_text:
         out.append(_requirement("WEBSITE_HOST_SUFFIX", kind="infra", required=True))
 
-    # The gated HF corpus is materialised into the workspace at build time, so
-    # HF_TOKEN is NOT required at episode time. It is optional here for the
-    # case where a host wants to re-fetch rather than use the pinned corpus.
-    out.append(_requirement("HF_TOKEN", kind="secret", required=False))
+    return tuple(out)
 
+
+def _merged(*layers: tuple[Requirement, ...]) -> tuple[Requirement, ...]:
     # Deterministic order: dedupe by name, keep the required-flag of the
     # stricter declaration, sort by name so two parses of the same task give
     # the identical tuple.
     deduped: dict[str, Requirement] = {}
-    for req in out:
-        existing = deduped.get(req.name)
-        if existing is None or (req.required and not existing.required):
-            deduped[req.name] = req
+    for layer in layers:
+        for req in layer:
+            existing = deduped.get(req.name)
+            if existing is None or (req.required and not existing.required):
+                deduped[req.name] = req
     return tuple(deduped[name] for name in sorted(deduped))
+
+
+def derive_requirements(
+    descriptor: TaskDescriptor, *, infra_values: tuple[ScopedInfraValue, ...] = ()
+) -> tuple[Requirement, ...]:
+    """Both layers in one ordered tuple: the set a host is TOLD about.
+
+    The layers stay separable because only the task-derived one can be enforced
+    at the task seam; see :func:`require_supplied` for what that leaves to the
+    always-on baseline's own consumers.
+    """
+
+    return _merged(
+        _baseline_requirements(),
+        derive_task_requirements(descriptor, infra_values=infra_values),
+    )
+
+
+class MissingRequiredRequirements(RuntimeError):
+    """A requirement the task declares as REQUIRED was not supplied.
+
+    Raised from ``reset_start`` once the descriptor exists and BEFORE the
+    provider is constructed, so it names the absent REF and costs nothing: no
+    guest is allocated and no vendor code runs, and the episode carries a
+    diagnostic instead of a traceback from inside upstream's own setup.
+    """
+
+
+def missing_required(requirements: Iterable[Requirement], *, supplied: set[str]) -> tuple[str, ...]:
+    """The names in ``requirements`` that are required and were NOT supplied.
+
+    Sorted, so the refusal is deterministic. ``required=False`` declarations
+    are excluded by construction: their absence is benign by the table's own
+    contract, and refusing one would train an operator to fabricate a value
+    nothing consumes.
+    """
+
+    return tuple(
+        sorted(req.name for req in requirements if req.required and req.name not in supplied)
+    )
+
+
+def require_supplied(
+    descriptor: TaskDescriptor,
+    *,
+    task_id: str,
+    secret_refs: Sequence[SecretRef | ResolvedSecret] = (),
+    infra_values: Sequence[ScopedInfraValue] = (),
+) -> None:
+    """Refuse a task whose declared-but-absent requirements would break it later.
+
+    THE CONTRACT: declaring a requirement means refusing when it is missing.
+    A requirement the table marks ``required=True`` is one the task cannot run
+    without, so an episode that proceeds without it does not run degraded -- it
+    dies, and the death is measured in an allocated guest. This check is where
+    that contract is enforced for the requirements a TASK introduces, and it is
+    name-free by construction: it reads the table in
+    :func:`derive_task_requirements` and never names a value of its own.
+
+    WHY HERE, AND NOT IN THE RUNNER. The runner's gate
+    (``episode._refuse_undeclared_disclosed_infra``) refuses a value an adapter
+    does not DECLARE, and deliberately cannot refuse the inverse case: it calls
+    ``inspect_requirements`` before the task is named, so a task-conditional
+    requirement is legitimately absent from the answer it gates on. The derived
+    set exists at exactly one seam -- after the descriptor is loaded and before
+    the provider is constructed -- and that seam is this one.
+
+    THE MEASURED FAILURE. 40 of the release's 108 tasks reference a controller
+    that reads its value from the environment when the guest's task object is
+    instantiated, and nothing in the pipeline supplied it. The episode built a
+    guest and died INSIDE vendor code:
+
+        ValueError: WEBSITE_HOST_SUFFIX must be set in environment variables
+          threads.py:25 to_thread <- aws.py:863 _start_desktop_env
+          <- vendor_bridge.py:202 instantiate_task <- task_016.py:7
+          <- website.py:22
+
+    -- a traceback naming no adapter, before any frame was scored, with an EC2
+    instance left to tear down. GOOGLE_ACCOUNT_CREDENTIALS,
+    OSWORLD_USER_SIM_API_KEY, GITLAB_PRIVATE_TOKEN and GITLAB_URL fail the same
+    way. This turns every one of them into a single refusal that names the ref.
+
+    WHAT IT DOES NOT COVER, deliberately: the always-on baseline. Those values
+    belong to the worker environment and the SELECTED provider rather than to
+    the task -- the AWS credentials are already refused by name when the
+    provider is built (``adapter._aws_credentials``, still before allocation),
+    and a cloud-free build (``adapter-provider.json`` selecting the fake)
+    legitimately omits the whole group. Demanding them here would refuse a run
+    the adapter can complete.
+
+    Only REFS are named, never values: this text crosses the RPC boundary into
+    the episode diagnostic and the sealed bundle.
+
+    ``task_id`` is the name the RUNNER gave this task (``ResetStartParams``),
+    which is the spelling the episode, the manifest and the operator's command
+    line carry -- the descriptor's own ``task_id`` is the task file's internal
+    id and can differ (``016`` for ``task_016.py``). The TABLE still comes from
+    the descriptor; the two describe one task or the run is already wrong.
+    """
+
+    supplied = {ref.name for ref in secret_refs} | {value.name for value in infra_values}
+    missing = missing_required(
+        derive_task_requirements(descriptor, infra_values=tuple(infra_values)),
+        supplied=supplied,
+    )
+    if missing:
+        raise MissingRequiredRequirements(
+            f"task {task_id!r} declares {list(missing)} as required, and the "
+            "host supplied neither a secret ref nor an infra value for them; refusing "
+            "before the provider is constructed, because the task's own controller "
+            "reads them the moment the guest's task object is instantiated"
+        )
