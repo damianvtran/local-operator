@@ -15,23 +15,26 @@ transcripts in this operator's store (2026-09-20):
   kind**, largest observed single call 130,491 chars. How much of the store they
   are is SAMPLING-RULE DEPENDENT, so each figure is quoted with its rule: `26.5%`
   of message bytes on a uniform random sample (four seeds, n=300 transcripts) and
-  `40.6%` on the 300 largest transcripts by size, against ~59% for results and
-  ~6.4% for everything else. An earlier revision stated a flat `34%` with no rule
-  named; that number is WITHDRAWN. The conclusion does not depend on the rule —
-  arguments were unbounded under every one of them — but the number does.
+  `40.6%` on the 300 largest transcripts by size. An earlier revision stated a
+  flat `34%` with no rule named; that number is WITHDRAWN. The conclusion does
+  not depend on the rule — arguments were unbounded under every one of them —
+  but the number does.
 
 So this is a BACKSTOP, not a latency lever: at the default bound it removes
 **2.25% of replayed tokens** as a median — 3,231 median tokens saved over 119
 real transcripts (baseline p50 141,459 replayed tokens), measured with the repo's
-own ``estimate_messages_tokens``. Latency-wise that is ~26 ms extrapolated at the
-provider's measured ~5 ms per 1k tokens. It earns its place by closing two
-unbounded paths — one of them entirely uncapped — so that no single row can
-dominate a session's every turn. Tightening the bound
+own ``estimate_messages_tokens``. Latency-wise the PR body's §2 table quotes
+~26 ms for this row; that figure is that table's extrapolation of a LARGER saving
+statistic than the median, not of the median itself — the §1 fitted 5.17 ms per
+1k applied to the median gives 3,231 x 5.17/1e3 ≈ 17 ms. It earns its place by
+closing two unbounded paths — one of them entirely uncapped — so that no single
+row can dominate a session's every turn. Tightening the bound
 is a one-line, measured, deferred decision (see the PR body's table) and it is
 decidedly NOT taken by default: at 2,048 chars it would remove **22.41% of
-replayed tokens** as a median (32,180 median tokens saved, p90 31.79%, ~263 ms of
-TTFB by the same fit) at the cost of eliding the middle of most tool results and
-long argument values, which is a lossy global behaviour change and belongs to the
+replayed tokens** as a median (32,180 median tokens saved, p90 31.79%; ~263 ms is
+the same §2 row's larger-statistic figure, against 32,180 x 5.17/1e3 ≈ 166 ms
+from the median) at the cost of eliding the middle of most tool results and long
+argument values, which is a lossy global behaviour change and belongs to the
 operator rather than to this module's default.
 
 The replay-only rule, and why it is not negotiable
