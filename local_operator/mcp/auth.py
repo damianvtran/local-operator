@@ -5125,25 +5125,21 @@ def _make_refresh_coordinating_provider(
                                 except StopAsyncIteration:
                                     return
                                 continue
-                            if getattr(retry_response, "status_code", 401) != 401:
-                                # The RESOURCE accepted a token on this chain: the
-                                # challenge the recovery answered is over, which is
-                                # positive evidence that the grant works — the one
-                                # thing a chain stamp cannot express, because a
-                                # rotation carries the stamp forward
-                                # (:data:`GRANT_OK_KEY`). Written here as well as at
-                                # the connect seam because a recovered challenge is
-                                # a session that kept working WITHOUT reconnecting,
-                                # and a blocked peer has no other way to learn that
-                                # the chain is healthy. Rare by construction: it
-                                # fires only after a 401 this flow recovered from,
-                                # so a normal request and a failed recovery both
-                                # write nothing — which is what keeps the witness a
-                                # fact about success rather than a heartbeat.
-                                # Best-effort, and never allowed to break a request
-                                # that just worked.
-                                with contextlib.suppress(Exception):
-                                    self._refresh_coord_storage.record_grant_ok()
+                            # Deliberately NO success witness here (agent review
+                            # round 4, major-1). A recovered retry that is not a
+                            # 401 — a 403, a 503, or a 200 followed by a later 401
+                            # — happens INSIDE a connect that can still fail on
+                            # auth, and that connect's block records its baseline
+                            # at the seam, before this point. A witness written
+                            # here was therefore always newer than the failing
+                            # attempt's own baseline, so every poll retried,
+                            # rotated and minted another: 31 connects over 30
+                            # polls. Filtering to 2xx does not close the
+                            # 200-then-401 shape. The connect seam
+                            # (``McpManager._record_grant_ok``) is the only writer,
+                            # because only there has the connect already stood up.
+                            # Guarded by
+                            # ``test_a_recovery_inside_a_failing_connect_never_buys_a_retry``.
                             try:
                                 outgoing = await inner.asend(retry_response)
                             except StopAsyncIteration:

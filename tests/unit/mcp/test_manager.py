@@ -5224,63 +5224,107 @@ class TestAuthBlockRevalidation:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_a_recovered_challenge_records_a_success_witness(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "retry_statuses",
+        [(403,), (503,), (200, 401)],
+        ids=["recovered_retry_403", "recovered_retry_503", "recovered_200_then_401"],
+    )
+    async def test_a_recovery_inside_a_failing_connect_never_buys_a_retry(
+        self,
+        retry_statuses: tuple[int, ...],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The flow's own seam: a session that recovers IN PLACE also witnesses it.
+        """A failing connect must never write evidence its own block reads as news.
 
-        The connect seam covers QA's repro, which is a sibling that RECONNECTS.
-        The reviewer's "stranded sessions" framing is wider than that: a session
-        whose token the resource first refused, and whose 401-recovery the
-        resource then ACCEPTED, has proved the chain works as well — and it never
-        reconnects, because the request simply succeeds on the retry. Driven
-        through the REAL auth flow (a 401 on the stored token, the recovery
-        refresh under the lock, a 200 for the re-yielded request), so what is
-        asserted is that the row carries a witness afterwards. A normal request
-        and a failed recovery both write nothing, which is what keeps the witness
-        a fact about success rather than a heartbeat.
+        Agent review round 4, major-1. Do not delete or weaken. This REPLACES
+        ``test_a_recovered_challenge_records_a_success_witness``, which pinned a
+        second witness writer inside ``async_auth_flow`` (written whenever the
+        re-yielded request after a 401 recovery came back as anything but 401).
+        That write happens INSIDE a connect that can still fail on auth — a 403
+        on the recovered retry, a 503, or a first request that recovers and a
+        later one that does not — and ``_block_on_auth`` records the baseline at
+        the seam, BEFORE that write. So every failed attempt minted a witness
+        newer than its own baseline, the next poll retried, rotated, failed and
+        minted another one: measured 31 connects over 30 polls (one refresh POST
+        or two per tick) against 1 on ``main``. Narrowing the write to 2xx does
+        not close the ``(200, 401)`` shape, which is why the write is gone rather
+        than filtered and the connect seam is the only writer left.
+
+        Driven through the REAL auth flow (``build_oauth_provider``, the real
+        401-recovery refresh under the lock, the real store) with only the
+        transport replaced, exactly the reviewer's probe: each request in the
+        dial is refused once, recovered, and its re-yielded retry answered with
+        the parametrized status; the connect then fails on authorization. The
+        existing ``test_a_failed_connect_writes_no_success_witness`` could not
+        see this, because its dial fails without ever running the flow.
         """
         import time as _time
 
         import httpx
 
-        from local_operator.mcp.auth import McpTokenStorage, build_oauth_provider
+        from local_operator.mcp.auth import build_oauth_provider
 
+        # A fresh token, so the flow sends the stored one and the only rotation
+        # per request is the 401-recovery one: the POST count is then a direct
+        # count of recoveries rather than of pre-send refreshes as well.
         store = self._real_store(tmp_path, obtained_at=_time.time())
         manager = self._oauth_manager(tmp_path, store)
+        endpoints = self._endpoints()
         try:
             await self._seed_client_info(store)
-            self._stub_token_endpoint(monkeypatch)
-            storage = McpTokenStorage(self.URL, store)
-            before = storage.grant_marker()
-            assert before is not None and before.witness_at is None, "nothing has stood up yet"
+            posts = self._stub_token_endpoint(monkeypatch)
+            # Discovery answers nothing, so the pre-dial refresh stays out of the
+            # way and every POST counted is the in-flow recovery under test.
+            self._stub_discovery(monkeypatch, None)
 
-            provider = build_oauth_provider(
-                self.URL, manager._configs["dd"], store=store, endpoints=self._endpoints()
-            )
-            async with provider.context.lock:
-                await provider._initialize()
-            gen = provider.async_auth_flow(httpx.Request("POST", self.URL, content=b"payload"))
-            try:
-                request = await gen.__anext__()
-                retried = await gen.asend(httpx.Response(401, request=request))
-                assert retried is not None, "the flow did not recover from the 401"
-                # The resource ACCEPTS the recovered token on the retry. A
-                # StopAsyncIteration here is the flow ENDING on that accepted
-                # response — a successful request's normal conclusion, not a
-                # failure — so it is tolerated rather than asserted away.
-                try:
-                    await gen.asend(httpx.Response(200, request=retried))
-                except StopAsyncIteration:
-                    pass
-            finally:
-                await gen.aclose()
+            attempts: list[str] = []
 
-            marker = storage.grant_marker()
-            assert marker is not None and marker.witness_at is not None, (
-                "a recovered challenge in place recorded no success witness, so a "
-                "blocked peer learns nothing from a session that never reconnects"
+            async def recovers_then_fails(name: str, cfg: Any) -> Any:
+                attempts.append(name)
+                provider = build_oauth_provider(self.URL, cfg, store=store, endpoints=endpoints)
+                async with provider.context.lock:
+                    await provider._initialize()
+                for status in retry_statuses:
+                    gen = provider.async_auth_flow(
+                        httpx.Request("POST", self.URL, content=b"payload")
+                    )
+                    try:
+                        request = await gen.__anext__()
+                        retried = await gen.asend(httpx.Response(401, request=request))
+                        assert retried is not None, "the flow did not recover from the 401"
+                        # Whatever the SDK does with the answer — end the flow,
+                        # or start its own authorization branch on a second 401
+                        # — this request is over; the connect's verdict is below.
+                        try:
+                            await gen.asend(httpx.Response(status, request=retried))
+                        except StopAsyncIteration:
+                            pass
+                    finally:
+                        await gen.aclose()
+                return None  # the connect fails on authorization
+
+            self._stub_transport(monkeypatch, recovers_then_fails)
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert manager.auth_blocked("dd") is True
+            assert attempts == ["dd"]
+            posts_after_block = posts["posts"]
+            assert posts_after_block >= len(retry_statuses), (
+                "the dial never reached the 401-recovery refresh, so the loop below "
+                "measures nothing"
             )
+
+            for _ in range(30):
+                await manager.revalidate_auth_blocked()
+
+            assert attempts == ["dd"], (
+                f"{len(attempts)} connects over 30 polls: a failing connect wrote "
+                "evidence that its own block read as news"
+            )
+            assert (
+                posts["posts"] == posts_after_block
+            ), f"{posts['posts'] - posts_after_block} refresh POSTs while blocked"
+            assert manager.auth_blocked("dd") is True
         finally:
             await manager.disconnect_all()
             store.close()
