@@ -1294,6 +1294,14 @@ def _process_argv(pid: int) -> str | None:
     (``group_reaper._owner_start_token``) does so to pin a locale-FORMATTED date,
     and there is no format to pin in a process's own bytes.
 
+    ``MemoryError`` is caught with the rest (review round 1, Q4, which measured one
+    escaping): a host under memory pressure can fail the FORK itself, and the only
+    caller that matters here is a repair inside an upgrade that has already
+    succeeded — so every way of not getting an answer collapses to ``None`` rather
+    than to a traceback. The blast radius without it was a spurious
+    ``kind="failed"`` warning (the installer's own guard catches it), never a write
+    or a reload.
+
     The ``subprocess`` import is function-local for this module's usual reason
     (see ``_refresh_steps``): ``update`` is imported by the TUI, and this runs once
     per supervised daemon on an upgrade.
@@ -1309,9 +1317,10 @@ def _process_argv(pid: int) -> str | None:
             check=False,
             timeout=_PS_PROBE_TIMEOUT_S,
         )
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        # No `ps` at all (a non-POSIX host), a pid `ps` refuses as an argument, or
-        # a call that did not answer inside the bound. All three are "unreadable".
+    except (OSError, ValueError, MemoryError, subprocess.SubprocessError) as exc:
+        # No `ps` at all (a non-POSIX host), a pid `ps` refuses as an argument, a
+        # fork the kernel would not give us, or a call that did not answer inside
+        # the bound. All four are "unreadable".
         logger.debug("could not read the argv of pid %s: %s", pid, exc)
         return None
     if completed.returncode != 0:
@@ -1340,15 +1349,17 @@ def generation_in_argv(argv: str) -> Path | None:
 
         59435     1 ~/.local/share/lop/generations/20260924T103058Z-509c7450dbf6/…
 
-    …whose first field is that generation's own ``bin/Local Operator``, followed by
-    the module and its arguments.
+    …whose first field is that generation's own
+    ``tools/local-operator/bin/Local Operator``, followed by the module and its
+    arguments (the shim prefers that branded image and falls back to the same
+    directory's ``python3``).
 
-    THE PATH HAS A SPACE IN IT (``…/bin/Local Operator``), which is why this walks
-    the path's ANCESTORS instead of splitting the line into fields: ``ps`` joins
-    argv with single spaces and quotes nothing, so the image path is not separable
-    from the argument list by parsing — and it does not have to be, because the
-    generation is an ancestor of the image path, i.e. of everything before the
-    first space.
+    THE PATH HAS A SPACE IN IT (``…/tools/local-operator/bin/Local Operator``),
+    which is why this walks the path's ANCESTORS instead of splitting the line into
+    fields: ``ps`` joins argv with single spaces and quotes nothing, so the image
+    path is not separable from the argument list by parsing — and it does not have to
+    be, because the generation is an ancestor of the image path, i.e. of everything
+    before the first space.
 
     LEXICAL THE FILE, RESOLVED THE ANCESTORS, and both halves are load-bearing.
     The file itself is never resolved: the fallback interpreter in a generation's
@@ -1419,11 +1430,28 @@ def stale_generation_of_process(pid: int) -> Path | None:
     being renamed as we read it). Neither is evidence of a move, so neither may
     produce one.
 
-    Names are compared rather than paths, because the two sides are spelled
-    differently BY CONSTRUCTION — the shim's ``pwd -P`` against ``~``-derived
-    ``stable_root()`` — and a generation id is unique per build, which is the whole
-    naming scheme. Two different generations cannot share a name; see
-    ``_new_generation_id``.
+    NAMES ARE COMPARED RATHER THAN PATHS, because the two sides are spelled
+    differently BY CONSTRUCTION: the shim's ``pwd -P`` puts the PHYSICAL path in the
+    process's argv while ``current`` names whatever ``flip_pointer`` wrote, and the
+    names are what a generation is. ``current`` is RESOLVED first (:func:`current_generation`
+    answers with what the link NAMES, one hop), because a CHAINED pointer —
+    ``current`` -> some link -> ``generations/<id>``, which no writer here produces
+    but a hand-made or wrapped one can — would otherwise compare the LINK's name
+    against a daemon's generation and make every daemon read as stale, four spurious
+    reloads per upgrade (QA round 1, Q3). Resolving it is idempotent for the shipped
+    one-hop shape.
+
+    WHAT THIS ANSWER MEANS, stated narrowly, because the obvious reading is wrong
+    (review round 1, R2): "not the generation ``current`` names" is NOT "the code
+    changed". Two generations can carry the identical build — measured on this
+    machine on 2026-09-24, ``generations/20260923T033831Z-71e3e49a315a`` and
+    ``generations/20260924T102951Z-71e3e49a315a`` both record ``.lop-source``
+    ``71e3e49a315a…`` with ``local_operator-0.62.8`` — so re-installing the same
+    commit into a new generation answers "STALE" for every daemon. That is the
+    repair's deliberate contract and the rejected alternative is recorded where it is
+    acted on (:func:`local_operator.launchd.restart_if_build_moved`): a build-stamp
+    comparison cannot answer at all for a generation that carries no source ref, and
+    that machine would keep the original defect.
     """
     running = generation_of_process(pid)
     if running is None:
@@ -1431,7 +1459,7 @@ def stale_generation_of_process(pid: int) -> Path | None:
     current = current_generation()
     if current is None:
         return None
-    return None if running.name == current.name else running
+    return None if running.name == current.resolve().name else running
 
 
 def current_install_root() -> Path | None:

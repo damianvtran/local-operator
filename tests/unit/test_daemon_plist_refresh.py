@@ -96,6 +96,7 @@ def _patch_launcher(
     fail: bool = False,
     pid: int | None = None,
     kickstart_fails: bool = False,
+    kickstart_comes_back: bool = True,
 ) -> None:
     """Install a launchd-shaped stand-in for one module's ``launchctl`` call.
 
@@ -112,8 +113,15 @@ def _patch_launcher(
     ``pid`` adds the other half of what ``print`` really answers: a RUNNING job
     prints a ``pid = <n>`` line (:func:`local_operator.launchd.job_pid`), which is
     the only handle the build probe has on the process. Without it the stand-in
-    answers the stopped-job shape. ``kickstart_fails`` is a refusal of the
-    restart itself, which is a different failure from ``fail``'s bootstrap one.
+    answers the stopped-job shape.
+
+    TWO KICKSTART ANSWERS, because launchd has two: ``kickstart_fails`` is launchctl
+    REFUSING the request (non-zero, nothing asked to happen), and
+    ``kickstart_comes_back=False`` is the request ACCEPTED — exit 0 — with no new
+    process behind the label afterwards, which is a daemon that died on start. The
+    accepted case gives the job a NEW pid, as ``kickstart -k`` really does; a
+    stand-in that kept the old pid would make
+    :func:`local_operator.launchd._await_new_pid` reject every successful restart.
     """
     _freeze_clock(monkeypatch)
 
@@ -124,7 +132,11 @@ def _patch_launcher(
             self.stdout = ""
             self.stderr = "" if returncode == 0 else "Bootstrap failed: 5: Input/output error"
 
+    # TWO AXES, because launchd has two: `loaded` is whether the label is registered
+    # at all, and `live` is the pid behind it (None for a registered-but-stopped job).
+    # Collapsing them makes the bootstrap's own verification read as a failure.
     loaded = [pid is not None]
+    live = [pid]
 
     def fake(*args: str):
         calls.append(args)
@@ -133,18 +145,27 @@ def _patch_launcher(
             if not loaded[0]:
                 return _Completed(list(args), 1)
             completed = _Completed(list(args), 0)
-            if pid is not None:
-                completed.stdout = f"\tpid = {pid}\n"
+            if live[0] is not None:
+                completed.stdout = f"\tpid = {live[0]}\n"
             return completed
         if verb == "bootout":
             loaded[0] = False
+            live[0] = None
             return _Completed(list(args), 0)
-        if verb == "kickstart" and kickstart_fails:
-            return _Completed(list(args), 1)
+        if verb == "kickstart":
+            if kickstart_fails:
+                return _Completed(list(args), 1)
+            # Accepted: launchd kills the process and starts another one, which is a
+            # pid that differs from the one the repair recorded.
+            # ``kickstart_comes_back=False`` models the daemon that exits immediately:
+            # the kick succeeded and the label keeps no process.
+            live[0] = None if not kickstart_comes_back or live[0] is None else live[0] + 1
+            return _Completed(list(args), 0)
         if verb == "bootstrap" and fail:
             return _Completed(list(args), 1)
         if verb == "bootstrap":
             loaded[0] = True
+            live[0] = pid
         return _Completed(list(args), 0)
 
     monkeypatch.setattr(module, "_launchctl", fake)
@@ -533,6 +554,7 @@ def _rig(
     probe_none: bool = False,
     probe_raises: bool = False,
     kickstart_fails: bool = False,
+    kickstart_comes_back: bool = True,
     daemon_pids: bool = True,
 ) -> dict[str, list[tuple[str, ...]]]:
     """The shipped refresh step with the runner and the build probe injected.
@@ -542,6 +564,12 @@ def _rig(
     ``moved_pid`` is the one daemon whose probe answers "a generation other than
     ``current``"; every other pid answers ``None``, which is what the shipped probe
     answers for a daemon that is current AND for one it could not read.
+
+    THE MOBILE DAEMON IS NEVER ASKED (review round 1, R4): its own step bounces it
+    unconditionally right after this one, so ``refresh_plist_if_stale`` returns before
+    touching launchd. Every test here therefore expects NO call at all for
+    ``mobile`` — which is also what makes the "nothing moved" case below a statement
+    about three daemons rather than four.
     """
     _layout(tmp_path, monkeypatch, running=running, current=current, pointer=pointer)
     for _name, (_module, path, render, _label) in targets.items():
@@ -555,6 +583,7 @@ def _rig(
             calls[name],
             pid=_PIDS[name] if daemon_pids else None,
             kickstart_fails=kickstart_fails,
+            kickstart_comes_back=kickstart_comes_back,
         )
 
     def probe(pid: int):
@@ -570,6 +599,42 @@ def _rig(
     # in tests/unit/test_update.py).
     monkeypatch.setattr(update_mod, "install_kind", lambda: InstallKind.UV_TOOL)
     return calls
+
+
+def test_mobile_skips_the_build_question_its_own_step_already_answers(
+    targets: dict[str, Target], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 at the unit level: the mobile daemon is not probed, let alone kicked.
+
+    ``update.refresh_mobile_after_upgrade`` bounces this daemon unconditionally right
+    after the refresh child, so the build question is already answered for it on the
+    same upgrade — and asking here would restart the phone relay twice. The probe in
+    this test INSISTS the build moved, so a repair that asked the question would
+    produce a kickstart and fail this.
+    """
+    module, path, render, _label = targets["mobile"]
+    _layout(
+        tmp_path,
+        monkeypatch,
+        running="20260921T125352Z-0.61.12",
+        current="20260924T103058Z-509c7450dbf6",
+    )
+    path.write_bytes(plistlib.dumps(render()))
+    before = path.read_bytes()
+    calls: list[tuple[str, ...]] = []
+    _patch_launcher(monkeypatch, module, calls, pid=_PIDS["mobile"])
+    monkeypatch.setattr(
+        update_mod,
+        "stale_generation_of_process",
+        lambda pid: tmp_path / "lop" / "generations" / "20260921T125352Z-0.61.12",
+    )
+
+    outcome = module.refresh_plist_if_stale()
+
+    assert outcome.kind == "current", outcome
+    assert outcome.summary() == ""
+    assert calls == [], calls
+    assert path.read_bytes() == before
 
 
 def test_a_current_plist_on_a_moved_build_is_restarted_exactly_once(
@@ -606,17 +671,23 @@ def test_a_current_plist_on_a_moved_build_is_restarted_exactly_once(
     assert calls["tunnel"] == [
         ("print", f"{domain}/{label}"),
         ("kickstart", "-k", f"{domain}/{label}"),
+        # THE CONFIRMATION (R3): the new pid has to come back before the line claims
+        # a move, so a successful restart costs one more read of the same question.
+        ("print", f"{domain}/{label}"),
     ], calls["tunnel"]
-    for name in ("mobile", "browser bridge", "wakes supervisor"):
+    for name in ("browser bridge", "wakes supervisor"):
         assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
+    # MOBILE IS NOT EVEN READ: its own step bounces it unconditionally on the same
+    # upgrade, so asking here would restart the phone relay twice (R4).
+    assert calls["mobile"] == [], calls["mobile"]
     for name, (_module, path, render, _label) in targets.items():
         assert plistlib.loads(path.read_bytes()) == render(), name
     captured = capsys.readouterr()
-    assert (
-        "tunnel daemon: restarted onto the install `current` points at "
-        f"(it was still running {running})"
-    ) in captured.out
     assert captured.err == ""
+    assert [line for line in captured.out.splitlines() if "daemon:" in line] == [
+        "tunnel daemon: restarted onto the new build (was on "
+        f"{running}) — remote access reconnects by itself"
+    ], captured.out
 
 
 def test_a_current_plist_on_a_current_build_is_only_read_not_bounced(
@@ -645,10 +716,11 @@ def test_a_current_plist_on_a_current_build_is_only_read_not_bounced(
     assert update_mod.daemons_refresh_command() == 0
 
     domain = launchd.job_domain()
-    for name, (_module, _path, _render, label) in targets.items():
-        assert calls[name] == [("print", f"{domain}/{label}")], (name, calls[name])
+    for name in ("browser bridge", "tunnel", "wakes supervisor"):
+        assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
+    assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
-    assert "restarted onto the install" not in captured.out
+    assert "restarted onto the new build" not in captured.out
     assert captured.err == ""
 
 
@@ -738,11 +810,57 @@ def test_a_daemon_that_is_not_running_is_never_kicked(
 
     assert update_mod.daemons_refresh_command() == 0
 
-    for name in targets:
+    for name in ("browser bridge", "tunnel", "wakes supervisor"):
         assert calls[name] == [("print", f"{launchd.job_domain()}/{targets[name][3]}")], (
             name,
             calls[name],
         )
+    assert calls["mobile"] == [], calls["mobile"]
+
+
+def test_a_restart_launchd_accepted_but_that_brought_nothing_up_is_not_a_move(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """THE EXIT CODE IS NOT EVIDENCE (review round 1, R3).
+
+    ``kickstart -k`` answers 0 when launchd ACCEPTS the request, and a daemon that dies
+    immediately afterwards — a generation that cannot start, a port already taken, a
+    shim that cannot resolve the pointer it names — still answers 0. Reporting "restarted
+    onto the new build" from that, which this did, would announce a daemon that is not
+    there, in the one line the operator has about the tunnel. The restart is confirmed
+    by a pid that actually CHANGED, and the shape that fails to produce one reports the
+    truth without claiming either a move or a stop.
+    """
+    moved = "20260921T125352Z-0.61.12"
+    calls = _rig(
+        targets,
+        tmp_path,
+        monkeypatch,
+        running=moved,
+        current="20260924T103058Z-509c7450dbf6",
+        moved_pid=_PIDS["tunnel"],
+        kickstart_comes_back=False,
+    )
+
+    assert update_mod.daemons_refresh_command() == 0
+
+    domain = launchd.job_domain()
+    label = targets["tunnel"][3]
+    # ONE kick, then a bounded wait that keeps reading until its deadline: the confirm
+    # loop is not a retry (no second ``kickstart`` appears here).
+    assert calls["tunnel"][0] == ("print", f"{domain}/{label}")
+    assert calls["tunnel"][1] == ("kickstart", "-k", f"{domain}/{label}")
+    assert [call[0] for call in calls["tunnel"][2:]] == ["print"] * len(calls["tunnel"][2:])
+    captured = capsys.readouterr()
+    assert "restarted onto the new build" not in captured.out
+    assert "warning: tunnel daemon was not refreshed:" in captured.err
+    assert "did not bring a new process up" in captured.err
+    assert moved in captured.err
+    assert _RECOVERY["tunnel"] in captured.err, captured.err
+    assert "STOPPED" not in captured.err, captured.err
 
 
 def test_a_refused_restart_is_reported_with_the_daemons_own_recovery_command(
@@ -786,6 +904,14 @@ def test_a_refused_restart_is_reported_with_the_daemons_own_recovery_command(
     assert moved in captured.err
     assert _RECOVERY["tunnel"] in captured.err, captured.err
     assert "STOPPED" not in captured.err, captured.err
+    # THE DESIGNER'S WORDING (design review round 1, D3): the distinguishing fact
+    # leads — this failure is not the pre-existing "the plist was rewritten and the
+    # daemon is STOPPED" one — and the purpose clause is the same verb the other
+    # build-move failure uses.
+    assert (
+        f"it was still on an older install ({moved}) and launchctl would not restart "
+        f"it — run `{_RECOVERY['tunnel']}` to move it onto this build"
+    ) in captured.err, captured.err
 
 
 def test_a_probe_that_raises_is_reported_and_never_escapes(
@@ -813,7 +939,8 @@ def test_a_probe_that_raises_is_reported_and_never_escapes(
 
     assert update_mod.daemons_refresh_command() == 0
 
-    for name in targets:
+    for name in ("browser bridge", "tunnel", "wakes supervisor"):
         assert [call[0] for call in calls[name]] == ["print"], (name, calls[name])
+    assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
     assert "warning: tunnel daemon was not refreshed: ps exploded" in captured.err

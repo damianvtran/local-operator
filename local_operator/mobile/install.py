@@ -1743,17 +1743,21 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
         if outcome.kind == "current":
-            # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
-            # shim, so its content is byte-identical across generations while a
-            # daemon started from an older one keeps serving it. See
-            # :func:`launchd.restart_if_build_moved`.
-            return launchd.restart_if_build_moved(
-                name=name,
-                label=LABEL,
-                path=path,
-                recovery="lop mobile install",
-                run=_launchctl,
-            )
+            # THE BUILD QUESTION IS DELIBERATELY NOT ASKED FOR THIS DAEMON (review
+            # round 1, R4). `update.refresh_mobile_after_upgrade` runs immediately
+            # after the refresh child and bounces this daemon UNCONDITIONALLY, through
+            # the new wheel's own `lop mobile restart` — so asking here as well would
+            # restart the phone relay twice in one upgrade and print two lines about
+            # it. Kept: the installer's own bounce, because it is the wheel-aware path
+            # with its own failure reporting and the phone-UI notice, and because
+            # removing it would be a change to what that step is for.
+            #
+            # WHAT THIS COSTS, stated rather than hidden: if that unconditional bounce
+            # fails, this repair does not act as its fallback. The failure is reported
+            # where it happens (`updated, but the mobile daemon did not restart — run
+            # lop mobile restart`), so the operator still gets a true line and the
+            # command that fixes it; what they lose is a second automatic attempt.
+            return outcome
         if outcome.kind != "repaired":
             return outcome
         # bootout + bootstrap through the shared helper, NOT kickstart -k:

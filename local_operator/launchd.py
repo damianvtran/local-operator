@@ -210,11 +210,21 @@ class PlistRefresh:
     the generation a ``restarted`` daemon was still running, launchd's own stderr
     on a ``failed`` rewrite. ``summary`` and ``warning`` are the two readers, and
     each uses the one that belongs to it.
+
+    ``consequence`` is the one clause a daemon's repair site adds about what the
+    operator may NOTICE, and only the tunnel has one to give: its restart is the
+    only one of the four a person can feel (remote access reconnects). It rides on
+    the outcome rather than in the shared sentence because it is per-daemon
+    knowledge — the repair site knows it and the shared template cannot — and it is
+    deliberately absent for a restart that could not be confirmed
+    (:func:`build_move_failure`), so it can never be printed over a move that did
+    not happen.
     """
 
     name: str
     kind: PlistRefreshKind
     detail: str = ""
+    consequence: str = ""
 
     def summary(self) -> str:
         """The upgrade-summary line, or ``""`` when there is nothing to say.
@@ -227,16 +237,24 @@ class PlistRefresh:
         THE ``restarted`` LINE IS A SECOND REPAIR and says the one thing the
         ``repaired`` line cannot: no unit was rewritten. The reader's question is
         "why did my tunnel bounce on an upgrade that changed nothing?", and the
-        answer is the generation the daemon was still running — which is what this
-        line carries.
+        answer is the generation the daemon was still running — so the line names
+        where it went and where it was.
+
+        THE WORDING IS THE DESIGNER'S (design review round 1, D1-D2), and each part
+        of it is deliberate: no backticked ``current`` (that reads as a command the
+        reader could run, and this is a concept); an em-dash for the consequence
+        clause, as the sibling summary lines use; and "the new build" rather than
+        the pointer's own vocabulary, because the generation id in the parentheses
+        only makes sense to someone who has read this module. It claims the daemon
+        was RESTARTED, never that it is now healthy or verified on the new build — a
+        restart launchd accepted but that brought no new process up is not reported
+        as this at all (:func:`build_move_failure`).
         """
         if self.kind == "repaired":
             return f"{self.name} daemon: refreshed a stale LaunchAgent and restarted it"
         if self.kind == "restarted":
-            return (
-                f"{self.name} daemon: restarted onto the install `current` points at "
-                f"(it was still running {self.detail})"
-            )
+            line = f"{self.name} daemon: restarted onto the new build (was on {self.detail})"
+            return f"{line} — {self.consequence}" if self.consequence else line
         return ""
 
     def warning(self) -> str:
@@ -294,26 +312,42 @@ def reload_failure(name: str, path: Path, recovery: str, error: str) -> PlistRef
     )
 
 
-def build_move_failure(name: str, recovery: str, stale: Path) -> PlistRefresh:
+def build_move_failure(name: str, recovery: str, stale: Path, *, why: str) -> PlistRefresh:
     """Outcome for a daemon whose BUILD had moved and could not be restarted.
 
     THE SECOND FAILURE SHAPE, and it deliberately does not borrow
     :func:`reload_failure`'s sentence. That one is about a plist this repair just
     REWROTE and a ``bootout`` that has already landed, so it may say the daemon is
-    STOPPED. Here nothing was written — the plist was already current — and a
-    refused ``kickstart`` does not tell us whether the job is still running the old
-    build or has stopped, so the honest line is the fact both cases share: it was
-    running an install that is not ``current``, and a command exists that fixes it.
+    STOPPED. Here nothing was written — the plist was already correct — and neither
+    failure below tells us whether the job is still on the old build or has stopped,
+    so the honest line is what both share: it WAS on an install that is not
+    ``current``, and a command exists that fixes it. Past tense throughout, on
+    purpose: "is still running" would claim something this code cannot see.
 
-    The reader of this line is deciding whether to touch anything, so it names that
-    command — same four strings, same reason, as :func:`reload_failure`.
+    ``why`` is what launchd's answer actually establishes, and it is a parameter
+    because there are two shapes (review round 1, R3):
+
+    * **the restart was refused** — ``kickstart -k`` answered non-zero, so nothing
+      was asked to happen;
+    * **the restart was accepted and brought no new process up** — the exit code was
+      0 and the re-probe found no new pid, which is a daemon that exited
+      immediately (a bad build, a port already taken, a shim that cannot resolve the
+      pointer). Reporting THAT as a successful restart is what R3 was about: this is a
+      separate sentence rather than the same one, because the operator's next move
+      is the same but the reason is not.
+
+    The reader of this line is deciding whether to touch anything, so it names the
+    command that fixes either shape — the same four strings, for the same reason, as
+    :func:`reload_failure`. The wording is the designer's (design review round 1,
+    D3): the distinguishing fact leads, and the recovery verb is "move it onto this
+    build" rather than a fourth purpose phrase.
     """
     return PlistRefresh(
         name=name,
         kind="failed",
         detail=(
-            f"it was running an older install ({stale.name}) and launchctl would not "
-            f"restart it — run `{recovery}` to bring it onto this build"
+            f"it was still on an older install ({stale.name}) and {why} "
+            f"— run `{recovery}` to move it onto this build"
         ),
     )
 
@@ -545,6 +579,46 @@ def _await_registration(
             return False, why
         _sleep(backoff)
         backoff = min(backoff * 2, _BOOTSTRAP_BACKOFF_CAP_S)
+
+
+#: How long a ``kickstart`` gets to show a NEW pid before this module reports that
+#: nothing came up. Short, and for the same reason :data:`_REGISTRATION_DEADLINE_S`
+#: is: this waits only for a replacement launchd has ALREADY started to become
+#: visible in a ``launchctl print``, not for a service to come up.
+_KICKSTART_PID_DEADLINE_S = 1.5
+
+#: The poll interval while waiting for that pid.
+_KICKSTART_PID_POLL_S = 0.05
+
+
+def _await_new_pid(
+    *, label: str, path: Path, previous: int, run: Callable[..., object]
+) -> int | None:
+    """The pid launchd reports once it DIFFERS from ``previous``, or ``None``.
+
+    THE CONFIRMATION :func:`kickstart` CANNOT GIVE (review round 1, R3). Its exit
+    code says launchd ACCEPTED the request — it kills and respawns — and a daemon
+    that dies immediately afterwards (a build that cannot start, a port already
+    taken, a shim that cannot resolve the pointer) still answers 0. Reporting
+    "restarted onto the new build" from the exit code alone would be the one kind of
+    claim this module's own principle forbids in the other direction: a fact asserted
+    from a probe that did not establish it (``None`` means no move; the mirror is
+    "no new process means no move").
+
+    Bounded and POLLED rather than a single read, for the measured reason
+    :func:`_await_registration` exists: launchd takes a moment to publish the pid of
+    a process it has just spawned, so one immediate ``print`` can still show the OLD
+    pid — or none — for a restart that is in fact happening. The first probe is
+    immediate, so the ordinary case costs one ``launchctl print``.
+    """
+    limit = _monotonic() + _KICKSTART_PID_DEADLINE_S
+    while True:
+        pid = job_pid(label=label, path=path, run=run)
+        if pid is not None and pid != previous:
+            return pid
+        if _monotonic() >= limit:
+            return None
+        _sleep(_KICKSTART_PID_POLL_S)
 
 
 def kickstart(*, label: str, path: Path, run: Callable[..., object]) -> bool:
@@ -1001,6 +1075,7 @@ def restart_if_build_moved(
     path: Path,
     recovery: str,
     run: Callable[..., object],
+    consequence: str = "",
 ) -> PlistRefresh:
     """THE SECOND STALENESS QUESTION: is the RUNNING daemon's build current?
 
@@ -1024,12 +1099,19 @@ def restart_if_build_moved(
         64865   wakes supervisor  …/generations/20260922T082114Z-aba13b8246fb/…
         67449   browser bridge    …/generations/20260923T114635Z-bfe5f78fbcf4/…
 
-    …two daemons on the current generation and two two-and-three generations
-    behind, with FOUR BYTE-IDENTICAL PLISTS. The consequence is why this was found
-    at all: a released fix (PR #1509, v0.62.22) could not reach the tunnel connector
-    until an explicit ``lop tunnel restart`` moved pid 1206 to pid 59435 — and the
-    generation pid 1206 had been serving was by then PRUNED, so that connector had
-    been importing from a deleted tree for three days.
+    (each line continues ``/tools/local-operator/bin/Local Operator -m <module>``,
+    elided for width). Two daemons on the current generation and two two-and-three
+    generations behind, with FOUR BYTE-IDENTICAL PLISTS. The consequence is why this
+    was found at all: a released fix (PR #1509, v0.62.22) could not reach the tunnel
+    connector until an explicit ``lop tunnel restart`` moved pid 1206 to pid 59435 —
+    and the generation pid 1206 had been serving was by then PRUNED, so that
+    connector had been importing from a deleted tree for three days.
+
+    THE IMAGE'S FULL SHAPE MATTERS TO A READER, because two paths in this layout look
+    plausible and only one is real: the generation's branded image is
+    ``<gen>/tools/local-operator/bin/Local Operator`` (what the shim prefers and what
+    ``ps`` shows), with that directory's ``python3`` as the shim's fallback. There is
+    no ``<gen>/bin/Local Operator``.
 
     WHAT IT ASKS. The pid launchd holds (:func:`job_pid`), then that process's own
     argv (:func:`local_operator.update.stale_generation_of_process`), and it acts
@@ -1074,11 +1156,42 @@ def restart_if_build_moved(
     again; a refused kickstart is reported (:func:`build_move_failure`) and never
     retried here; and the one shape that could ask again — a daemon that comes back
     on the old build anyway, i.e. a shim that did not resolve ``current`` — asks
-    once per upgrade, which is a report, not a cycle.
+    once per upgrade, which is a report, not a cycle. The confirmation below
+    (:func:`_await_new_pid`) does not change that: it is a second READ of the same
+    answer, never a second kick.
+
+    WHAT "THE BUILD MOVED" REALLY MEANS, stated precisely because the obvious
+    reading is wrong (review round 1, R2): the comparison is between generation
+    NAMES, so this fires when the daemon is not on the generation ``current`` names,
+    which is NOT the same as "the code changed". Two generations can carry the
+    identical build — measured on the operator's machine on this very date,
+    ``generations/20260923T033831Z-71e3e49a315a`` and
+    ``generations/20260924T102951Z-71e3e49a315a`` both record ``.lop-source``
+    ``71e3e49a315a…`` and ``local_operator-0.62.8`` — so re-installing the SAME
+    commit into a new generation moves every daemon, the tunnel included, with no
+    code change behind it.
+
+    THAT IS THE CONTRACT, deliberately, and the alternative was rejected knowingly.
+    The question this repair answers is "is the daemon on the generation ``current``
+    names?", because that is the state the incident needed and the only one that also
+    clears the pruned-tree exposure: a daemon can outlive the generation it started
+    from, and pid 1206 in the incident had been importing from a DELETED tree for
+    three days. A comparison by build stamp (``.lop-source``, or the installed
+    version) answers a narrower question and answers it WRONGLY in two live shapes:
+    it cannot read a generation that carries no source ref at all (a tree installed
+    from a wheel), and it would decline to move such a daemon even though a released
+    fix is sitting in ``current`` — the original defect, kept for the machines that
+    can only be repaired this way. What the name comparison costs is one reload per
+    daemon per POINTER MOVE rather than per build change; what the build comparison
+    costs is a machine where the repair silently cannot fire. The narrower rule is
+    the one for a repair that must not guess, and a same-build re-install onto a new
+    generation is still a move onto a tree that will outlive the old one.
 
     The addressability guard has already run inside :func:`job_pid`, so a ``False``
     from :func:`kickstart` here is launchd refusing the restart rather than this run
-    having no business touching the job.
+    having no business touching the job. ``consequence`` is the per-daemon notice
+    clause (:class:`PlistRefresh`); it rides onto the ``restarted`` outcome only, so a
+    move that could not be confirmed never prints it.
     """
     # Function-local, this module's habit for the one edge it has into `update`
     # (see `procname.supervised_image`): `update` imports `launchd` at module level,
@@ -1093,6 +1206,20 @@ def restart_if_build_moved(
     stale = update.stale_generation_of_process(pid)
     if stale is None:
         return PlistRefresh(name=name, kind="current")
-    if kickstart(label=label, path=path, run=run):
-        return PlistRefresh(name=name, kind="restarted", detail=stale.name)
-    return build_move_failure(name=name, recovery=recovery, stale=stale)
+    if not kickstart(label=label, path=path, run=run):
+        return build_move_failure(
+            name,
+            recovery,
+            stale,
+            why="launchctl would not restart it",
+        )
+    if _await_new_pid(label=label, path=path, previous=pid, run=run) is None:
+        # THE RESTART WAS ACCEPTED AND NOTHING CAME UP. The exit code is not evidence
+        # (R3): reporting this as a move would announce a daemon that is not there.
+        return build_move_failure(
+            name,
+            recovery,
+            stale,
+            why="the restart it accepted did not bring a new process up",
+        )
+    return PlistRefresh(name=name, kind="restarted", detail=stale.name, consequence=consequence)

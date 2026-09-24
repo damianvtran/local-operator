@@ -33,8 +33,11 @@ The repair that consumes this — one ``launchctl print``, one probe, at most on
 from __future__ import annotations
 
 import os
+import select
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -54,6 +57,17 @@ pytestmark = pytest.mark.skipif(
 #: spawned-and-reaped child, because a reaped pid can be REUSED and this test is
 #: about the answer for a pid that does not exist.
 _UNUSED_PID = 1 << 30
+
+#: How long the live child gets to announce that its own ``execve`` landed.
+#: Generous, because the announcement is what removes the race rather than a shorter
+#: sleep being "usually enough": a loaded runner may take seconds to exec a fresh
+#: interpreter, and this is a bound on waiting, not a delay in the run.
+_EXEC_ANNOUNCEMENT_DEADLINE_S = 30.0
+
+#: The image inside a generation, exactly as the shipped shim prefers it and as
+#: ``ps -o args=`` shows it. Spelled once here so the live test and the mechanism
+#: test cannot drift into two shapes of the same path.
+_GENERATION_IMAGE = ("tools", "local-operator", "bin", "Local Operator")
 
 #: The four supervised daemons' real argv SHAPES, captured with
 #: ``ps -o pid=,ppid=,args=`` on the operator's machine 2026-09-24 (only the home
@@ -104,30 +118,78 @@ def test_the_generation_is_read_from_the_first_field_of_a_live_argv(
 def test_a_real_process_reports_the_generation_it_was_executed_from(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """END TO END THROUGH THE REAL ``ps``: a probe that never calls it cannot pass.
+    """END TO END THROUGH THE REAL ``ps``, SYNCHRONISED on the child's own exec.
 
-    The child is ``sys.executable`` executed with a generation path as ``argv[0]``,
-    which is exactly the shape the shim produces (``exec "$gen/…/bin/Local
-    Operator" "$@"``), so this reads a live process the way the repair does on a
-    real machine. The generation directory deliberately does not exist: the argv is
-    a claim about what was EXECUTED, and a pruned generation is the incident this
-    whole change came from.
+    WHY THE ANNOUNCEMENT IS NOT DECORATION (review round 1, R1; QA Q1). ``Popen``
+    returns as soon as the child is FORKED, and its ``execve`` lands afterwards. In
+    that window the child's argv — what ``/proc/<pid>/cmdline`` and therefore
+    ``ps -o args=`` report — is still the PARENT'S, and a parent's command line
+    names no generation, so an unsynchronised probe answers ``None`` for a child
+    that is about to be perfectly readable. That is how this test failed on a loaded
+    Linux CI runner twice (``test (3.12, 4)``) while never losing the race here
+    (0/200 immediate probes). The window is reproduced deterministically in
+    ``test_a_child_that_has_not_exec_d_yet_reports_its_parents_argv``.
+
+    So the child says so itself: the ``-c`` code writes a byte to a pipe from INSIDE
+    the exec'd image, and this reads it before asking ``ps`` anything. That is the
+    only synchronisation — no sleep that merely has to be "long enough".
+
+    The generation directory deliberately does not exist, and the child is
+    ``sys.executable`` executed with a generation path as ``argv[0]``: the argv is a
+    claim about what was EXECUTED, and a PRUNED generation (the state pid 1206 was
+    serving for three days) is exactly what must still be readable.
     """
     root = _layout(tmp_path, monkeypatch)
     generation = "20260924T103058Z-509c7450dbf6"
-    argv0 = str(root / "generations" / generation / "tools" / "local-operator" / "bin" / "Local")
+    argv0 = str(root / "generations" / generation / Path(*_GENERATION_IMAGE))
 
-    child = subprocess.Popen(  # noqa: S603 — a fixed argv, and this test's own child
-        [argv0, "-c", "import time; time.sleep(30)"],
-        executable=sys.executable,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    read_fd, write_fd = os.pipe()
+    child: subprocess.Popen | None = None
     try:
+        code = f"import os, time; os.write({write_fd}, b'1'); time.sleep(60)"
+        child = subprocess.Popen(  # noqa: S603 — a fixed argv, and this test's own child
+            [argv0, "-c", code],
+            executable=sys.executable,
+            pass_fds=(write_fd,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        readable, _, _ = select.select([read_fd], [], [], _EXEC_ANNOUNCEMENT_DEADLINE_S)
+        assert readable, "the child never announced that its exec landed"
+        assert os.read(read_fd, 1) == b"1"
         assert update_mod.generation_of_process(child.pid) == root / "generations" / generation
     finally:
-        child.kill()
-        child.wait(timeout=10)
+        os.close(read_fd)
+        os.close(write_fd)
+        if child is not None:
+            child.kill()
+            child.wait(timeout=10)
+
+
+def test_a_child_that_has_not_exec_d_yet_reports_its_parents_argv() -> None:
+    """THE WINDOW THE TEST ABOVE SYNCHRONISES AROUND, made deterministic.
+
+    ``fork`` copies the parent's command line into the child, and it stays there
+    until ``execve`` replaces it — so between ``Popen`` returning and the exec
+    landing, ``ps -o args=`` describes the PARENT. Forking without exec'ing
+    reproduces that state exactly, on every platform, and the reading below is the
+    same one that returned ``None`` on the runner.
+
+    This is also why the assertion in the live test is not "a sleep long enough for
+    the exec": the only sound signal is the child's own announcement.
+    """
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover — the child; it never returns into pytest
+        time.sleep(5)
+        os._exit(0)
+    try:
+        # The same command line, byte for byte: the fork copied it, and no exec has
+        # replaced it.
+        assert update_mod._process_argv(pid) == update_mod._process_argv(os.getpid())
+        assert update_mod.generation_of_process(pid) is None
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
 
 
 @pytest.mark.parametrize(
@@ -320,3 +382,40 @@ def test_no_pointer_and_a_dangling_pointer_are_both_no_move(
 
     (root / "current").symlink_to(root / "generations" / "20260101T000000Z-gone")
     assert update_mod.stale_generation_of_process(1234) is None
+
+
+def test_a_chained_pointer_still_names_the_generation_it_reaches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pointer through a LINK is the same pointer (review round 1, QA Q3).
+
+    ``current_generation`` answers with what the link NAMES, so a chained pointer
+    (``current`` -> ``gen-link`` -> ``generations/<id>``) hands back the LINK, whose
+    name is not a generation. Compared raw, that made every daemon read as stale —
+    four reloads per upgrade, the tunnel included — for a pointer that names exactly
+    the generation the daemons are on. The comparison resolves the pointer first,
+    which is a no-op for the one-hop shape the shipped writer produces
+    (``flip_pointer`` replaces the link with ``os.rename``).
+    """
+    root = _layout(tmp_path, monkeypatch, "20260101T000000Z-old", "20260202T000000Z-new")
+    (root / "gen-link").symlink_to(root / "generations" / "20260202T000000Z-new")
+    (root / "current").symlink_to(root / "gen-link")
+
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda pid: _argv(root, "20260202T000000Z-new", "-m", "local_operator.tunnels.service"),
+    )
+    # The daemon IS on the generation the chain reaches, so there is nothing to do.
+    assert update_mod.stale_generation_of_process(1234) is None
+
+    # …and a daemon on a different generation is still stale THROUGH the chain, so
+    # the fix cannot have been "resolve everything to nothing".
+    monkeypatch.setattr(
+        update_mod,
+        "_process_argv",
+        lambda pid: _argv(root, "20260101T000000Z-old", "-m", "local_operator.tunnels.service"),
+    )
+    assert update_mod.stale_generation_of_process(1234) == (
+        root / "generations" / "20260101T000000Z-old"
+    )
