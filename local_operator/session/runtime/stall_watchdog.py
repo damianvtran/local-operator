@@ -932,6 +932,15 @@ def min_bound_seconds() -> float:
 #: short enough that "overdue" and "fires now" are the same thing to a reader.
 MIN_REARM_S = 0.05
 
+#: How often the sampler looks while a runtime has registered an evidence callback
+#: (:func:`notify_on_evidence_signal`). That callback is the route by which the
+#: runtime's own ``SIGUSR1`` action is reached once Python can run again, and the
+#: notification is an OBSERVATION of the dump file rather than a signal — so this is
+#: the latency an operator's ``kill -USR1`` waits for the runtime's half of the
+#: evidence. Well under the 15 s heartbeat because it is a person waiting, and paid
+#: only by a process that registered a listener.
+EVIDENCE_POLL_S = 1.0
+
 #: How many times one window is LOOKED AT, which is the leg's resolution and
 #: nothing more: the decision is a claim about the trailing window (see
 #: :data:`PROGRESS_CPU_FLOOR`), so the look count gates nothing and a run of two
@@ -1218,6 +1227,8 @@ class _Armed:
         "due_at",
         "due_seconds",
         "registered_signal",
+        "evidence_size",
+        "evidence_callbacks",
         "held_fires",
         "after_fire_at",
         "fired_held",
@@ -1375,9 +1386,19 @@ class _Armed:
         #: from a steady-bound one (see ``HOW_TO_READ_THE_FIRED_VALUE``).
         self.due_seconds = seconds
         #: The signal ``arm`` registered for the out-of-process leg, or ``None`` where
-        #: the platform has no ``SIGUSR1``. Kept so ``disarm`` takes down exactly what
-        #: this process installed (see :func:`_register_evidence_signal`).
+        #: the platform has no ``SIGUSR1``. Kept so a reader can answer "is this process
+        #: reachable by signal" — NEVER so it can be unregistered: see
+        #: :func:`_register_evidence_signal` on why nothing here touches the slot again.
         self.registered_signal: int | None = None
+        #: The dump file's size as of the last look that could tell a signal dump apart
+        #: (:func:`_note_evidence_dump`) — separate from ``arm_size``, which the held-fire
+        #: policy re-baselines, so an observation here cannot disturb that policy.
+        self.evidence_size = _dump_size(path)
+        #: Who to tell when a dump this module did not write lands — see
+        #: :func:`notify_on_evidence_signal`.
+        #: A list rather than one callable, because registration is append-only and a
+        #: second caller must not silently replace the first.
+        self.evidence_callbacks: list[Callable[[], object]] = []
         #: How many fires this arm has already ANNOTATED. A counter rather than a flag
         #: because a runtime can survive several: each held fire re-arms for the next
         #: episode, and a second one must be recorded too rather than swallowed by the
@@ -2191,26 +2212,22 @@ def _register_evidence_signal(armed: "_Armed") -> None:
     inherit this leg; a child that forks WITHOUT exec inherits both the handler and
     the descriptor, which this side cannot prevent.
 
-    THE ONE WAY IT IS INSTALLED, AND THE GAP THAT LEAVES (measured, with the numbers):
-    :func:`arm` registers it. ``process.amain`` then installs its own ``SIGUSR1``
-    handler on the loop (``LOP_RUNTIME_DEBUG_STACKS``, on by default), and a signal has
-    one sigaction slot, so THAT one is the live handler and this leg is shadowed for the
-    rest of a live runtime's life. Re-registering on top of it was implemented and
-    MEASURED TO SEGFAULT the runtime child — ``faulthandler.unregister`` restores the
-    handler saved at arm time (default/``SIG_IGN``) rather than the loop's, and the
-    re-registered chain then faults inside signal handling: a real armed runtime child,
-    spawned by ``launch._spawn_runtime``, died ``rc=-11`` on the first ``SIGUSR1`` that
-    the suite's own readiness probe sent, with ``Fatal Python error: Segmentation fault``
-    and no frames (killing the diagnostic that was meant to explain the stall). So this
-    leg is reachable on a runtime that never installs a loop handler, or while
-    ``LOP_RUNTIME_DEBUG_STACKS=0``, and NOT on the default live runtime.
-    THE FIX NEEDS A DECISION, not another attempt: either the loop's handler routes its
-    evidence through this module's registration, or this leg moves to a signal nothing
-    else owns (``SIGUSR2`` is free but its default disposition is fatal, which the
-    registry's own comment rejects for a mixed-version fleet), or the chain path is
-    debugged at the CPython level. The class this leg exists for — no Python running at
-    all — is currently uncovered on a live runtime, and this paragraph is here so that
-    is a stated gap rather than an assumed capability.
+    WHY NOTHING ELSE MAY REGISTER ``SIGUSR1``, AND WHY THERE IS NO CHAIN (measured, not
+    preferred): a signal has one sigaction slot. An earlier revision had the runtime
+    re-register this leg on top of its own loop handler with ``chain=True`` so both
+    dumps happened; on a real armed runtime child that SEGFAULTED (``rc=-11``, "Fatal
+    Python error: Segmentation fault", no frames) because ``faulthandler``'s chain
+    re-raises against the handler it SAVED, and ``unregister`` restores that saved
+    disposition rather than the live one. So this module registers ONCE, with
+    ``chain=False``, and NEVER calls ``unregister`` — see the disarm comment for the
+    second half of that rule. A diagnostic that can crash a runtime is worse than a
+    diagnostic that is missing.
+
+    THE RUNTIME'S OWN WALK IS NOT LOST WITH THE SLOT: it is reached from the same signal
+    by :func:`notify_on_evidence_signal`, which fires when the module's sampler sees a
+    dump it did not write land in its own file. That is the callback route, it needs no
+    sigaction at all, and it is why ``process.amain`` no longer installs a handler for
+    this signal.
 
     Never raises: a diagnostic that cannot install its own leg must leave the
     runtime otherwise untouched.
@@ -2220,27 +2237,53 @@ def _register_evidence_signal(armed: "_Armed") -> None:
         # Windows: no SIGUSR1, so no out-of-process leg there.
         return
     try:
-        faulthandler.register(signum, file=armed.handle, all_threads=True, chain=True)
+        faulthandler.register(signum, file=armed.handle, all_threads=False, chain=False)
     except (OSError, RuntimeError, ValueError):
         logger.warning("stall watchdog could not register its evidence signal", exc_info=True)
         return
     armed.registered_signal = signum
 
 
-def _unregister_evidence_signal(signum: int | None) -> None:
-    """Take the out-of-process leg down, restoring whatever handler preceded it.
+def notify_on_evidence_signal(callback: "Callable[[], object]") -> None:
+    """Ask to be told when a dump this module did NOT write lands in its own file.
 
-    PART OF A CLEAN EXIT, so it never raises: a disarmed runtime that left this
-    handler installed would answer a stray ``SIGUSR1`` by writing a dump into a file
-    ``disarm`` has just removed, and would hold a registration the next arm's
-    predecessor chain still points at.
+    WHAT THIS IS FOR, and why it is not a signal handler: the runtime has its own
+    ``SIGUSR1`` action (the ``LOP_RUNTIME_DEBUG_STACKS`` asyncio task-chain walk, which
+    must run on the loop). This module owns the signal's slot, and a C signal handler
+    cannot both dump and run Python — so the notification is delivered by the module's
+    SAMPLER, which is Python and already awake on a cadence, and the caller decides what
+    to do with it (the runtime uses ``loop.call_soon_threadsafe``, so its walk is
+    scheduled on the loop and never runs in signal context).
+
+    WHEN PYTHON CANNOT RUN THE CALLBACK DOES NOT RUN EITHER, and that is the honest
+    shape of it: this route is additive, never a substitute. The dump has already been
+    written by then — that is the leg's whole point — and this is what recovers the
+    runtime's own action once Python is running again.
+
+    Callbacks are called from the sampler thread and never under :data:`_LOCK`; one that
+    raises is logged and dropped rather than allowed to end the sampler, because this is
+    a diagnostic hook and a caller's bug must not take the reporter down.
     """
-    if signum is None:
-        return
-    try:
-        faulthandler.unregister(signum)
-    except (OSError, RuntimeError, ValueError):
-        logger.debug("stall watchdog could not unregister its evidence signal", exc_info=True)
+    with _LOCK:
+        armed = _ARMED
+        if armed is None:
+            return
+        armed.evidence_callbacks.append(callback)
+
+
+def _note_evidence_dump(armed: "_Armed") -> bool:
+    """True when the dump file grew by something this module did not write.
+
+    THE SAME PAIRING THE HELD-FIRE DETECTOR USES, and for the same reason: growth alone
+    cannot tell a foreign dump from this module's own lines, but growth WITHOUT a new
+    ``Timeout (`` count can — a fire always writes that line and a signal dump never
+    does. The watermark advances here either way, so one dump notifies once.
+    """
+    size = _dump_size(armed.path)
+    if size < 0 or size <= armed.evidence_size:
+        return False
+    armed.evidence_size = size
+    return _fired_count(armed.path) <= armed.seen_fires
 
 
 def _format_timeout(seconds: float) -> str:
@@ -3009,6 +3052,8 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
             # the lock and CALLED outside it, then the armed-ness is re-checked after
             # the unlocked section rather than trusted from before it (that section can
             # take arbitrarily long, and ``disarm`` can run inside it).
+            due = False
+            notified = False
             with _LOCK:
                 if _ARMED is not armed:
                     return
@@ -3047,6 +3092,16 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
                 # ``_sample_interval`` is ``bound / PROGRESS_SAMPLES_PER_WINDOW`` capped
                 # at the heartbeat — where the C timer expired exactly on time.
                 interval = min(interval, max(MIN_REARM_S, armed.due_at - time.monotonic()))
+                if armed.evidence_callbacks:
+                    # AND IT FOLLOWS A REGISTERED EVIDENCE CALLBACK TOO, because that
+                    # callback is how the runtime's own SIGUSR1 action is reached now
+                    # (:func:`notify_on_evidence_signal`): the notification is an
+                    # observation of the dump file, so this cadence bounds how long an
+                    # operator's signal waits for the runtime's half of the evidence.
+                    # Only while somebody is listening, so a runtime that registers
+                    # nothing pays nothing.
+                    interval = min(interval, EVIDENCE_POLL_S)
+                notified = _note_evidence_dump(armed)
                 # BEFORE the sample, and in this order: a fire that landed since the
                 # last wake is recorded and re-armed on the same pass, only then is the
                 # exit leg applied — so a flip made while the timer was pending is in
@@ -3063,6 +3118,17 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
                 # above runs FIRST, so a fire this process already wrote is annotated and
                 # re-armed before this line can fire on the same episode twice.
                 due = time.monotonic() >= armed.due_at
+            if notified:
+                # OUTSIDE THE GATE, and on the sampler's own thread: the runtime's
+                # callback schedules its work on the loop (``call_soon_threadsafe``),
+                # which must not happen while a beat is waiting for this gate. A listener
+                # that raises is logged and dropped — see the docstring of
+                # :func:`notify_on_evidence_signal`.
+                for callback in list(armed.evidence_callbacks):
+                    try:
+                        callback()
+                    except Exception:  # noqa: BLE001 — a diagnostic hook is not a control path
+                        logger.warning("stall watchdog: an evidence callback raised", exc_info=True)
             if due:
                 _fire(armed, time.monotonic())
                 continue
@@ -3241,13 +3307,13 @@ def disarm() -> None:
         _ARMED = None
         if armed is None:
             return
-        # NO CANCEL ANY MORE: there is no C timer to cancel, and that call was half of
-        # the deadlock this module's docstring measures — it parked the calling thread
-        # while holding the GIL, waiting for a dump in flight. The SIGNAL leg is what
-        # goes instead, so a disarmed runtime neither leaves a handler writing into a
-        # file this call is about to remove nor holds a registration the next arm's
-        # predecessor chain still points at.
-        _unregister_evidence_signal(armed.registered_signal)
+        # NO CANCEL AND NO UNREGISTER ANY MORE, and both omissions are deliberate: there
+        # is no C timer to cancel (see the module docstring), and
+        # ``faulthandler.unregister`` restores the disposition SAVED at arm time rather
+        # than the live one — the measured segfault :func:`_register_evidence_signal`
+        # records. The signal leg is left installed: it would write into a file this call
+        # is unlinking (so a stray signal after a clean exit produces nothing a reader can
+        # find) and it dies with the process, which is the only moment it needs to.
         try:
             armed.handle.close()
         except OSError:
