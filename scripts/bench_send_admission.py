@@ -58,7 +58,13 @@ process this script starts is killed by exact pid at exit.
       .venv/bin/python scripts/bench_send_admission.py --condition roster --lanes 12 --probes 8
 
 Wall figures are observations on a shared host; compare arms interleaved on the
-same host, and read ``loop_lag`` and the child's CPU beside them.
+same host, and read ``loop_lag`` and the child's CPU beside them. The committed
+driver for that is ``scripts/bench_send_admission_ab.sh``: it runs THIS rig over
+each arm's tree (``BENCH_SEND_TREE``) and rejects a report whose recorded import
+(``imported`` in the JSON) is not the arm it was labelled as. A probe that times
+out is kept as a censored row (``timed_out``, its wait as a lower bound) rather
+than aborting the run, and a tail is reported as ``p95`` only at n >= 20 —
+below that it is the ``max``.
 """
 
 from __future__ import annotations
@@ -76,7 +82,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-REPO = Path(__file__).resolve().parents[1]
+#: The source tree to MEASURE. Defaults to the tree this script sits in; an A/B
+#: points ``BENCH_SEND_TREE`` at the other arm's checkout so both arms run the
+#: SAME rig over different product code (the base ref predates this script).
+#: The child inherits the variable, so parent and runtime import the same tree,
+#: and every report records what was really imported (``_tree_identity``).
+REPO = Path(os.environ.get("BENCH_SEND_TREE") or Path(__file__).resolve().parents[1]).resolve()
 sys.path.insert(0, str(REPO))
 
 if not os.environ.get("LOCAL_OPERATOR_CONFIG_DIR"):
@@ -417,6 +428,10 @@ async def _child_main(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The viewer-side hops a censored (timed-out) probe carries as lower bounds.
+_VIEWER_KEYS = ("admit_ms", "echo_ms", "start_ms", "token_ms")
+
+
 def _first_word(message: Any) -> str:
     """The probe tag a user message leads with; "" for a non-text message."""
     words = str(getattr(message, "text", "") or "").split()
@@ -432,6 +447,12 @@ def _pipeline_tag(args: Any) -> str:
     return ""
 
 
+#: Below this many samples a "p95" is just the maximum (``int(0.95 * n)`` is the
+#: last index for n < 20), so the tail is reported only as ``max`` — review
+#: round 1 (F4) caught a table whose p95 and max columns were always equal.
+_MIN_N_FOR_P95 = 20
+
+
 def _pcts(values: list[float]) -> dict[str, float]:
     if not values:
         return {}
@@ -440,13 +461,55 @@ def _pcts(values: list[float]) -> dict[str, float]:
     def at(q: float) -> float:
         return round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 1)
 
-    return {"p50": at(0.5), "p95": at(0.95), "max": round(ordered[-1], 1), "n": len(ordered)}
+    out = {"p50": at(0.5), "max": round(ordered[-1], 1), "n": len(ordered)}
+    if len(ordered) >= _MIN_N_FOR_P95:
+        out["p95"] = at(0.95)
+    return out
 
 
 def _child_env() -> dict[str, str]:
+    """The runtime child's environment: stripped of live-pane families, and GATED.
+
+    The child is a real runtime that finishes real turns, so without
+    ``NO_NOTIFY_ENV`` it can put the paced stream's text on the operator's lock
+    screen (and a resume click could launch the desktop app). The strip does not
+    remove the gate, but this mapping is BUILT, so it must carry the gate itself
+    rather than hope the ambient environment did (QA round 1, Q1-1;
+    ``tests/unit/test_notification_isolation.py`` sweeps for this).
+    """
+    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+    from local_operator.tui.resume_click import DESKTOP_LAUNCH_REFUSED_ENV
+
+    NO_NOTIFY_ENV = {ENV_DISABLE: ENV_DISABLE_VALUE, DESKTOP_LAUNCH_REFUSED_ENV: "1"}
     env = {k: v for k, v in os.environ.items() if not k.startswith(("LOP_", "CMUX_", "XPC_FLAGS"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.update(NO_NOTIFY_ENV)
     return env
+
+
+def _tree_identity() -> dict[str, str]:
+    """Which source tree this run actually imported, recorded in every report.
+
+    ``sys.path.insert(0, REPO)`` above means the script ALWAYS measures the tree
+    it sits in, whatever ``PYTHONPATH`` says. Review round 1 (F3) lost an A/B to
+    exactly that: the "base" arm ran the head's copy with ``PYTHONPATH`` pointed
+    at base, and measured head against head. Recording the imported file and the
+    tree's commit makes a mislabelled arm visible in the JSON instead of in a
+    traceback, and ``scripts/bench_send_admission_ab.sh`` checks it.
+    """
+    import local_operator
+
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**_child_env(), "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"},
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        sha = ""
+    return {"tree": str(REPO), "sha": sha or "unknown", "module": str(local_operator.__file__)}
 
 
 async def _wait_record(timeout: float = 60.0) -> Any:
@@ -521,18 +584,39 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         viewer.subscribe(on_event)
         # Let the lanes get going: the point is a probe against a BUSY loop.
         await asyncio.sleep(args.settle)
-        rows: list[dict[str, float]] = []
+        rows: list[dict[str, Any]] = []
         for index in range(args.probes):
-            while viewer.is_streaming:
+            idle_by = time.monotonic() + args.probe_deadline
+            while viewer.is_streaming and time.monotonic() < idle_by:
                 await asyncio.sleep(0.02)
             await asyncio.sleep(args.gap)
             tag = f"probe-{index}"
             since = len(seen)
             t0 = time.perf_counter()
-            await viewer.prompt(tag + " hello")
+            try:
+                await viewer.prompt(tag + " hello")
+            except (TimeoutError, ConnectionError) as exc:
+                # CENSOR, do not abort. Under heavy load the base arm misses the
+                # 15 s owner ack (``OwnerAckTimeout``) in exactly the cell that
+                # matters, and aborting made that arm unmeasurable (review round
+                # 1, F4). The row keeps the wait it took as a LOWER bound on every
+                # hop and says so; summaries count it rather than drop it.
+                waited = (time.perf_counter() - t0) * 1000
+                rows.append(
+                    {
+                        "t0": t0,
+                        "tag": index,
+                        "timed_out": True,
+                        "error": type(exc).__name__,
+                        **{key: waited for key in _VIEWER_KEYS},
+                    }
+                )
+                if not getattr(viewer, "connected", True):
+                    break
+                continue
             admitted = time.perf_counter()
-            row: dict[str, float] = {"t0": t0, "admit_ms": (admitted - t0) * 1000}
-            deadline = time.monotonic() + 60
+            row: dict[str, Any] = {"t0": t0, "admit_ms": (admitted - t0) * 1000}
+            deadline = time.monotonic() + args.probe_deadline
             while time.monotonic() < deadline:
                 window = seen[since:]
                 echo = next((s for s in window if s[0] == "echo" and s[1] == tag), None)
@@ -548,7 +632,14 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
                         row["token_ms"] = (delta[2] - t0) * 1000
                         break
                 await asyncio.sleep(0.005)
-            row["tag"] = index  # type: ignore[assignment]
+            else:
+                # Admitted but never echoed/started inside the deadline: the same
+                # censoring as an ack timeout, for the hops that did not arrive.
+                waited = (time.perf_counter() - t0) * 1000
+                row["timed_out"] = True
+                for key in ("echo_ms", "start_ms", "token_ms"):
+                    row.setdefault(key, waited)
+            row["tag"] = index
             rows.append(row)
         await viewer.dispose()
     finally:
@@ -578,7 +669,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
                 }.get(kind)
                 if key and key not in row:
                     row[key] = (ts - row["t0"]) * 1000
-    summary = {
+    summary: dict[str, Any] = {
         key: _pcts([r[key] for r in rows if key in r])
         for key in (
             "rpc_ms",
@@ -593,7 +684,9 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
             "token_ms",
         )
     }
+    summary["timed_out"] = sum(1 for r in rows if r.get("timed_out"))
     return {
+        "imported": _tree_identity(),
         "condition": args.condition,
         "lanes": args.lanes if args.condition != "idle" else 0,
         "roster": args.roster if args.condition == "roster" else 0,
@@ -620,6 +713,12 @@ def main() -> int:
     parser.add_argument("--probes", type=int, default=8)
     parser.add_argument("--gap", type=float, default=0.3, help="idle gap before each probe")
     parser.add_argument("--settle", type=float, default=3.0)
+    parser.add_argument(
+        "--probe-deadline",
+        type=float,
+        default=60.0,
+        help="seconds a probe may wait for its echo/start before it is recorded as timed out",
+    )
     parser.add_argument("--sample", action="store_true", help="stack-sample the runtime loop")
     parser.add_argument("--json", default="")
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)

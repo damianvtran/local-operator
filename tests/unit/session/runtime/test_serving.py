@@ -2694,12 +2694,14 @@ async def test_a_burst_of_root_events_costs_one_roster_pass() -> None:
     comms = _CountingComms()
     session._subagent_comms = comms  # type: ignore[attr-defined]
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
-    handle.subscribe(lambda: None)
+    projections: list[int] = []
+    handle.subscribe(lambda: projections.append(comms.passes))
     comms.passes = 0  # the attach seed is a deliberate, separate pass
 
     for _ in range(50):
         session.emit(NoticeEvent(text="tick", kind="info"))
     assert comms.passes == 0, "the per-event path must not walk the registry inline"
+    projections.clear()
 
     # Wait on the coalescer's own flag rather than a sleep sized to the window.
     for _ in range(200):
@@ -2707,6 +2709,13 @@ async def test_a_burst_of_root_events_costs_one_roster_pass() -> None:
             break
         await asyncio.sleep(serving_mod._ROSTER_REFRESH_COALESCE_S / 5)
     assert comms.passes == 1, f"a burst must fold into ONE pass, saw {comms.passes}"
+    # The deferred pass must also be PUBLISHED: it is what carries a quiet
+    # session's final roster to the phone and desktop. Review round 1 (F2)
+    # turned the flush's ``_notify()`` into ``pass`` and 727 tests stayed
+    # green; a projection callback that observed the pass is what was missing.
+    assert (
+        projections and projections[-1] == 1
+    ), "the deferred roster pass was folded but never published to the viewer"
 
 
 @pytest.mark.asyncio

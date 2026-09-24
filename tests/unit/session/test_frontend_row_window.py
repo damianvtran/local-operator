@@ -1665,3 +1665,35 @@ async def test_the_flush_records_the_cost_the_next_schedule_reads(tmp_path: Path
     assert getattr(session, "_frontend_jobs_last_cost_s", 0.0) == 0.0
     session._flush_frontend_jobs()
     assert session._frontend_jobs_last_cost_s > 0.0
+
+
+@pytest.mark.asyncio
+async def test_the_schedule_spaces_the_next_tick_by_the_recorded_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The WIRING, not the formula: ``_schedule_frontend_jobs`` must hand
+    ``call_later`` the delay the last tick's cost earns. Review round 1 (F1)
+    replaced that argument with a fixed ``0.05`` and the suite stayed green,
+    because the two tests above pin the pure function and the recorder but
+    nothing read the value back at the one call site that spends it."""
+    from local_operator.session import session as session_module
+
+    session = _real_session(tmp_path)
+    session._frontend_state_store.subscribe(lambda _update: None)
+    loop = asyncio.get_running_loop()
+    delays: list[float] = []
+    real_call_later = loop.call_later
+
+    def spy(delay: float, callback: Any, *args: Any, **kwargs: Any) -> asyncio.TimerHandle:
+        if getattr(callback, "__func__", None) is type(session)._flush_frontend_jobs:
+            delays.append(delay)
+        return real_call_later(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "call_later", spy)
+    session._frontend_jobs_last_cost_s = 0.06
+    session._schedule_frontend_jobs()
+    session._frontend_jobs_refresh_scheduled = False  # the tick is not what is under test
+
+    expected = session_module._frontend_jobs_delay(0.06)
+    assert expected > session_module._FRONTEND_JOBS_FLOOR_S, "the fixture must earn a longer gap"
+    assert delays == [pytest.approx(expected)]
