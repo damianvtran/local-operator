@@ -37,6 +37,26 @@ failure names the guard that dropped the card rather than a theory about one.
 * **E — the answered-key latch against a second question.** The second question
   of one ask still resurfaces. See
   :func:`test_a_second_question_in_the_same_ask_resurfaces_across_a_switch`.
+* **F — an answer that never reached the owner.** The receipt is lifted and the
+  operator is told once. See
+  :func:`test_an_answer_that_never_reached_the_owner_writes_no_receipt`.
+* **G — the same stop on a SIDEBAR-LEASED source.** The viewer contract carries
+  ``_can_go_cold``, so ``can_ever_bind`` is true on every switched-to session
+  and the first version of this guard could never fire there. See
+  :func:`test_a_sidebar_leased_source_whose_owner_was_stopped_offers_no_card`.
+* **H — a stopped session that comes back.** The stop term must lift on the
+  successor's sync, or the guard would refuse a live question. See
+  :func:`test_a_session_restarted_after_its_stop_still_surfaces_a_new_gate`.
+* **I — the band over a returned card.** It yields to the card, in the muted
+  ink, and stops instructing once the card is answered. See
+  :func:`test_the_band_yields_to_a_returned_card_and_stops_when_it_is_answered`.
+* **J — the undelivered channel's discriminators.** A refusal and a superseded
+  race are not delivery failures, and a retraction is tied to the reply that
+  failed. See the three ``test_a_refused_answer_is_not_reported_as_undelivered``
+  / ``…_superseded_race…`` / ``…_retracted_receipt…`` cases.
+* **K — the undelivered notice's copy and its retirement.** One row at 60
+  columns, and gone when the card is answerable again. See
+  :func:`test_the_undelivered_notice_fits_one_row_and_is_retired`.
 
 THE THREE ROUTES BACK FOR A DETACHED BRIDGE, since every case above is about
 one of them:
@@ -75,6 +95,7 @@ import pytest
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.session.attached import AttachedSession
 from local_operator.session.catalog import CatalogEntry, SessionRow
+from local_operator.session.errors import OperatorAuthorityRequired
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
@@ -997,8 +1018,8 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
     use.
 
     TWO HALVES, BOTH ASSERTED, because either alone is a lie: the false record is
-    GONE, and the operator is TOLD — once — in the register the composer already
-    refuses in (``_unavailable_notice``).
+    GONE, and the operator is TOLD — once — in the sentence that names the
+    outcome (``_gate_reply_undelivered_text``).
 
     WHAT IS FAKED, AND WHAT IS NOT. The runtime, the owner, its gate, the card,
     the keystroke, the swallow arms and the notice are all real. Only the
@@ -1099,12 +1120,805 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                         "an undelivered answer must be said exactly once, in the "
                         "unavailable-until-connected register" + diagnosis
                     )
-                    assert "unavailable until connected" in undelivered[0] or (
-                        "was stopped" in undelivered[0]
+                    assert "not connected" in undelivered[0] or "was stopped" in undelivered[0], (
+                        "the notice does not name the outcome, so the operator is told "
+                        "nothing about what happened to the answer they gave" + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+# --- G: THE SAME STOP ON A SIDEBAR-LEASED SOURCE (the viewer contract) --------
+
+
+@pytest.mark.asyncio
+async def test_a_sidebar_leased_source_whose_owner_was_stopped_offers_no_card(
+    tmp_path, monkeypatch
+) -> None:
+    """Condition G: the stop gate has to hold on the VIEWER contract too.
+
+    WHY D IS NOT ENOUGH. D drives the facade ``lop`` itself builds
+    (``viewer=False``), whose deliberate-stop arm leaves ``can_ever_bind`` False
+    for the life of the process — so G6 could refuse it on that term alone.
+    EVERY sidebar lease is the other contract: ``_lease_sidebar_source`` builds
+    ``_can_go_cold = True`` facades, and that flag is one of ``can_ever_bind``'s
+    own disjuncts, so on the switched-to sessions the predicate had no false term
+    at all and the guard that exists to withhold this card could never fire.
+    Measured before this case existed, on this rig (agent review round 3, A9 = QA
+    Q2, reproduced independently in both streams): the card mounted AND focused
+    over ``Saved · This session was stopped; /resume beta reopens it``, was
+    re-offered on every visit, and each answer produced an "undelivered" notice
+    for a question no owner could ever receive.
+
+    THE SESSION UNDER TEST IS BETA, not the boot session, and that is what makes
+    the facade a sidebar lease. It is also the shape the PR's own defect
+    statement is about: raise a question, switch away, come back.
+
+    THE PREMISES ARE ASSERTED, because either one failing turns this case into a
+    restatement of D: ``beta._can_go_cold`` True (the viewer contract) and
+    ``beta.can_ever_bind`` True after the stop (so the refusal cannot be the
+    first term), alongside the stale ``pending_gate`` that would otherwise mount
+    the card.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                app._set_approve_all(False)
+
+                # Step 1: lease BETA through the real sidebar, which is what
+                # builds the viewer-contract facade this case is about.
+                await _click(app, pilot, "beta")
+                beta, source = _attached(app._session), app._interaction
+                assert getattr(app._session, "session_id", None) == "beta", (
+                    "the switch never landed on beta, so this case is not driving a "
+                    "sidebar lease at all"
+                )
+                assert beta._can_go_cold is True, (
+                    "beta was not leased through `_lease_sidebar_source`, so its facade "
+                    "carries the boot contract and this case duplicates D"
+                )
+                probe = _install_probe(monkeypatch, beta)
+
+                gate_task = await _raise_ask(rig, "beta", _one_question())
+                try:
+                    assert await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=300
+                    ), "the ask card never mounted on beta; the premise is unmet"
+                    assert not source.display_only, "beta was already display_only"
+
+                    # Step 2: leave, and stop beta's owner while the user is away.
+                    await _click(app, pilot, "alpha")
+                    assert beta._gates_detached, "the switch away did not detach beta's gates"
+                    assert app._ask_screen is None, "the outgoing card is still on screen"
+
+                    rig.servers["beta"].announce_stop()
+                    await _pump(pilot, 10)
+                    await rig.servers["beta"].aclose()
+                    assert await _pump_until(
+                        pilot, lambda: beta.is_cold, tries=600
+                    ), "the stop never made the viewer cold"
+
+                    diagnosis = (
+                        _state(app, beta, source, probe)
+                        + f"\n  beta._deliberate_stop = {beta._deliberate_stop!r}"
+                        + f"\n  beta.is_cold = {beta.is_cold!r}"
+                        + f"\n  beta.pending_gate is not None = "
+                        f"{beta.pending_gate is not None!r}"
+                    )
+                    _dump(diagnosis)
+
+                    assert beta.pending_gate is not None, (
+                        "the viewer's gate went away with the stop, so no card could be "
+                        "offered and this case would pass without the guard" + diagnosis
+                    )
+                    assert beta.can_ever_bind, (
+                        "beta reports it can never bind, so the refusal would come from "
+                        "G6's first term and the sidebar term would go untested" + diagnosis
+                    )
+                    assert beta._deliberate_stop, (
+                        "the viewer was never told the session was stopped, so the guard "
+                        "has nothing to refuse on and the card will be offered" + diagnosis
+                    )
+
+                    # Step 3: back to beta, twice, each given a full settle.
+                    marker = probe.marker
+                    await _click(app, pilot, "beta", rounds=20)
+                    offered = await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=_RESURFACE_TURNS
+                    )
+                    await _click(app, pilot, "alpha")
+                    await _click(app, pilot, "beta", rounds=20)
+                    offered = offered or await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=_RESURFACE_TURNS
+                    )
+
+                    diagnosis = (
+                        _format(probe.since(marker), "RETURN LEGS onto a stopped sidebar lease")
+                        + _state(app, beta, source, probe)
+                        + f"\n  beta._deliberate_stop = {beta._deliberate_stop!r}"
+                        + f"\n  beta.can_ever_bind = {beta.can_ever_bind!r}"
+                        + f"\n  gate_task.done() = {gate_task.done()!r}"
+                        + "\n  band = "
+                        f"{app._status._connection if app._status is not None else None!r}"
+                    )
+                    _dump(diagnosis)
+
+                    assert not beta._gates_detached, (
+                        "the commit did not clear `_gates_detached`, so the ladder was "
+                        "never reached and this case is not measuring G6" + diagnosis
+                    )
+                    assert not offered, (
+                        "OFFERED (G): a sidebar-leased session whose owner was stopped was "
+                        "offered an answerable card. `can_ever_bind` is True for every "
+                        "sidebar lease, so this is the term G6 needs — refusing here is "
+                        "what makes the withheld card the fix rather than an apology for "
+                        "it." + diagnosis
+                    )
+                    band = app._status._connection if app._status is not None else None
+                    assert band is not None and "was stopped" in band and "/resume beta" in band, (
+                        f"the band is {band!r} rather than the stopped-session verdict "
+                        "this source's own state names" + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+# --- H: A STOPPED SESSION THAT COMES BACK ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_session_restarted_after_its_stop_still_surfaces_a_new_gate(
+    tmp_path, monkeypatch
+) -> None:
+    """Condition H: the guard must not cost a session that someone brings back.
+
+    THE OTHER SIDE OF G, and the thing the guard's second term could get wrong.
+    A stop ends the TURN — and the parked gate with it, which is why withholding
+    the card is honest — but it does not end the SESSION. Another TUI, a shell
+    turn, ``--resume``, or a fresh ``lop`` on the same id all bring the session
+    back, and when they do, the viewer binds to that successor and
+    ``_finish_sync`` clears ``_deliberate_stop``. From that moment the term G6
+    reads is false again, and the next gate the successor raises has to mount and
+    be answerable — a guard that withheld it would be worse than the bug it
+    fixes, because there would be no way to answer a live question.
+
+    DRIVEN THROUGH THE SAME ROUTE AS G: beta is leased by the sidebar, its owner
+    is stopped while the user is away, and the card is withheld. The owner is
+    then RESTARTED in-process for the same session id, the user returns, and a
+    FRESH ask raised by the successor is answered on screen with a real keypress
+    — asserted by the owner's own gate returning the answer, so a card that
+    merely mounted and swallowed the keystroke cannot pass.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                app._set_approve_all(False)
+
+                await _click(app, pilot, "beta")
+                beta, source = _attached(app._session), app._interaction
+                probe = _install_probe(monkeypatch, beta)
+                first = await _raise_ask(rig, "beta", _one_question())
+                try:
+                    assert await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=300
+                    ), "the first ask never mounted"
+
+                    # The stop, while the user is on alpha.
+                    await _click(app, pilot, "alpha")
+                    rig.servers["beta"].announce_stop()
+                    await _pump(pilot, 10)
+                    await rig.servers["beta"].aclose()
+                    assert await _pump_until(pilot, lambda: beta.is_cold, tries=600)
+                    assert beta._deliberate_stop, (
+                        "the stop was not recorded on the viewer, so this case is not "
+                        "exercising the term it exists for"
+                    )
+
+                    # The owner comes back: a new runtime for the same session id,
+                    # which is what `lop --resume` and a fresh turn both produce.
+                    await rig.runtime("beta")
+                    assert not first.done()
+
+                    await _click(app, pilot, "alpha")
+                    await _click(app, pilot, "beta", rounds=20)
+                    rebound = await _pump_until(
+                        pilot,
+                        lambda: not beta.is_cold and not beta._deliberate_stop,
+                        tries=_RESURFACE_TURNS,
+                    )
+                    diagnosis = (
+                        _state(app, beta, source, probe)
+                        + f"\n  beta._deliberate_stop = {beta._deliberate_stop!r}"
+                        + f"\n  beta.is_cold = {beta.is_cold!r}"
+                        + f"\n  beta.can_ever_bind = {beta.can_ever_bind!r}"
+                        + "\n  band = "
+                        f"{app._status._connection if app._status is not None else None!r}"
+                    )
+                    _dump(diagnosis)
+                    assert rebound, (
+                        "the viewer never bound to the restarted owner, so the claim that "
+                        "the stop term lifts on a successful sync is untested" + diagnosis
+                    )
+
+                    # A FRESH gate from the successor has to come back and be
+                    # answerable. The stopped turn's gate died with it, so this is
+                    # the one route on which a card is owed.
+                    second = await _raise_ask(rig, "beta", _one_question())
+                    try:
+                        assert await _pump_until(
+                            pilot, lambda: app._ask_screen is not None, tries=_RESURFACE_TURNS
+                        ), (
+                            "REFUSED A RECOVERABLE SESSION: the restarted owner raised a "
+                            "question and no card was offered, so the stop term is still "
+                            "suppressing a card that can be answered" + diagnosis
+                        )
+                        await pilot.press("enter")
+                        delivered = await asyncio.wait_for(second, 30)
+                        assert delivered == {"destination": ["Here"]}, (
+                            "the successor's gate did not receive the answer given on "
+                            f"screen; it returned {delivered!r}" + diagnosis
+                        )
+                    finally:
+                        second.cancel()
+                        await asyncio.gather(second, return_exceptions=True)
+                finally:
+                    first.cancel()
+                    await asyncio.gather(first, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+# --- I: THE BAND OVER A RETURNED, THEN ANSWERED, CARD ------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_band_yields_to_a_returned_card_and_stops_when_it_is_answered(
+    tmp_path, monkeypatch
+) -> None:
+    """Conditions I: D1's band copy, D7's ink, and D5's half nobody finished.
+
+    THE STATE is D1's: a session whose viewer is not ready for events (a display
+    resync in flight, so ``display_only`` is latched and ``is_cold`` is true
+    through its third disjunct) and whose connect has ended in a verdict — the
+    band's own card-less sentence, ``Select again to retry``. Two things then
+    have to hold, and the second is the half the last round left open (design
+    round 2, D5 = QA Q6):
+
+    * while the card is back and answerable, the band must NOT go on offering a
+      retry, and it must not carry it in the alarm ink either: `Answer the
+      question above` is an instruction, and painting it red under a card whose
+      own highlight is the accent green reads as "something is wrong with this
+      question" (D7).
+    * once the card is ANSWERED the band must stop saying that, because there is
+      nothing above it to answer — measured still saying it at +20 s with the
+      composer contradicting it in the line below.
+
+    HOW THE STATE IS REACHED, and one deliberate shortcut. The held
+    ``frontend_sync`` and the invalidated display history are real, and the
+    click back onto the session is the real route. What is set directly is
+    ``connection_error``, because the honest route to that verdict is
+    ``_await_sidebar_frame``'s 15 s timer (measured at 16.5 s in the round-2
+    frames) and what THIS case pins is the band's answer to the state, not the
+    clock that produces it — which
+    ``test_a_display_only_frame_whose_gate_cannot_be_presented_still_paints``
+    already drives for real. The band is read on the frame the card arrives,
+    because that is the frame the branch exists for.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
+    app = _app(rig, "alpha")
+    release_sync = asyncio.Event()
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+
+                gate_task = await _raise_ask(rig, "alpha", _one_question())
+                try:
+                    assert await _pump_until(
+                        pilot, lambda: app._ask_screen is not None, tries=300
+                    ), "the ask card never mounted; the premise is unmet"
+
+                    await _click(app, pilot, "beta")
+                    assert app._ask_screen is None, "the outgoing card is still on screen"
+
+                    client = alpha._client
+                    assert client is not None
+                    real_sync = client.frontend_sync
+
+                    async def held_sync(*args: Any, **kwargs: Any) -> Any:
+                        await release_sync.wait()
+                        return await real_sync(*args, **kwargs)
+
+                    monkeypatch.setattr(client, "frontend_sync", held_sync)
+                    alpha._invalidate_display_history()
+                    assert await _pump_until(
+                        pilot, lambda: not alpha._ready_for_events, tries=100
+                    ), "the held resync never cleared _ready_for_events"
+
+                    await _click(app, pilot, "alpha", rounds=20)
+                    assert source.display_only, "the returning source never latched display_only"
+                    # The verdict a spent connect leaves, without its 15 s clock.
+                    source.connection_error = "the connection could not be established"
+                    source.can_never_bind = False
+                    app._show_sidebar_connection(source)
+                    await _pump(pilot, 10)
+
+                    before = app._status._connection if app._status is not None else None
+                    assert before is not None and "Select again to retry" in before, (
+                        f"the card-less sentence is not on the band ({before!r}), so the "
+                        "state this case needs was never reached"
+                    )
+
+                    # Read the band on every frame the card is up, so the frame the
+                    # branch exists for cannot be missed.
+                    seen: list[tuple[str, bool]] = []
+
+                    def card_up() -> bool:
+                        if app._ask_screen is None:
+                            return False
+                        seen.append(
+                            (
+                                "" if app._status is None else app._status._connection,
+                                bool(app._status is not None and app._status._connection_muted),
+                            )
+                        )
+                        return True
+
+                    release_sync.set()
+                    assert await _pump_until(pilot, card_up, tries=_RESURFACE_TURNS), (
+                        "the card never came back once the viewer was ready, so the band "
+                        "state it should have announced was never reached"
+                        + _state(app, alpha, source, probe)
+                    )
+                    await _pump(pilot, 10)
+
+                    diagnosis = (
+                        _state(app, alpha, source, probe)
+                        + f"\n  band frames while the card was up = {seen!r}"
+                    )
+                    _dump(diagnosis)
+
+                    assert any("Answer the question above" in band for band, _ in seen), (
+                        "the band kept the connect's card-less sentence over a question "
+                        "that is right there and answerable — design round 1's D1" + diagnosis
+                    )
+                    assert not any(
+                        "Answer the question above" in band and not muted for band, muted in seen
                     ), (
-                        "the notice did not use the register the composer already refuses "
-                        "in, so the operator has no sentence telling them what to do next"
+                        "the instruction sentence was painted in the connection-failure "
+                        "ink, so a card whose own highlight is the accent green is "
+                        "announced by a red line (design round 2, D7)" + diagnosis
+                    )
+
+                    # Answer it for real, and the band must stop instructing.
+                    await pilot.press("enter")
+                    answered = await _pump_until(
+                        pilot,
+                        lambda: app._ask_screen is None and alpha.pending_gate is None,
+                        tries=_RESURFACE_TURNS,
+                    )
+                    assert (
+                        answered
+                    ), "the returned card did not resolve on a real keypress" + _state(
+                        app, alpha, source, probe
+                    )
+                    await _pump(pilot, 30)
+                    after = app._status._connection if app._status is not None else None
+                    _dump(_state(app, alpha, source, probe) + f"\n  band after = {after!r}")
+                    assert after is not None and "Answer the question above" not in after, (
+                        "the band is still pointing the operator at a question that has "
+                        "been answered and taken off the screen (design round 2, D5 = QA "
+                        f"Q6): band = {after!r}"
+                    )
+                finally:
+                    release_sync.set()
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+# --- J: THE UNDELIVERED CHANNEL'S THREE DISCRIMINATIONS ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refused_answer_is_not_reported_as_undelivered(tmp_path, monkeypatch) -> None:
+    """Condition J1: the owner's REFUSAL is not a delivery failure (A10 = Q3 = D4).
+
+    ``OperatorAuthorityRequired`` subclasses ``RuntimeError``, so the transport
+    clause in ``_run_approval`` matched it and the pane was told its answer was
+    never delivered — false twice over: the session is connected, and the owner
+    RECEIVED the answer and refused it. The row recording this pane's answer was
+    retracted with it, which is precisely what the refusal notice's own
+    ``not applied — `` prefix exists to avoid: the row has to RECORD that the
+    answer was given here, corrected in its first words, not disappear.
+
+    WHAT IS FAKED, AND WHAT IS NOT. As in the receipt case beside it: the
+    runtime, the owner, the card, the keypress, the swallow arms, the refusal
+    arm and both notices are real, and only the transport's answer comes from the
+    boundary the product itself treats as fallible. The fake raises the REAL
+    exception type, built through its real constructor, so the discrimination is
+    exercised exactly as the socket would exercise it.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+                client = alpha._client
+                assert client is not None
+
+                gate_task = asyncio.create_task(
+                    rig.handles["alpha"]._approval_gate("write", "Save one record")
+                )
+                posted: list[Any] = []
+                try:
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._approval is not None and app.focused is app._approval,
+                        tries=300,
+                    ), "the approval card never mounted with focus; the premise is unmet"
+
+                    async def refused(*args: Any, **_kwargs: Any) -> Any:
+                        posted.append(args[0] if args else None)
+                        raise OperatorAuthorityRequired(trigger="approval_answer")
+
+                    monkeypatch.setattr(client, "approval_answer", refused)
+                    await pilot.press("y")
+                    await _pump(pilot, 60)
+
+                    blocks = app._transcript_view().blocks()
+                    receipts = [b for b in blocks if isinstance(b, ApprovalBlock)]
+                    notices = [b.text() for b in blocks if isinstance(b, NoticeBlock) and b.text()]
+                    undelivered = [text for text in notices if "Answer not delivered" in text]
+                    diagnosis = (
+                        _state(app, alpha, source, probe)
+                        + f"\n  transcript notices = {notices!r}"
+                        + f"\n  approval receipts on the transcript = {len(receipts)!r}"
+                        + f"\n  posts attempted = {len(posted)!r}"
+                        + f"\n  client.connected = {client.connected!r}"
+                        + f"\n  gate_task.done() = {gate_task.done()!r}"
+                    )
+                    _dump(diagnosis)
+
+                    assert len(posted) == 1, (
+                        "the answer was never posted, so no delivery outcome exists to "
+                        "report" + diagnosis
+                    )
+                    assert client.connected, (
+                        "the premise is a CONNECTED pane whose owner refused; a "
+                        "disconnected one takes the transport arm legitimately" + diagnosis
+                    )
+                    assert not undelivered, (
+                        "the pane was told its answer was never delivered when the owner "
+                        "had received it and refused it: the sentence is false in both "
+                        "clauses and points at the connection instead of the operator key"
                         + diagnosis
+                    )
+                    assert len(receipts) == 1, (
+                        "the receipt recording this pane's answer was retracted; the "
+                        "refusal notice's own `not applied —` prefix is what corrects "
+                        "that row, and retracting it throws away the record that the "
+                        "answer was given here at all" + diagnosis
+                    )
+                    assert any("not applied" in text for text in notices), (
+                        "the refusal's own notice never arrived, so this case cannot show "
+                        "which surface owns the outcome" + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_race_is_not_reported_as_a_disconnection(tmp_path, monkeypatch) -> None:
+    """Condition J2: the first-answer-wins race is not a connection problem (A11 = Q4).
+
+    Another front end settles the owner's gate between this pane's keypress and
+    its post, and the owner answers the stale tap with its own verdict ("that
+    approval is no longer waiting"). The reply REACHED the owner — it was read
+    and ruled on — so the transport clause must not turn it into "Send
+    unavailable until connected" on a pane whose socket is up: the operator is
+    sent to fix a connection instead of doing nothing, which is what the pre-fix
+    head did (the swallow arm's ordinary outcome, silent by design).
+
+    The receipt is left alone here for the same reason the refusal case leaves it
+    alone: it records the answer this pane gave, and the arm that owns this
+    outcome is the swallow's, not the host's.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+                client = alpha._client
+                assert client is not None
+
+                gate_task = asyncio.create_task(
+                    rig.handles["alpha"]._approval_gate("write", "Save one record")
+                )
+                posted: list[Any] = []
+                try:
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._approval is not None and app.focused is app._approval,
+                        tries=300,
+                    ), "the approval card never mounted with focus; the premise is unmet"
+
+                    async def raced(*args: Any, **_kwargs: Any) -> Any:
+                        posted.append(args[0] if args else None)
+                        raise RuntimeError("that approval is no longer waiting")
+
+                    monkeypatch.setattr(client, "approval_answer", raced)
+                    await pilot.press("y")
+                    await _pump(pilot, 60)
+
+                    blocks = app._transcript_view().blocks()
+                    receipts = [b for b in blocks if isinstance(b, ApprovalBlock)]
+                    notices = [b.text() for b in blocks if isinstance(b, NoticeBlock) and b.text()]
+                    undelivered = [text for text in notices if "Answer not delivered" in text]
+                    diagnosis = (
+                        _state(app, alpha, source, probe)
+                        + f"\n  transcript notices = {notices!r}"
+                        + f"\n  approval receipts on the transcript = {len(receipts)!r}"
+                        + f"\n  posts attempted = {len(posted)!r}"
+                        + f"\n  client.connected = {client.connected!r}"
+                    )
+                    _dump(diagnosis)
+
+                    assert len(posted) == 1, (
+                        "the answer was never posted, so this is not the race under test"
+                        + diagnosis
+                    )
+                    assert client.connected, (
+                        "the pane is not connected, so the transport arm fires legitimately "
+                        "and this case proves nothing" + diagnosis
+                    )
+                    assert not undelivered, (
+                        "an ordinary stale-answer race on a CONNECTED pane was reported as "
+                        "a connection problem: nothing was disconnected, and the operator "
+                        "is told to wait for a link that is already up" + diagnosis
+                    )
+                    assert len(receipts) == 1, (
+                        "the row recording this pane's answer was retracted by the "
+                        "transport arm, which no longer owns this outcome" + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_retracted_receipt_belongs_to_the_reply_that_failed(tmp_path, monkeypatch) -> None:
+    """Condition J3: only THIS reply's receipt may be taken back (A12 = QA Q5).
+
+    The two facts are not the same one. A reply that failed to land is not always
+    the reply that wrote the retained row: an approval answered with NO card at
+    all — an allow-all latch, a background approval — writes no receipt, so a
+    slot holding "the last receipt" lets an undelivered post delete a DELIVERED
+    row belonging to an unrelated gate. The session now reports the gate identity
+    with the drop and the host matches it, which is what this case pins: an
+    allow-all approval whose post fails must leave the earlier, delivered
+    ``✓ allowed`` on the transcript untouched.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+                client = alpha._client
+                assert client is not None
+
+                def receipts() -> list[Any]:
+                    return [
+                        b for b in app._transcript_view().blocks() if isinstance(b, ApprovalBlock)
+                    ]
+
+                def notices() -> list[str]:
+                    return [
+                        b.text()
+                        for b in app._transcript_view().blocks()
+                        if isinstance(b, NoticeBlock) and b.text()
+                    ]
+
+                # Step 1: a DELIVERED approval, with its card, answered for real.
+                first = asyncio.create_task(
+                    rig.handles["alpha"]._approval_gate("write", "Save one record")
+                )
+                try:
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._approval is not None and app.focused is app._approval,
+                        tries=300,
+                    ), "the first approval card never mounted with focus"
+                    await pilot.press("y")
+                    assert await _pump_until(
+                        pilot, lambda: bool(receipts()) and app._approval is None, tries=300
+                    ), "the delivered approval left no receipt to protect"
+                    delivered_blocks = receipts()
+                    delivered_gate = await asyncio.wait_for(first, 30)
+                    assert (
+                        delivered_gate is True
+                    ), f"the first approval was not delivered to the owner: {delivered_gate!r}"
+                finally:
+                    first.cancel()
+                    await asyncio.gather(first, return_exceptions=True)
+
+                # Step 2: a second approval answered with NO card (the latch) whose
+                # post fails. Its own reply wrote no receipt of its own, so nothing
+                # may be taken off the transcript for it.
+                app._set_approve_all(True)
+                second = asyncio.create_task(
+                    rig.handles["alpha"]._approval_gate("write", "Save another record")
+                )
+                try:
+
+                    async def dead_socket(*_args: Any, **_kwargs: Any) -> Any:
+                        raise ConnectionError("the owner's socket is gone")
+
+                    monkeypatch.setattr(client, "approval_answer", dead_socket)
+                    assert await _pump_until(
+                        pilot,
+                        lambda: "Answer not delivered" in " ".join(notices()),
+                        tries=600,
+                    ), (
+                        "the card-less approval was never reported as undelivered, so the "
+                        "retraction this case is about never ran"
+                        + _state(app, alpha, source, probe)
+                    )
+                    await _pump(pilot, 30)
+
+                    remaining = receipts()
+                    diagnosis = (
+                        _state(app, alpha, source, probe)
+                        + f"\n  receipts before = {len(delivered_blocks)!r}"
+                        + f"\n  receipts after = {len(remaining)!r}"
+                        + f"\n  notices = {notices()!r}"
+                        + f"\n  _last_gate_receipt = {app._last_gate_receipt!r}"
+                    )
+                    _dump(diagnosis)
+
+                    assert len(remaining) == len(delivered_blocks), (
+                        "an undelivered approval that wrote NO receipt of its own removed "
+                        "the DELIVERED row belonging to the previous gate: the retraction "
+                        "is not tied to the reply that failed" + diagnosis
+                    )
+                finally:
+                    second.cancel()
+                    await asyncio.gather(second, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+# --- K: THE UNDELIVERED NOTICE'S COPY AND ITS RETIREMENT ---------------------
+
+
+@pytest.mark.asyncio
+async def test_the_undelivered_notice_fits_one_row_and_is_retired(tmp_path, monkeypatch) -> None:
+    """Condition K: the sentence has to be readable, and it has to end (D6, U5).
+
+    TWO FACTS ABOUT ONE SURFACE.
+
+    * IT FITS. Under a mounted card at 60 columns the transcript viewport is a
+      single row, so the sentence the last round shipped — 57 cells — wrapped and
+      the only text on screen was its last fragment, ``connected.``: a truncation
+      that reads as the opposite of the message (design round 2, D6). The
+      replacement leads with the outcome, and this case asserts the rendered
+      block is ONE row rather than a character count, so a copy change that
+      overflows fails here rather than in someone's terminal.
+
+    * IT ENDS. The sentence is present-progressive about a connection state, and
+      UX round 2 measured it still up at t=33 s with the card back and
+      answerable, at t=37.6 s after a message had been sent successfully, and
+      idle at t=44.9 s (U5). Retired when an answerable card is on screen for the
+      source, which is the frame the claim stops being true on.
+
+    The drop is real: the transport's answer is the one thing faked, from the
+    boundary the product treats as fallible.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(60, 16)) as pilot:
+                assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+                client = alpha._client
+                assert client is not None
+
+                gate_task = asyncio.create_task(
+                    rig.handles["alpha"]._approval_gate("write", "Save one record")
+                )
+                try:
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._approval is not None and app.focused is app._approval,
+                        tries=300,
+                    ), "the approval card never mounted with focus; the premise is unmet"
+
+                    async def dead_socket(*_args: Any, **_kwargs: Any) -> Any:
+                        raise ConnectionError("the owner's socket is gone")
+
+                    monkeypatch.setattr(client, "approval_answer", dead_socket)
+                    await pilot.press("y")
+                    await _pump(pilot, 60)
+
+                    def undelivered_blocks() -> list[Any]:
+                        return [
+                            b
+                            for b in app._transcript_view().blocks()
+                            if isinstance(b, NoticeBlock) and "Answer not delivered" in b.text()
+                        ]
+
+                    assert await _pump_until(
+                        pilot, lambda: bool(undelivered_blocks()), tries=600
+                    ), (
+                        "no undelivered notice was written, so this case has nothing to "
+                        "measure" + _state(app, alpha, source, probe)
+                    )
+                    block = undelivered_blocks()[0]
+                    rows = block.region.height
+                    diagnosis = (
+                        _state(app, alpha, source, probe)
+                        + f"\n  notice text = {block.text()!r}"
+                        + f"\n  notice region = {block.region!r}"
+                        + f"\n  transcript content_region = "
+                        f"{app._transcript_view().content_region!r}"
+                    )
+                    _dump(diagnosis)
+                    assert rows == 1, (
+                        "the undelivered notice wraps at 60 columns, so the only text on "
+                        "screen under a card is its last fragment (design round 2, D6)" + diagnosis
+                    )
+
+                    # THE LINK IS BACK: the gate is re-offered and the operator can
+                    # answer it, which is exactly the state the sentence denies.
+                    alpha.resume_viewer_gates()
+                    assert await _pump_until(
+                        pilot, lambda: app._approval is not None, tries=_RESURFACE_TURNS
+                    ), (
+                        "the card never came back, so the retirement this case is about "
+                        "was never exercised" + _state(app, alpha, source, probe)
+                    )
+                    await _pump(pilot, 30)
+                    left = undelivered_blocks()
+                    _dump(_state(app, alpha, source, probe) + f"\n  notices left = {len(left)!r}")
+                    assert not left, (
+                        "the 'not connected' sentence is still on screen with the card back "
+                        "and answerable under it (UX round 2, U5)" + diagnosis
                     )
                 finally:
                     gate_task.cancel()

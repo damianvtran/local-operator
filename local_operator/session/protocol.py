@@ -127,6 +127,15 @@ class CompactionOutcome:
 #: axis ``is_remote`` named.
 RuntimeLocality = Literal["this-process", "this-machine", "unknown"]
 
+#: Where an accepted-but-undelivered gate reply goes, for a host with a surface
+#: for it: the gate's KIND and its IDENTITY, ``(kind, request_id,
+#: question_index)`` — the tuple the viewer ladder keys bridges on (see
+#: :meth:`ViewerSessionProtocol.set_gate_undelivered_handler`). Named rather than
+#: spelled out because the identity half is what lets a host retract the receipt
+#: THAT card wrote, and an unnamed tuple in a callback type is how that half gets
+#: dropped from a signature by the next person.
+GateUndeliveredHandler = Callable[[str, tuple[str, str, int] | None], None]
+
 
 @runtime_checkable
 class SessionProtocol(Protocol):
@@ -1402,7 +1411,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    def set_gate_undelivered_handler(self, handler: Callable[[str], None] | None) -> None:
+    def set_gate_undelivered_handler(self, handler: GateUndeliveredHandler | None) -> None:
         """Install the surface that reports a gate reply the owner never RECEIVED.
 
         Viewer-only for the same reason as the refusal hook above, and the reason
@@ -1412,7 +1421,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         answer is POSTED to an owner after the host's handler has returned, and
         that post can find the owner gone — a stop landing under a live card is
         the reachable shape (UX review round 1, U1). ``handler`` receives the
-        gate's kind, ``"ask"`` or ``"approval"``.
+        gate's kind, ``"ask"`` or ``"approval"``, and the gate's identity,
+        ``(kind, request_id, question_index)`` or ``None`` — the host needs the
+        second to retract the receipt THAT card wrote rather than whichever
+        receipt happens to be retained (agent review round 3, A12).
 
         Declared here rather than probed with ``getattr`` like the two optional
         siblings on this class because the TUI calls it on every attached
