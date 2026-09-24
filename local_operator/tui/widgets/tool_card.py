@@ -139,6 +139,22 @@ _strip_control_sequences = strip_control_sequences
 ICON_SUCCESS = "✓"
 ICON_ERROR = "✗"
 ICON_INTERRUPTED = "⊘"
+#: A result a stop made PARTIAL: the tool answered, but not about the whole tree
+#: it was asked about. Its OWN glyph in the same family, for the reason the
+#: family exists — ✓/✗/⊘/◐ separate by SHAPE alone in a colourless frame — and
+#: because a partial answer that paints like a complete one is exactly the
+#: failure this state is here to end (design review D1).
+ICON_PARTIAL = "◐"
+#: The leads a partial result is composed with by ``tools/builtin.py``
+#: (``execute_grep`` / ``execute_glob``). The card promotes line 0 into the
+#: collapsed row, and wraps it in the body, only when the line LEADS with one of
+#: these — the same reachability test :meth:`_failure_reason` makes for an
+#: error's own text, and the reason a flag alone is not enough: the flag says the
+#: RESULT is partial, the prefix says THIS LINE is the disclosure. A card rebuilt
+#: from a payload whose text predates the prefixes, or a partial result that
+#: leads with something else, therefore keeps the ordinary crop instead of
+#: promoting a line that is not the claim.
+_PARTIAL_LEADS = ("Partial results:", "Partial search:")
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
 EXPAND_HINT = "⟨expand⟩"
@@ -1403,6 +1419,13 @@ class ToolCard(ExpandableActionBlock):
         #: bare prefix match, since no card that reported no interval can carry
         #: the sentence at all. Set in :meth:`_absorb_result`.
         self._fetch_reported_retry_after = False
+        #: True when the result was cut short by a search budget
+        #: (``details["partial"]``, set by the search tools). The COLLAPSED row
+        #: reads this: that row takes its structure from ``details`` and never
+        #: from the result text, so a disclosure the text leads with is still
+        #: unreachable from the state an operator scans unless the flag rides here
+        #: too (design review D1). Set in :meth:`_absorb_result`.
+        self._partial = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -2284,6 +2307,10 @@ class ToolCard(ExpandableActionBlock):
         cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
+        # Reset per result, with the fetch flags below and for the same reason: a
+        # card is written once, but a rebuilt card must never inherit the previous
+        # body's partial state.
+        self._partial = bool(details.get("partial")) if isinstance(details, Mapping) else False
         name = self.tool_name.lower()
         search_output = _search_result_output(details) if name == "web_search" else []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
@@ -2851,25 +2878,73 @@ class ToolCard(ExpandableActionBlock):
             return ""
         return head
 
+    def _partial_reason(self) -> str:
+        """The body's LEADING line when the collapsed row must carry it too.
+
+        The partial twin of :meth:`_failure_reason`, with the same shape and the
+        same reason: the expansion is documented as the tool's output, so the
+        card must not grow a synthetic row restating what the collapsed row
+        already carries, and only the head line qualifies.
+
+        What differs is the EVIDENCE. An error compares its head line against
+        the message the card was handed; a partial result is a SUCCESS, so there
+        is no error message to compare against — the flag in ``details`` says the
+        RESULT is partial and :data:`_PARTIAL_LEADS` says whether THIS LINE is the
+        disclosure. Both halves are required, which is what stops a card rebuilt
+        from an older payload, or a partial result that leads with something
+        else, from promoting a line that is not the claim.
+        """
+        if not self._partial or not self._output:
+            return ""
+        head = self._output[0].strip()
+        return head if head.startswith(_PARTIAL_LEADS) else ""
+
+    def _promoted_lead(self) -> str:
+        """The lead line the collapsed row claims, whichever state owns it."""
+        return self._failure_reason() or self._partial_reason()
+
+    def _promoted_paint(self, fallback: Style) -> tuple[str, Style]:
+        """``(glyph, ink)`` for the promoted lead line, in the state's own pair.
+
+        The disclosure is the line an operator must be able to read WHOLE, and a
+        partial one was painted in ``dim``: measured byte-identical to the
+        ordinary result line beneath it, so the frame carried no signal that this
+        was the state rather than more output (design review D9). It takes the
+        same `warning` ink the collapsed row's partial marker does, which is also
+        what puts the state on the pixel plane at all (D1).
+        """
+        if self._partial_reason():
+            return ICON_PARTIAL, bindings.style("tool.status.partial_glyph")
+        return ICON_ERROR, fallback
+
     def _captured_output(self) -> list[str]:
-        """``_output`` minus the leading line :meth:`_failure_reason` just claimed.
+        """``_output`` minus the leading line :meth:`_promoted_lead` just claimed.
 
         ``mark_failed`` defaults ``result_text`` to the error itself, so the
         common failure arrives as one line that is BOTH the claimed line and the
         first output row; painting it in both places would print the sentence
         twice. A MULTI-line error claims only its head line, so the rest of it
-        stays here and is cropped like every other captured line.
+        stays here and is cropped like every other captured line. A partial
+        result's disclosure is claimed the same way and for the same reason: it is
+        a sentence ABOUT the answer, while the body's captured rows are the answer.
         """
-        return self._output[1:] if self._failure_reason() else self._output
+        return self._output[1:] if self._promoted_lead() else self._output
 
     def _append_reason_body(
-        self, row: Text, line_width: int, indent: str, dim: Style, ink: Style
+        self,
+        row: Text,
+        line_width: int,
+        indent: str,
+        dim: Style,
+        ink: Style,
+        *,
+        glyph: str = ICON_ERROR,
     ) -> None:
-        """Paint the failure reason WRAPPED, every continuation keeping the indent.
+        """Paint a claimed lead line WRAPPED, every continuation keeping the indent.
 
         Wrapped rather than cropped because the collapsed row's status cap cannot
         carry the line in ANY state, and the leading line here is the one that cap
-        truncates (:meth:`_failure_reason`). Captured output keeps the
+        truncates (:meth:`_promoted_lead`). Captured output keeps the
         one-line-per-row crop: wrapping it would let a single 397-cell stdout line
         spend six rows at the 80-column frame's 72-cell measure, so a 40-line
         expansion would reflow the transcript from 40 rows to 240 — +200 rows on
@@ -2882,12 +2957,12 @@ class ToolCard(ExpandableActionBlock):
         block uses) rather than ``textwrap`` so a CJK reason wraps by the width
         it is actually drawn at.
 
-        After the indent every row of the block carries a two-cell LEAD —
-        :data:`ICON_ERROR` on the first, two blanks on the continuations. (The
-        glyph needs no state lookup: :meth:`_failure_reason` answers "" for
-        every state but ``error``, so a non-error card cannot reach this painter
-        and this is the state's own glyph.) The lead is the cue that tells these
-        rows from the tool's captured bytes on the
+        After the indent every row of the block carries a two-cell LEAD — the
+        caller's ``glyph`` on the first, two blanks on the continuations. (The
+        glyph needs no state lookup: :meth:`_promoted_lead` answers "" for every
+        state but ``error`` and for every card whose result is not partial, so a
+        card cannot reach this painter without owning a glyph for it.) The lead
+        is the cue that tells these rows from the tool's captured bytes on the
         same card (design round 1, D1: same fill, same ``OUTPUT_INDENT``, nothing
         separating one paragraph of prose from a log dump), and it is a GLYPH
         because a glyph is this card's monochrome-safe state vocabulary — see
@@ -2910,12 +2985,16 @@ class ToolCard(ExpandableActionBlock):
         whole of it (design round 1, D2; QA round 1, Q1). The marker sits outside
         both budgets: it is the report ON the cut, not sentence content.
         """
-        reason = self._failure_reason()
+        reason = self._promoted_lead()
         if not reason:
             return
-        lead = ICON_ERROR + " "
+        lead = glyph + " "
         blanks = " " * cell_len(lead)
-        lead_ink = bindings.style("tool.status.error_glyph")
+        # The lead's ink follows its glyph, so the state's mark and its colour
+        # cannot disagree: `danger` for an error, `warning` for a partial result.
+        lead_ink = bindings.style(
+            "tool.status.partial_glyph" if glyph == ICON_PARTIAL else "tool.status.error_glyph"
+        )
         wrapped = wrap_cells(reason, line_width)
         # Greedy fit inside both budgets: the cell budget bounds the CONTENT at
         # every width and the row budget bounds the SHAPE on narrow frames, where
@@ -2958,13 +3037,18 @@ class ToolCard(ExpandableActionBlock):
         ``mark_failed(_first_line(result.text), result.text, …)``). What scopes
         the exemption is the guard, not the provenance: the line is claimed only
         when the collapsed status leads with it, and the wrap it licenses is
-        bounded by :data:`REASON_MAX_CELLS`/:data:`REASON_MAX_ROWS`.
+        bounded by :data:`REASON_MAX_CELLS`/:data:`REASON_MAX_ROWS`. A PARTIAL
+        result's disclosure is claimed and wrapped the same way — a stop clause
+        the crop would otherwise cut in half, which is where the design round
+        found it (design review D2) — and it paints in the state's own ink rather
+        than the captured rows' ``dim`` (D9).
         """
         dim = bindings.style("tool.output.dim")
         ink = bindings.style("tool.output.error") if self._state == "error" else dim
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        self._append_reason_body(row, line_width, indent, dim, ink)
+        glyph, lead_ink = self._promoted_paint(ink)
+        self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         captured = self._captured_output()
         shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
@@ -2991,7 +3075,8 @@ class ToolCard(ExpandableActionBlock):
         dim = bindings.style("tool.search.dim")
         line_width = max(1, width - 2 - OUTPUT_INDENT)
         indent = " " * OUTPUT_INDENT
-        self._append_reason_body(row, line_width, indent, dim, muted)
+        glyph, lead_ink = self._promoted_paint(muted)
+        self._append_reason_body(row, line_width, indent, dim, lead_ink, glyph=glyph)
         captured = self._captured_output()
         shown = captured[:EXPAND_MAX_LINES]
         for line in shown:
@@ -3334,7 +3419,7 @@ class ToolCard(ExpandableActionBlock):
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
         name_budget = width - (2 + status_cells + 2)
-        if name_budget < 2 and self._state in ("error", "interrupted"):
+        if name_budget < 2 and (self._state in ("error", "interrupted") or self._partial):
             # The status is the only segment carrying free text, so it is the
             # one that gives way first. A failing row used to be the ONLY row
             # in a narrow ledger to lose its name — its neighbours kept three
@@ -3703,7 +3788,7 @@ class ToolCard(ExpandableActionBlock):
             else:
                 duration = format_duration(elapsed)
             duration = duration.rjust(DURATION_COL)
-        if self._state == "success":
+        if self._state == "success" and not self._partial:
             # See `bindings.BY_ELEMENT["tool.status.success_glyph"].note`.
             success_ink = bindings.style("tool.status.success_glyph")
             return [(f"{ICON_SUCCESS} ", success_ink), (duration, dim)]
@@ -3725,7 +3810,21 @@ class ToolCard(ExpandableActionBlock):
         # width that holds the word whole it is dropped, and the glyph column
         # carries the state alone — which it can, being distinguishable from
         # ✓ and ✗ with no colour at all.
-        if self._state == "interrupted":
+        if self._state == "success":
+            # PARTIAL: the tool answered, but not about the whole tree it was
+            # asked about. It gets its own glyph and the state's own ink —
+            # `warning`, the amber this card already spends on a harness state
+            # line (`tool.live.advisory`) — because the collapsed row is where an
+            # operator decides whether an answer is WHOLE, and design review D1
+            # measured the alternative: nine cards in one frame, six of them
+            # truncated searches, every one painting `✓ 0.4s` beside its
+            # arguments. A bound nobody can see does not fix the reported
+            # problem. The disclosure itself is promoted exactly as an error's
+            # cause is, so the row that cannot show the note still says it.
+            glyph, reason = ICON_PARTIAL, self._partial_reason()
+            tint = bindings.style("tool.status.partial_glyph")
+            abbreviates = True
+        elif self._state == "interrupted":
             # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
             # keeps `dim`, not a hue: see its note.
             glyph, reason = ICON_INTERRUPTED, self._interrupt_label

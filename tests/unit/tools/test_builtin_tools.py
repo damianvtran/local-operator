@@ -23,6 +23,7 @@ import threading
 import time
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -5037,6 +5038,32 @@ async def test_glob_respects_gitignore_unless_pattern_names_it(tools, context, t
 # ---------------------------------------------------------------------------
 
 
+class _StubbornProc:
+    """A ripgrep process whose reap never lands, for the review R-3 window.
+
+    ``kill()`` records that it was asked and changes nothing, and ``wait()``
+    returns without ever setting ``returncode`` — the state the guard must treat
+    as "a stop we performed, keep the records" rather than "rg failed, walk the
+    tree in Python". ``stdout.readline`` is a coroutine because the scanner awaits
+    it, and returns EOF once its scripted lines run out.
+    """
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = list(lines)
+        self.returncode: int | None = None
+        self.killed = 0
+        self.stdout = SimpleNamespace(readline=self._readline)
+
+    async def _readline(self) -> bytes:
+        return self._lines.pop(0) if self._lines else b""
+
+    def kill(self) -> None:
+        self.killed += 1
+
+    async def wait(self) -> int | None:
+        return self.returncode
+
+
 class _ScriptedClock:
     """A ``time`` stand-in whose ``monotonic()`` readings are scripted.
 
@@ -5057,9 +5084,10 @@ class _ScriptedClock:
 def test_walk_entries_stops_mid_tree_on_its_deadline(tmp_path, monkeypatch) -> None:
     """The budget stops the walk where it stands and reports itself truncated.
 
-    Reading 1 passes the root boundary check, reading 2 (one level in) is past
-    the deadline, so the result is the two files the walk had reached — not the
-    four in the tree, and not a silent claim to have walked it all.
+    Reading 1 passes the root boundary check and reading 2 the check on the far
+    side of the root's LISTING (review R-2); reading 3, one level in, is past the
+    deadline — so the result is the two files the walk had reached, not the four
+    in the tree, and not a silent claim to have walked it all.
     """
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "b.txt").write_text("b")
@@ -5068,7 +5096,7 @@ def test_walk_entries_stops_mid_tree_on_its_deadline(tmp_path, monkeypatch) -> N
     (tmp_path / "sub" / "d.txt").write_text("d")
 
     with monkeypatch.context() as patched:
-        patched.setattr(builtin, "time", _ScriptedClock(0.0, 200.0))
+        patched.setattr(builtin, "time", _ScriptedClock(0.0, 0.0, 200.0))
         stopped = builtin._walk_entries(tmp_path, deadline=100.0)
 
     assert stopped.truncated is True
@@ -5079,6 +5107,28 @@ def test_walk_entries_stops_mid_tree_on_its_deadline(tmp_path, monkeypatch) -> N
     complete = builtin._walk_entries(tmp_path)
     assert complete.truncated is False
     assert {p.name for p in complete.files} == {"a.txt", "b.txt", "c.txt", "d.txt"}
+
+
+def test_walk_entries_checks_inside_one_large_directory(tmp_path, monkeypatch) -> None:
+    """The IN-directory checkpoint is load-bearing, and nothing else covered it.
+
+    Review R-4: deleting the ``seen % _WALK_DEADLINE_CHECK_EVERY`` block left the
+    whole selection green, so the one line that bounds a single huge directory —
+    the 40,000-entry shape this fleet has, and the term a directory-boundary
+    check cannot reach for the whole of its listing — had no test at all. The
+    clock is scripted so the third reading expires with 300 entries still in ONE
+    directory; without that checkpoint the walk returns all 300.
+    """
+    for i in range(300):
+        (tmp_path / f"f{i:03d}.txt").write_text("x")
+
+    with monkeypatch.context() as patched:
+        # boundary, post-listing, then the midpoint of the entry loop
+        patched.setattr(builtin, "time", _ScriptedClock(0.0, 0.0, 200.0))
+        stopped = builtin._walk_entries(tmp_path, deadline=100.0)
+
+    assert stopped.truncated is True
+    assert len(stopped.files) == builtin._WALK_DEADLINE_CHECK_EVERY - 1
 
 
 def test_count_oversized_files_walks_the_tree_exactly_once(tmp_path, monkeypatch) -> None:
@@ -5102,10 +5152,13 @@ def test_count_oversized_files_walks_the_tree_exactly_once(tmp_path, monkeypatch
     monkeypatch.setattr(
         builtin,
         "_grep_file_set",
-        lambda target: pytest.fail("the count re-walked the tree for a file list it discards"),
+        lambda target, **kwargs: pytest.fail(
+            "the count re-walked the tree for a file list it discards"
+        ),
     )
 
-    assert builtin._count_oversized_files(tmp_path) == (1, "")
+    # ``(skipped, incomplete)``: one oversized file, and the count is complete.
+    assert builtin._count_oversized_files(tmp_path) == (1, False)
     assert len(calls) == 1
 
 
@@ -5171,11 +5224,53 @@ async def test_ripgrep_deadline_keeps_partial_records_and_skips_the_python_walk(
 
     assert walked == [], "a budget-killed rg fell back to the unbounded Python walk"
     assert "(ripgrep)" in result.text, "the rg engine's provenance must survive the stop"
-    assert "Partial search:" in result.text
-    assert "GREP_SCAN_DEADLINE_S" in result.text
+    assert result.text.startswith("Partial search: ripgrep stopped at"), result.text
     assert "path=<subdirectory>" in result.text
     assert result.useless is False
     assert "No matches for" not in result.text
+    # Design review D5: the budget's CONSTANT NAME is code, so it belongs in the
+    # payload rather than in the operator's sentence — which is where a reader
+    # could not act on it anyway. The number stays in the text.
+    assert "GREP_SCAN_DEADLINE_S" not in result.text
+    stops = (result.details or {}).get("partial_stops")
+    assert stops and stops[0]["constant"] == "GREP_SCAN_DEADLINE_S", result.details
+    assert (result.details or {}).get("partial") is True
+
+
+def test_ripgrep_keeps_the_records_a_stop_produced_even_with_no_returncode(
+    monkeypatch,
+) -> None:
+    """A stop THIS function performed is not an rg failure, however it exits.
+
+    Review R-3: the guard keyed on ``returncode < 0``, so the narrow window where
+    the reap leaves ``returncode`` as None (the wait times out and the kill is
+    best-effort) fell through to ``None not in (0, 1)`` — the records were
+    discarded and the unbounded Python walk ran instead. That is this change's own
+    bug reopened through a narrower door, so the guard is now the stop itself. The
+    process below never reports a returncode at all.
+    """
+    proc = _StubbornProc([b"src/a.py:1:needle\n"])
+    monkeypatch.setattr(builtin, "_rg_binary", lambda: "/fake/rg")
+
+    async def _spawn(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    # boundary... : the budget passes once, then expires on the second check, so
+    # the scan has ONE record to keep when the stop lands.
+    with monkeypatch.context() as patched:
+        patched.setattr(builtin, "time", _ScriptedClock(0.0, 0.0, 200.0))
+        scanned = asyncio.run(
+            builtin._ripgrep_scan("needle", Path("."), Path("."), None, True, 0, None)
+        )
+
+    assert scanned is not None, "a stop of our own must not read as an rg failure"
+    assert [record[3] for record in scanned.records] == ["m"]
+    assert scanned.stops and scanned.stops[0].stage == "ripgrep"
+    # At least the budget kill; a second kill is the reap retry in the `finally`,
+    # which is exactly the state this test is about (nothing reaps, so
+    # ``returncode`` stays None).
+    assert proc.killed >= 1, "the budget kill must actually have been issued"
 
 
 @pytest.mark.asyncio
@@ -5219,9 +5314,16 @@ async def test_grep_with_a_stopped_walk_does_not_answer_no_matches(
 
     assert result.useless is False
     assert "No matches for" not in result.text
-    assert "Partial search:" in result.text
-    assert "SEARCH_WALK_DEADLINE_S" in result.text
+    # The claim LEADS the line (design review D2: the card crops the first output
+    # row to 94 / 73 / 54 cells at 100 / 80 / 60 columns, so the disclosure has to
+    # be in the leading cells rather than after the bookkeeping).
+    assert result.text.startswith("Partial search: the walk stopped at"), result.text
     assert "path=<subdirectory>" in result.text and "include=<glob>" in result.text
+    # And the stop is structured for the collapsed row (D1) with the constant in
+    # the payload rather than in the sentence (D5).
+    assert (result.details or {}).get("partial") is True
+    assert (result.details or {})["partial_stops"][0]["constant"] == "SEARCH_WALK_DEADLINE_S"
+    assert "SEARCH_WALK_DEADLINE_S" not in result.text
 
 
 @pytest.mark.asyncio
@@ -5231,35 +5333,47 @@ async def test_grep_with_a_stopped_walk_marks_its_matches_partial(
 ) -> None:
     """With matches, the existing header contract stays and the stop is added.
 
-    The truncation clause is additive: `1 match(es) for 'needle'` and
-    `path:line:text` render exactly as before, and the result still says it is
-    part of a tree that was not fully read.
+    The clause is additive: `1 match(es) for 'needle'` and `path:line:text` render
+    exactly as before, the claim LEADS the line so the card's crop cannot eat it
+    (design review D2), and the result still says it is part of a tree that was
+    not fully read.
     """
     hit = tmp_path / "hit.py"
     hit.write_text("needle\n")
 
-    def partial_file_set(target):
+    def partial_file_set(target, **kwargs):
         return builtin._WalkOutcome(files=[hit], truncated=True), target
 
     monkeypatch.setattr(builtin, "_grep_file_set", partial_file_set)
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
-    assert "1 match(es) for 'needle'" in result.text
+    assert result.text.startswith("Partial results: 1 match(es) for 'needle'")
     assert "hit.py:1:needle" in result.text
-    assert "these results are partial" in result.text
-    assert "SEARCH_WALK_DEADLINE_S" in result.text
+    assert "the walk stopped at" in result.text
+    assert "narrow path=<subdirectory> or include=<glob>" in result.text
     assert result.useless is False
+    # The card marks the collapsed row from the payload, not from the text
+    # (design review D1), and the stop's constant lives there rather than in the
+    # operator's sentence (D5).
+    assert (result.details or {}).get("partial") is True
+    assert (result.details or {})["partial_stops"][0]["constant"] == "SEARCH_WALK_DEADLINE_S"
+    assert "SEARCH_WALK_DEADLINE_S" not in result.text
 
 
 @pytest.mark.asyncio
-async def test_grep_skipped_count_from_a_stopped_walk_is_a_lower_bound(
+async def test_grep_skipped_count_from_a_stopped_walk_is_not_a_number(
     tools, context, tmp_path, monkeypatch
 ) -> None:
-    """A count the walk did not finish is a LOWER BOUND, and says so.
+    """A count the walk did not finish is stated as unfinished, not as a number.
 
-    Printing `0 file(s) skipped` from a truncated walk would claim a total the
-    walk never established — the same lie as `no matches`, one level down.
+    Printing `0 file(s) skipped over the 1MB cap` from a truncated walk claims a
+    total the walk never established — the same lie as `no matches`, one level
+    down — and the older spelling was worse still: `0 file(s) skipped … a lower
+    bound` reads as a total that happens to be zero (design review Q-2, review
+    N-3). The parenthetical now carries no count at all when the walk did not
+    finish, and the RECORDS are not called partial by it: only the count is in
+    doubt here, and saying otherwise would be its own lie.
     """
     monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
     if not builtin._use_ripgrep():
@@ -5270,8 +5384,12 @@ async def test_grep_skipped_count_from_a_stopped_walk_is_a_lower_bound(
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
     assert "hit.py:1:needle" in result.text, "the rg scan itself must still have matched"
-    assert "file(s) skipped over the 1MB cap; a lower bound" in result.text
-    assert "SEARCH_WALK_DEADLINE_S" in result.text
+    assert "(files over the 1MB cap not fully counted)" in result.text
+    assert "file(s) skipped over the 1MB cap" not in result.text
+    # The records are complete — the ripgrep scan finished — so the result is not
+    # labelled partial, and the card does not mark it as one.
+    assert "Partial" not in result.text
+    assert (result.details or {}).get("partial") is None
 
 
 @pytest.mark.asyncio
@@ -5391,9 +5509,15 @@ async def test_glob_with_a_stopped_walk_does_not_answer_no_paths_matched(
 
     assert result.useless is False
     assert "No paths matched pattern" not in result.text
-    assert "Partial search:" in result.text
-    assert "SEARCH_WALK_DEADLINE_S" in result.text
-    assert "a literal directory prefix" in result.text
+    assert result.text.startswith("Partial search: the walk stopped at")
+    # The remedy's example no longer contains the operator design review D7
+    # flagged: `**` in the positive example contradicted the warning it sat in,
+    # and the sentence had no agent for "is only descended into".
+    assert "makes the walk descend only that subtree" in result.text
+    assert "'src/*.py'" in result.text
+    assert "SEARCH_WALK_DEADLINE_S" not in result.text
+    assert (result.details or {}).get("partial") is True
+    assert (result.details or {})["partial_stops"][0]["constant"] == "SEARCH_WALK_DEADLINE_S"
 
 
 # ---------------------------------------------------------------------------
