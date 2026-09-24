@@ -15,6 +15,7 @@ import uvicorn
 
 from local_operator.mcp.manager import McpManager
 from local_operator.server.app import app
+from local_operator.session.aside import ASIDE_PROMPT
 from local_operator.session.goal_loop import LOOP_GOAL_PROMPT, LOOP_JUDGE_PROMPT
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -59,7 +60,11 @@ def _census(stream: ScriptedStream) -> list[str]:
             # LOOP_JUDGE_PROMPT question about a different objective.
             LOOP_GOAL_PROMPT.format(goal=LOOP_GOAL_TEXT): "loop-goal",
             LOOP_JUDGE_PROMPT.format(goal=LOOP_GOAL_TEXT): "judge",
-            "Private question": "aside",
+            # The aside arrives WRAPPED: the remote seam composes
+            # ``ASIDE_PROMPT`` around the question (#1488), and that wrapper is
+            # the last user row the call asks with. Labelling the raw question
+            # left this call unlabelled, so it counted as a user turn.
+            ASIDE_PROMPT.format(question="Private question"): "aside",
         },
     )
 
