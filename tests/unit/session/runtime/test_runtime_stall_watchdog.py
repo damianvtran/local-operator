@@ -6258,6 +6258,164 @@ def test_a_fire_with_work_in_flight_dumps_and_the_runtime_SURVIVES(tmp_path: Pat
     assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
 
 
+#: A runtime that fires its bound over work in flight and then either goes on REPORTING
+#: (a real beat, which is a real re-arm) or stays silent. Both directions are one run of
+#: this child, because they are one artifact pair apart.
+_HELD_FIRE_THEN_REARM_CHILD = """
+import os
+import pathlib
+import sys
+import time
+
+from local_operator.session.runtime import stall_watchdog
+
+sentinel = pathlib.Path(sys.argv[1])
+bound = float(sys.argv[2])
+mode = sys.argv[3]
+
+BUSY = {"work": True}
+
+
+def busy():
+    return BUSY["work"]
+
+
+assert stall_watchdog.arm(seconds=bound, busy=busy), "the child could not arm"
+print(f"armed:{os.getpid()}", flush=True)
+dump = stall_watchdog.dump_path()
+deadline = time.monotonic() + bound * 4 + 30
+while time.monotonic() < deadline:
+    if stall_watchdog.HELD_MARKER in dump.read_text(encoding="utf-8"):
+        break
+    # The dump GROWS on every fire while nothing clears the sample, so this is a poll of
+    # a file rather than of a flag: a tight cadence re-reads megabytes to learn nothing.
+    time.sleep(0.1)
+else:
+    raise AssertionError("the held fire never arrived")
+if mode == "rearm":
+    # THE WORK CLEARS, so the sampler ends its watch and only the beat keeps writing --
+    # the runtime "went on working and re-arming" rather than one still held.
+    BUSY["work"] = False
+    # BOTH PLANES, in ONE round, and the order is load-bearing: the WORKLOAD beat is
+    # where a quiet SERVING plane's transition line is written INTO the dump, so it has
+    # to be the SERVING beat that writes the sibling last. One loop reporting while the
+    # other is still silent also leaves the deadline in the past, so the timer keeps
+    # firing and every fire appends to the dump AFTER the re-arm -- a fixture that could
+    # not reach the state this cell is about (measured: dump 0.30 s newer than a sibling
+    # two beats had just written). Stamping SERVING from here is a STAMP, not a claim
+    # that its loop ran: what this cell tests is the pair the re-arm writes.
+    stall_watchdog.beat(stall_watchdog.WORKLOAD)
+    stall_watchdog.beat(stall_watchdog.SERVING)
+# DISARM, which KEEPS both files for a runtime that survived a fire and cancels the
+# timer: the pair is frozen at the state under test rather than left to a countdown, and
+# this is the clean-exit path ``stall_watchdog`` documents for exactly this case.
+stall_watchdog.disarm()
+sentinel.write_text("done", encoding="utf-8")
+"""
+
+
+@pytest.mark.parametrize("mode", ("rearm", "held"))
+def test_the_re_arm_fence_is_the_siblings_position_and_not_its_existence(
+    tmp_path: Path, mode: str
+) -> None:
+    """A RE-ARM AFTER THE FIRE RETIRES THE HELD READING; NO RE-ARM KEEPS IT.
+
+    THE DEFECT (2026-09-24): ``stall_held`` was read off the dump's ``bound held:``
+    marker alone, which records an EPISODE. A runtime that fired once, was held for work
+    in flight, then recovered and went on beating carries that marker for the rest of its
+    life, so ``lop sessions`` painted a healthy, continuously re-arming runtime as one
+    that needs a person — the peer report this cell is the regression guard for.
+
+    DRIVEN THROUGH A REAL PROCESS, and that is what the two modes buy: a real C-timer
+    fire, the real sampler recording it as held, and a real ``beat`` (the call
+    ``process._beat_stall_watchdog`` makes) writing the deadline sibling afterwards. The
+    artifact state each direction asserts on is therefore the state a fleet session
+    reaches, not one this file composed.
+
+    ``held_fire`` is asserted True in BOTH directions on purpose: it is the episode
+    reading and it does not change — the fence above it is what answers whether the
+    runtime is still re-arming, and a cell that let ``held_fire`` go false would be
+    testing a different function from the one the row reads.
+    """
+    sentinel = tmp_path / "sentinel.txt"
+    result = _run_script(
+        _HELD_FIRE_THEN_REARM_CHILD,
+        tmp_path,
+        args=(str(sentinel), str(SHORT_BOUND_S), mode),
+        # A REAL FIRE'S OWN BOUND, plus room for a fleet-loaded host: the child waits on a
+        # C-timer expiry and a sampler wake, and on this machine that is queued behind
+        # ~25 sibling suites.
+        timeout=240.0,
+    )
+    assert result.returncode == 0, (
+        f"the {mode} child did not survive its own fire: rc={result.returncode} "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert sentinel.read_text(encoding="utf-8") == "done"
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    dump = _dump_for(tmp_path, pid)
+    text = dump.read_text(encoding="utf-8")
+    assert any(
+        line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
+    ), f"the fire was not recorded as held, so this cell proves nothing: {text[:900]!r}"
+    assert (
+        stall_watchdog.held_fire(pid, tmp_path / "logs") is True
+    ), "the episode reading is unchanged by this fence, in both directions"
+    sibling = stall_watchdog.deadline_path(pid, tmp_path / "logs")
+    if mode == "rearm":
+        assert sibling.exists(), "the beat wrote no deadline sibling, so nothing re-armed"
+        assert stall_watchdog.rearmed_after_dump(dump) is True, (
+            f"a real re-arm after the fire was not read as one: "
+            f"dump={dump.stat().st_mtime!r} sibling={sibling.stat().st_mtime!r}"
+        )
+    else:
+        assert not sibling.exists(), (
+            "a runtime that never re-armed has a deadline sibling, so this direction "
+            "cannot tell the fence from a clock"
+        )
+        assert stall_watchdog.rearmed_after_dump(dump) is False
+
+
+def test_the_re_arm_fence_reads_a_position_and_never_an_existence(tmp_path: Path) -> None:
+    """The fence's boundary, stated against files whose mtimes this cell controls.
+
+    The real-process cell above proves the state a fleet reaches; this one pins the
+    BOUNDARY around it, which a process cannot be asked to produce on demand: no
+    sibling is no evidence of a re-arm, a sibling written BEFORE the fire leaves the
+    runtime held, and one written after it retires the claim. It also pins the one
+    argument shape the caller relies on — a ``None`` dump — because that is what
+    ``held_dumps`` hands every row it has no artifact for.
+    """
+    logs = tmp_path / "logs"
+    dump = stall_watchdog.dump_path(11, logs)
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.write_text(
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n{stall_watchdog.HELD_MARKER}work in flight\n",
+        encoding="utf-8",
+    )
+    sibling = stall_watchdog.deadline_path(11, logs)
+    assert stall_watchdog.rearmed_after_dump(dump) is False, "no sibling re-armed anything"
+    sibling.write_text("0.000 progress\n", encoding="utf-8")
+    before = dump.stat().st_mtime - 10.0
+    os.utime(sibling, (before, before))
+    assert stall_watchdog.rearmed_after_dump(dump) is False, "a sibling behind the fire"
+    after = dump.stat().st_mtime + 10.0
+    os.utime(sibling, (after, after))
+    assert stall_watchdog.rearmed_after_dump(dump) is True, "a sibling ahead of the fire"
+    assert stall_watchdog.rearmed_after_dump(None) is False, "no dump is not a re-arm"
+    # THE PATH, NOT THE PID: a caller hands the dump its store search FOUND, and the
+    # sibling has to be that file's own arm -- a pid-keyed lookup would answer from
+    # this process's own log directory and read a different life's pair.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    sibling_two = stall_watchdog.deadline_path(11, other)
+    sibling_two.write_text("0.000 progress\n", encoding="utf-8")
+    os.utime(sibling_two, (after, after))
+    assert (
+        stall_watchdog.rearmed_after_dump(dump) is True
+    ), "the fence stopped reading the found path's own sibling"
+
+
 def test_an_UNREADABLE_work_report_still_fires_and_holds(tmp_path: Path) -> None:
     """THE INVARIANT: no path withholds the fire. Only the exit is ever refused.
 

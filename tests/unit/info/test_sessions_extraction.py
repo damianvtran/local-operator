@@ -741,6 +741,66 @@ def test_a_stale_pid_with_a_leftover_dump_is_not_held(monkeypatch: Any) -> None:
     ), "a leftover dump on a dead pid was rendered as a runtime that survived its bound"
 
 
+def test_a_re_arm_after_the_fire_retires_the_held_cell(monkeypatch: Any, capsys: Any) -> None:
+    """2026-09-24: a held row must mean the runtime STOPPED reporting, not that it once did.
+
+    ``stall_held`` was read off the dump's marker alone, and the marker records an
+    EPISODE. A runtime that fired once, was held for work in flight, then recovered and
+    went on beating therefore listed as ``bound held; lop stop`` for the rest of its
+    life — a false "this session needs a person" claim, observed by a peer session on two
+    healthy runtimes whose deadline siblings had been rewritten one second before it
+    read them. The fence is the third one on this fact
+    (``stall_watchdog.rearmed_after_dump``): a re-arm after the fire retires the CLAIM
+    without retiring the FIRE, because the dump is still the evidence a person opens.
+
+    WHAT THIS CELL DOES NOT PROVE: it composes the pair from ``_dump_file`` and a sibling
+    file, so it pins the boundary and both rendered halves, not that a real runtime
+    produces the pair. ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``
+    drives a real process for that.
+    """
+    import argparse
+    import os
+
+    from local_operator import cli
+    from local_operator.session.runtime import stall_watchdog
+
+    _install_fixture(monkeypatch, HELD_SESSION)
+    record = HELD_SESSION[0][0]
+    dump = _dump_file(record.pid, mtime=NOW, held=True)
+
+    def table() -> str:
+        assert (
+            cli.sessions_command(
+                argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+            )
+            == 0
+        )
+        return capsys.readouterr().out
+
+    # NO SIBLING: the runtime fired and is not re-arming, so the claim — and the cell
+    # and the way out — stand. This is the direction a fix that dropped the state
+    # outright would hide.
+    assert session_rows()[0]["stall_held"] is True
+    assert cli.HELD_CELL in table()
+
+    # THE DEADLINE REWRITTEN AFTER THE FIRE: a real re-arm. A row still promising that a
+    # person is needed would be describing a runtime that is demonstrably reporting.
+    sibling = stall_watchdog.deadline_path(record.pid, dump.parent)
+    sibling.write_text(f"{NOW + 300:.3f} progress\n", encoding="utf-8")
+    os.utime(sibling, (NOW + 1.0, NOW + 1.0))
+    row = session_rows()[0]
+    assert row["stall_held"] is False, row
+    assert row["stall_dump"] == str(dump), "the fire is still this row's evidence"
+    assert cli.HELD_CELL not in table()
+
+    # AND THE BOUNDARY IS A POSITION, not an existence: a sibling BEHIND the fire is a
+    # runtime that fired and has not re-armed since, which is exactly the state the
+    # phrase exists for.
+    os.utime(sibling, (NOW - 1.0, NOW - 1.0))
+    assert session_rows()[0]["stall_held"] is True
+    assert cli.HELD_CELL in table()
+
+
 def test_the_stalled_and_updating_cells_sit_under_their_own_headers(
     monkeypatch: Any, capsys: Any
 ) -> None:
