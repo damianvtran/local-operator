@@ -76,6 +76,14 @@ class RadientTunnels:
                 # the one terminal case is never inferred from this sentence --
                 # which is deliberately the same for both, because the redaction
                 # rule below forbids echoing what the provider actually said.
+                #
+                # A DEFERRED refresh (`RefreshUnconfirmedError`) gets the same
+                # treatment, and deliberately: this sentence is not where the
+                # distinction lives, the chain is, and it survives there because
+                # this raise uses `from failure`. `service.authorization_failure_reason`
+                # and `service.classify_failure` read the chain rather than the prose,
+                # so the relay can say "the refresh is deferred and is being retried"
+                # instead of blaming a login nothing has happened to.
                 if isinstance(failure, CredentialInvalidError):
                     raise LoginRequired(
                         "The tunnel's Radient login could not be refreshed."
