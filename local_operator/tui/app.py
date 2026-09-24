@@ -32130,7 +32130,20 @@ class OperatorApp(App[None]):
             self._stop_all_armed_at = None
             self._system_notice("no sessions to stop")
             return
-        drained = frozenset(rec.pid for rec in targets if (getattr(rec, "leaving", "") or ""))
+        leaving = [rec for rec in targets if (getattr(rec, "leaving", "") or "")]
+        # A DRAIN THE LADDER NO LONGER BELIEVES IS NOT LEFT ALONE (agent review round 1,
+        # m2): ``control._drain_stalled`` is the exact predicate the second press applies,
+        # so the listing asks it too rather than promising "left alone" for a runtime the
+        # press will then stop. Off the loop, because it reads dumps and may fork ``ps``.
+        stalled_pids = frozenset(
+            rec.pid
+            for rec, why in zip(
+                leaving,
+                await asyncio.to_thread(lambda: [control._drain_stalled(r) for r in leaving]),
+            )
+            if why
+        )
+        drained = frozenset(rec.pid for rec in leaving) - stalled_pids
         rows: list[tuple[int, str, str]] = [
             (
                 rec.pid,
@@ -32142,8 +32155,13 @@ class OperatorApp(App[None]):
                 # more session to stop promises a stop that will not happen. The
                 # outcome line already reconciles the count afterwards; this is
                 # the same fact one step earlier, where it can still change the
-                # decision (UX round 2, NIT-1).
-                " (already leaving)" if rec.pid in drained else "",
+                # decision (UX round 2, NIT-1). A STALLED drain is marked apart, because
+                # the press does stop it (agent review round 1, m2).
+                (
+                    " (already leaving)"
+                    if rec.pid in drained
+                    else " (leaving, but stalled)" if rec.pid in stalled_pids else ""
+                ),
             )
             for rec in targets
         ]
@@ -32159,13 +32177,28 @@ class OperatorApp(App[None]):
         # off the painted block (D2-1).
         budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
         lines = [f"will stop {total} session{'s' if total != 1 else ''}:"]
+        qualifiers = []
         if drained:
             # Named once, above the rows: every marked row below is a session the
             # press ASKS again and then leaves alone — the plain count would read
             # as "these will all be stopped".
+            qualifiers.append(f"{len(drained)} already leaving — asked again, then left alone")
+        if qualifiers:
             lines[0] = (
                 f"will stop {total} session{'s' if total != 1 else ''} "
-                f"({len(drained)} already leaving — asked again, then left alone):"
+                f"({'; '.join(qualifiers)}):"
+            )
+        if stalled_pids:
+            # The other half, in the ladder's own words: these are leaving too, but their
+            # drain has stopped reporting, so the press does NOT leave them alone.
+            # FUTURE TENSE, because this is the plan the press will try and the identity
+            # gate can still refuse it (QA round 2, Q-5). ITS OWN LINE, because appended
+            # to the header the pair wrapped at 110 columns (99 of body): the header is
+            # the count, and each qualifier is a line a reader can scan.
+            n = len(stalled_pids)
+            lines.append(
+                f"({n} leaving but stalled — not left to drain; "
+                f"{'it' if n == 1 else 'they'} will be stopped)"
             )
         for pid, name, tag in rows:
             lead = f"  pid {pid:>{pid_w}}  "
