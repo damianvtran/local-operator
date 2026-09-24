@@ -59,7 +59,9 @@ depending on that runtime right now:
 * **It is not merely still booting.** A candidate younger than
   :data:`MIN_AGE_S` is refused, which covers the whole construction window of a
   spawn whose record is not published yet (measured at 2.1 s warm, and the engage
-  deadline the supervisor sizes for is 180 s).
+  deadline the supervisor sizes for is 180 s). The age is the YOUNGER of the
+  process's own and its boot record's (:func:`effective_age`), because an adopted
+  runtime's interpreter is started minutes before the session it constructs.
 * **It is not burning CPU.** Cumulative CPU is compared across the two sightings
   and a candidate that spent more than :data:`BUSY_CPU_FRACTION` of the window
   burning is refused for another window. This test can only ever REFUSE — a quiet
@@ -700,6 +702,13 @@ class Fleet:
     boots: Mapping[int, Any]
     viewers: Sequence[Any]
     sockets: SocketEvidence
+    #: ``pid -> the boot record's own ``started_at````, for :func:`effective_age`.
+    #: A SECOND, LATER age for one process, and the only way the young rung can
+    #: see it: an ADOPTED runtime is an interpreter that was started minutes
+    #: before the session it is now constructing (see
+    #: ``session/runtime/standby.py``), so its ``ps`` age says "long-lived" while
+    #: its session is seconds old.
+    boot_starts: Mapping[int, float] = field(default_factory=dict)
     own_pids: frozenset[int] = frozenset()
     #: The roots this pass may act in, when a caller NAMED them. ``None`` is the
     #: production rule in the module docstring — the swept root, plus any root that
@@ -729,6 +738,7 @@ def read_fleet(root: Path | None = None, *, sockets: SocketEvidence | None = Non
     scanned = registry.scan(config_root, RUN_DIRNAME, SessionRecord.from_json, reap=False)
     records = {record.pid: record for record, _state in scanned}
     boots: dict[int, Any] = {}
+    boot_starts: dict[int, float] = {}
     host_dir = config_root / HOST_RUN_DIRNAME
     try:
         boot_paths = sorted(host_dir.glob("*.json"))
@@ -742,14 +752,46 @@ def read_fleet(root: Path | None = None, *, sockets: SocketEvidence | None = Non
         pid = data.get("pid") if isinstance(data, dict) else None
         if isinstance(pid, int):
             boots.setdefault(pid, data)
+            started = data.get("started_at")
+            if isinstance(started, (int, float)):
+                boot_starts.setdefault(pid, float(started))
     return Fleet(
         root=config_root,
         records=records,
         boots=boots,
         viewers=scan_viewers(config_root, reap=False),
         sockets=sockets if sockets is not None else SocketEvidence(),
+        boot_starts=boot_starts,
         own_pids=ancestor_pids(),
     )
+
+
+def effective_age(process: RuntimeProcess, fleet: Fleet, *, now: float | None = None) -> float:
+    """How long this runtime has been doing what a caller cares about.
+
+    The YOUNGER of two observations, and both are stamped by the kernel or by a
+    file's writer:
+
+    * the process's own age from the process table (``ps`` ``etime``), valid
+      however broken the runtime's own instrumentation is;
+    * the age of its boot record (``run/host/<pid>.json``) — written by the
+      runtime at its boot boundary, or by an ADOPTED standby the moment it takes
+      a spawn.
+
+    WHY THE SECOND IS NEEDED AT ALL (agent review round 1, R1-3). An adopted
+    runtime is a pre-imported interpreter this machine started up to
+    :data:`IDLE_REAP_S` BEFORE the session it is constructing. Its ``etime``
+    therefore reports "15 minutes old" while its construction is seconds old, so
+    the young rung — the one rung that covers the whole construction window —
+    would not fire, and a sweep could signal a runtime that has not published
+    yet. The MINIMUM is what makes that impossible, and for a forked runtime the
+    two agree to within the boot boundary, so the reading is unchanged.
+    """
+    started = fleet.boot_starts.get(process.pid)
+    if started is None:
+        return process.age_s
+    stamp = time.time() if now is None else now
+    return min(process.age_s, max(0.0, stamp - started))
 
 
 def verdict(
@@ -771,8 +813,10 @@ def verdict(
     1. ``self`` — this process or an ancestor. The one refusal that must never be
        skipped, and the one a caller cannot be trusted to state.
     2. ``young`` — newer than :data:`MIN_AGE_S`, i.e. possibly still constructing
-       and not yet publishing. The process table's own age, so it holds however
-       broken the runtime's own instrumentation is.
+       and not yet publishing. The process table's own age, or its boot record's
+       (whichever is YOUNGER — see :func:`effective_age`), so it holds however
+       broken the runtime's own instrumentation is, and it covers an adopted
+       runtime whose interpreter predates its session.
     3. ``unattributable`` — its config root could not be read, so no statement can
        be made about which records could exist for it.
     4. ``foreign-root`` — its root is neither the swept root nor a deleted path. A
@@ -794,12 +838,13 @@ def verdict(
     """
     if process.pid in fleet.own_pids:
         return Verdict(process=process, config_root="", refusal=REFUSAL_SELF)
-    if process.age_s < min_age_s:
+    age_s = effective_age(process, fleet, now=now)
+    if age_s < min_age_s:
         return Verdict(
             process=process,
             config_root="",
             refusal=REFUSAL_YOUNG,
-            detail=f"{process.age_s:.0f}s < {min_age_s:.0f}s",
+            detail=f"{age_s:.0f}s < {min_age_s:.0f}s",
         )
     # THE HINTS ARE FOR A CALLER THAT ALREADY KNOWS — the roster, which has just
     # composed the row and must not be able to describe a runtime differently from

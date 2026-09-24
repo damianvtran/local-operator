@@ -412,7 +412,12 @@ def _spawn_runtime(
     # typed commands — presents it, while every other process on the machine
     # (a peer's terminal, the desktop app, the phone relay when it is not the
     # one that engaged) has nothing to present and is refused.
-    handoff = open_operator_cap_handoff()
+    #
+    # MINTED ONCE, HANDED OVER ONCE. Whichever route below is taken (adoption or
+    # a cold fork) sends this value into the one process that becomes the
+    # session's runtime; the handoff OBJECT is per-route, because a failed
+    # adoption attempt may already have duplicated its descriptor into the
+    # standby — see the comment at the attempt.
     operator_cap = mint_operator_cap()
     # Name the detached runtime in the OS process listing. A machine has many of
     # these at once (one per live session), and until now every one of them was
@@ -440,36 +445,49 @@ def _spawn_runtime(
 
     interpreter = _spawn_interpreter()
     # A WARMED STANDBY FIRST (``session/runtime/standby.py``): the same spawn —
-    # this exact environment, this capture file, the child end of this handoff
-    # — handed to an interpreter that has already paid the runtime's ~1.1 s of
-    # import CPU, which at this host's load is most of a cold engage's 3-4 s.
-    # ``None`` means no standby, or one that refused (a moved build, generation,
-    # config or environment); the cold spawn below then runs exactly as before.
-    # The capability is still minted and registered HERE, so the console that
-    # engaged holds it for the adopted pid just as it would for a forked one.
+    # this exact environment, this capture file, the child end of a handoff this
+    # console made — handed to an interpreter that has already paid the runtime's
+    # ~1.1 s of import CPU, which at this host's load is most of a cold engage's
+    # 3-4 s. ``None`` means this console has no standby, or one that refused (a
+    # moved build, generation, config or environment); the cold spawn below then
+    # runs exactly as before.
+    #
+    # A FRESH HANDOFF FOR EACH ROUTE (agent review round 1, R1-4). An adoption
+    # that times out may already have duplicated this handoff's child end into the
+    # standby, so reusing that handoff for the cold child would leave TWO processes
+    # holding one socketpair: whichever reads the 32 bytes first wins, and lease
+    # arbitration then decides which SURVIVES — so the survivor can be the one
+    # without the capability. The attempt therefore gets its own handoff, and the
+    # cold path mints another; the value is written only into the one that is used.
+    # ``adoption_possible`` first so a console with no standby never mints one.
     from local_operator.paths import config_dir as _config_dir
     from local_operator.session.runtime import standby
 
-    # ``try_adopt`` never raises, so the handoff and capture stay ours to close
-    # on exactly the paths below: here on adoption, in the cold path's own
-    # ``finally`` otherwise.
-    adopted = standby.try_adopt(
-        Path(env.get("LOCAL_OPERATOR_CONFIG_DIR") or _config_dir()),
-        interpreter,
-        env,
-        capture,
-        handoff.pass_fds[0] if handoff.pass_fds else None,
-    )
-    if adopted is not None:
-        try:
-            # SCM_RIGHTS gave the standby its OWN duplicate of the child end, so
-            # delivering and closing here is the same sequence as after a fork.
-            handoff.deliver(operator_cap)
-            remember_operator_cap(adopted.pid, operator_cap)
-        finally:
-            handoff.close()
-            handle.close()
-        return cast("subprocess.Popen[bytes]", adopted)
+    if standby.adoption_possible():
+        adopt_handoff = open_operator_cap_handoff()
+        # ``try_adopt`` never raises, so the descriptors it was given stay ours to
+        # close on every path below.
+        adopted = standby.try_adopt(
+            Path(env.get("LOCAL_OPERATOR_CONFIG_DIR") or _config_dir()),
+            interpreter,
+            env,
+            capture,
+            adopt_handoff.pass_fds[0] if adopt_handoff.pass_fds else None,
+        )
+        if adopted is not None:
+            try:
+                # SCM_RIGHTS gave the standby its OWN duplicate of the child end,
+                # so delivering and closing here is the sequence a fork uses.
+                adopt_handoff.deliver(operator_cap)
+                remember_operator_cap(adopted.pid, operator_cap)
+            finally:
+                adopt_handoff.close()
+                handle.close()
+            return cast("subprocess.Popen[bytes]", adopted)
+        # NOT ADOPTED: close the attempt's handoff WITHOUT delivering, so no copy
+        # of this session's capability is left in a descriptor nobody will read.
+        adopt_handoff.close()
+    handoff = open_operator_cap_handoff()
     if interpreter != sys.executable:
         argv0, executable = procname.spawn_identity_for_interpreter(
             procname.LABEL_SESSION_ANON, interpreter, id=str(session_id)[:8]
