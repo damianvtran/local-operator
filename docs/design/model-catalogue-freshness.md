@@ -623,7 +623,7 @@ the `.fetching` lease gone.
 | `SOFT_TTL_S` | catalogue | 1h | staleness bound for the next call at zero on-path cost |
 | `MISS_REFETCH_MIN_AGE_S` | catalogue | 10 min | a young document that lacks an id is right; bounds typo refetches |
 | `REVALIDATE_BACKOFF_S` | catalogue | 5 min | one background attempt per key per five minutes while offline |
-| `LISTING_FAILURE_BACKOFF_S` | catalogue | 5 min | one SYNCHRONOUS attempt per document per five minutes after a fetch fails — the sibling of the row above for the path a caller waits on |
+| `LISTING_FAILURE_BACKOFF_S` | catalogue | 1 min | one SYNCHRONOUS attempt per document per minute after a fetch fails — the sibling of the row above for the path a caller waits on |
 | `PICKER_TTL_S` | controller | 15 min | the user is asking; sync fetch is already off-loop behind painted rows |
 | `_PRICE_CATALOGUE_TIMEOUT_S` | configure | 3s (= `_AGGREGATOR_TIMEOUT_S`) | same leg-2 budget rule; reachable from the executor thread of the 1 Hz poll |
 | `LISTING_CAPTURE_VERSIONS` | discovery | `anthropic 2, openrouter 2, radient 2` (+`xai 2` if the transport lands) | readers now need `cache_write_price` |
@@ -637,11 +637,29 @@ every live read, and a surface that refetches on window focus let a user
 amplify their own rate limit by alt-tabbing.
 
 The synchronous memory is bound to the DOCUMENT it was recorded against
-(`mtime_ns` + size), not to the path alone, and `invalidate` / `invalidate_documents`
-both clear it. A path-only memory answered `stale` — with no attempt at all — for
-a document that had been removed or replaced since the failure, which a cache
-sweep, a peer process's `invalidate` or a hand-cleared cache dir does for real;
-and it is what pytest's reused `tmp_path` exposed in `test_deepseek.py`.
+(`st_ino` + `st_size` + `st_ctime_ns`), not to the path alone, and `invalidate` /
+`invalidate_documents` both clear it — the latter by the credential IDENTITY the
+document glob uses, not by the documents that glob can find, because a provider
+whose fetch failed with nothing cached has no document to find and is exactly the
+state this bound exists for. A path-only memory answered `stale` — with no attempt
+at all — for a document that had been removed or replaced since the failure, which
+a cache sweep, a peer process's `invalidate` or a hand-cleared cache dir does for
+real; and it is what pytest's reused `tmp_path` exposed in `test_deepseek.py`.
+`st_mtime_ns` is excluded on purpose: a copy or restore can carry it over
+(`rsync -a`, `cp -p`), and `st_ctime_ns` is the field `os.utime` cannot set back.
+
+**The window also covers the user's own explicit read, and that is why it is a
+minute rather than five.** `GET /v1/desktop/models?live=true` — the picker's
+Refresh, the TUI's — is the user asking NOW, and inside the window it is answered
+from the memory with no request. What clears it early: any credential change or
+account removal (`invalidate_listing` → `invalidate_documents`), a newly
+configured local endpoint (`_configure_local` → `invalidate`), and a document that
+changed or vanished under the memory. The memory is also in-process only, so a
+restart retries at once — the property that keeps a short bound from becoming a
+state the user cannot clear by hand. The automation the bound actually defends
+against (the renderer refetching a live query on window focus) is bounded in
+`local-operator-ui`, so one minute pays for the round trips without making a
+person wait for a Refresh.
 
 ---
 

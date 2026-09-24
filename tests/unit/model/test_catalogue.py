@@ -16,6 +16,7 @@ from starting when it is not.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
@@ -223,11 +224,12 @@ def test_a_successful_fetch_clears_the_failure_memory(tmp_path, monkeypatch) -> 
         calls.append("ok")
         return _payload()
 
+    window = catalogue.LISTING_FAILURE_BACKOFF_S
     catalogue.read_listing("openrouter.listing", boom, cache_dir=tmp_path)
     monkeypatch.setattr(catalogue, "LISTING_FAILURE_BACKOFF_S", -1.0)
     fresh = catalogue.read_listing("openrouter.listing", ok, cache_dir=tmp_path)
     assert fresh.fetched
-    monkeypatch.setattr(catalogue, "LISTING_FAILURE_BACKOFF_S", 5 * 60)
+    monkeypatch.setattr(catalogue, "LISTING_FAILURE_BACKOFF_S", window)
     assert (
         catalogue._failure_backoff_active(catalogue._cache_path("openrouter.listing", tmp_path))
         is False
@@ -271,6 +273,94 @@ def test_invalidating_every_document_of_a_credential_forgets_them_all(tmp_path) 
     assert dropped == 1
     catalogue.read_listing("openai.oauth.abcd.listing", boom, ttl_s=-1, cache_dir=tmp_path)
     assert len(calls) == 2
+
+
+def test_a_credential_repair_re_arms_the_backoff_with_no_document_on_disk(tmp_path) -> None:
+    """THE REPAIR PATH, in the state the backoff exists for: nothing cached.
+
+    ``invalidate_documents`` has to clear the memory by the credential IDENTITY
+    the document glob uses, not by the documents that glob can find — a provider
+    whose fetch failed before it ever succeeded has none. Measured before this:
+    ``dropped 0``, the memory survived, and the next live read made NO attempt and
+    still reported the failure, so a user who had just logged in was told "Model
+    listing unavailable" for the rest of the window. QA reached the same thing
+    end to end through `DELETE /v1/auth/accounts/<row>` and through a corrected
+    `radient-key` key, both of which land here via `invalidate_listing`.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("401 Unauthorized")
+
+    # NO document: the very first fetch fails, so nothing was ever cached.
+    catalogue.read_listing("openai.listing", boom, cache_dir=tmp_path)
+    document = catalogue._cache_path("openai.listing", tmp_path)
+    assert catalogue._failure_backoff_active(document)
+    dropped = catalogue.invalidate_documents("openai", cache_dir=tmp_path)
+    assert dropped == 0, "no document existed — that is the case under test"
+    assert catalogue._failure_backoff_active(document) is False
+    catalogue.read_listing("openai.listing", boom, cache_dir=tmp_path)
+    assert len(calls) == 2, "the repair must be followed by an ATTEMPT, not a skip"
+
+
+def test_the_identity_prefix_does_not_reach_a_prefixed_provider_id(tmp_path) -> None:
+    """`openai.*` must not match `openai-device.listing.json` — the glob's dot.
+
+    The document sweep's docstring calls the dot separator load-bearing, because
+    `openai` and `openai-device` are two credential identities that share one
+    document only where the registry says so. The memory follows the same rule.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("401 Unauthorized")
+
+    catalogue.read_listing("openai-device.listing", boom, cache_dir=tmp_path)
+    document = catalogue._cache_path("openai-device.listing", tmp_path)
+    assert catalogue.invalidate_documents("openai", cache_dir=tmp_path) == 0
+    assert catalogue._failure_backoff_active(document)
+    catalogue.read_listing("openai-device.listing", boom, cache_dir=tmp_path)
+    assert len(calls) == 1, "the surviving memory still bounds this document"
+
+
+def test_an_equal_length_replacement_with_a_pinned_back_mtime_is_still_fetched(tmp_path) -> None:
+    """A copy or restore can carry an mtime over; the stamp must not be fooled.
+
+    Reproduced by the reviewer: with `(mtime_ns, size)` alone, a replacement of
+    IDENTICAL length whose mtime was pinned back to the failed document's passed
+    for it — 0 fetches, and the fresh document was reported `stale`. `st_ino`
+    catches the rename a cache write makes; `st_ctime_ns` catches this in-place
+    shape, which `os.utime` cannot set back.
+    """
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("429")
+
+    cached_listing("openrouter.listing", lambda: _payload(window=999), cache_dir=tmp_path)
+    document = catalogue._cache_path("openrouter.listing", tmp_path)
+    before = document.stat()
+    catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert catalogue._failure_backoff_active(document)
+
+    raw = document.read_text(encoding="utf-8")
+    replacement = raw.replace('"context_length": 999', '"context_length": 888')
+    assert replacement != raw and len(replacement) == len(
+        raw
+    ), "the case under test needs an equal-length replacement that really differs"
+    document.write_text(replacement, encoding="utf-8")  # same inode, same size
+    os.utime(document, ns=(before.st_atime_ns, before.st_mtime_ns))  # mtime pinned back
+    assert document.stat().st_size == before.st_size
+    assert document.stat().st_mtime_ns == before.st_mtime_ns
+
+    assert catalogue._failure_backoff_active(document) is False
+    fresh = catalogue.read_listing("openrouter.listing", boom, ttl_s=-1, cache_dir=tmp_path)
+    assert len(calls) == 2
+    assert fresh.payload is not None
+    assert fresh.payload["data"][0]["context_length"] == 888
 
 
 def test_the_soft_window_still_schedules_its_background_refresh(tmp_path, monkeypatch) -> None:
