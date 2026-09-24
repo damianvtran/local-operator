@@ -26,6 +26,10 @@ Hops timestamped (``time.perf_counter`` is ``mach_absolute_time`` on macOS, so
 it is comparable across the two processes):
 
   rpc_ms        viewer submit -> the runtime's control dispatch sees the frame
+  session_prompt_ms / pipeline_ms / append_ms
+                the same frame entering ``Session.prompt``, entering the turn
+                pipeline (turn lock held), and reaching the durable user-row
+                append — the hops between the RPC and the echo
   admit_ms      viewer submit -> the viewer holds the owner's receipt
   echo_ms       viewer submit -> the viewer sees the user ``message_start``
   start_ms      viewer submit -> the viewer sees ``agent_start`` (the working signal)
@@ -276,6 +280,39 @@ async def _child_main(args: argparse.Namespace) -> None:
 
     server_module.RuntimeServer._dispatch = dispatch  # type: ignore[method-assign]
 
+    # Hop marks INSIDE the admission path, wrapped at the class so the
+    # production objects are otherwise untouched: when the handle's body starts
+    # on the session loop, when Session.prompt starts, when it holds the turn
+    # lock, and when the user row is durably appended.
+    from local_operator.session.runtime import serving as serving_module
+    from local_operator.session.transcript import Transcript as _Transcript
+
+    def _wrap(owner: Any, name: str, kind: str, pick: Any) -> None:
+        original = getattr(owner, name)
+
+        async def wrapped(self: Any, *a: Any, **kw: Any) -> Any:
+            tag = pick(a, kw)
+            if tag:
+                marks.append((kind, tag, time.perf_counter()))
+            return await original(self, *a, **kw)
+
+        wrapped.__wrapped__ = original  # type: ignore[attr-defined]
+        setattr(owner, name, wrapped)
+
+    def _probe_text(a: Any, kw: Any) -> str:
+        text = str(a[0] if a else kw.get("text", ""))
+        return text.split()[0] if text.startswith(("probe-", "long-")) else ""
+
+    _wrap(Session, "prompt", "session_prompt", _probe_text)
+    _wrap(Session, "_run_turn_pipeline", "pipeline", lambda a, kw: _pipeline_tag(a))
+    _wrap(
+        _Transcript,
+        "append_messages",
+        "append",
+        lambda a, kw: _pipeline_tag((list(a[0]) if a else [],)),
+    )
+    del serving_module
+
     loop = asyncio.get_running_loop()
     handle = ServingSessionHandle(session, loop, cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
@@ -314,7 +351,7 @@ async def _child_main(args: argparse.Namespace) -> None:
     if sampler:
         total = sum(sampler.leaf.values()) or 1
         report["sample_total"] = total
-        report["sample_inclusive"] = sorted(sampler.counts.items(), key=lambda kv: -kv[1])[:30]
+        report["sample_inclusive"] = sorted(sampler.counts.items(), key=lambda kv: -kv[1])[:70]
         report["sample_leaf"] = sorted(sampler.leaf.items(), key=lambda kv: -kv[1])[:20]
     Path(args.report).write_text(json.dumps(report))
     os._exit(0)  # the lanes are still stepping; the parent owns our lifetime
@@ -323,6 +360,15 @@ async def _child_main(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # parent: the viewer
 # ---------------------------------------------------------------------------
+
+
+def _pipeline_tag(args: Any) -> str:
+    """The probe tag of the user message a pipeline/append call carries, if any."""
+    for message in args[0] if args else []:
+        text = str(getattr(message, "text", "") or "")
+        if getattr(message, "role", "") == "user" and text.startswith(("probe-", "long-")):
+            return text.split()[0]
+    return ""
 
 
 def _pcts(values: list[float]) -> dict[str, float]:
@@ -458,12 +504,30 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
         tag = f"probe-{int(row['tag'])}"
         for kind, name, ts in child_report.get("marks", []):
             if name == tag and ts >= row["t0"]:
-                key = {"rpc": "rpc_ms", "request": "request_ms", "emit_user": "emit_ms"}.get(kind)
+                key = {
+                    "rpc": "rpc_ms",
+                    "session_prompt": "session_prompt_ms",
+                    "pipeline": "pipeline_ms",
+                    "append": "append_ms",
+                    "request": "request_ms",
+                    "emit_user": "emit_ms",
+                }.get(kind)
                 if key and key not in row:
                     row[key] = (ts - row["t0"]) * 1000
     summary = {
         key: _pcts([r[key] for r in rows if key in r])
-        for key in ("rpc_ms", "admit_ms", "emit_ms", "echo_ms", "start_ms", "request_ms", "token_ms")
+        for key in (
+            "rpc_ms",
+            "session_prompt_ms",
+            "pipeline_ms",
+            "append_ms",
+            "emit_ms",
+            "admit_ms",
+            "echo_ms",
+            "start_ms",
+            "request_ms",
+            "token_ms",
+        )
     }
     return {
         "condition": args.condition,
