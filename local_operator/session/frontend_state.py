@@ -4066,9 +4066,7 @@ class SnapshotSubagentComms:
             kept = previous.get(job.id)
             pure = bool(job.session_dir) or not job.session_id
             sources[job.id] = (
-                kept
-                if pure and kept is not None and kept[0] is job
-                else (job, self._node_for(job))
+                kept if pure and kept is not None and kept[0] is job else (job, self._node_for(job))
             )
         self._node_sources = sources
         self._nodes = {job.id: sources[job.id][1] for job in rows}

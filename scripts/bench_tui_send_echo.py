@@ -69,10 +69,8 @@ import asyncio
 import json
 import os
 import signal
-import statistics
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -265,7 +263,9 @@ def _child_env() -> dict[str, str]:
         for k, v in os.environ.items()
         if not k.startswith(("LOP_", "CMUX_")) and k != "XPC_FLAGS"
     }
-    env["PYTHONPATH"] = str(REPO) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONPATH"] = str(REPO) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
@@ -283,9 +283,9 @@ async def _wait_record(timeout: float = 90.0) -> Any:
 
 
 async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
-    import local_operator
     from textual import events
 
+    import local_operator
     from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.editor import Editor
