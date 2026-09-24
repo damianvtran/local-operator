@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -484,10 +484,13 @@ RULES: tuple[Rule, ...] = (
             "env | grep V=` and `V=$(…); set | grep V=` all hand the raw value "
             "back, and none of them puts it in a printer's argv — which is why "
             "the emitter rule cannot see them. The dumper's REACH is what "
-            "decides: `printenv` and bare `env` show the EXPORTED namespace, "
-            "bare `set`/`export`/`declare` show the shell's own variables, and "
-            "any of them with a real operand is a consumer handing the value to "
-            "a child (`env V=… client`) rather than printing it."
+            "decides, and it is keyed on what the shell did with the name, not on "
+            "which prefix bound it: `printenv` and a command-less `env` (any "
+            "flags: `-0`, `-u OTHER`) show the EXPORTED namespace (`export`, "
+            "`-x`, `set -a`, a `V=… cmd` prefix); bare `set`, bare "
+            "`declare`/`typeset` and `-p` show every shell variable; `readonly` "
+            "and `local` bind WITHOUT exporting. An `env` that runs a command "
+            "(`env V=… client`) is a consumer handing the value to a child."
         ),
         rewrite=(
             "Let the consumer print its own result: "
@@ -498,10 +501,19 @@ RULES: tuple[Rule, ...] = (
         examples=(
             "export V=$(lop secret get GITHUB_TOKEN); printenv V",
             "V=$(lop secret get GITHUB_TOKEN); export V; env | grep V=",
-            "declare V=$(lop secret get GITHUB_TOKEN); printenv",
+            "declare -x V=$(lop secret get GITHUB_TOKEN); printenv",
             "export V=$(lop secret get GITHUB_TOKEN); env",
             "V=$(lop secret get GITHUB_TOKEN); set | grep V=",
             "export V=$(lop secret get GITHUB_TOKEN); export",
+            # R2-1: the reach of a dump is the shell's, whatever bound the name.
+            "v=$(lop secret get GITHUB_TOKEN); declare",
+            "v=$(lop secret get GITHUB_TOKEN); typeset",
+            "v=$(lop secret get GITHUB_TOKEN); typeset -p v",
+            "export V=$(lop secret get GITHUB_TOKEN); env -0 | tr '\\0' '\\n' | grep '^V='",
+            "export V=$(lop secret get GITHUB_TOKEN); env -u HOME | grep '^V='",
+            "V=$(lop secret get GITHUB_TOKEN) printenv V",
+            "set -a; V=$(lop secret get GITHUB_TOKEN); printenv V",
+            "readonly V=$(lop secret get GITHUB_TOKEN); readonly",
         ),
         counterexamples=(
             'v=$(lop secret get GITHUB_TOKEN); env V="$v" some-client --flag',
@@ -510,6 +522,13 @@ RULES: tuple[Rule, ...] = (
             "set -e",
             "env",
             'v=$(lop secret get GITHUB_TOKEN); curl -H "Authorization: Bearer $v" https://x',
+            # R2-4: binding is not exporting (bash 3.2.57: nothing printed, rc 1).
+            "f() { local V=$(lop secret get GITHUB_TOKEN); printenv V; }; f",
+            "readonly V=$(lop secret get GITHUB_TOKEN); printenv V",
+            "declare V=$(lop secret get GITHUB_TOKEN); printenv",
+            "export V=$(lop secret get GITHUB_TOKEN); export -n V; printenv V",
+            "v=$(lop secret get GITHUB_TOKEN); declare -f",
+            "export V=$(lop secret get GITHUB_TOKEN); env -i some-client",
         ),
     ),
     Rule(
@@ -566,7 +585,13 @@ RULES: tuple[Rule, ...] = (
             "The store's own `SecretValue.__repr__` shows `[redacted]`, and the "
             "cell's output is scrubbed — but the guide says plainly that the "
             "scrub is a safety net for accidents and not a channel, so the "
-            "deliberate print is refused rather than relied on to be masked."
+            "deliberate print is refused rather than relied on to be masked. "
+            "The allowed derived observations are a length (`len`/`hash`/`id`) "
+            "and anything read off a RESPONSE the value was used to build "
+            "(`resp.status_code`, `done.returncode`); a membership or comparison "
+            "(`print('x' in token)`) is refused, because a bool the model can "
+            "ask for again is an oracle that reads the value one character at "
+            "a time (R2-5)."
         ),
         rewrite=(
             "Use the value in the call that needs it "
@@ -582,6 +607,14 @@ RULES: tuple[Rule, ...] = (
             'import logging\ntoken = secrets["GITHUB_TOKEN"]\nlogging.info("got %s", token)',
             'token = secrets["GITHUB_TOKEN"]\nprint(repr(token))',
             'token = secrets["GITHUB_TOKEN"]\nprint(token[:8])',
+            # R2-2: a method whose value is built from its ARGUMENT carries the
+            # value whatever its receiver is, printed directly or via a name.
+            'token = secrets["NAME"]\nprint(",".join([token]))',
+            'token = secrets["NAME"]\nprint("{}".format(token))',
+            'token = secrets["NAME"]\nprint("".replace("", token))',
+            'token = secrets["NAME"]\nblob = ",".join([token])\nprint(blob)',
+            'import base64\ntoken = secrets["NAME"]\n'
+            "enc = base64.b64encode(token.encode())\nprint(enc)",
         ),
         counterexamples=(
             'token = secrets["GITHUB_TOKEN"]\n'
@@ -983,7 +1016,10 @@ def _iter_expansions(text: str) -> list[tuple[str, tuple[int, int]]]:
     a body is data, so only the two constructs that really run are read out of
     it. An unbalanced group is DROPPED rather than raised: bash fails the whole
     command at expansion time, so there is nothing to print, and raising here is
-    what produced R1-4's false refusal in the first place.
+    what produced R1-4's false refusal in the first place. The scan also STOPS at
+    that group, so a balanced `$(…)` after it is never read — deliberately:
+    the unbalanced one already fails the expansion of the whole body before any
+    later group runs, so there is no later value to follow.
     """
     found: list[tuple[str, tuple[int, int]]] = []
     i = 0
@@ -1321,14 +1357,32 @@ _INLINE_PYTHON = frozenset({"python", "python3"})
 #: (required non-finding (iii)).
 _SOURCE_VERBS = frozenset({"get", "file", "run"})
 
-#: Prefixes that BIND an assignment rather than commanding with it: `export
-#: V=$(lop secret get X)` is the same binding as `V=$(…)` and then some — the
-#: value is in the child environment, which `printenv`/`env` print (R1-2).
+#: Prefixes that BIND an assignment rather than commanding with it. Binding is
+#: not exporting (R2-4): only `export`, `declare -x`/`typeset -x`/`local -x` and
+#: `set -a` put a value in the child environment that `printenv`/`env` print —
+#: `local V=…; printenv V` and `readonly V=…; printenv V` print nothing (bash
+#: 3.2.57 measured: empty, rc 1). Which prefix exports is decided per call in
+#: :meth:`_ShellAnalyzer._binding_attributes`, not by membership here.
 _BINDING_PREFIXES = frozenset({"export", "declare", "local", "readonly", "typeset"})
 
+#: Prefixes whose `-x`/`-r` flags set the export/readonly ATTRIBUTE, and whose
+#: bare or `-p` form lists variables with their values.
+_ATTRIBUTE_BUILTINS = frozenset({"declare", "typeset", "local"})
+
 #: Commands that can dump a variable's value out of the environment or the shell
-#: rather than by naming it as an operand.
-_ENV_DUMPERS = frozenset({"printenv", "env", "set", "export", "declare"})
+#: rather than by naming it as an operand. `typeset` is `declare`'s synonym and
+#: prints the same listing (R2-1); `readonly`/`local` list their own variables.
+_ENV_DUMPERS = frozenset(
+    {"printenv", "env", "set", "export", "declare", "typeset", "readonly", "local"}
+)
+
+#: `env` options that take the NEXT word as their argument, so that word is
+#: neither an assignment nor the command `env` would run.
+_ENV_ARG_OPTIONS = frozenset({"-u", "--unset", "-C", "--chdir", "-P"})
+
+#: `env` options that start a new, empty environment: with no command after
+#: them, only the assignments given on the line are printed.
+_ENV_CLEARING = frozenset({"-i", "-", "--ignore-environment"})
 
 #: Commands that move a path's contents somewhere else, so a value's copy keeps
 #: its debt under a new name.
@@ -1418,7 +1472,15 @@ class _ShellAnalyzer:
         self.tainted_paths: dict[str, tuple[int, int]] = {}
         #: Names this command put into the exported namespace (R1-2), whose
         #: values an environment dump can print without naming the secret.
+        #: Only a real export lands here (R2-4): `export`, a `-x` attribute, or
+        #: an assignment while `set -a` is on.
         self.exported_vars: set[str] = set()
+        #: Names bound by `readonly`/`-r` and by `local`: `readonly` and `local`
+        #: with no operand list exactly these, with their values.
+        self.readonly_vars: set[str] = set()
+        self.local_vars: set[str] = set()
+        #: `set -a` / `set -o allexport`: every later plain assignment exports.
+        self._allexport = False
         #: The text of a substitution this walk was too deep to follow (R1-8),
         #: and of the here-doc bodies it could not place.
         self._skipped_deep = ""
@@ -1561,38 +1623,173 @@ class _ShellAnalyzer:
                 self._argv_taint = self._argv_taint or (piece.span or item.span, piece.name)
         return flow
 
-    def _dumped_name(self, command: str, flags: list[str], operands: list[str]) -> str:
+    def _secret_of(self, names: Iterable[str]) -> str:
+        """The secret behind the first of ``names`` that holds one, or ""."""
+        for name in names:
+            if name in self.value_vars or name in self.file_vars:
+                return self.value_vars.get(name) or self.file_vars.get(name) or name
+        return ""
+
+    @staticmethod
+    def _operands(words: Sequence[_Word]) -> list[_Word]:
+        """The words after a builtin's name that are not option flags."""
+        return [
+            word
+            for word in words
+            if (text := _ShellAnalyzer._word_text(word).strip()) and text[:1] not in ("-", "+")
+        ]
+
+    def _is_listing(self, command: str, flags: list[str], args: Sequence[_Word]) -> bool:
+        """Does a binding builtin PRINT here rather than bind?
+
+        Bare `export`/`readonly`/`declare`/`typeset`/`local` list variables with
+        their values, and so does `-p` with or without names. Anything carrying
+        an operand and no `-p` binds or re-attributes, and prints nothing.
+        """
+        if any(flag in ("-p", "--print") or (flag[:1] == "-" and "p" in flag) for flag in flags):
+            return True
+        return not self._operands(args) and command in _BINDING_PREFIXES
+
+    @staticmethod
+    def _binding_attributes(command: str, flags: list[str]) -> tuple[bool, bool, bool]:
+        """``(exports, unexports, readonly)`` for one binding builtin call (R2-4).
+
+        `local`/`readonly`/`declare` BIND without exporting: measured on bash
+        3.2.57, `f() { local V=…; printenv V; }` and `readonly V=…; printenv V`
+        print nothing and exit 1. Only `export` (not `export -n`) and a `-x`
+        attribute put the value into a child's environment.
+        """
+        dashed = "".join(flag[1:] for flag in flags if flag.startswith("-") and flag[:2] != "--")
+        plussed = "".join(flag[1:] for flag in flags if flag.startswith("+"))
+        if command == "export":
+            return "n" not in dashed, "n" in dashed, False
+        if command == "readonly":
+            return False, False, True
+        return "x" in dashed, "x" in plussed, "r" in dashed
+
+    @classmethod
+    def _command_span(cls, stage: list[_Word | _Op | _Body]) -> tuple[int, int]:
+        """The span of the stage's command word, or ``(0, 0)`` when it has none."""
+        for item in stage:
+            if not isinstance(item, _Word) or cls._is_assignment(item):
+                continue
+            text = cls._word_text(item).strip()
+            if text and text not in _SHELL_KEYWORDS:
+                return item.span
+        return (0, 0)
+
+    def _prefix_exports(self, stage: list[_Word | _Op | _Body], *, depth: int) -> list[str]:
+        """Names a `V=… command` prefix exports into THIS command's environment.
+
+        `V=$(lop secret get X) printenv V` binds nothing in the shell, but the
+        child runs with `V` in its environment — the same reach as `export`.
+        """
+        names: list[str] = []
+        for item in stage:
+            if not isinstance(item, _Word):
+                continue
+            if not self._is_assignment(item):
+                break
+            flow = self._value_flow(item, depth=depth)
+            name = self._assignment_name(item)
+            if flow.value:
+                self.value_vars.setdefault(name, flow.name)
+                names.append(name)
+            elif flow.path:
+                self.file_vars.setdefault(name, flow.name)
+                names.append(name)
+        return names
+
+    def _dumped_name(
+        self, command: str, flags: list[str], words: list[_Word], prefix: list[str], *, depth: int
+    ) -> str:
         """The secret an environment/variable dump would print, or "".
 
-        Each dumper's REACH is the precision here: `printenv` and bare `env` show
-        the exported namespace, `set` (bare, no flags — `set -e`/`set -x` print
-        nothing) shows the shell's variables, and `export`/`declare`/`typeset`
-        print only when bare or asked for with `-p`. An operand that names a
-        value is a printer's argument; an operand that names a *command's*
-        environment (`env V=… client`) is a consumer, and the caller has already
-        told them apart.
+        Each dumper's REACH is the precision here, and reach is keyed on what
+        the SHELL did with the name, not on which prefix bound it (R2-1/R2-4):
+
+        * `printenv` (bare or naming it) and `env` with no command show the
+          EXPORTED namespace — `export`, a `-x` attribute, `set -a`, or a
+          `V=… command` prefix. `env` flags that only change the format or drop
+          other names (`-0`, `--null`, `-u OTHER`) still print it; `-i`/`-`
+          start empty, so only the assignments on the line are shown.
+        * bare `set`, bare `declare`/`typeset`, and `declare -p`/`typeset -p`
+          show every SHELL variable, exported or not (measured: bare `declare`
+          prints a non-exported `v`); `declare -x` bare shows only exported
+          ones, `readonly`/`declare -r` the readonly ones, `local` the locals.
+        * `export` bare or `-p` lists the exported namespace.
+
+        An `env` that runs a command (`env V=… client`) is a CONSUMER handing
+        the environment to a child, and is allowed.
         """
+        args = words[1:]
+        exported = [*self.exported_vars, *prefix]
+        operands = [self._word_text(word).strip() for word in self._operands(args)]
         if command == "printenv":
-            if operands:
-                return operands[0] if operands[0] in self.exported_vars else ""
-            return next(iter(self.exported_vars), "")
+            return self._secret_of([n for n in operands if n in exported] if operands else exported)
         if command == "env":
-            return "" if operands or flags else next(iter(self.exported_vars), "")
+            return self._env_dump(args, exported, depth=depth)
         if command == "set":
-            return "" if operands or flags else next(iter(self.value_vars), "")
-        # export / declare / typeset: bare dumps the namespace, `-p` prints the
-        # named variables it is given.
-        if not operands:
-            return (
-                ""
-                if flags and not any(f in ("-p", "--print") for f in flags)
-                else (next(iter(self.exported_vars), ""))
-            )
-        if any(f in ("-p", "--print") for f in flags):
-            for name in operands:
-                if name in self.value_vars or name in self.file_vars:
-                    return self.value_vars.get(name) or self.file_vars.get(name) or name
-        return ""
+            return "" if operands or flags else self._secret_of(list(self.value_vars))
+        if not self._is_listing(command, flags, args):
+            return ""
+        if operands:
+            # `declare -p V` / `export -p V`: the named ones, whatever their
+            # attributes — a conservative reading, since a false refusal costs
+            # one re-spelling and a false allow is the value in the transcript.
+            return self._secret_of(operands)
+        dashed = "".join(flag[1:] for flag in flags if flag.startswith("-") and flag[:2] != "--")
+        if command == "export" or "x" in dashed:
+            return self._secret_of(exported)
+        if command == "readonly" or "r" in dashed:
+            return self._secret_of(list(self.readonly_vars))
+        if dashed.strip("p"):
+            # `declare -f`/`-F` list functions, `-a`/`-A`/`-i` list arrays and
+            # integers — none of them is a string a source bound.
+            return ""
+        if command == "local":
+            return self._secret_of(list(self.local_vars))
+        return self._secret_of([*self.value_vars, *self.file_vars])
+
+    def _env_dump(self, args: Sequence[_Word], exported: list[str], *, depth: int) -> str:
+        """`env`'s reach: its assignments, its unsets, and whether it runs a command."""
+        # A SET, not a list: `-u`/`--unset` need only membership, and a
+        # `list.remove` here reads as a filesystem removal to the AST guard in
+        # tests/unit/session/test_no_session_deletion.py — the guard is biased
+        # to false positives on purpose, and its allow-list should stay short.
+        printed = set(exported)
+        pending_arg = False
+        for word in args:
+            text = self._word_text(word).strip()
+            if pending_arg:
+                pending_arg = False
+                printed.discard(text)
+                continue
+            if text in _ENV_ARG_OPTIONS:
+                pending_arg = True
+                continue
+            if text.startswith("--unset="):
+                printed.discard(text.split("=", 1)[1])
+                continue
+            if text in _ENV_CLEARING:
+                printed = set()
+                continue
+            if text in ("-S", "--split-string") or text.startswith("--split-string="):
+                return ""  # a command string follows: env runs something
+            if text.startswith("-"):
+                continue  # -0/--null/-v: format only, the dump is unchanged
+            if self._is_assignment(word):
+                flow = self._value_flow(word, depth=depth)
+                name = self._assignment_name(word)
+                if flow.value or flow.path:
+                    if flow.value:
+                        self.value_vars.setdefault(name, flow.name)
+                    else:
+                        self.file_vars.setdefault(name, flow.name)
+                    printed.add(name)
+                continue
+            return ""  # the first plain word is the command env runs: a consumer
+        return self._secret_of(printed)
 
     def _literal_path_hit(self, stage: list[_Word | _Op | _Body]) -> tuple[bool, tuple[int, int]]:
         """Does this stage name a file a secret was written into?"""
@@ -1831,25 +2028,45 @@ class _ShellAnalyzer:
 
         # -- assignments: the value is bound, not printed -------------------
         plain_assignment = bool(words) and all(self._is_assignment(word) for word in words)
-        binding_prefix = command in _BINDING_PREFIXES
-        if binding_prefix:
-            # `export V` with no `=` re-exports a variable bound by an earlier
-            # statement, which is the second spelling of R1-2.
-            for word in words:
+        rest = [self._word_text(word).strip() for word in words[1:]]
+        flags = [text for text in rest if text[:1] in ("-", "+") and len(text) > 1]
+        if command in _BINDING_PREFIXES and not self._is_listing(command, flags, words[1:]):
+            # A binding builtin that lists nothing: it binds, re-attributes, or
+            # both. `export V` with no `=` re-exports a variable an earlier
+            # statement bound (R1-2's second spelling), and `declare -x V`
+            # does the same without printing (R1-2's adjacent defect (a)).
+            exports, unexports, readonly = self._binding_attributes(command, flags)
+            for word in words[1:]:
                 text = self._word_text(word).strip()
-                if text in self.value_vars or text in self.file_vars:
-                    self.exported_vars.add(text)
-        if plain_assignment or (binding_prefix and any(self._is_assignment(w) for w in words)):
-            for word in words:
-                if not self._is_assignment(word):
+                if not text or text[:1] in ("-", "+"):
                     continue
+                name = self._assignment_name(word) if self._is_assignment(word) else text
+                if self._is_assignment(word):
+                    flow = self._value_flow(word, depth=depth)
+                    if flow.value:
+                        self.value_vars[name] = flow.name
+                    elif flow.path:
+                        self.file_vars[name] = flow.name
+                if name not in self.value_vars and name not in self.file_vars:
+                    continue
+                if exports:
+                    self.exported_vars.add(name)
+                elif unexports:
+                    self.exported_vars.discard(name)
+                if readonly:
+                    self.readonly_vars.add(name)
+                if command == "local":
+                    self.local_vars.add(name)
+            return _Flow()
+        if plain_assignment:
+            for word in words:
                 flow = self._value_flow(word, depth=depth)
                 name = self._assignment_name(word)
                 if flow.value:
                     self.value_vars[name] = flow.name
                 elif flow.path:
                     self.file_vars[name] = flow.name
-                if binding_prefix and (flow.value or flow.path):
+                if self._allexport and (flow.value or flow.path):
                     self.exported_vars.add(name)
             # A pure assignment's stdout carries nothing; the value is in the
             # variable, which is exactly the sanctioned first half.
@@ -1871,7 +2088,9 @@ class _ShellAnalyzer:
             name=flow_in.name or body_flow.name,
             span=flow_in.span if flow_in.span != (0, 0) else body_flow.span,
         )
-        span = flow_in.span or (stage[0].span if stage else (0, 0))
+        # `(0, 0)` is the "no span" sentinel and is truthy, so `span or …`
+        # never fell back and the caret sat under column 0 (R2-3).
+        span = flow_in.span if flow_in.span != (0, 0) else (stage[0].span if stage else (0, 0))
         name = flow_in.name
         path_hit, path_span = self._literal_path_hit(stage)
 
@@ -1896,15 +2115,34 @@ class _ShellAnalyzer:
         # print it back. Fired only when this command really did put a value in
         # that namespace, and only for the bare/no-operand spellings — `env
         # V=1 client` is a CONSUMER handing an environment to a child.
+        if command == "set":
+            # `set -a` is the one `set` spelling that changes what later
+            # assignments do: each is exported, so `printenv V` then reaches it.
+            for flag in flags:
+                if flag.startswith("-") and "a" in flag and not flag.startswith("--"):
+                    self._allexport = True
+                elif flag.startswith("+") and "a" in flag:
+                    self._allexport = False
+            if "-o" in rest and "allexport" in rest:
+                self._allexport = True
         if command in _ENV_DUMPERS:
-            rest = [self._word_text(word).strip() for word in words[1:]]
-            flags = [text for text in rest if text.startswith("-")]
-            operands = [text for text in rest if text and not text.startswith("-")]
-            dumped = self._dumped_name(command, flags, operands)
+            # A `V=…` prefix is not the dumper's argument: slice from the
+            # command word so `V=$(…) printenv V` reads `V` as the operand.
+            prefix = self._prefix_exports(stage, depth=depth)
+            dumper = [word for word in words if not self._is_assignment(word)] or words
+            dumper = words[words.index(dumper[0]) :]
+            dumper_flags = [
+                text
+                for text in (self._word_text(word).strip() for word in dumper[1:])
+                if text[:1] in ("-", "+") and len(text) > 1
+            ]
+            dumped = self._dumped_name(command, dumper_flags, dumper, prefix, depth=depth)
             if dumped:
+                # The caret goes under the DUMPER: nothing in its argv carries
+                # the value, so the flow's span is empty by construction (R2-3).
                 self._add(
                     "shell.environment-dump-of-source",
-                    span or (words[0].span if words else (0, 0)),
+                    self._command_span(stage) or span,
                     dumped,
                     reason=f"`{command}` prints the value back out of the shell's own variables",
                 )
@@ -2227,6 +2465,23 @@ _PY_SHELL_CALLS = frozenset(
 )
 _PY_WRITE_MODES = frozenset({"w", "a", "x", "w+", "a+", "xb", "wb"})
 
+#: Carriers: calls whose VALUE is built from their arguments, so an assignment
+#: from one taints its target (R2-2). Free functions that re-spell an argument
+#: as a string, bytes or container of it.
+_PY_CARRIER_FUNCS = frozenset(
+    {"str", "repr", "ascii", "format", "bytes", "bytearray", "list", "tuple", "sorted", "reversed"}
+)
+#: Methods that splice an argument into the returned value, whatever the
+#: receiver is: `sep.join([token])`, `tmpl.format(token)`, `"".replace("", token)`.
+_PY_CARRIER_METHODS = frozenset({"join", "format", "format_map", "replace", "__add__", "__mod__"})
+#: Modules whose functions are encoders: the value comes back re-spelled, which
+#: is exactly the incident's second half (`rev`, `base64`). A module outside
+#: this list that re-spells a value into a NEW name is not followed — the named
+#: boundary a static scan has, recorded in the PR's "What this does not catch".
+_PY_CARRIER_MODULES = frozenset(
+    {"str", "bytes", "base64", "binascii", "codecs", "json", "urllib.parse", "shlex", "html"}
+)
+
 
 class _PyAnalyzer:
     """Every call in a parsed cell, classified against the rule table."""
@@ -2306,15 +2561,86 @@ class _PyAnalyzer:
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Attribute):
-                return self._value_taint(func.value)
-            if isinstance(func, ast.Name) and func.id in ("str", "repr", "format", "bytes"):
-                for argument in node.args:
-                    found, child = self._value_taint(argument)
+                found, receiver = self._value_taint(func.value)
+                if found:
+                    return True, receiver
+            # A CARRIER builds its value out of its arguments, so the value
+            # comes along whatever the receiver is (R2-2): `",".join([token])`,
+            # `"{}".format(token)` and `base64.b64encode(token.encode())` are
+            # the value re-spelled, and dropping them here let
+            # `blob = ",".join([token]); print(blob)` through. The argument test
+            # is the argument-walking one, so `"".join(reversed(token))` counts.
+            if self._is_carrier(func):
+                for argument in list(node.args) + [kw.value for kw in node.keywords]:
+                    found, child = self._is_tainted(argument)
                     if found:
                         return True, child
             return False, ""
         for child in ast.iter_child_nodes(node):
             found, child_name = self._value_taint(child)
+            if found:
+                return True, child_name
+        return False, ""
+
+    def _is_carrier(self, func: ast.AST) -> bool:
+        """Does a call through ``func`` return a value built from its arguments?
+
+        A deliberately NAMED set rather than "every call": the whole point of
+        :meth:`_value_taint` is that `requests.get(url, headers=…token…)` and
+        `subprocess.run([…token…])` return a response, and QA Q1 measured what
+        treating them as carriers costs (`print(resp.status)` refused). What IS
+        in the set is the str/bytes surface that splices an argument into its
+        result, any method called on a string literal or f-string, the
+        re-spelling builtins, and the encoder modules — the `base64` re-spelling
+        the incident is about. An unknown function that re-spells the value
+        into a NEW name is outside it (see :data:`_PY_CARRIER_MODULES`); a
+        direct `print(mylib.scramble(token))` is still refused, because the sink
+        test walks the argument.
+        """
+        if isinstance(func, ast.Name):
+            return func.id in _PY_CARRIER_FUNCS
+        if not isinstance(func, ast.Attribute):
+            return False
+        if func.attr in _PY_CARRIER_METHODS:
+            return True
+        receiver = func.value
+        if isinstance(receiver, ast.JoinedStr) or (
+            isinstance(receiver, ast.Constant) and isinstance(receiver.value, (str, bytes))
+        ):
+            return True
+        return self._dotted(receiver) in _PY_CARRIER_MODULES
+
+    def _is_tainted(self, node: ast.AST) -> tuple[bool, str]:
+        """Does this expression carry a value from the store ANYWHERE in it?
+
+        The SINK-argument test (R2-2), as opposed to :meth:`_value_taint`, which
+        is the assignment collector's. A printed argument is judged on
+        everything it contains, because a printer shows whatever its argument
+        evaluates to and the scan cannot know which calls re-spell their input:
+        `print(",".join([token]))` and `print("{}".format(token))` print the
+        value. The Q1 boundary survives because it never depended on this test:
+        `resp` and `done` are not tainted names (the collector does not follow
+        a response), so `print(resp.status_code)` has nothing in it to find.
+
+        ``len``/``hash``/``id`` are exempt: the length of a secret is not the
+        secret, which is what keeps `print(len(secrets["X"]))` allowed.
+        Membership and comparison are NOT exempt (`print("x" in token)` stays
+        refused, R2-5): a bool the model can ask for repeatedly is an oracle
+        that reads the value one character at a time, where a length is one
+        fixed number.
+        """
+        name = self._source_name(node)
+        if name is not None:
+            self.sources.append(name)
+            return True, name
+        if isinstance(node, ast.Name) and node.id in self.tainted:
+            return True, node.id
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in ("len", "hash", "id"):
+                return False, ""
+        for child in ast.iter_child_nodes(node):
+            found, child_name = self._is_tainted(child)
             if found:
                 return True, child_name
         return False, ""
@@ -2502,14 +2828,15 @@ class _PyAnalyzer:
                         or self._write_path(argument) is not None
                     ):
                         continue
-                    # VALUE-based, like every other taint question here (Q1):
-                    # `resp = requests.get(url, headers={"Authorization": …token…})`
-                    # used a secret correctly, and its VALUE is a response — so
-                    # `print(resp.status)` is an observation of the response, not
-                    # a print of the value. The argument-inclusive test refused
-                    # it, and refused `print(done.returncode)` for a child's exit
-                    # code, while bash allowed printing a whole curl response.
-                    found, found_name = self._value_taint(argument)
+                    # ARGUMENT-walking (R2-2), not value-based: the Q1 fix made
+                    # this `_value_taint`, and that let `print(",".join([token]))`
+                    # and `print("{}".format(token))` through, because a method's
+                    # value was read off its receiver alone. Q1's boundary lives
+                    # in the COLLECTOR instead — `resp = requests.get(url,
+                    # headers={…token…})` does not taint `resp` — so
+                    # `print(resp.status)` and `print(done.returncode)` stay
+                    # allowed with the stricter sink test.
+                    found, found_name = self._is_tainted(argument)
                     if found:
                         tainted = True
                         name = name or found_name
@@ -2744,7 +3071,10 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
             lines.append(f"  why:    {finding.reason}")
         lines.append(f"  do:     {finding.rewrite}")
         lines.append(f"  rule {finding.rule} exists because: {spec.why}")
-        if len(result.findings) > 1:
+        # Guarded on the distinct LABELS, not the findings: `print(repr(token))`
+        # is two findings of one rule (the `print` and the `repr`), and the old
+        # `len(findings)` guard printed an empty "also refused by:" (NIT-1).
+        if len(result.labels) > 1:
             lines.append(f"  also refused by: {', '.join(result.labels[1:])}")
     lines.append(
         "  still allowed: `lop secret list`, `lop secret get --help`, "

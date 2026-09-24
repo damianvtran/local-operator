@@ -675,7 +675,7 @@ def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> N
     refused = [
         "export V=$(lop secret get [redacted]); printenv V",
         "V=$(lop secret get [redacted]); export V; env | grep V=",
-        "declare V=$(lop secret get [redacted]); printenv",
+        "declare -x V=$(lop secret get [redacted]); printenv",
         "export V=$(lop secret get [redacted]); env",
         "V=$(lop secret get [redacted]); set | grep V=",
         "export V=$(lop secret get [redacted]); export",
@@ -694,6 +694,9 @@ def test_r1_2_an_exported_value_is_refused_at_any_dump_of_the_environment() -> N
         "set -e",
         "env",
         "export MY_FLAG=1",
+        # `declare` without `-x` binds and does not export (R2-4): printenv
+        # prints nothing, so this is not a dump of the value.
+        "declare V=$(lop secret get [redacted]); printenv",
         # `declare -x V` marks a variable for export and prints nothing.
         "V=$(lop secret get [redacted]); declare -x V",
     ]
@@ -795,3 +798,213 @@ def test_q2_a_multi_line_cell_points_the_caret_at_the_call() -> None:
     assert "print(token)" in here, message
     assert "import urllib.request" not in here, message
     assert "cell line 4" in message
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 2 — the reviewer's measured rows, in both directions: each
+# refusal restored AND each counterexample consumer still allowed, because R2-1
+# and R2-4 are the same premise (bind vs export) read from opposite sides.
+# ---------------------------------------------------------------------------
+
+#: R2-1: every one of these handed back the RAW value through the real tool at
+#: d99767f7 (bash 3.2.57 measured: bare `declare` lists a non-exported `v`, and
+#: `env -0`/`env -u OTHER` still print the whole environment).
+_R2_1_DUMPS = [
+    "v=$(lop secret get NAME); declare",
+    "v=$(lop secret get NAME); typeset",
+    "v=$(lop secret get NAME); typeset -p v",
+    "v=$(lop secret get NAME); declare -p",
+    "export V=$(lop secret get NAME); env -0 | tr '\\0' '\\n' | grep '^V='",
+    "export V=$(lop secret get NAME); env -u HOME | grep '^V='",
+    "export V=$(lop secret get NAME); env --null",
+    "V=$(lop secret get NAME) printenv V",
+    "set -a; V=$(lop secret get NAME); printenv V",
+    "readonly V=$(lop secret get NAME); readonly",
+    'v=$(lop secret get NAME); env V="$v"',
+]
+
+
+def test_r2_1_a_dump_s_reach_is_what_the_shell_did_with_the_name() -> None:
+    for command in _R2_1_DUMPS:
+        result = scan_command(command)
+        assert result.refused, f"{command!r} -> {result.verdict}"
+        assert result.labels == ("shell.environment-dump-of-source",), (command, result.labels)
+    allowed = [
+        # `env` that RUNS a command is a consumer, flags or not.
+        'v=$(lop secret get NAME); env V="$v" some-client --flag',
+        "export V=$(lop secret get NAME); env -u HOME some-client",
+        "export V=$(lop secret get NAME); env -i some-client",
+        # Listings that cannot hold a bound string.
+        "v=$(lop secret get NAME); declare -f",
+        "v=$(lop secret get NAME); set -o",
+        # No source at all: the bare dumpers are ordinary commands.
+        "declare",
+        "typeset",
+        "env -0",
+    ]
+    for command in allowed:
+        assert not scan_command(command).refused, command
+
+
+def test_r2_4_binding_is_not_exporting() -> None:
+    """`local`/`readonly`/`declare` without `-x` put nothing in a child's env.
+
+    Measured on bash 3.2.57: `f() { local V=…; printenv V; }; f` and
+    `readonly V=…; printenv V` print nothing and exit 1, so refusing them was a
+    false refusal whose diagnosis described nothing the command did.
+    """
+    allowed = [
+        "f() { local V=$(lop secret get NAME); printenv V; }; f",
+        "readonly V=$(lop secret get NAME); printenv V",
+        "declare V=$(lop secret get NAME); printenv",
+        "declare V=$(lop secret get NAME); env",
+        "export V=$(lop secret get NAME); export -n V; printenv V",
+    ]
+    for command in allowed:
+        result = scan_command(command)
+        assert not result.refused, f"{command!r} -> {result.verdict} {result.labels}"
+    # ... while the spellings that DO export are refused.
+    refused = [
+        "declare -x V=$(lop secret get NAME); printenv V",
+        "typeset -x V=$(lop secret get NAME); env",
+        "f() { local -x V=$(lop secret get NAME); printenv V; }; f",
+        "declare V=$(lop secret get NAME); export V; printenv V",
+    ]
+    for command in refused:
+        assert scan_command(command).refused, command
+
+
+def test_r2_3_the_dump_caret_points_at_the_dumper() -> None:
+    """`(0, 0)` is truthy, so the old `span or …` fallback never fell back."""
+    command = "export V=$(lop secret get NAME); printenv V"
+    result = scan_command(command)
+    start, end = result.findings[0].span
+    assert command[start:end] == "printenv", result.findings[0].span
+    # And the rendered caret sits under it: the `here:` and caret lines share a
+    # 10-column prefix, so the columns compare directly.
+    lines = refusal_text(result, text=command, tool_name="bash").splitlines()
+    here = next(index for index, line in enumerate(lines) if line.startswith("  here:"))
+    caret = lines[here + 1]
+    assert caret.index("^") == lines[here].index("printenv"), "\n".join(lines[here : here + 2])
+    assert caret.strip() == "^" * len("printenv")
+
+
+#: R2-2: `print(...)` of a method call whose VALUE is built from its argument.
+#: The base commit refused every row; d99767f7 allowed all of them.
+_R2_2_PRINTS = [
+    'token = secrets["NAME"]\nprint("".join([token]))',
+    'token = secrets["NAME"]\nprint(",".join([token]))',
+    'token = secrets["NAME"]\nprint("{}".format(token))',
+    'token = secrets["NAME"]\nprint("".replace("", token))',
+    'token = secrets["NAME"]\nblob = ",".join([token])\nprint(blob)',
+    'token = secrets["NAME"]\nsep = ","\nblob = sep.join([token])\nprint(blob)',
+    'import base64\ntoken = secrets["NAME"]\nenc = base64.b64encode(token.encode())\nprint(enc)',
+    'import json\ntoken = secrets["NAME"]\nd = json.dumps({"t": token})\nprint(d)',
+    'token = secrets["NAME"]\nprint(requests.get(url, headers={"A": token}).status_code)',
+]
+
+
+def test_r2_2_an_argument_carrying_method_is_still_the_value() -> None:
+    for cell in _R2_2_PRINTS:
+        result = scan_python(cell)
+        assert result.refused, f"{cell!r} -> {result.verdict}"
+        assert "python.print-of-source" in result.labels
+    # The Q1 boundary, which the reviewer re-checked against this direction: a
+    # RESPONSE built with the value is not the value.
+    prefix = (
+        'token = secrets["NAME"]\n'
+        'resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})\n'
+    )
+    allowed = [
+        prefix + "print(resp.status_code)",
+        prefix + "print(resp.url)",
+        prefix + "print(resp.headers['x'])",
+        prefix + "resp",
+        'token = secrets["NAME"]\n'
+        'done = subprocess.run(["curl", "-H", "Authorization: Bearer " + token, url], '
+        "capture_output=True)\n"
+        'print("rc", done.returncode, "len", len(done.stdout))',
+        'token = secrets["NAME"]\nprint(len(token))',
+        'token = secrets["NAME"]\nprint(len(",".join([token])))',
+    ]
+    for cell in allowed:
+        result = scan_python(cell)
+        assert not result.refused, f"{cell!r} -> {result.verdict} {result.labels}"
+
+
+def test_nit_1_one_rule_twice_is_not_also_refused_by_nothing() -> None:
+    cell = 'token = secrets["NAME"]\nprint(repr(token))'
+    result = scan_python(cell)
+    message = refusal_text(result, text=cell, tool_name="eval")
+    assert "also refused by" not in message, message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "v=$(lop secret get {name}); declare",
+        "v=$(lop secret get {name}); typeset -p v",
+        "export V=$(lop secret get {name}); env -u HOME | grep '^V='",
+    ],
+)
+async def test_r2_1_the_dump_is_refused_before_the_child_runs(
+    command: str,
+    tmp_path: Path,
+    config_root: Path,
+    stored_secret: str,
+    shimmed_path: None,
+) -> None:
+    """R2-1 through the real tool, the real CLI and a real isolated store."""
+    marker = tmp_path / "ran"
+    full = command.format(name=stored_secret) + f"; touch {marker}"
+    result = await builtin.execute_bash(
+        "bash-r2-1", {"command": full}, AbortSignal(), None, _context(tmp_path)
+    )
+    text = _result_text(result)
+    assert result.is_error, text
+    assert "shell.environment-dump-of-source" in text
+    assert not marker.exists(), "the child ran anyway"
+    assert _SYNTHETIC not in text
+
+
+@pytest.mark.asyncio
+async def test_r2_4_a_bound_but_unexported_value_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    """The R2-4 false refusal, fixed: it runs, and prints nothing of the value."""
+    marker = tmp_path / "ran"
+    command = (
+        f"f() {{ local V=$(lop secret get {stored_secret}); printenv V; }}; f; "
+        f"echo rc=$?; touch {marker}"
+    )
+    result = await builtin.execute_bash(
+        "bash-r2-4", {"command": command}, AbortSignal(), None, _context(tmp_path)
+    )
+    text = _result_text(result)
+    assert not result.is_error, text
+    assert marker.exists()
+    assert "rc=1" in text, text
+    assert _SYNTHETIC not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "print_line",
+    [
+        'print(",".join([token]))',
+        'print("{}".format(token))',
+        'blob = "".join([token])\nprint(blob)',
+    ],
+)
+async def test_r2_2_the_carrier_print_is_refused_before_the_kernel_sees_it(
+    print_line: str, tmp_path: Path
+) -> None:
+    marker = tmp_path / "ran"
+    code = f'open("{marker}", "w").write("ran")\ntoken = secrets["{_SECRET_NAME}"]\n{print_line}'
+    result = await execute_eval(
+        "eval-r2-2", {"code": code}, AbortSignal(), None, _context(tmp_path)
+    )
+    assert result.is_error
+    assert "python.print-of-source" in _result_text(result)
+    assert not marker.exists(), "the cell ran anyway"
