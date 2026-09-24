@@ -105,6 +105,21 @@ async def test_a_remote_session_is_opened_and_piloted_on_the_peer(
             ), _user_texts(created)
             await asyncio.to_thread(created.owner.wait_for_turn)
 
+            # STEER: the frame crosses both relays to the OWNER's session. Between
+            # turns it is QUEUED there (``Session._steering_queue``) for the next
+            # turn rather than journalled, so the queue is what is read — on the
+            # peer's session object, not the viewer's.
+            viewer.steer("steer from the other device")
+
+            def steered() -> bool:
+                queue = getattr(created.owner.session, "_steering_queue", None) or ()
+                pending = list(getattr(queue, "_queue", ()))  # asyncio.Queue's own deque
+                return any("steer from the other device" in str(m) for m in pending) or any(
+                    "steer from the other device" in t for t in _user_texts(created)
+                )
+
+            assert await _wait(steered), _user_texts(created)
+
             # RENAME, the way the TUI sends it (`/rename` is advertised
             # authoritative, so the app routes it through `route_shared_slash`):
             # the OWNER's naming state is what moves.
