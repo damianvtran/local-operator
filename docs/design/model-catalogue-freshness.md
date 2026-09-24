@@ -623,9 +623,25 @@ the `.fetching` lease gone.
 | `SOFT_TTL_S` | catalogue | 1h | staleness bound for the next call at zero on-path cost |
 | `MISS_REFETCH_MIN_AGE_S` | catalogue | 10 min | a young document that lacks an id is right; bounds typo refetches |
 | `REVALIDATE_BACKOFF_S` | catalogue | 5 min | one background attempt per key per five minutes while offline |
+| `LISTING_FAILURE_BACKOFF_S` | catalogue | 5 min | one SYNCHRONOUS attempt per document per five minutes after a fetch fails — the sibling of the row above for the path a caller waits on |
 | `PICKER_TTL_S` | controller | 15 min | the user is asking; sync fetch is already off-loop behind painted rows |
 | `_PRICE_CATALOGUE_TIMEOUT_S` | configure | 3s (= `_AGGREGATOR_TIMEOUT_S`) | same leg-2 budget rule; reachable from the executor thread of the 1 Hz poll |
 | `LISTING_CAPTURE_VERSIONS` | discovery | `anthropic 2, openrouter 2, radient 2` (+`xai 2` if the transport lands) | readers now need `cache_write_price` |
+
+The two backoffs are deliberately separate. `REVALIDATE_BACKOFF_S` bounds the
+BACKGROUND path, which never blocks a caller; `LISTING_FAILURE_BACKOFF_S` bounds
+the synchronous one, which is what a live read waits on — a failed fetch leaves
+no fresh document, so its age only ever grows and every later live read used to
+re-issue the request. Without it a provider answering 429/5xx was re-asked on
+every live read, and a surface that refetches on window focus let a user
+amplify their own rate limit by alt-tabbing.
+
+The synchronous memory is bound to the DOCUMENT it was recorded against
+(`mtime_ns` + size), not to the path alone, and `invalidate` / `invalidate_documents`
+both clear it. A path-only memory answered `stale` — with no attempt at all — for
+a document that had been removed or replaced since the failure, which a cache
+sweep, a peer process's `invalidate` or a hand-cleared cache dir does for real;
+and it is what pytest's reused `tmp_path` exposed in `test_deepseek.py`.
 
 ---
 

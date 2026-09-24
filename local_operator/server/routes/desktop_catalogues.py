@@ -11,7 +11,6 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
-from local_operator.model.discovery import FAILED_LISTING_STATUSES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -126,45 +125,23 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
             from local_operator.providers.controller import PICKER_TTL_S
 
             entries, statuses = await controller.live_catalogue(ttl_s=PICKER_TTL_S)
-            # ``live_catalogue`` returns a STATUS for EVERY provider it
-            # considered (``ok``/``cached``/``stale``/``static``/
-            # ``unauthenticated``/``empty``), not a failure map. Naming every key
-            # as an error is how this endpoint told the desktop that all 23
-            # providers had "not answered" while two aggregators' 452 rows were
-            # on screen (D1). A status answers "how did we get these rows", and
-            # two of its values are not failures: ``cached`` served a stored
-            # document on purpose, and ``unauthenticated`` providers were never
-            # asked because they need a credential the caller did not supply.
+            # WHICH providers count as failing is ``catalogue_failures``'s
+            # question now, and it lives on the controller so every desktop
+            # surface asks it once from the same facts (config for the local
+            # endpoints, ``usable_providers()`` for the rest, and the row count
+            # that separates a row-less ``static`` from a provider whose bundled
+            # rows are exactly what the user asked to see). The deliberate
+            # silences are unchanged from before the rule moved: a row-ful
+            # ``static``/``unauthenticated`` provider has answered the user's
+            # question, and the TUI footer names the missing credential (D1,
+            # R1-4/Q1). This route only publishes the answer, in the same shape
+            # the mobile daemon's model route uses.
             #
-            # ``static`` is the one status that is BOTH shapes. It means "the
-            # registry is all there is", which for a provider that bundles rows
-            # is a fine answer — but a provider with NO bundled rows whose fetch
-            # failed with nothing cached also reports ``static``, and that is
-            # exactly the operator's original "refresh failed" state (R1-4/Q1:
-            # ``available_models('openrouter', base_url=dead)`` → ``static``, 0
-            # rows; a real 401 against api.openai.com likewise). ``FAILED_LISTING_STATUSES``
-            # alone would go SILENT there, where the old code named it.
-            #
-            # So a provider is reported when it has no listing AND contributed no
-            # rows at all: the intersection of the no-listing statuses with
-            # "contributed zero entries". Same shape the mobile daemon's model
-            # route uses (``status != "empty" and provider not in
-            # listed_providers``). The deliberate silence is kept for the
-            # row-ful ``static``/``unauthenticated`` cases — a 401 provider whose
-            # catalogue still shows its bundled rows has answered the user's
-            # question, and the TUI footer already names the missing credential.
-            #
-            # The VALUE stays the generic sentence on purpose: the surface that
-            # consumes this reads only the keys, and provider exceptions can
-            # carry response bodies or credential URLs, so an unvetted reason
-            # string must never reach the wire here.
-            contributed = {entry.provider for entry in entries}
-            failures = {
-                key: "Model listing unavailable"
-                for key, status in statuses.items()
-                if status in FAILED_LISTING_STATUSES
-                or (status == "static" and key not in contributed)
-            }
+            # The VALUE is the controller's one generic sentence on purpose: the
+            # surface that consumes this reads only the keys, and provider
+            # exceptions can carry response bodies or credential URLs, so an
+            # unvetted reason string must never reach the wire here.
+            failures = controller.catalogue_failures(entries, statuses)
         else:
             # NOT `asyncio.to_thread`, and the reason is CORRECTNESS rather than
             # cost: the AuthStore's sqlite connection is created on the event-loop

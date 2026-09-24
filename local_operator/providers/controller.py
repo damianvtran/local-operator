@@ -29,6 +29,8 @@ from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
 from local_operator.model.discovery import (
+    FAILED_LISTING_STATUSES,
+    NO_LISTING_PROVIDERS,
     DiscoveredModel,
     available_models,
     cached_available_models,
@@ -102,6 +104,13 @@ EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 #: re-list nine providers. Boot and repaint paths keep the default 24h hard TTL
 #: (with an hourly background refresh) because there a request IS visible.
 PICKER_TTL_S = 15 * 60
+
+#: The reason every provider named by :meth:`ProviderController.catalogue_failures`
+#: carries. Deliberately the ONE generic sentence and never the provider's own
+#: error: the surfaces that consume it read only the KEYS, and a provider
+#: exception can carry a response body or a credential URL, so an unvetted reason
+#: string must never reach a wire (or a screenshot) from here.
+CATALOGUE_FAILURE_REASON = "Model listing unavailable"
 
 #: Notes for the QwenCloud console-ticket states the user can ACT ON. All are
 #: painted by ``usage_panel.py``'s body builder, which prefixes a two-cell
@@ -2106,6 +2115,85 @@ class ProviderController:
             # price the row ended up carrying.
             time_of_use=info.time_of_use if info is not None else None,
         )
+
+    def catalogue_failures(
+        self, entries: Collection[CatalogueEntry], statuses: Mapping[str, str]
+    ) -> dict[str, str]:
+        """Provider id -> :data:`CATALOGUE_FAILURE_REASON`, for the listings the
+        user could act on.
+
+        ``statuses`` comes from :meth:`live_catalogue` and answers "how did we get
+        these rows" for EVERY provider considered, so most of its keys are not
+        failures at all: ``cached`` is a deliberate cache serve and
+        ``unauthenticated`` means the provider was never asked. Publishing every
+        key as an error is how the desktop picker told the user that all 23
+        providers had "not answered" (D1).
+
+        The question is narrower than "is it local": **could the app have listed
+        this provider on the user's behalf, and did not**. A provider is named
+        only when ALL of these hold.
+
+        1. It has a listing transport at all. ``NO_LISTING_PROVIDERS`` (the mock
+           ``test`` host) is excluded by the registry's own statement about those
+           ids — they "cannot be listed at all, exposed so a UI can say so
+           without first attempting a request that is guaranteed to fail".
+        2. The user ENGAGED it. A ``local_setup`` provider counts only when the
+           config carries ``providers.<id>.base_url``
+           (:func:`local.configured_local_providers`): the preset port nobody
+           chose is the app's own default with nobody home, which is not a
+           provider that went away. Every other provider counts when it has a
+           usable credential. **When the credential store could not be read at
+           all (``usable_providers() is None``) the credential axis does NOT
+           narrow** — unknown is not unengaged, and this method follows the
+           degradation that already reads an unreadable store as "everything
+           connected". The local-endpoint axis is read from config instead, so
+           it still applies in that case.
+        3. The listing actually failed. The existing rule, unchanged: a status in
+           ``FAILED_LISTING_STATUSES`` (``stale``/``empty``), or ``static`` with
+           no rows contributed — ``static`` conflates "no listing endpoint, only
+           bundled rows" with "the fetch died and nothing was cached", and only
+           the second is a failure, which is why the row count is the second
+           argument's job (R1-4/Q1).
+
+        MEASURED, and the reason the engagement axis is not optional. On the
+        operator's machine this named exactly SIX providers — ``ollama``,
+        ``lmstudio``, ``llamacpp``, ``vllm``, ``openai-compatible`` (five preset
+        local ports; ``config.yml`` has no ``providers:`` section at all, so none
+        of them was ever configured) and ``test`` (the app's own mock host). With
+        an ISOLATED config dir, which is what a fresh install looks like, the
+        same three-fact rule named SEVEN: the same six plus ``radient``, a keyless
+        aggregator whose public listing answers 401 and which has no credential,
+        no cache and no bundled rows either. A new install must not open its
+        picker with "Some providers did not answer (7)", and none of the seven was
+        a report about a provider the user had.
+
+        TWO SIBLING RULES ARE LEFT ALONE ON PURPOSE, and neither is drift. The
+        mobile daemon's ``unavailable`` list and the TUI's ``_catalogue_status``
+        both describe a listing the user asked their OWN server for: the TUI's
+        ``stale list: vllm`` is TRUE — those rows really are stale — whereas the
+        desktop banner's claim ("did not answer") is the false one this narrows.
+        Read the three together before changing any one of them.
+        """
+        from local_operator.providers.local import configured_local_providers
+
+        contributed = {entry.provider for entry in entries}
+        configured_local = configured_local_providers()
+        usable = self.usable_providers()
+        failures: dict[str, str] = {}
+        for provider, status in statuses.items():
+            if provider in NO_LISTING_PROVIDERS:
+                continue
+            definition = get_provider_definition(provider)
+            if definition is not None and definition.local_setup:
+                if provider not in configured_local:
+                    continue
+            elif usable is not None and provider not in usable:
+                continue
+            if status in FAILED_LISTING_STATUSES or (
+                status == "static" and provider not in contributed
+            ):
+                failures[provider] = CATALOGUE_FAILURE_REASON
+        return failures
 
     async def live_catalogue(
         self,
