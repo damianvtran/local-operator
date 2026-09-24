@@ -27,7 +27,9 @@ Fresh ``HOME`` and ``LOCAL_OPERATOR_CONFIG_DIR`` per pass (the model catalogue
 cache follows HOME, AGENTS.md "Isolating a run"); every ``LOP_*``/``CMUX_*``
 stripped; the ``test`` provider; every pid this script starts — the runtime, the
 standby, the replacement standby — is SIGTERMed by exact pid at the end of its
-pass, identified through the root's own lock file and record, never by name.
+pass, identified from this process's own child list and the runtime's record,
+never by name. There is no lock file or socket to identify them by any more: the
+channel is a private socketpair, which is the point.
 
 USAGE
 =====
@@ -69,28 +71,21 @@ def _strip_inherited() -> None:
             del os.environ[key]
 
 
-def _lock_holders(root: Path) -> set[int]:
-    """Pids holding THIS root's standby lock: the standby, and nothing else."""
-    lock = root / "run" / "standby" / "lock"
-    if not lock.exists():
-        return set()
-    out = subprocess.run(["lsof", "-t", str(lock)], capture_output=True, text=True).stdout
-    return {int(x) for x in out.split() if x.strip().isdigit()} - {os.getpid()}
-
-
 def _warm_standby(root: Path, timeout_s: float) -> tuple[bool, float, int | None, float | None]:
-    """Warm one standby for ``root`` and wait until it listens. (ok, seconds, pid, rss_mb)."""
+    """Warm one standby in THIS process and wait until it can take a spawn.
+
+    (ok, seconds, pid, rss_mb). The pid is this process's own ``[standby]`` child,
+    found by ``ps`` rather than by a path: there is no rendezvous path to look for
+    (that is the security property — see ``session/runtime/standby.py``), and the
+    console-side state that names the pid is private to the process.
+    """
     from local_operator.session.runtime import standby
-    from local_operator.session.runtime.launch import _spawn_interpreter
 
     started = time.perf_counter()
-    standby._WARMING[0] = True
-    standby.ensure_warm(root, _spawn_interpreter())
-    sock = standby.socket_path(root, create=False)
+    standby.enable_warming(root)
     while time.perf_counter() - started < timeout_s:
-        if sock.exists():
-            holders = _lock_holders(root)
-            pid = min(holders) if holders else None
+        if standby.adoption_possible():
+            pid = _standby_child()
             rss = None
             if pid:
                 raw = subprocess.run(
@@ -98,8 +93,25 @@ def _warm_standby(root: Path, timeout_s: float) -> tuple[bool, float, int | None
                 ).stdout.strip()
                 rss = round(int(raw) / 1024, 1) if raw.isdigit() else None
             return True, time.perf_counter() - started, pid, rss
-        time.sleep(0.05)
+        time.sleep(0.2)
     return False, time.perf_counter() - started, None, None
+
+
+def _standby_child() -> int | None:
+    """The pid of this process's live standby child, or ``None``."""
+    from local_operator.session.runtime import standby
+
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,command="], capture_output=True, text=True
+    ).stdout
+    for line in out.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3:
+            continue
+        pid, ppid, command = fields
+        if int(ppid) == os.getpid() and standby.STANDBY_MODULE in command:
+            return int(pid)
+    return None
 
 
 def _cpu_ms() -> float:
@@ -170,19 +182,20 @@ def _one(arm: str, index: int, warm_timeout_s: float) -> dict[str, Any]:
     try:
         if arm == "cold":
             os.environ[standby.DISABLE_ENV] = "1"
-            standby._WARMING[0] = False
+            standby.reset_for_tests()
         else:
             os.environ.pop(standby.DISABLE_ENV, None)
             ok, secs, spare_pid, rss = _warm_standby(root, warm_timeout_s)
             row.update(standby_ready=ok, standby_warm_s=round(secs, 1), standby_rss_mb=rss)
-            # Nothing re-warms INSIDE the timed span; the replacement is its
-            # own measurement (standby_warm_s), not weather on this one.
-            standby._WARMING[0] = False
+            # Nothing re-warms INSIDE the timed span; the replacement is its own
+            # measurement (standby_warm_s), not weather on this one.
+            standby.reset_for_tests()
+            os.environ.pop(standby.DISABLE_ENV, None)
         row["load1"] = round(os.getloadavg()[0], 1)
         row.update(asyncio.run(_engage(root, uuid.uuid4().hex[:12])))
         row["adopted"] = bool(spare_pid and row.get("runtime_pid") == spare_pid)
     finally:
-        pids = {p for p in (row.get("runtime_pid"), spare_pid) if p} | _lock_holders(root)
+        pids = {p for p in (row.get("runtime_pid"), spare_pid, _standby_child()) if p}
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGTERM)
