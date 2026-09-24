@@ -35448,17 +35448,15 @@ class OperatorApp(App[None]):
           contract (``docs/DESKTOP_API.md``), so a continuation written by a
           local TUI replayed there as the user's own words — the operator's
           invisibility requirement failing on a real cross-host path (agent
-          review round 1, MAJOR-2). Probed for the keyword the way
-          ``serving.py`` probes it: a reduced or third-party session that
-          predates it must not raise, and the keyword's job is to stamp a marker
-          those hosts never read.
+          review round 1, MAJOR-2). The stamp itself now comes from
+          ``_prompt_loop_turn``, the route this method shares with the two
+          ``/loop`` workers: a caller-side stamp is how the goal-mode loop's own
+          turn went without one (see that method), and one route is what keeps a
+          fourth chrome row from repeating it.
         """
         from local_operator.session.errors import TurnInFlight
 
         fields: dict[str, Any] = dict(echo.prompt_kwargs())
-        complete = getattr(session, "prompt_and_wait", session.prompt)
-        if "harness_injected" in inspect.signature(complete).parameters:
-            fields["harness_injected"] = True
 
         deadline = time.monotonic() + _GOAL_CONTINUATION_ADMISSION_S
         while True:
@@ -35476,9 +35474,36 @@ class OperatorApp(App[None]):
 
     @staticmethod
     async def _prompt_loop_turn(session: SessionProtocol, prompt: str, **kwargs: Any) -> None:
+        """Admit ONE harness-authored turn — the ONE route all three of them use.
+
+        ``/loop``'s next iteration, the goal-mode loop's working turn and the goal
+        judge's continuation all come through here, and every one of them is
+        chrome: this host paints a NOTICE for the loops and a stamped row for the
+        continuation, and the durable row exists only so the transcript can say
+        why the conversation continued.
+
+        So the STRUCTURAL marker is stamped HERE, by the route, rather than by
+        each caller — which is how two of the three came to be missing it. The
+        goal-mode loop's own turn reached the transcript with no marker at all,
+        and ``LOOP_GOAL_PROMPT`` is in neither ``harness_chrome_prompts()`` nor
+        any producer-side recogniser (measured on a real session over the desktop
+        route: the persisted row reads ``stamp=no, chrome-recognised=False``).
+        The desktop is marker-only by contract (``docs/DESKTOP_API.md`` names
+        "the goal loop's own prompt" as a row that must carry it), so a goal loop
+        run from a terminal replayed there as the USER's own words — the
+        operator's invisibility requirement failing on the same cross-host path
+        the judge's continuation was fixed on.
+
+        Probed for the keyword the way ``serving.py`` probes it: a reduced or
+        third-party session that predates it must not raise, and the keyword's
+        job is to stamp a marker those hosts never read. ``setdefault``, so a
+        caller that states the stamp itself is not second-guessed.
+        """
         # Local Session.prompt already awaits the pipeline. Remote interactive
         # prompt only admits it; a loop needs its explicit terminal-outcome API.
         complete = getattr(session, "prompt_and_wait", session.prompt)
+        if "harness_injected" in inspect.signature(complete).parameters:
+            kwargs.setdefault("harness_injected", True)
         await cast(Callable[..., Awaitable[None]], complete)(prompt, **kwargs)
 
     async def _loop_worker(self, iterations: int, source: SessionInteraction | None = None) -> None:
