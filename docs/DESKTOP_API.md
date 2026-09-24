@@ -857,15 +857,41 @@ same terms as the child transcript route.
 ```json
 {"rows": [{"type": "message_update", "delta": "\u2026", "_lo_seq": 41}],
  "base_seq": 7, "total": 63, "trajectory_length": 63,
+ "watchers": 1, "joined": false,
  "available": true, "reason": null}
 ```
 
 `rows` are the events the runtime retains for that job — what its own
 `job_trajectory` op pages and what the live append stream extends — neither
-re-stamped nor re-ordered, so a reader folds them through the SAME reducer it
-uses for the parent's live events. `base_seq` is the `_lo_seq` of `rows[0]`;
-`trajectory_length` is how many events the runtime retains for the job and
-`total` is how many this reply carries (equal after a successful load).
+re-stamped nor re-ordered, and with each `_lo_seq` appearing **at most once** (the
+first occurrence wins, at its own position), so a reader folds them through the
+SAME reducer it uses for the parent's live events. `base_seq` is the `_lo_seq` of
+`rows[0]`. `total` and `trajectory_length` both count the window this reply
+carries and are equal by construction: after a successful load the reply IS the
+whole retained window (the pager loops until the owner's own total is reached), so
+"what this reply carries" and "what the runtime retains for the job" are the same
+window. Neither is the roster row's own `trajectory_length` — that one is the
+follower's COPY of the runtime's number and it drifts in both directions (it lags
+the window just read, and it is inflated by the duplicated rows the seed drops) —
+so a reader that wants the runtime's own figure reads the roster row it already
+has, and a reader that wants the window reads these rows.
+
+The dedupe is the runtime's job because the race is the runtime's: the
+subscription is taken BEFORE the window is paged, and the owner computes each
+delta against its own last published window, so a run of rows emitted in that
+overlap is delivered twice — once inside the seed and once as an append. Measured
+on a live child: 16 re-opens, 17 rows for 15 distinct stamps, the repeated pair
+being `turn_start`/`message_start`. An APPEND may therefore still repeat a row the
+seed already carried, which is exactly why the rule below is a stamp watermark
+rather than a position.
+
+`watchers` and `joined` say what the call did to the session's shared count:
+`watchers` is how many readers hold this child's window after it (`1` for an open,
+more when it joined one a sibling window already had live) and `joined` is
+`watchers > 1`. Every `POST` increments and one `DELETE` releases one, so a client
+that re-seeds without unmounting (a rotation, a double mount) accumulates a
+reference; these two fields are what make that visible at the call that caused
+it, instead of at a release nobody sends.
 
 **A reader may rely on identity, never on order.** The seed arrives over HTTP
 while appends arrive on the session's event stream, and either may overtake the
@@ -884,20 +910,41 @@ opened.** They arrive as `job_trajectory_appends: {job_id: [row, …]}` on
 naming any job whose rows were dropped to keep the frame inside its byte budget:
 the marker means the window is a REPLACEMENT rather than a suffix, so a reader
 resets that job's local rows to exactly what the frame carried. **Both fields are
-per-job and opt-in.** A connection that has not loaded a job receives `{}` and
-`[]` for it — byte-identical to the frame an older backend sends — and a
-connection with several loaded jobs receives each of them. The rows are scoped to
-the connection and byte-bounded by the runtime (newest kept, oldest dropped), so
-a client must not trim them again: what it is given is what the socket could
-carry, and a job that lost a row is the one named in the replacements list.
+per-job and opt-in.** A session whose reader has loaded no job receives `{}` and
+`[]` — byte-identical to the frame an older backend sends — and a session with
+several loaded jobs receives each of them. The rows are byte-bounded by the
+runtime (newest kept, oldest dropped), so a client must not trim them again: what
+it is given is what the socket could carry, and a job that lost a row is the one
+named in the replacements list.
+
+**The opt-in is per SESSION BRIDGE, not per subscriber**, and that is the scope a
+client should build against. Two `GET …/events` streams on one session share one
+bridge, so once ANY window has loaded a job, every subscriber to that session's
+stream receives that job's rows: a second subscriber that never opened the child
+sees them too, and pays their bytes on every frame for as long as a sibling's
+reader is open. That is deliberate rather than an oversight — every subscriber to
+a session's stream is already authorised for that session, the rows are the
+runtime's bounded projection, and the app holds ONE subscription per session by
+its own doctrine, so in the app there is exactly one subscriber and nothing extra
+is ever fanned out. Scoping per subscriber would need a load-to-subscription
+identity the client must echo on every `POST`, and getting it wrong fails to a
+silently empty child page, which is a worse bug than a few bounded rows.
+**Follow-up**: per-subscriber scoping, with the load naming the subscription it
+serves. Until it exists, opening a second stream on a session means seeing the
+rows of whatever another window has loaded.
 
 **Releasing.** `DELETE` is a RELEASE, not an unconditional unsubscribe: several
 windows can watch one child through the same session bridge, and the count is per
-job, so closing one window leaves the others' stream live. The reply states what
-is left (`{"watching": bool, "watchers": int}`). It never BUILDS a bridge — a
-cleanup must not be the request that attaches a session — so a session with no
-resident bridge answers `{"watching": false, "watchers": 0}` rather than being
-refused. Send it on unmount: until the last reference is released the runtime
+job, so closing one window leaves the others' stream live. Both the release and
+the `POST` that opened the window state what is left or what it left behind
+(`{"watching": bool, "watchers": int}` and `"watchers"`/`"joined"`), so a client
+can see an accumulation at the call that caused it rather than at a release it
+never sends. A release never BUILDS a bridge — a cleanup must not be the request
+that attaches a session — so a session with no resident bridge answers
+`{"watching": false, "watchers": 0}` rather than being refused, while a
+malformed session or job id IS refused (`404 child_not_found`): a value that could
+not name a child is not a cleanup target, so send a release only for an id you
+loaded. Send it on unmount: until the last reference is released the runtime
 keeps relaying a window nobody is reading. Nothing about the CHILD changes on a
 release — a reader is never load-bearing on a child's execution — and the rows
 stay cached on both sides, so reopening re-seeds cheaply.
@@ -917,6 +964,16 @@ there until the job is swept — so a reader opened after the child finished sti
 sees its final events.
 
 Capability: `features.subagent_trajectory` (see the keys table).
+
+**The seed body is the one unbounded path here, and leaving it so is deliberate.**
+`rows` carries the whole retained window (≤500 events) in a single HTTP body,
+where the frame path is bounded to 262 KiB against a 1 MiB line. Measured bodies:
+3.6 KB for 14 text rows, 24.6 KB for 87 — so the risk lives entirely in
+TOOL-RESULT-sized rows, and the trigger to watch for is a reader opened on a
+~500-row window of large results. A bound must ship with a page route (this op has
+none to fall back on, so trimming the seed would silently truncate a child's
+history instead of letting the reader fetch the rest), which is why it is a
+follow-up rather than part of this op.
 
 ### A read never needs an answering owner
 
@@ -1802,7 +1859,7 @@ absent.
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
 | `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
-| `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and receives the empty pair it has always received |
+| `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
