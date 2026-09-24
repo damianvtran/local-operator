@@ -2510,12 +2510,20 @@ def _lane_step_in_flight(lane: object) -> bool:
     the same property reached through the narrow question.
 
     FAIL CLOSED ON A SHAPE IT CANNOT READ, and it is stated rather than implied
-    because the alternative is silent. The lane is recognised as a REAL
-    ``Session`` — the type ``attach`` is ever handed in production, from
-    ``harness.subagent._construct_child_session`` — and anything else on
-    ``record.child`` (a test double, a future lane class) is HELD rather than judged
-    idle, with the hold announced at WARNING. Plain truthiness was the defect (agent
-    review round 1, MINOR 3), in BOTH of its directions: a ``MagicMock``'s attribute
+    because the alternative is silent. THE GATE IS AN ``isinstance``, ON THE CLASS,
+    and what it excludes is precise: any object on ``record.child`` that is not a
+    ``Session`` — a test double, a lane class built on another base — is HELD rather
+    than judged idle, with the hold announced at WARNING. A ``Session`` SUBCLASS
+    passes that gate and is then judged by its own flags and its tail, so a subclass
+    whose ``_compacting`` reads a real ``False`` with no tail to scan is spent as
+    "not in flight" — the same answer a settled lane gives. The flag itself is read
+    as plain truthiness, not as a ``bool``. (Both clauses were stated more widely
+    than the code does before agent review round 2, MINOR 1; nothing reachable
+    changes, because ``Session`` sets ``_compacting`` from ``True``/``False`` only and
+    ``attach`` is always handed a ``Session``.)
+
+    Plain truthiness was the defect (agent review round 1, MINOR 3), in BOTH of its
+    directions: a ``MagicMock``'s attribute
     is truthy for the life of the process, so it answered "in flight" forever with
     nothing recording that the read never worked, and a shape whose attribute read a
     real ``False`` while having no tail to scan was spent as "not in flight" — the

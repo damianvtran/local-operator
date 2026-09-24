@@ -309,33 +309,83 @@ spends ~1.2-1.3 ms of CPU per minute: about 0.002% of one core, three orders of
 magnitude below the :data:`PROGRESS_CPU_FLOOR` (5% of one core) the leg demands of
 the very spin this read exists to judge.
 
-THE TAIL AXIS IS THE REAL DRIVER, AND IT IS WHY THAT "THREE ORDERS" IS A
-SHORT-TAIL STATEMENT. What the scan walks is not "a lane": it is the run of rows
-after the last ``user`` boundary that are neither that boundary nor an assistant
-row carrying tool calls — the rows ``unanswered_tail_call_ids`` steps over one at a
-time, which is exactly what a ``CustomMessage`` row is (the class that rule's own
-docstring names: an incident can land on top of an open batch). One lane,
-text-only tail, same rig:
+THE TAIL AXIS IS THE REAL DRIVER, AND THE PER-ROW CONSTANT IS A PROPERTY OF THE
+ROW CLASS, so it is only meaningful with the class beside it. What the scan walks
+is not "a lane": it is the run of rows after the last ``user`` boundary that are
+neither that boundary nor an assistant row carrying tool calls — the rows
+``unanswered_tail_call_ids`` steps over one at a time. One lane, one row class per
+sweep, same rig, CPU via ``time.thread_time()``, the minimum of three sweeps:
 
-    rows scanned   widened read (µs)   marginal (µs/row)
-    66             5.17-5.98           --
-    514            40.05-61.22         0.08-0.12
-    4098           460.67-464.95       0.11-0.12
+    row class                                   N=514     N=4098   marginal
+    CustomMessage, the product's own ctors      849.65    6706.46   1.65 µs/row
+    CustomMessage, bare                         937.03    7039.58   1.72
+    CustomMessage carrying a role extra         659.00    7391.50   1.80
+    Message(role='assistant') with text          38.36     305.96   0.075
+    Message(role='assistant') with tool_calls     0.29       1.00   returns there
+    SimpleNamespace(role='assistant')            31.81     250.38   0.061
 
-LINEAR IN THE TAIL at ~0.1 µs per row, so the completed-turn tail above is the
-SHORT end of this axis — a CALIBRATION shape, not "the expensive shape" — and the
-real cost is rows × lanes rather than lanes: 4098 rows cost 461-465 µs on ONE
-lane. The same 256-lane roster on 4098-row tails would therefore spend ~118 ms per
-sample, ~0.47 s of CPU a minute, about 0.8% of one core: still under the 5% floor,
-but ONE order of magnitude below it rather than three. It is still below the floor,
-so the leg still works — what the figures mean is that this is a RATE to re-measure
-rather than a constant to budget from, and that the tail, not the lane count, is
-what moves it. Two structural facts keep the walk as small as it is, and both are
-pinned in ``tests/unit/session/runtime/test_child_lane_progress.py``: each live lane
-is asked once per sample, and a lane that DOES hold a step answers on the first
-message the scan reaches, so the in-flight case is the cheaper one (measured:
-1.38-1.50 µs when the FIRST record holds the step, against 221-284 µs when the LAST
-does).
+THE CLASSES ARE 20-30x APART, so a µs/row figure means nothing without its class.
+The 0.08-0.12 µs/row table this paragraph used to carry was measured on the CHEAP
+class — ``Message`` and ``SimpleNamespace`` rows (0.061-0.075 here) — while the
+sentence above it named the ``CustomMessage`` row the incident lands on, which is
+1.65-1.80. At the class the rule names, 4098 rows cost ~6.7 ms on ONE lane rather
+than ~0.46 ms. What is walked in the incident shape IS the ``CustomMessage`` class:
+that is what a hub message, a job result, a compaction marker and an incident all
+are.
+
+WHAT A REAL TAIL IS, COUNTED RATHER THAN ASSUMED: over the 10,475 saved
+transcripts under ``~/.local-operator/sessions``, the walk — rows from the end to
+the first assistant row carrying calls, or to the last ``user`` row — is a MEDIAN
+OF 5 ROWS, p99.9 = 16, and the widest is 25. Of the 43,161 rows those walks step
+over, 21,831 (50.6%) carry no role, i.e. the ``CustomMessage`` class, and 21,330
+(49.4%) are ``Message`` rows. A real tail is short, and about half of it is the
+cheap class.
+
+AT A REAL WIDTH THE READ IS CHEAP AND THE FLOOR IS UNDER NO PRESSURE. The widest
+walk those transcripts show, on a 256-lane roster, is 11.7-13.5 ms of CPU per
+sample: 47-54 ms of a CPU minute, ~0.08-0.09% of one core, three orders below the
+:data:`PROGRESS_CPU_FLOOR`. At the median 5-row walk it is 2.3-2.7 ms per sample,
+~0.015-0.018% of a core. That is the honest form of the "three orders" claim, and
+it is about ROWS more than lanes: the lane axis alone, over a real completed-turn
+tail (four rows plus the boundary the scan breaks on), is 191-239 µs at 256 lanes,
+0.75-0.93 µs per lane.
+
+THE SHAPE THAT BREACHES THE FLOOR, NAMED, BECAUSE THE FLOOR KEEPS ITS ROLE: 256
+lanes whose tails are 4098 ``CustomMessage`` rows each — the shape this paragraph
+used to extrapolate — costs 1.88-2.03 s of CPU per sample, 7.5-8.1 s of a CPU
+minute, ~12.5-13.5% of one core. That is ABOVE the 5% floor, not below it. Even on
+the real 50/50 row mix counted above the same shape is ~1.1 s per sample, ~7.5% of
+a core, still above. The floor itself does not move: it is the demand the legs make
+and the number this read is judged against, and what this section now says is that
+at that tail the read does not meet it. Two consequences, stated rather than left
+to inference:
+
+* 4098 rows is SYNTHETIC, not a rate seen in the field — it is 164x the widest walk
+  in those 10,475 transcripts, and it is structurally hard to reach, because the
+  walk ends at the last ``user`` boundary: a tail that long needs thousands of
+  incident / hub / job-result rows on top of one open batch. The steady state is
+  the 0.08% case above.
+* Should tails that long ever become real, the fix is a BOUNDED read rather than a
+  smaller constant, and the bound belongs in ``protocol.unanswered_tail_call_ids``
+  — the one rule this read shares with the two display predicates. That is a
+  different change from this one, with a wider blast radius, and it is not taken
+  here. A CHEAP BOUND WAS CONSIDERED AND REFUSED, measured rather than argued: a
+  fast path that skips a row class it "knows" cannot qualify is NOT
+  semantics-preserving, because ``CustomMessage`` is ``extra="allow"`` and the scan
+  reads its ``role`` and ``tool_calls`` — a ``CustomMessage`` carrying
+  ``role='assistant'`` and ``tool_calls`` IS the qualifying row (its calls come
+  back as unanswered), one carrying ``role='tool'`` plus ``tool_call_id`` ANSWERS
+  the batch below it (the answer flips from ``{'open-1'}`` to empty), and one
+  carrying ``role='user'`` STOPS the walk. Short-circuiting on the first qualifying
+  row is already what the loop does. A bound that can miss an unanswered call is
+  not one to take.
+
+Two structural facts keep the walk as small as it is, and both are pinned in
+``tests/unit/session/runtime/test_child_lane_progress.py``: each live lane is asked
+once per sample, and a lane that DOES hold a step answers on the first row the scan
+reaches, so the in-flight case is the cheaper one (measured on that same 256-lane
+roster: 1.5 µs per sample with an open batch on the FIRST record, against 211 µs
+with one on the LAST, where every lane is asked).
 
 N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``, and the cap is not a budget for this
 read. ``_evict_overflow`` evicts only records with no live child AND no running

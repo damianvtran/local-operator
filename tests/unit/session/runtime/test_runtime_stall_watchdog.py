@@ -3046,9 +3046,12 @@ def test_an_unreadable_lane_leaves_the_runtime_alive(tmp_path: Path) -> None:
 def test_a_lane_of_an_unrecognised_shape_holds_the_runtime(tmp_path: Path) -> None:
     """FAIL CLOSED on a child this read cannot vouch for (agent review round 1, MINOR 3).
 
-    ``_compacting`` is read only from a real ``bool`` now, so a ``record.child`` that
-    is not a lane this read recognises — a double, a future lane class without the
-    flag — is HELD and the hold is announced. Plain truthiness was the defect: a
+    The gate is an ``isinstance`` against the real ``Session``, so a
+    ``record.child`` that is not a ``Session`` — a double, a lane class built on
+    another base — is HELD and the hold is announced. The ``_compacting`` read
+    behind it is still plain truthiness, and a ``Session`` SUBCLASS passes the gate
+    and is judged by its tail instead: this arm is about the non-``Session`` shape.
+    Plain truthiness was the defect: a
     ``MagicMock``'s attribute is truthy for the life of the process, which answered
     "in flight" forever with nothing recording that the read never worked, and the
     mirror case (an attribute reading a real ``False`` on a shape with no tail to
