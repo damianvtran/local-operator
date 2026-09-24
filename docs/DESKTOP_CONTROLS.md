@@ -31,8 +31,8 @@ endpoint's admission rule and the composer's planner both read:
   - `word` — one whitespace-free selector token (`/usage on`, `/stop now`).
     `/session --copy` is a `word` row with a one-word vocabulary
     (`argument_words: ["--copy"]`): the copy is terminal-only, so the command
-    route refuses it with "/session --copy works in the terminal; the /session
-    view shows the ID" rather than opening the view and dropping the flag;
+    route refuses it with "--copy works only in the terminal; the /session view
+    shows the ID" rather than opening the view and dropping the flag;
   - `provider` — one token naming a provider this install knows, so `/login
     openai` is the command and `/login zzz` is a message;
   - `subcommand` — `<subcommand> [name]`, the MCP shape, at most two tokens, so

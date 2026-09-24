@@ -125,7 +125,7 @@ def test_slash_discovery_and_locality():
     # The description is where `--copy` is taught (no value list offers it, D1),
     # and it must not fold: the two-column table wraps a description past ~55
     # cells, the budget `/model`'s row pins in test_app_pilot.
-    assert "--copy" in command.description
+    assert command.description == "Usage, cost, diagnostics; --copy copies the session ID"
     assert len(command.description) <= 55, command.description
     capabilities = _slash_capabilities()
     assert (
@@ -301,7 +301,7 @@ async def test_other_session_text_is_refused_and_names_the_copy_flag(text):
         await app.workers.wait_for_complete()
         assert app._clipboard == ""
         assert not isinstance(app.screen, SessionScreen)
-        assert "/session takes no text; /session --copy copies its ID" in _notices(app)
+        assert "/session takes no text except --copy" in _notices(app)
         assert not session.prompts
 
 
@@ -323,7 +323,7 @@ async def test_copy_flag_before_the_session_exists_copies_nothing(missing):
         await _submit(pilot, app, "/session --copy")
         assert app._clipboard == ""
         assert not isinstance(app.screen, SessionScreen)
-        assert "session is not ready yet — no ID to copy" in _notices(app)
+        assert "no session ID to copy" in _notices(app)
 
 
 @pytest.mark.asyncio

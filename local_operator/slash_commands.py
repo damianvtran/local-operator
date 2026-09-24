@@ -545,10 +545,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # turn. Deliberately NOT a value list (`ArgumentMode.OPTIONAL`): a one-row
     # list RUNS on a single Enter, so `/session ` + Enter would copy instead of
     # opening the view — the description teaches the flag instead, the way
-    # `/fork --switch` is taught. 52 cells, inside the ~55 the column wraps past.
+    # `/fork --switch` is taught. 54 cells, inside the ~55 the column wraps past.
     SlashCommand(
         "session",
-        "Current-session usage and cost; --copy copies its ID",
+        "Usage, cost, diagnostics; --copy copies the session ID",
         argument_shape=ArgumentShape.WORD,
         desktop_destination="session.diagnostics",
     ),

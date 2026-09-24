@@ -35421,7 +35421,10 @@ class OperatorApp(App[None]):
             session = self._session
             session_id = session.session_id if session is not None else ""
             if not session_id:
-                self._system_notice("session is not ready yet — no ID to copy", "warning")
+                # Not "not ready yet": `_session is None` is also the state after
+                # a failed start, and this branch cannot tell the two apart. A
+                # failed start has its own error notice above (design DR2).
+                self._system_notice("no session ID to copy", "warning")
                 return
             self._put_on_clipboard(session_id)
             self._system_notice(f"session ID {session_id} sent to the clipboard", "info")
@@ -35433,9 +35436,9 @@ class OperatorApp(App[None]):
         )
 
         if arg.strip():
-            self._system_notice(
-                f"/session takes no text; /session {SESSION_COPY_FLAG} copies its ID", "warning"
-            )
+            # Names the one exception and leaves what it does to the description,
+            # so the sentence does not contradict itself (design DR1).
+            self._system_notice(f"/session takes no text except {SESSION_COPY_FLAG}", "warning")
             return
         session = self._session
         if session is None:
