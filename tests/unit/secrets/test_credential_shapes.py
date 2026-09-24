@@ -2507,6 +2507,66 @@ def test_the_spelling_window_floor_does_not_close_an_open_key_block(chunk: int) 
     assert leaked == [], f"{len(leaked)} body lines published at {chunk}-byte reads"
 
 
+@pytest.mark.parametrize("terminated", [True, False], ids=["with-end", "unterminated"])
+def test_a_body_line_wider_than_the_cap_does_not_close_an_open_key_block(
+    terminated: bool,
+) -> None:
+    """Round-2 review R2-1: the floor's line retreat is bounded by the cap (memory
+    must not depend on what the child prints), so on an UNWRAPPED body line — one
+    wider than ``_PIPE_DEFERRAL_LIMIT``, which ``pem_body_line`` accepts — the floor
+    still cut mid-line, and the few characters it left at the start of the next
+    release were a "line" the block loop read as prose. The block closed and every
+    following body line went out raw: 20 of 20 at most widths in this sweep with a
+    value registered, 0 with none, on the head before the start-side fragment rule.
+
+    The widths sweep the floor's offset across the line's last characters (16
+    consecutive widths put the cut at every fragment length below the body floor)
+    and the 7-byte read is a paced writer; the line is built from the base64
+    alphabet so it is body-shaped at any width.
+    """
+    _pem_grammar_is_live()
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    tail = _PEM_END + "after\n" if terminated else ""
+    for width in range(builtin._PIPE_DEFERRAL_LIMIT + 1, builtin._PIPE_DEFERRAL_LIMIT + 17):
+        wide = (alphabet * (width // len(alphabet) + 1))[:width]
+        stream = ("pre\n" + _PEM_HEADER + wide + "\n" + _body_lines(20) + tail).encode()
+        redactor = builtin._PipeRedactor(["SYNTH-" + "q" * 20])
+        assert redactor.hold > 0, "no window is held, so this proves nothing"
+        published = b"".join(
+            redactor.feed(stream[i : i + 7]) for i in range(0, len(stream), 7)
+        ) + redactor.feed(b"", final=True)
+        text = published.decode()
+        leaked = _published_body_lines(text)
+        assert leaked == [], f"width {width}: {len(leaked)} body lines published"
+        assert wide not in text, f"width {width}: the wide body line published"
+
+
+@pytest.mark.parametrize("value_length", [12, 20, 27, 49])
+def test_a_cut_inside_a_crlf_pair_does_not_close_an_open_key_block(value_length: int) -> None:
+    """Round-2 review R2-1's CRLF cell: a cut between ``\\r`` and ``\\n`` hands the
+    next release a lone ``\\n``, an empty line the block loop reads as prose. On
+    the head before the start-side fragment rule a CRLF block at 333-byte reads
+    published 7, 42, 31 and 44 body lines for these value lengths (the hold moves
+    the floor, so the length picks the alignment), and 0 with no value.
+    """
+    _pem_grammar_is_live()
+    stream = (
+        "pre\r\n"
+        + _PEM_HEADER.replace("\n", "\r\n")
+        + _body_lines(200).replace("\n", "\r\n")
+        + _PEM_END.replace("\n", "\r\n")
+        + "after\r\n"
+    ).encode()
+    redactor = builtin._PipeRedactor(["SYNTH-" + "q" * (value_length - 6)])
+    assert redactor.hold > 0, "no window is held, so this proves nothing"
+    published = b"".join(
+        redactor.feed(stream[i : i + 333]) for i in range(0, len(stream), 333)
+    ) + redactor.feed(b"", final=True)
+    leaked = _published_body_lines(published.decode())
+    assert leaked == [], f"{len(leaked)} body lines published"
+    assert published.decode().endswith("after\r\n"), "the stream's tail was not released"
+
+
 # --- the store: containment, and the incident path ---------------------------
 
 

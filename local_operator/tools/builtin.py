@@ -2897,9 +2897,16 @@ class _PipeRedactor:
         # release the PEM classifiers were written against, including a header line
         # the floor would otherwise have split.
         #
-        # BOUNDED by `_PIPE_DEFERRAL_LIMIT`, because a line has no length limit and
-        # this hold must not become the unbounded one: a line longer than that is not
-        # a PEM body line, and the floor stands where it fell rather than holding it.
+        # BOUNDED by `_PIPE_DEFERRAL_LIMIT`, and the bound is about MEMORY, not about
+        # what a PEM body looks like: an unwrapped body line longer than the cap IS a
+        # body line to `pem_body_line` (round-2 review, R2-2). The bound is what stops
+        # this hold becoming the unbounded one. Once `hold` exceeds the cap (a value of
+        # ~2 KiB, whose escaped spelling is 4x) the floor lands before the cap-forced
+        # cut, and in a line with no terminator yet the unbounded retreat would answer
+        # every release with the line's start — cut 0, forever, while `pending` grows
+        # with the child's output. So a line longer than the cap keeps its mid-line cut
+        # here, and the START-side fragment rule in the fixed point below is what
+        # stops that cut from closing an open block (round-2 review, R2-1).
         floor = max(len(text) - self.hold, 0)
         if floor < cut:
             line_start = max(text.rfind("\n", 0, floor), text.rfind("\r", 0, floor)) + 1
@@ -2934,6 +2941,22 @@ class _PipeRedactor:
         # and holding bytes back at that point would DROP them, because ``pending`` is
         # never flushed again. The invariant this hold exists for is not "no fragment is
         # ever released"; it is "no fragment a LATER release will classify".
+        #
+        # AND THE SAME HOLD FOR THE FRAGMENT A CUT LEAVES AT THE START OF THE NEXT
+        # RELEASE (`_short_line_start`), because a mid-line cut has two ends and the
+        # rule above guards one. Every rule that can cut inside a line — the cap, the
+        # window floor past its line bound, `_cut_outside`, the known-value rule — hands
+        # the rest of that line to the next release, whose line loop reads it as a
+        # LINE: `5\n` is prose to it, so the block closed and the rest of the body went
+        # out raw. Measured (round-2 review, R2-1) with one registered value on an
+        # unwrapped body line longer than the cap: 200 of 200 body lines published,
+        # against 0 with no value; the same class published a CRLF body when a cut
+        # fell between `\r` and `\n` (a lone `\n` is prose too). A release is not made
+        # to start ON a line — a line longer than the cap cannot be, while memory stays
+        # bounded — it is made to start with at least `PEM_BODY_FLOOR` characters of
+        # its line, which the body grammar classifies exactly as it classifies the
+        # whole line. Moves the cut LEFT by at most `PEM_BODY_FLOOR` characters, so it
+        # composes with the other rules like the end-side hold does.
         while True:
             previous_cut = cut
             if spans:
@@ -2945,9 +2968,44 @@ class _PipeRedactor:
                 break_at = max(text.rfind("\n", 0, cut), text.rfind("\r", 0, cut)) + 1
                 if 0 < cut - break_at < PEM_BODY_FLOOR:
                     cut = break_at
+                else:
+                    cut = self._short_line_start(text, cut, break_at)
             if cut == previous_cut:
                 break
         return cut
+
+    @staticmethod
+    def _short_line_start(text: str, cut: int, line_start: int) -> int:
+        """Move ``cut`` left so the next release does not START with a sub-floor fragment.
+
+        Only called while a key block is open (see the fixed point in
+        :meth:`_release_point`). ``line_start`` is where the line holding ``cut``
+        begins. Returns ``cut`` unchanged when it is already a line boundary, or when
+        the rest of its line — up to that line's terminator, or to the end of the
+        buffer when the terminator has not arrived (the line can only grow, so the
+        fragment can only get LONGER) — is at least ``PEM_BODY_FLOOR`` characters.
+
+        A cut between ``\\r`` and ``\\n`` counts as mid-line: the next release would
+        start with a lone ``\\n``, an empty line the loop reads as prose. So does a cut
+        right after a ``\\r`` that ends the buffer, because the ``\\n`` may be the next
+        read's first byte; that holds a CR-terminated line one read longer, and only
+        while a block is open.
+        """
+        if cut >= len(text) and not text.endswith("\r"):
+            return cut  # nothing is left for a next release to start with
+        if text[cut - 1] == "\r" and text[cut : cut + 1] in ("\n", ""):
+            # Inside a CRLF pair: the line ends at that `\r`, so its start is the one
+            # before it — `line_start` was computed from the `\r` itself.
+            line_end = cut - 1
+            line_start = max(text.rfind("\n", 0, line_end), text.rfind("\r", 0, line_end)) + 1
+        elif line_start == cut:
+            return cut  # already a line boundary
+        else:
+            ends = [i for i in (text.find("\n", cut), text.find("\r", cut)) if i >= 0]
+            line_end = min(ends) if ends else len(text)
+        if line_end - cut >= PEM_BODY_FLOOR:
+            return cut
+        return max(line_start, line_end - PEM_BODY_FLOOR)
 
     def _cut_past_a_split_header(self, text: str, cut: int) -> int:
         """Extend a cap-forced cut to the end of a header LINE it would otherwise split.
