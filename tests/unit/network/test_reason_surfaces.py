@@ -67,6 +67,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
     ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (3, "the relay's own sentence"),
+    # The mobility slice's wire transport reads the ACK'S ``detail`` key - the
+    # envelope field itself, never rendered to anyone: what a surface renders is the
+    # ``message`` INSIDE it, and the codes beside it are what a front end branches on.
+    (
+        "local_operator/network/mobility.py",
+        "LinkTransport.ask",
+        "detail",
+    ): (1, "the ack's own payload key, not a rendered reason"),
     # The refusing device's code and sentence, handed to ``refusal_from_pairing``, whose
     # code-to-sentence map is what a person reads (Q-R3-3).
     ("local_operator/network/cli.py", "_join_one", "detail"): (1, "input to the sentence map"),

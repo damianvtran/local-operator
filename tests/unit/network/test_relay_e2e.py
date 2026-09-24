@@ -1045,6 +1045,21 @@ def test_the_relay_never_becomes_a_session_owner() -> None:
     assert offenders == [], f"the relay imports a session owner: {offenders}"
 
 
+#: The modules the MOVE owns, exempt from the scan below BY NAME.
+#:
+#: Moving a session is the one thing the relay does that writes session state, and
+#: that is the design rather than a leak: the destination writes verified bytes into
+#: ``network/staging/`` (outside ``sessions/``) and adopts them with ONE
+#: ``os.replace``; a replica is recovered into a NEW session directory. So the guard
+#: that matters for these two files is a PER-CALL one, and it exists and is
+#: stronger than this scan: ``tests/unit/session/test_no_session_deletion.py``
+#: allow-lists every rename, replace and rmtree in them at the call site with a
+#: reason, and ``tests/unit/network/test_mobility.py`` pins that the only path into
+#: ``sessions/`` is a promote of a copy whose every byte was verified against the
+#: owner's manifest.
+_MOVE_WRITERS: frozenset[str] = frozenset({"mobility.py", "sync.py"})
+
+
 def test_the_relay_writes_no_session_state() -> None:
     """R1's second structural half, stated as a rule a reviewer can check.
 
@@ -1057,6 +1072,8 @@ def test_the_relay_writes_no_session_state() -> None:
     for path in sorted(
         Path(__file__).resolve().parents[3].joinpath("local_operator/network").glob("*.py")
     ):
+        if path.name in _MOVE_WRITERS:
+            continue
         text = path.read_text(encoding="utf-8")
         if "transcript.jsonl" in text:
             offenders.append(f"{path.name}: names a transcript")

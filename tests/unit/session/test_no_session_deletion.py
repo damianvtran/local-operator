@@ -519,13 +519,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # peer just asked for, and the removal belongs to the move/fork path, which is
     # the next slice and not in this build.
     (
-        "local_operator/session/placement.py::write_stamp",
+        "local_operator/session/placement.py::write_stamp_into",
         "os.replace",
-        "tmp FILE -> sessions/<id>/mesh.json FILE; the directory is written INTO, never "
-        "named, and a failed write deliberately leaves no stamp at all",
+        "tmp FILE -> mesh.json FILE; the directory is written INTO, never named, and a "
+        "failed write deliberately leaves no stamp at all. Renamed from `write_stamp` when "
+        "the move needed a stamp written into its STAGING directory (so the promote is one "
+        "rename): one writer taking that directory, with `write_stamp` delegating to it "
+        "with `sessions/<id>`.",
     ),
     (
-        "local_operator/session/placement.py::write_stamp",
+        "local_operator/session/placement.py::write_stamp_into",
         "os.unlink",
         "Removes only this call's own .mesh.json.<pid>.tmp sidecar before re-raising the "
         "failed write",
@@ -1713,6 +1716,63 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own pid-keyed temp file after a failed atomic replacement",
     ),
+    # -- the mesh's move (``network/mobility.py``, ``network/sync.py``) ---------
+    # THE ONE CALL IN THE TREE THAT RENAMES SOMETHING INTO ``sessions/``, and it is
+    # the move protocol's whole design rather than a convenience. The destination
+    # copies a session into ``<config>/network/staging/<id>/`` — deliberately
+    # OUTSIDE the session store, so no picker, catalogue, retention pass or resume
+    # can see a half-copied session — verifies every byte against the owner's
+    # manifest, and then makes the session visible with ONE atomic rename. The
+    # source is the STAGING path, never a session directory: nothing under
+    # ``sessions/`` is renamed, moved or replaced by this, and the rename is what
+    # removes the window in which a scanner could see half a session.
+    (
+        "local_operator/network/mobility.py::_promote",
+        "os.replace",
+        "Adopts a VERIFIED staging directory into sessions/ under a new id (never "
+        "renames a session directory); the owner deleted the original through "
+        "cleanup.remove_session_dir",
+    ),
+    (
+        "local_operator/network/mobility.py::_promote",
+        "<path>.unlink",
+        "Removes the move's own ready.json boot marker from the just-adopted session "
+        "directory: a bookkeeping FILE written by the move, not session content",
+    ),
+    (
+        "local_operator/network/mobility.py::_roll_back_destination",
+        "shutil.rmtree",
+        "Removes the move's own staging directory under network/staging/, after the "
+        "owner refused the handoff; it is outside sessions/ by construction",
+    ),
+    (
+        "local_operator/network/mobility.py::sweep_staging",
+        "shutil.rmtree",
+        "Age-capped sweep of abandoned network/staging/ directories (a `ready.json` "
+        "marker exempts one, because those bytes may be the last copy alive); never "
+        "a path under sessions/",
+    ),
+    # A replica lives at network/replicas/<id>/ — outside the session store, so it
+    # can never be a second directory for an id the owner holds (INV-1). Its cursor
+    # is written through a temp in that same directory.
+    (
+        "local_operator/network/sync.py::write_replica_cursor",
+        "os.replace",
+        "Atomic tmp -> sync.json inside one network/replicas/<id>/ directory",
+    ),
+    # The handoff journal's own atomic writer (see the module's fail-closed rule):
+    # both the replacement and the temp cleanup are under <config>/network/.
+    (
+        "local_operator/session/placement.py::_write_journal",
+        "os.replace",
+        "Atomic tmp -> pending-move.json under <config>/network/, the file the launch "
+        "guard reads; never a path under sessions/",
+    ),
+    (
+        "local_operator/session/placement.py::_write_journal",
+        "os.unlink",
+        "Removes only its own pid-keyed temp file after a failed atomic replacement",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
@@ -1940,7 +2000,11 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # session directory it belongs to, never a directory rename. The entry was
         # carried on the mesh branch and lost when `main` touched this same file,
         # which is exactly the class this guard exists to catch.
-        "local_operator/session/placement.py::write_stamp",  # tmp -> mesh.json
+        "local_operator/session/placement.py::write_stamp_into",  # tmp -> mesh.json
+        # The handoff journal: the same shape as the stamp above, one directory up
+        # (``<config>/network/pending-move.json``). Its receiver is that file, and
+        # the move's own reader turns a missing one into "no handoff in flight".
+        "local_operator/session/placement.py::_write_journal",  # tmp -> journal FILE
     }
 )
 

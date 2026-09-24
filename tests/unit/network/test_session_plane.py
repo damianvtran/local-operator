@@ -39,6 +39,7 @@ import pytest
 
 from local_operator.network import dial as session_dial
 from local_operator.network import projection, relay, store
+from local_operator.session.cleanup import mark_store
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _init_network,
     _pair,
@@ -1204,19 +1205,22 @@ def test_the_session_plane_listing_has_a_header_and_says_the_state_in_words(
         link.close("test")
 
 
-def test_a_session_lifecycle_op_is_refused_by_name(
+def test_a_session_lifecycle_op_deletes_on_the_owner(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§8 routes delete/archive to the owner's implementation; this build has none.
+    """§8 routes delete to the OWNER's implementation, and it lands there.
 
-    Refused WITH the module that owns it rather than half-implemented: a second
-    ``rmtree`` of a session directory is what
-    ``tests/unit/session/test_no_session_deletion.py`` exists to prevent.
+    The op is served by the mobility slice now, so what this pins is the routing
+    rather than a by-name refusal: the requester asks, the OWNER deletes out of its
+    own store (through the same ``remove_session_dir`` every other delete uses), and
+    the requester's own root is untouched. A second ``rmtree`` of a session directory
+    anywhere is what ``tests/unit/session/test_no_session_deletion.py`` prevents.
     """
     server_a, server_b, _host_a, _port_a = peer_pair
     record, _host, _port = _pair(peer_pair, monkeypatch, role="admin")
     host_b, port_b = _listen(server_b)
     _seed(server_b.root, SESSION)
+    mark_store(server_b.root / "sessions")
     link = _dial_to(server_a, record, host_b, port_b)
     reply = link.request(
         {
@@ -1228,8 +1232,10 @@ def test_a_session_lifecycle_op_is_refused_by_name(
             "confirmed": True,
         }
     )
-    assert reply is not None and reply["op"] == "error"
-    assert "session/archived.py" in str(reply["message"])
+    assert reply is not None and reply["op"] == "ack", reply
+    assert reply["detail"]["deleted"] is True, reply["detail"]
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    assert not (server_a.root / "sessions" / SESSION).exists()
     link.close("test")
 
 
