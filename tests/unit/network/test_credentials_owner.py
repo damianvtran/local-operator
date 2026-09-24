@@ -239,6 +239,13 @@ def owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: str) -
     document.grant(STUB_PROVIDER, BORROWER_DEVICE, scope="session", by=OWNER_DEVICE)
     document.grant(STUB_PROVIDER, BORROWER_TWO, scope="session", by=OWNER_DEVICE)
     document.save()
+    # A REAL audit log, because the `credential.grant` record is part of the
+    # deliverable and its fields are whitelisted: a key missing from
+    # ``audit.DETAIL_KEYS`` is dropped SILENTLY, so an assertion against a fake
+    # recorder would pass while the file on disk carried nothing.
+    from local_operator.network.audit import AuditLog
+
+    audit = AuditLog(root=root)
     broker = owner_mod.MeshCredentialBroker(
         root=root,
         self_device=OWNER_DEVICE,
@@ -246,15 +253,24 @@ def owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: str) -
         network_id="n_owner",
         placement=document,
         auth_store=auth,
+        audit=audit,
     )
     try:
         yield type(
             "Owner",
             (),
-            {"root": root, "auth": auth, "row": row, "broker": broker, "document": document},
+            {
+                "root": root,
+                "auth": auth,
+                "row": row,
+                "broker": broker,
+                "document": document,
+                "audit": audit,
+            },
         )
     finally:
         broker.close()
+        audit.close()
         auth.close()
 
 
@@ -728,3 +744,51 @@ def test_the_grant_carries_no_refresh_material(owner: Any, idp: RotatingIdP) -> 
     assert not [name for name in _keys(detail) if "refresh" in name and name != "refreshed"]
     assert owner.auth.get_credential(owner.row.id).data["refresh"] not in blob
     assert detail["token_kind"] == "bearer"
+
+
+def test_a_grant_is_audited_on_the_owner_with_act_and_sub(owner: Any, idp: RotatingIdP) -> None:
+    """The delegation record, read back from the real ``audit.jsonl``.
+
+    ``act`` is the owing device (the broker) and ``sub`` is the device the grant was
+    lent to — the RFC 8693 delegation markers ``mesh-credentials.md`` §1.4 names and
+    ``mesh-incident-response.md`` §4.3 fields. Read from the FILE rather than from a
+    fake recorder because the writer keeps a per-event detail whitelist: a field
+    missing from ``audit.DETAIL_KEYS`` is dropped without complaint, so a recorder
+    would agree with a record that never reached disk.
+    """
+    detail = _ask_grant(owner, BORROWER_DEVICE, session="sess-1")
+    assert detail["kind"] == "grant"
+    records = [
+        row
+        for row in owner.audit.tail(50, network_id="n_owner")
+        if row.get("event") == "credential.grant"
+    ]
+    assert len(records) == 1, records
+    record = records[0]
+    assert record["actor"] == OWNER_DEVICE
+    assert record["subject"] == BORROWER_DEVICE
+    fields = record["detail"]
+    assert fields["act"] == OWNER_DEVICE
+    assert fields["sub"] == BORROWER_DEVICE
+    assert fields["credential_key"] == STUB_PROVIDER
+    assert fields["scope"] == "session"
+    assert isinstance(fields["latency_ms"], int)
+    assert isinstance(fields["refreshed"], bool)
+    # THE BEARER IS NOT IN THE RECORD, and its key is refused by name rather than
+    # being remembered not to be added.
+    assert detail["access_token"] not in json.dumps(record)
+    assert "access_token" not in fields
+
+
+def test_a_refused_grant_is_audited_with_its_code(owner: Any, idp: RotatingIdP) -> None:
+    """A refusal the operator will be asked about is on the owner's own log too."""
+    stranger = "d_00000000000000000000000000000009"
+    _ask_grant(owner, stranger)
+    records = [
+        row
+        for row in owner.audit.tail(50, network_id="n_owner")
+        if row.get("event") == "credential.grant_refused"
+    ]
+    assert len(records) == 1, records
+    assert records[0]["detail"]["code"] == "not_a_holder"
+    assert records[0]["detail"]["sub"] == stranger
