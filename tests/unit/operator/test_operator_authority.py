@@ -848,6 +848,7 @@ class _FakeCF:
         access_accepted: dict[str, bool] | None = None,
         keygen: list[tuple[int, str] | None] | None = None,
         point: bytes = _A_REAL_P256_POINT,
+        sign_refused: bool = False,
     ) -> None:
         self._next = 1
         self.kinds: dict[int, str] = {}
@@ -865,6 +866,11 @@ class _FakeCF:
         self.attempts = 0
         self.flags_seen: list[int] = []
         self.point = point
+        #: Whether ``SecKeyCreateSignature`` refuses, so the signing path's failure exit is
+        #: reachable without an OS: the payload release lives on both exits.
+        self.sign_refused = sign_refused
+        #: A DER-shaped ES256 signature, so a successful sign returns something real.
+        self.signature = b"\x30\x44\x02\x20" + bytes(range(32)) + b"\x02\x20" + bytes(range(32))
         self.S = _FakeSecurity(self)
         self.C = _FakeCoreFoundation(self)
 
@@ -901,7 +907,15 @@ class _FakeCF:
                 self.released.append((self.kinds[value], value))
 
     def _fail(self, out: Any, status: int, text: str) -> None:
-        """Publish an error the way the framework does: an out-param the caller owns."""
+        """Publish an error the way the framework does: an out-param the caller owns.
+
+        A status of 0 means the framework refused WITHOUT publishing an error — the out
+        param is left untouched, so ``status`` and ``error`` see no error object at all.
+        That is the state QA round 2 (Q2-1) is about, and modelling it is what makes the
+        "no success code in a failure line" assertion mean something.
+        """
+        if not status:
+            return
         ref = self._make("error")
         self.errors[ref] = (status, text)
         if out is not None:
@@ -942,10 +956,20 @@ class _FakeCF:
         return self._make("dict")
 
     def status(self, err: Any) -> int:
-        return self.errors.get(int(err.value or 0), (0, ""))[0]
+        value = int(err.value or 0)
+        # Touch it: reading a code out of an error object that has already been RELEASED is
+        # the use-after-free the real ``cf.error`` would hide, and the signing path relies
+        # on the order (status first, then the call that releases it).
+        self._touch(value, "CFErrorGetCode")
+        return self.errors.get(value, (0, ""))[0]
 
     def error(self, err: Any) -> str:
         value = int(err.value or 0)
+        if not value:
+            # ``_CF.error`` renders a missing error as "no error reported" and releases
+            # nothing, so the fake says the same rather than inventing a code.
+            return "no error reported"
+        self._touch(value, "CFErrorCopyDescription")
         code, text = self.errors.pop(value, (0, ""))
         if value in self.live:  # _CF.error releases the CFErrorRef; so does the fake
             self.live.discard(value)
@@ -965,7 +989,13 @@ class _FakeCF:
 
 
 class _FakeSecurity:
-    """The ``.S`` half: only the four calls ``create`` and ``load`` make."""
+    """The ``.S`` half: the calls ``create``, ``load`` and ``sign`` make.
+
+    ``SecKeyCreateSignature`` is here so the signing path has a guard that runs in every
+    CI job rather than only under this host's by-hand probes: it was the one changed line
+    in the round-1 remediation with nothing exercising it (agent review round 2, R2-3 /
+    QA round 2, Q2-3).
+    """
 
     def __init__(self, cf: _FakeCF) -> None:
         self.cf = cf
@@ -1004,6 +1034,22 @@ class _FakeSecurity:
         raw = cf._make("raw")
         cf.blobs[raw] = cf.point
         return raw
+
+    def SecKeyCreateSignature(self, key: Any, algorithm: Any, payload: Any, out: Any) -> int:
+        """Sign, or publish a refusal the caller must report.
+
+        ``payload`` is TOUCHED, so a message ref that was released before the call raises
+        here — which is exactly the leak's inverse and the reason the payload is bound.
+        """
+        cf = self.cf
+        cf._touch(key, "SecKeyCreateSignature key")
+        cf._touch(payload, "SecKeyCreateSignature payload")
+        if cf.sign_refused:
+            cf._fail(out, -34018, "a signature needs a presence prompt this process cannot raise")
+            return 0
+        signature = cf._make("signature")
+        cf.blobs[signature] = cf.signature
+        return signature
 
     def SecItemCopyMatching(self, query: Any, out: Any) -> int:
         cf = self.cf
@@ -1235,6 +1281,12 @@ def test_the_refusal_is_classified_by_call_site_and_not_by_the_code_alone() -> N
     access = keychain.secure_enclave_diagnosis(keychain.ACCESS_CONTROL_REFUSED, -50)
     assert "errSecParam" in access[0]
     assert "kSecAccessControlApplicationPassword" in access[0]
+    # The site must name a next command, and NOT the one that cannot help there: a
+    # file-backed key is a different key, and `file-only` never calls
+    # SecAccessControlCreateWithFlags, so pointing at it would send the operator to a
+    # command that does not address what failed (design round 2, D2-1).
+    assert "lop-update" in " ".join(access), "the access-control site names no action"
+    assert "file-only" not in " ".join(access), "file-only does not help at this site"
     keygen = keychain.secure_enclave_diagnosis(keychain.KEY_GENERATION_REFUSED, -50)
     assert keygen and keygen[0] != access[0], "one code read the same way at two sites"
     assert "inconsistent" in keygen[0]
@@ -1321,6 +1373,15 @@ def test_the_refusal_message_leads_with_the_diagnosis_and_says_each_thing_once(
     assert message.count("-34018") == 1, f"the status is stated once: {message}"
     assert "OSStatus -34018 - OSStatus error" not in message, "our prefix was added on top"
     assert refused.value.status == keychain._ERR_SEC_MISSING_ENTITLEMENT
+    # ONE LINE PER SENTENCE, AT COLUMN 0, with no hand-set indent and no interior run of
+    # spaces for a terminal to strand mid-wrap: the sibling status block's convention,
+    # which design round 2 (D2-2) asked this message to follow rather than introduce a
+    # second one. Only the product's lines are checked for double spaces — the framework's
+    # own words are kept verbatim and may contain them.
+    for line in message.splitlines():
+        assert not line.startswith(" "), f"a hand-set indent came back: {line!r}"
+        if not line.startswith("framework detail:"):
+            assert "  " not in line, f"a doubled space for a terminal to strand: {line!r}"
 
     # When the framework's own description already states the code — its usual
     # "(OSStatus error -N - …)" shape — the framework's words are kept VERBATIM and ours
@@ -1345,18 +1406,125 @@ def test_the_refusal_message_leads_with_the_diagnosis_and_says_each_thing_once(
 
 
 def test_a_printed_failure_carries_no_per_run_object_address() -> None:
-    """``0x…`` differs every run: two identical failures must not read as different.
+    r"""The framework's ``> 0x…`` address goes; nothing else does.
 
-    The framework renders its objects as ``<SecKeyRef:('com.apple.setoken')> 0x7f86b0d240``,
-    and that address is noise in copy meant to be pasted into a bug report (design round
-    1, D4). The description is kept; only the address goes.
+    ``0x75929d8380`` differs every run, and stripping it is also what lets two protection
+    classes' otherwise identical refusals collapse into one detail line (design round 1,
+    D4). The first cut used ``\s*0x[0-9a-fA-F]+``, which ALSO deleted a small hex literal,
+    truncated a hex path segment and — because ``\s*`` matches a newline — could join two
+    lines. So the rule is anchored to the shape the framework actually prints, and the
+    cases below are its contract rather than an aspiration (agent review round 2, R2-2 /
+    QA round 2, Q2-2).
     """
     raw = "failed to add key to keychain: <SecKeyRef:('com.apple.setoken')> 0x7F86B0D240"
     cleaned = keychain.without_run_addresses(raw)
     assert "0x" not in cleaned and "7F86B0D240" not in cleaned
     assert cleaned == "failed to add key to keychain: <SecKeyRef:('com.apple.setoken')>"
-    # ...and a message with no address is returned unchanged, so this never eats words.
-    assert keychain.without_run_addresses("OSStatus error -50") == "OSStatus error -50"
+    # NOT run addresses — every one of these was altered by the first rule.
+    for kept in (
+        "id=0x7f8 ref=0x1",  # short hex literals: `id= ref=` before
+        "could not read /tmp/0x9f/probe.pem",  # a hex path segment: `/tmp//probe.pem` before
+        "OSStatus error -50",  # no hex at all
+        "0x75929d8380 begins the description",  # no separator, so nothing to anchor on
+        "first line\n    0x1000 second line",  # a small literal AND a line break: must not join
+    ):
+        assert keychain.without_run_addresses(kept) == kept, kept
+    # ...and the two classes' texts DO become identical, which is the dedup benefit: two
+    # addresses that differ per run and per class now read the same, so the refusals merge.
+    class_a = "keychain: <SecKeyRef:('com.apple.setoken')> 0x75929d8380"
+    class_b = "keychain: <SecKeyRef:('com.apple.setoken')> 0x75929d8840"
+    assert keychain.without_run_addresses(class_a) == keychain.without_run_addresses(class_b)
+
+
+def test_the_refusal_status_is_unanimous_or_none_and_never_a_success_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller branching on ``status`` must fail CLOSED.
+
+    The attribute exists so the opt-in hardware test can skip without reading prose, so a
+    ladder whose classes refused with DIFFERENT codes must not hand it whichever class
+    happened to run first — that silently chooses which remedy a caller is offered, and
+    the ladder's order would decide it (agent review round 2, R2-1). A refusal that
+    published NO error object carries ``0``, a SUCCESS code, and is reported as no code at
+    all rather than as "OSStatus 0" (QA round 2, Q2-1).
+    """
+    mixed = _FakeCF(keygen=[(-50, "inconsistent params"), (-34018, "no entitlement")])
+    with pytest.raises(keychain.KeyBackendError) as refused:
+        _enclave_with(monkeypatch, mixed).create()
+    assert refused.value.status is None, "a mixed ladder decided which code to report"
+    # Both refusals are still on the message: failing closed must not lose the detail.
+    assert str(refused.value).count("framework detail:") == 2, str(refused.value)
+    # ...and swapping the ladder's order cannot change the answer.
+    swapped = _FakeCF(keygen=[(-34018, "no entitlement"), (-50, "inconsistent params")])
+    with pytest.raises(keychain.KeyBackendError) as refused_swapped:
+        _enclave_with(monkeypatch, swapped).create()
+    assert refused_swapped.value.status is None
+
+    agreed = _FakeCF(keygen=[(-34018, "no entitlement"), (-34018, "no entitlement")])
+    with pytest.raises(keychain.KeyBackendError) as unanimous:
+        _enclave_with(monkeypatch, agreed).create()
+    assert unanimous.value.status == -34018, "a unanimous ladder must still report its code"
+
+    # A refusal the framework reports WITHOUT an error object: no code to state, and the
+    # number 0 must not reach the line as if it were one.
+    silent = _FakeCF(keygen=[(0, "ignored — nothing was published"), (0, "ignored")])
+    with pytest.raises(keychain.KeyBackendError) as wordless:
+        _enclave_with(monkeypatch, silent).create()
+    message = str(wordless.value)
+    assert wordless.value.status is None
+    assert "OSStatus 0 - " not in message, f"a success code in a failure line: {message}"
+    assert message.splitlines()[-1].endswith("no error reported"), message
+
+
+def test_the_signing_payload_is_released_on_both_paths_and_the_status_outlives_the_error() -> None:
+    """The one changed line of the round-1 remediation that had no guard anywhere.
+
+    ``_SecureEnclaveSigner.sign`` used to create the message ``CFDataRef`` inline and drop
+    it — one leaked CoreFoundation object per signature — and the fix binds it and releases
+    it in a ``finally``. Nothing exercised that: ``SecKeyCreateSignature`` appeared in the
+    tree only inside docstrings, so a future re-inline would have passed CI exactly as the
+    leak did (agent review round 2, R2-3 / QA round 2, Q2-3).
+
+    No OS is needed for this, which is why it belongs in the default suite: the fake now
+    carries ``SecKeyCreateSignature``, refuses a released ref, and refuses to answer
+    ``status`` out of an error object that has already been released — so the ORDER the
+    signing path relies on (code first, then the call that releases the error) is
+    asserted rather than assumed.
+    """
+    handle = keychain.KeyHandle(
+        backend=keychain.SECURE_ENCLAVE,
+        key_id=verify.key_id_for(_A_REAL_P256_POINT),
+        spki=_A_REAL_P256_POINT,
+        presence=True,
+    )
+
+    # Success: the payload is created once and released once, and so is the signature.
+    # ``Any`` for the fake, as elsewhere in this file: it stands in for the loaded dylib,
+    # and the real parameter is typed as the ``_CF`` it deliberately is not.
+    signed_cf: Any = _FakeCF()
+    signed_key = signed_cf._make("key")
+    signer = keychain._SecureEnclaveSigner(handle, signed_key, signed_cf)
+    assert signer.sign(b"a message") == signed_cf.signature
+    assert signed_cf.counts()["data"] == (1, 1), signed_cf.counts()
+    assert signed_cf.counts()["signature"] == (1, 1), signed_cf.counts()
+    assert signed_cf.live == {signed_key}, "only the key the signer still holds may be live"
+    signer.close()
+    assert signed_cf.live == set()
+
+    # Failure: the payload is still released exactly once, and the status is read while
+    # the error ref is live (a read after `error()` would raise in this fake).
+    refused_cf: Any = _FakeCF(sign_refused=True)
+    refused_key = refused_cf._make("key")
+    refusing = keychain._SecureEnclaveSigner(handle, refused_key, refused_cf)
+    with pytest.raises(keychain.KeyBackendError) as raised:
+        refusing.sign(b"a message")
+    assert raised.value.status == -34018
+    assert refused_cf.counts()["data"] == (1, 1), refused_cf.counts()
+    assert refused_cf.counts()["error"] == (1, 1), refused_cf.counts()
+    assert "0x" not in str(raised.value), str(raised.value)
+    assert refused_cf.live == {refused_key}
+    refusing.close()
+    assert refused_cf.live == set()
 
 
 class _StubEnclaveBackend:

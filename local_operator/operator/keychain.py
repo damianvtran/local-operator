@@ -123,12 +123,18 @@ class KeyBackendError(RuntimeError):
     """
 
     def __init__(self, message: str, *, status: int | None = None) -> None:
-        """``status`` is the ``OSStatus`` the OS returned, when there was one.
+        """``status`` is the ``OSStatus`` the OS returned, when there was ONE such code.
 
         An attribute rather than only prose because a caller sometimes has to BRANCH on
         it rather than read it: the opt-in hardware test must SKIP (not fail) when the OS
         itself refuses this caller's entitlement, and matching that on the message text
         would be the string-sniffing this removes (agent review round 1, R1-6).
+
+        UNANIMOUS OR ``None``, never the first refusal's code: a caller branching on this
+        must fail closed, and a ladder whose classes refused with DIFFERENT codes has no
+        single code to report — handing it one class's would silently mis-attribute the
+        remedy (agent review round 2, R2-1). ``None`` also covers "the framework refused
+        without publishing an error", so ``0`` — a SUCCESS code — is never carried here.
         """
         super().__init__(message)
         self.status = status
@@ -454,8 +460,9 @@ _SECURE_ENCLAVE_DIAGNOSES: dict[tuple[str, int], tuple[str, ...]] = {
         "the access-control flags were refused (errSecParam), which no host accepts: "
         "kSecAccessControlUserPresence may be combined only with "
         "kSecAccessControlApplicationPassword and kSecAccessControlPrivateKeyUsage",
-        "that is a defect in the build carrying the flag pair, not something this host "
-        "can work around",
+        "that is a defect in the build carrying the flag pair, not a state this host can "
+        "work around — no protection class can succeed with it, so the fix is a build "
+        "carrying the corrected pair (`lop-update`)",
     ),
     (KEY_GENERATION_REFUSED, _ERR_SEC_MISSING_ENTITLEMENT): (
         "this runtime cannot create a presence-gated operator key: the Secure Enclave "
@@ -474,17 +481,29 @@ _SECURE_ENCLAVE_DIAGNOSES: dict[tuple[str, int], tuple[str, ...]] = {
     ),
 }
 
-#: A CoreFoundation object address as the framework prints it (``<SecKeyRef:…> 0x7f86…``).
-_RUN_ADDRESS = re.compile(r"\s*0x[0-9a-fA-F]+")
+#: A CoreFoundation object address as the framework PRINTS it: a separator, then ``0x`` and
+#: at least 8 hex digits (`> 0x75929d8380`).
+#:
+#: DELIBERATELY NARROW, because the first version was not: ``\s*0x[0-9a-fA-F]+`` also
+#: deleted a small hex literal (`id=0x7f8 ref=0x1` became `id= ref=`), truncated a path
+#: segment (`/tmp/0x9f/probe.pem` became `/tmp//probe.pem`) and — because ``\s*`` matches a
+#: newline — could join two framework lines. The separator is required, so an address at
+#: the very start of a description is left alone; that is not a shape this framework
+#: produces, and the docstring below says so rather than pretending otherwise (agent
+#: review round 2, R2-2 / QA round 2, Q2-2).
+_RUN_ADDRESS = re.compile(r"[ \t]0x[0-9a-fA-F]{8,}\b")
 
 
 def without_run_addresses(text: str) -> str:
     """The framework's words with per-run object ADDRESSES removed, nothing else.
 
-    ``0x7f86b0d240`` differs on every run, and this text is printed to be pasted into a
-    bug report: the address is noise there, and it makes two identical failures look
-    different (design round 1, D4). The framework's own wording, including the object's
-    description, is kept.
+    ``0x75929d8380`` differs on every run, which is why it is stripped: this text is
+    printed to be pasted into a bug report, two identical failures must not look
+    different, and the same strip is what lets two protection classes' identical refusals
+    collapse into one detail line. What is removed is only a separator followed by ``0x``
+    and 8 or more hex digits — a short hex literal, a hex path segment, and a line break
+    all survive, as :data:`_RUN_ADDRESS` explains. The framework's own wording, including
+    the object's description, is kept.
     """
     return _RUN_ADDRESS.sub("", text)
 
@@ -530,12 +549,20 @@ def secure_enclave_refusal_message(refusals: dict[tuple[str, int, str], list[str
         # it: ``CFErrorCopyDescription`` normally renders "… (OSStatus error -34018 - …)",
         # and saying the same number twice on one line is the restatement this message
         # exists to avoid (design round 1, D3). The framework's words are never edited.
-        stated = re.search(rf"error\s+{re.escape(str(status))}\b", detail) is not None
+        #
+        # A status of 0 means NO error object was published, so there is no code to state:
+        # printing "OSStatus 0 -" would put a SUCCESS code in a failure line (agent review
+        # round 2, R2-1 / QA round 2, Q2-1).
+        stated = not status or re.search(rf"error\s+{re.escape(str(status))}\b", detail)
         lines.append(
             f"framework detail: {site} — {', '.join(classes)}: "
             f"{'' if stated else f'OSStatus {status} - '}{detail}"
         )
-    return lines[0] + "".join(f"\n  {line}" for line in lines[1:])
+    # ONE LINE PER SENTENCE, STARTING AT COLUMN 0, with no hand-set indent: the terminal
+    # is what wraps, so a wrapped continuation must not be stranded mid-indent (design
+    # round 2, D2-2 — the same convention `test_the_spawn_only_status_lines_are_wrapped_
+    # by_the_terminal_not_by_hand` pins for the status block).
+    return "\n".join(lines)
 
 
 class SecureEnclaveBackend:
@@ -684,10 +711,14 @@ class SecureEnclaveBackend:
             # Every class refused. The message leads with the diagnosis and the next
             # command, and keeps the framework's own words (minus per-run addresses) as
             # the detail line; the status rides along for callers that must branch on it
-            # rather than read it.
+            # rather than read it — and only when the ladder AGREED, so a mixed-code
+            # ladder leaves it ``None`` rather than letting ladder order decide which
+            # remedy a caller is offered (agent review round 2, R2-1).
+            codes = {status for _site, status, _detail in refusals}
+            agreed = codes.pop() if len(codes) == 1 else None
             raise KeyBackendError(
                 secure_enclave_refusal_message(refusals),
-                status=next(iter(refusals))[1],
+                status=agreed or None,
             )
         finally:
             cf.release(tag)
@@ -803,7 +834,7 @@ class _SecureEnclaveSigner(Signer):
             # reading it afterwards would be a use-after-free on the very ref being
             # reported on. Same treatment as ``create``'s copy, too: this line is meant
             # to be pasted into a report, so the per-run address is stripped (D4).
-            status = cf.status(err) if err else None
+            status = (cf.status(err) if err else 0) or None
             raise KeyBackendError(
                 "the Secure Enclave refused to sign: " + without_run_addresses(cf.error(err)),
                 status=status,
