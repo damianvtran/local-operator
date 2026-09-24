@@ -201,7 +201,7 @@ and only facts: a volatile observation never enters this file.
       "kind": "oauth-rotating",
       "owner_device": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b",
       "owner_device_name": "damian-mbp",
-      "identity_label": "damian@gominerva.com",
+      "identity_label": "you@example.com",
       "holders": [
         { "device": "d_4b2a91c4e0b87f3a", "scope": "session", "granted_at": 1789000000.0, "granted_by": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b" },
         { "device": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b", "scope": "device",  "granted_at": 1789000000.0, "granted_by": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b" }
@@ -291,8 +291,8 @@ Joining network "lab"
   SAS:         6F2Q-8HD4
 
 Credentials damian-mbp will serve to this device:
-  openai     (OAuth, damian@gominerva.com)   share: yes
-  anthropic  (OAuth, damian@gominerva.com)   share: yes
+  openai     (OAuth, you@example.com)   share: yes
+  anthropic  (OAuth, you@example.com)   share: yes
   deepseek   (API key)                       share: no   [t] to change
 
 Confirm SAS and share list on BOTH devices. [c]onfirm  [a]bort
@@ -340,7 +340,7 @@ path**, and never enters LLM context.
 {"type": "custom", "custom_type": "mesh_credential_binding.v1",
  "details": {"schema": "lop.mesh.credential_binding.v1", "version": 1,
              "provider": "openai", "owner_device": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b",
-             "identity_label": "damian@gominerva.com",
+             "identity_label": "you@example.com",
              "policy": "local-first", "bound_at": 1789012345.0,
              "writer": "47201:1789012000"}}
 ```
@@ -463,7 +463,7 @@ advertised `credential-broker-v1` in `caps`; an older peer answers
   "grant_expires_at_ms": 1789013245678,
   "credential_ref": {"owner_device": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b", "owner_device_name": "damian-mbp",
                      "provider": "openai", "kind": "oauth", "credential_id": 12},
-  "identity": {"account_id": "org_9x2", "email": "damian@gominerva.com", "org_id": "org_9x2"},
+  "identity": {"account_id": "org_9x2", "email": "you@example.com", "org_id": "org_9x2"},
   "scope": {"kind": "session", "session_id": "2026-09-19T18-04-11_ab12"},
   "served_by": "d_6c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b",
   "refreshed": true,
