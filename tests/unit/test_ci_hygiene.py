@@ -807,8 +807,9 @@ SHARD_JOB_OVERHEAD_SECONDS = 60
 #: (the 0.5 share is deliberately skipped on a dedicated runner — applying it
 #: measurably halved CI parallelism), and a GitHub `ubuntu-latest` runner has 4
 #: vCPUs, so a unit shard's serial weight divides by 4. The e2e tree divides by
-#: 1 by design: it runs `-n0` because a fired watchdog exits the process, which
-#: is exactly why its sharding axis had to be runners rather than workers.
+#: 1 by design: it runs `-n0` because a hang cannot be interrupted in-process
+#: and `faulthandler`'s timer is process-global, which is exactly why its
+#: sharding axis had to be runners rather than workers.
 CI_UNIT_WORKERS = 4
 
 
@@ -908,8 +909,9 @@ def test_the_shard_job_runs_the_partitioned_list_not_the_whole_tree(job: str) ->
     if tree == "e2e":
         assert re.search(r"-m\s*e2e\b", run), "the e2e shard run lost `-m e2e`"
         assert re.search(r"(?<!\w)-n\s*0(?!\d)", run), (
-            "the e2e shard run lost serial execution (`-n0`): under xdist a fired "
-            "watchdog kills a worker carrying unrelated tests (see AGENTS.md)"
+            "the e2e shard run lost serial execution (`-n0`): a hang cannot be "
+            "ended in-process and the timer is process-global, so under xdist a "
+            "worker would strand the run and lose its stacks (see AGENTS.md)"
         )
         assert (
             "NO_COLOR" in run and "xterm-256color" in run

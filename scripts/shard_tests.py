@@ -74,9 +74,10 @@ WHY THE E2E TREE IS SHARDED THE SAME WAY, AND WHY THAT IS SAFE
 -------------------------------------------------------------
 ``tests/e2e`` is the opposite of the unit tree in one respect that decides
 its sharding axis: it runs ``-n0``, serially, because a test's failure mode is
-a HANG and a fired ``faulthandler`` watchdog exits the process -- under xdist
-that kills a worker carrying unrelated tests and reports them as
-infrastructure errors instead of a freeze (see AGENTS.md). It also contends
+a HANG, which nothing in-process can interrupt -- a wedged xdist worker strands
+the whole run and reports as an infrastructure error instead of a freeze, and
+``faulthandler``'s timer is process-global on top of that (see AGENTS.md and
+``tests/e2e/watchdog.py``). It also contends
 real ``flock`` lock files and drives whole application lifecycles.
 
 So the workers cannot be the sharding axis; the RUNNERS are. Each matrix leg
