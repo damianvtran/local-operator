@@ -258,7 +258,7 @@ Five things, all small relative to what exists:
    (§1.6). The same is true on a systemd host through the sibling unit renderer
    (§2's note on supervision).
 
-   **Landed 2026-09-24 (PR #1516), for the supervised daemons.** The refresh now asks
+   **Landed 2026-09-24 (PR #1515), for the supervised daemons.** The refresh now asks
    the second question after the plist comparison: the pid launchd holds for the
    label (``launchd.job_pid``), then the generation that process's own argv names
    (``update.stale_generation_of_process``, which reads ``ps -o args=`` — the shim
@@ -718,7 +718,7 @@ serving the generation each started on for an unbounded time is not "properly
 updated" in the operator's sense, however clean the pointer flip was — **and
 §1.6 shows that is the state of this machine today**, not a risk.
 
-**Landed 2026-09-24 (PR #1516): the refresh asks a second question.** After the
+**Landed 2026-09-24 (PR #1515): the refresh asks a second question.** After the
 plist comparison comes the RUNNING daemon: the pid launchd holds for the label
 (`launchd.job_pid`) and the generation that process's own argv names
 (`update.stale_generation_of_process`, reading `ps -o args=` — the shim `exec`s
