@@ -284,6 +284,18 @@ class SessionInteraction:
     #: refresh: those are the app talking to itself, and a clock they reset
     #: never fires. See `app.SIDEBAR_IDLE_RELEASE_S`.
     parked_at: float | None = field(default=None, repr=False)
+    #: The account a paint-first attach OWES this conversation: its one row and
+    #: the last thing that row said (``app._AttachBehindAccount``).
+    #:
+    #: On the SOURCE rather than on the attempt that produced it, because the
+    #: attempt ends the moment a carrier binds and the account must not end with
+    #: it (agent review round 4 on #1474, F-1; UX round 4, U14): a message whose
+    #: own bind fails AFTER another carrier landed still has to be accounted
+    #: for, and a row the conversation's view carried is lost with that view
+    #: when the switch back's connect re-commits a fresh replay — so the claim
+    #: lives with the conversation and is re-posted into whatever view it has
+    #: in front. ``None`` when nothing is owed.
+    attach_behind_account: Any = field(default=None, repr=False)
 
     @property
     def unsent(self) -> list[SessionDraft]:

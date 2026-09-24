@@ -1226,9 +1226,15 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # authenticated dial is retained and its state has not arrived. Both are on
     # the wire, both are read off a duck-typed bound facade by the bridge, and
     # neither exists for an owner ``Session`` — it has no dial to be silent on.
-    assert len(viewer_only) == 63, (
+    #
+    # 63 → 64 is the paint-first attach flag (PR #1474, UX round 1, U1).
+    # ``attach_behind`` marks a cold viewer opened IN FRONT of a live owner it
+    # binds to behind the paint, which is what the TUI narrates and bounds. An
+    # owner ``Session`` has no owner to attach to, so the flag has no meaning
+    # there. Declared in ``ViewerSessionProtocol`` in the same commit.
+    assert len(viewer_only) == 64, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 63, and the aggregate floor is set at 40 against that number. A "
+        "says 64, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
