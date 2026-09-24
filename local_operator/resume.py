@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -823,7 +823,12 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
         return
 
 
-def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
+def backfill_session_origins(
+    config_dir: Path,
+    limit: int = 500,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Stamp pre-existing subagent directories once, and return how many.
 
     Without this the fix only applies to sessions created after the upgrade,
@@ -853,6 +858,23 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     the cut stamped 0 on three consecutive startups. Deciding a session's
     origin by where its random name falls in an alphabet is not a policy
     anyone would choose deliberately.
+
+    ``should_stop`` is a cooperative halt for a runtime that is LEAVING, and it
+    defaults to ``None`` so every existing caller is byte-identical in
+    behaviour: the CLI ``--resume`` sweeps call this to FINISH, and a predicate
+    they do not pass cannot change what they do. The store-maintenance thread
+    passes the same event that halts the pass sequence (see
+    :func:`local_operator.session_factory.request_store_maintenance_stop`),
+    which is what turns a walk worth minutes (measured on the fleet's own store:
+    10,737 directories at 16.7-38.4 ms each, i.e. 3-7 minutes per pass) into one
+    that leaves within a directory of the request — one step of this loop. It is
+    checked once per ITERATION rather than once per call because the pass IS the
+    expensive unit: every directory between one check and the next is a
+    directory a departing runtime paid to stat. Stopping between directories is
+    safe at any point — the two writes below are atomic and idempotent, and
+    nothing is carried across iterations — and the caller's completed-sequence
+    guard reads the same event, so a partial sweep is never published as a
+    completed one (``_run_store_maintenance``).
     """
     stamped = 0
     sessions = config_dir / "sessions"
@@ -861,6 +883,8 @@ def backfill_session_origins(config_dir: Path, limit: int = 500) -> int:
     except OSError:
         return 0
     for directory in directories:
+        if should_stop is not None and should_stop():
+            break
         if stamped >= limit:
             break
         try:
@@ -993,7 +1017,12 @@ def _write_title_scan_sentinel(session_dir: Path) -> None:
         return
 
 
-def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
+def backfill_session_titles(
+    config_dir: Path,
+    limit: int = 500,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     """Write the title sidecar for sessions that predate it, and return how many.
 
     Mirrors :func:`backfill_session_origins` exactly, and for the same reason:
@@ -1032,6 +1061,13 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     list instead would leave any session sorting past the cut unvisited on
     every run forever, because the list sorts by hex name and the same prefix
     is recomputed each startup.
+
+    ``should_stop`` is the cooperative halt :func:`backfill_session_origins`
+    documents at length, checked once per directory for the same reason: this
+    is the sweep a teardown dump most often caught mid-walk, and the title scan
+    is the most expensive single step here (``_scan_all_titles`` reads a whole
+    transcript), so a departing runtime must not have to finish one. Defaults to
+    ``None``, which is the byte-identical behaviour every existing caller has.
     """
     written = 0
     sessions = config_dir / "sessions"
@@ -1040,6 +1076,8 @@ def backfill_session_titles(config_dir: Path, limit: int = 500) -> int:
     except OSError:
         return 0
     for directory in directories:
+        if should_stop is not None and should_stop():
+            break
         if written >= limit:
             break
         try:

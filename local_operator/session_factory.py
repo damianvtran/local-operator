@@ -3128,6 +3128,38 @@ async def await_store_maintenance_for_tests() -> None:
         await asyncio.sleep(0.01)
 
 
+def request_store_maintenance_stop() -> bool:
+    """Ask this process's store-maintenance walk to stop at its next directory.
+
+    THE PRODUCTION SETTER for the event every check in this module reads, and the
+    reason those checks are worth having: without it the event had no writer
+    outside a test reset, so a runtime that had committed to LEAVING kept
+    walking a store that costs minutes (measured: 10,737 session directories at
+    16.7-38.4 ms each, i.e. 3-7 minutes per pass, two session passes and two
+    analytics passes per boot) while the process waited only on its own drain.
+    The runtime's one departure commit calls this — :func:`local_operator.session
+    .runtime.process._commit_to_leaving`, right after the drain latches — so the
+    request is the departure's own act rather than a re-badged test seam.
+
+    The per-PASS checks around this (the entry check, the between-passes check,
+    the lock-loser backoff) are worth the gap between two passes; the four
+    store-walking passes take this same event as a per-DIRECTORY predicate, which
+    is worth one directory instead. Nothing here starts, joins or waits for the
+    worker: a departure must not be made to wait on the very walk it is asking to
+    end, and the walk is a daemon thread no production path joins.
+
+    Returns True when this process had a walk to ask, False when it did not (no
+    dispatch yet, or maintenance already finished) — the common case, and not an
+    error. A partial sweep leaves no completion stamp, so the next boot resumes
+    rather than trusts (see :func:`_run_store_maintenance`).
+    """
+    stop_event = _STORE_MAINTENANCE_STOP
+    if stop_event is None:
+        return False
+    stop_event.set()
+    return True
+
+
 def _acquire_store_maintenance_lock(config_dir: Path) -> int | None:
     """Try the config-root mutex once; return None for a live peer's lock.
 
@@ -3232,8 +3264,15 @@ def _run_store_maintenance(
     A versioned 60-second completion stamp coalesces a launch burst; cleanup
     and orphan-group reaping may consequently wait up to 60 seconds after a
     completed sweep. A crash or any failed pass writes no fresh stamp, so the
-    next launch retries. The sidecar backfills use atomic/idempotent writes and
-    the analytics rollup advances only over committed days, making an
+    next launch retries — and so does a pass that STOOD DOWN mid-walk because
+    this process is leaving: the four store-walking passes check the stop once
+    per directory and RETURN their partial count rather than raising, so what
+    refuses the stamp is the guard on the sequence below
+    (``all_passes_succeeded and not stop.is_set()``). That is the same event
+    read at the end, which is why a walk that left early can never publish a
+    completed sequence, and why no separate "was this pass partial" state is
+    needed here. The sidecar backfills use atomic/idempotent
+    writes and the analytics rollup advances only over committed days, making an
     interrupted sequence safe to resume.
 
     The lock is acquired after the idle window and before reading the stamp,
@@ -3280,15 +3319,21 @@ def _run_store_maintenance(
                 lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
             ),
             ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
-            ("session origin backfill", lambda: backfill_session_origins(config_dir)),
-            ("session title backfill", lambda: backfill_session_titles(config_dir)),
+            (
+                "session origin backfill",
+                lambda: backfill_session_origins(config_dir, should_stop=stop.is_set),
+            ),
+            (
+                "session title backfill",
+                lambda: backfill_session_titles(config_dir, should_stop=stop.is_set),
+            ),
             (
                 "analytics session-name backfill",
-                lambda: backfill_analytics_session_names(config_dir),
+                lambda: backfill_analytics_session_names(config_dir, should_stop=stop.is_set),
             ),
             (
                 "analytics session-daily rollup backfill",
-                lambda: backfill_analytics_session_daily(config_dir),
+                lambda: backfill_analytics_session_daily(config_dir, should_stop=stop.is_set),
             ),
         ]
         pass_names = [label for label, _ in passes]
