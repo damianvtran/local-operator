@@ -806,6 +806,137 @@ _URL_LIKE = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 #: A dotted attribute path (``current.session_key``, ``models-dev.listing``).
 _DOTTED_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+")
 
+#: The characters a type ANNOTATION may be spelled with, used as a whole-value
+#: confinement check — NECESSARY, not sufficient.
+#:
+#: A value outside it is decidable as a credential by alphabet alone: a quote, ``/``,
+#: ``@``, ``=``, ``$``, ``%`` or a backtick is in no type annotation, so membership
+#: REJECTS a credential spelling that carries one of those. It does NOT accept a
+#: value as a type, and that distinction is what agent review R1-1 measured the cost
+#: of believing: a human-chosen password is usually spelled with no symbol at all,
+#: and ``&Secret1`` and ``Camel::Word9`` are both confined to this alphabet while
+#: being credential material. The alphabet narrows the class; the parser and the
+#: conditions in :func:`_is_type_expression` are what decide.
+#:
+#: ``[``/``]``/``(``/``)`` are deliberately absent: a value carrying one of them is
+#: released by :data:`_EXPRESSION_CHARS` before this test runs — a PRE-EXISTING
+#: release, identical at base and head, and not one this clause introduces.
+_TYPE_ALPHABET = frozenset(
+    "abcdefghijklmnopqrstuvwxyz" "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "0123456789" "_<>,:&'."
+)
+
+#: Primitive type names, in every language whose source this pass reads.
+#:
+#: A primitive is what lets a generic's ARGUMENT prove itself a type without being
+#: CamelCase: ``Vec<u8>``, ``Map<string, string>``, ``Optional[str]``. Without it
+#: the argument rule would have to accept any lowercase word, and a value spelled
+#: ``SomePassword<secret>`` would be read as a type.
+#:
+#: **A primitive proves a type only as an ARGUMENT of a parsed generic application**
+#: (agent review R1-2). Several of these words are ordinary English in the languages
+#: that use them — ``any``, ``void``, ``object``, ``null``, ``type`` — so an ungated
+#: allowance released ``Pass<int>`` and ``Pass<any>``, a passphrase whose
+#: argument happens to be one. The gate is enforced where the argument is read, in
+#: :func:`_parse_type_expression`; a value with no argument list never reaches the
+#: allowance at all, which is also what keeps a bare ``&Password1`` out.
+_TYPE_PRIMITIVES = frozenset(
+    {
+        # Rust
+        "bool",
+        "char",
+        "str",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "f32",
+        "f64",
+        # TypeScript / JavaScript
+        "string",
+        "number",
+        "boolean",
+        "any",
+        "unknown",
+        "never",
+        "void",
+        "object",
+        "symbol",
+        "bigint",
+        "undefined",
+        "null",
+        # Python
+        "int",
+        "float",
+        "complex",
+        "bytes",
+        "bytearray",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "frozenset",
+        "type",
+        "None",
+    }
+)
+
+#: How deep a nested type application may go before the value stops being read as
+#: a type. ``Arc<Mutex<String>>`` is 2, ``Option<Vec<HashMap<K, V>>>`` is 3. This
+#: is a bound on RECURSION — a pathological value must not drive the parser — and
+#: not a claim about how deeply real annotations nest.
+_TYPE_NESTING_LIMIT = 8
+
+#: The spelling of a TYPE NAME: CamelCase, or a single capital with anything after
+#: it. This is the same judgement the bare-name clause in
+#: :func:`_value_is_not_a_credential` makes inline, named here because the type
+#: parser needs it too and two spellings of one rule drift.
+#:
+#: A digit is ALLOWED here, unlike in that clause: a type name legitimately carries
+#: one (``Base64``, ``Sha256``, ``Utf8``), and the digit test there exists to keep a
+#: real AWS session token — a bare CamelCase run of digits and letters — out. A
+#: value reaching this test has already had to parse as a type application, which
+#: no session token does. **Where a digit is allowed is decided by
+#: :func:`_carries_a_non_primitive_digit`, not by this pattern**: the release is
+#: confined to the digit-free residual, so a digit-carrying name is read as a type
+#: only when it is a primitive.
+_TYPE_NAME = re.compile(r"[A-Z][A-Za-z0-9]*|[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*")
+
+#: One IDENTIFIER in a value, for the digit confinement below: a name may carry
+#: digits, and ``1`` alone (a const-generic argument) is deliberately not a match.
+_TYPE_NAME_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: The stems a CREDENTIAL WORD begins with, matched against a type application's
+#: BASE (agent review R1-2). A primitive argument is ordinary English in the
+#: languages that use primitives — ``any``, ``void``, ``object``, ``null``, ``int``
+#: — so an application whose base is spelled like a credential and whose argument is
+#: a bare primitive (``Pass<int>``, ``Secret<str>``, ``Token<void>``) is a
+#: passphrase, not an annotation. ``Pass`` is not a whole credential word, which is
+#: why the match is a STEM and not :func:`is_credential_name`.
+_CREDENTIAL_STEMS = (
+    "pass",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "credential",
+    "auth",
+    "login",
+    "apikey",
+)
+
+#: A qualified path with NO argument list: ``Sv::Secret``, ``collections::HashMap``.
+#: Used only to refuse a value that is a path and nothing else — the spelling a person
+#: reaches for when a credential carries ``::`` (agent review R1-1).
+_TYPE_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+")
+
 
 #: Qualifier words that make an otherwise ambiguous ``*_KEY``/``*_KEYS`` name a
 #: CREDENTIAL name rather than a code one. ``PRIVATE_KEY`` is a secret;
@@ -966,6 +1097,394 @@ def _repeats_its_own_name(value: str, name: str) -> bool:
     return value_norm in name_norm or name_norm in value_norm
 
 
+def _carries_a_non_primitive_digit(value: str) -> bool:
+    """Whether any NAME in ``value`` carries a digit without being a primitive.
+
+    The release is confined to the DIGIT-FREE residual, and this is the
+    enforcement of that half of the condition: a digit is read as a type's only
+    where it belongs to a primitive type name (``u8``, ``i32``, ``f64``), because
+    ``Option<Vec<u8>>`` is a real annotation and no human password is spelled
+    ``u8``. Everywhere else a digit is exactly what separates a chosen password
+    from a type spelling: ``Ident<Ident7>`` and ``Ident7<Ident>`` are released
+    WHOLE by an arm that ignores this, with no hit at all — the dangerous
+    direction, and one the corpus had no row for (agent review R1-1).
+
+    The cost is the false positive this re-admits, deliberately: ``Option<Sha256>``
+    is a real type name and is now masked. That is the safe direction — the same
+    class the clause exists to *reduce* rather than to eliminate — and masking a
+    type is strictly better than releasing a credential.
+    """
+    for token in _TYPE_NAME_TOKEN.findall(value):
+        if any(char.isdigit() for char in token) and token not in _TYPE_PRIMITIVES:
+            return True
+    return False
+
+
+def _is_type_leaf_name(segment: str) -> bool:
+    """Whether a path segment is spelled as a TYPE name rather than a word.
+
+    This is the existing CamelCase judgement, reused: a type's own name begins
+    with a capital (``String``, ``HashMap``, ``Foo``) or is a single capital
+    (``T``, ``K``), and a language primitive is in :data:`_TYPE_PRIMITIVES`. A
+    lowercase word is neither, which is what keeps ``Foo<word>`` out.
+    """
+    if not segment:
+        return False
+    if segment in _TYPE_PRIMITIVES or segment == "_":
+        return True
+    return bool(_TYPE_NAME.fullmatch(segment))
+
+
+def _parse_generic_argument(text: str, index: int, end: int, depth: int) -> tuple[bool, int, bool]:
+    """Parse one generic argument: a lifetime, a const integer, or a type.
+
+    The third value says whether the argument is evidence that the enclosing
+    value is a TYPE. A lifetime and a const-generic integer are both legal
+    arguments (``Cow<'a, str>``, ``GenericArray<u8, N>``) but neither is proof on
+    its own, which is why the caller requires at least one argument that is.
+    """
+    if index < end and text[index] == "'":
+        index += 1
+        start = index
+        while index < end and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        return (index > start), index, True
+    if index < end and text[index].isdigit():
+        while index < end and text[index].isdigit():
+            index += 1
+        return True, index, False
+    return _parse_type_expression(text, index, end, depth)
+
+
+def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple[bool, int, bool]:
+    """Parse ONE type expression from ``text[index:end]``.
+
+    The grammar is the one real annotations are written in, and it is checked on
+    the WHOLE value rather than searched inside it. That is the load-bearing
+    part: a credential that merely contains an angle bracket does not parse as a
+    type, and the parser has to run out of characters at the same place the value
+    does.
+
+    Returns ``(parsed, next_index, is_a_type_name)``, where the last element says
+    whether what was parsed is spelled as a type NAME — the distinction the
+    caller uses to reject ``abc::def`` and ``Foo<word>``.
+
+    **An unterminated argument list is accepted**, and that is the common case
+    rather than an edge: the assigned-value group cannot cross whitespace, so
+    ``HashMap<String, String>`` reaches this rule as ``HashMap<String`` and
+    ``Option<Vec<u8>>`` as ``Option<Vec<u8``. The value is therefore allowed to
+    run out of characters inside a generic, provided the arguments it did carry
+    are types — which is what an annotation looks like when it is cut at a
+    delimiter, and what no credential-shaped value looks like.
+    """
+    if depth > _TYPE_NESTING_LIMIT:
+        return False, index, False
+    # An optional reference marker, with its optional lifetime: ``&``, ``&'a``.
+    while index < end and text[index] == "&":
+        index += 1
+        if index < end and text[index] == "'":
+            index += 1
+            while index < end and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+    start = index
+    while index < end and (text[index].isalnum() or text[index] == "_"):
+        index += 1
+    if index == start:
+        return False, index, False
+    segments = [text[start:index]]
+    while text.startswith("::", index):
+        index += 2
+        segment_start = index
+        while index < end and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        if index == segment_start:
+            return False, index, False
+        segments.append(text[segment_start:index])
+    # Only the LEAF has to be a type name: ``std::collections::HashMap`` is
+    # spelled with lowercase module segments, and demanding case from them would
+    # miss every qualified path in real code.
+    is_a_type_name = _is_type_leaf_name(segments[-1])
+    if index < end and text[index] == "<":
+        index += 1
+        argument_is_a_type = False
+        argued = False
+        argument_names_are_types = True
+        while index < end:
+            argument_start = index
+            parsed, index, argument_is_a_type_here = _parse_generic_argument(
+                text, index, end, depth + 1
+            )
+            if not parsed:
+                return False, index, is_a_type_name
+            argued = True
+            if argument_is_a_type_here:
+                argument_is_a_type = True
+            elif not _is_type_leaf_name(text[argument_start:index]):
+                # A lowercase word that is NOT a type name: ``Foo<word>``. A
+                # PRIMITIVE is a type name here, which is how ``Vec<u8>`` passes —
+                # and the allowance is spent only where an argument list was
+                # actually parsed.
+                #
+                # The WHOLE slice is read here, and that is deliberate (the family
+                # hunt's site 6). This line is reached only when the argument parsed as
+                # a NON-type, so it can only ever MASK — a whole-string read in the
+                # safe direction. A previous round claimed that token-splitting it
+                # would RELEASE qualified arguments; that claim has NO witness and is
+                # withdrawn. Patching this line to split the slice on ``::`` and accept
+                # any token moved the final verdict for 0 of 400 candidate values (and
+                # 0 in the reviewer's own 4752- and 1080-candidate sweeps): a
+                # ``::``-qualified slice that IS a type name is consumed as a type
+                # upstream and never arrives here. Leaving the whole-slice read is
+                # still the right call; the reason is that it is harmless, not that
+                # splitting it would leak (agent review R4-2).
+                argument_names_are_types = False
+            if index < end and text[index] == ",":
+                index += 1
+                continue
+            if index < end and text[index] == ">":
+                index += 1
+            break
+        if not argued or not argument_names_are_types:
+            # ``Foo<>`` (nothing to prove) or ``Foo<word>`` (a word is not a type):
+            # neither is an application, so neither is released.
+            return False, index, is_a_type_name
+        if not argument_is_a_type:
+            # ``Foo<word>`` — a generic application whose arguments are not
+            # types. That spelling is exactly how a person writes a passphrase
+            # with angle brackets in it, so it is NOT released.
+            return False, index, is_a_type_name
+        # The BASE's own verdict is NOT overwritten here, and that is the second
+        # half of R1-1: forcing it True released a lowercase base (``foo<Bar>``,
+        # ``abc::def<Bar>``, ``Correcthorse<Battery7>``) under a strong credential
+        # name. Only the argument is new evidence; a generic spelling does not
+        # make a word-shaped base into a type.
+    return True, index, is_a_type_name
+
+
+def _type_token_segments(token: str) -> tuple[str, ...]:
+    """EVERY name a type token is spelled with, markers and qualification stripped.
+
+    A token in this grammar carries things beside its own name: a ``::``
+    qualification (``foo::bar::Baz``) and a reference marker (``&``, ``&&``). Both are
+    SPELLING, and every guard here that decides a release on what a token is CALLED has
+    to read the same part of it.
+
+    **A POSITION, not a SITE, is what this returns — and that is the lesson of the
+    fifth round on this clause.** R1-1 was a digit position; R1-2 and R2-1 read the
+    ARGUMENT where the fact was the base; R3-1 read the WHOLE BASE where the fact is the
+    leaf; R4-1 read the FIRST and LAST segments where the fact is ANY segment. The three
+    earlier fixes each widened a read at a call SITE and then enumerated SITES — and
+    R4-1 hid INSIDE site 1, one the enumeration marked FIXED, because a site can be
+    named correctly while the window it reads is still narrower than the vocabulary it
+    refuses. So this returns the whole segment set rather than one leaf: a consumer that
+    tests every entry cannot read a narrower window than the vocabulary it refuses, and
+    a positional omission is then structurally impossible rather than enumerated away.
+
+    One helper rather than a ``split`` per call site, because the two release-side tests
+    in :func:`_is_type_expression` are the SAME extraction
+    (:func:`_base_is_a_credential_stem` and :func:`is_credential_name`), and a fix
+    applied to one of them and not the other is exactly the miss R3-1 was.
+
+    The token's OWN spelling leads the tuple, so a consumer keeps the whole-string read
+    the first-segment test used to provide (``startswith`` on the whole token can only
+    see segment 0) while gaining the interior ones.
+
+    Only ``::`` and ``&`` are stripped, and that is the whole REACHABLE set: the
+    assigned value's own grammar excludes whitespace, so a lifetime reference can only
+    arrive FUSED to the name it qualifies, and a fused lifetime is not separable from
+    that name by any split — there is no marker left to cut on. A reference to a
+    primitive therefore still reads as that primitive, which is what keeps ``&str``
+    released.
+    """
+    stripped = token.lstrip("&")
+    # ``dict.fromkeys`` de-duplicates while keeping the order, so a single-segment token
+    # (``Pass``, ``&str``) yields one entry rather than the same name twice.
+    return tuple(dict.fromkeys((stripped, *stripped.split("::"))))
+
+
+def _base_is_a_credential_stem(base: str) -> bool:
+    """Whether a type application's BASE is spelled like a credential word.
+
+    It decides the release on the BASE alone, whatever the argument is (agent
+    review R1-2, R2-1). ``Vec<u8>``, ``Map<string, string>`` and ``Arc<Mutex<str>>``
+    keep their release because a type's own base is a type name; a base a person
+    reaches for when they choose a password — ``Pass``, ``Passphrase``, ``Passkey``,
+    ``Passwd``, ``Secret``, ``Token``, ``Auth``, ``Login``, ``ApiKey`` — does not,
+    because a passphrase over such a base is a chosen value far more often than it
+    is an annotation, and a credential released is worse than a type masked.
+
+    **The test is on the BASE and not the argument, and that is the lesson of two
+    review rounds.** R1-2 gated this on a bare primitive argument and so released
+    ``Pass<int>``; R2-1 then shipped the same inversion one spelling over and
+    released ``Pass<Phrase>``, ``Auth<Token>`` and ``Pass<Vec<u8>>`` whole, with no
+    hit. Any later widening of the ARGUMENT grammar must not be able to re-open this
+    class, which is what putting the refusal on the base buys.
+
+    **The base is read as EVERY one of its ``::`` segments** (agent reviews R3-1 and
+    R4-1), because the discriminating fact is the NAME the token denotes and a
+    qualification hides that name behind a path: a qualified spelling whose ANY segment
+    is in :data:`_CREDENTIAL_STEMS` is that credential word with a namespace attached,
+    and each narrower window released a whole class with NO hit — so the value was not
+    even registered for the exact-value pass.
+
+    The windows, and what each one cost, because the series is the point:
+
+    * the WHOLE BASE alone released the qualified class — 360 of 360 combinations of 5
+      module prefixes, 12 stem leaves and 6 argument shapes (R3-1), and the
+      no-argument spelling (a bare qualified path) released through the
+      path-convention branch too;
+    * the whole base PLUS its LEAF fixed that and still released a stem in an INTERIOR
+      segment — ``foo::Pass::Word``, ``std::Secret::String<Vec<u8>>``, ``&Pass::Word``,
+      504 of 504 in the round-4 grid (R4-1) — because ``startswith`` on the whole base
+      can only ever match segment 0 and the leaf read takes ``rsplit("::", 1)[-1]``, so
+      every segment between the two was invisible to BOTH. That is the whole reason this
+      reads an extraction of the full segment set instead: the miss was a POSITION
+      inside a call site the R3-1 enumeration had marked fixed, not another site.
+
+    Either test can only ever refuse a release, so widening the window cannot trade
+    containment back — which is why every segment is read rather than the two the last
+    finding happened to name.
+
+    A stem match is deliberately blunt: it only ever REFUSES a release, so the cost
+    of a false hit is a masked type, which is the direction this clause trades in.
+    """
+    return any(
+        part.lower().startswith(stem)
+        for part in _type_token_segments(base)
+        for stem in _CREDENTIAL_STEMS
+    )
+
+
+def _is_type_expression(value: str) -> bool:
+    """Whether a matched value is a TYPE ANNOTATION rather than a credential.
+
+    **Why this exists.** ``api_key: Option<String>`` is a Rust struct field, and
+    the assignment rule read the generic type as the value of a credential-shaped
+    name: ``api_key`` is a credential name, the type is 14 characters of opaque
+    text to the value test, and the name is STRONG, so the value proof returned
+    ``False`` and the type was masked. Two of those in one file escalated to a
+    rotation demand that stopped a release, which is the cost this exists to
+    prevent — a guard that asks an operator to rotate a credential on a type
+    annotation is not one anybody can safely learn to ignore.
+
+    **Why the test is a parse and not a shape.** The cheap discriminators — "the
+    value contains an angle bracket", "the value does not contain a digit" — are
+    both wrong in the dangerous direction: a passphrase is free to contain either,
+    and each cheap test releases a whole class of real values with it. So the
+    value is read with the grammar real annotations are written in, on the whole
+    value, and it is released only when every character of it belongs to that
+    grammar: a reference, a path, and balanced generic arguments that are
+    themselves types.
+
+    **The named residual, and it is accepted deliberately.** A value spelled
+    exactly as ``Ident<Ident>`` — capitals on both sides, no other symbols — is
+    read as a type. ``DB_PASSWORD=Pass<Word>`` is therefore released. That is the
+    same residual class the neighbouring clauses already carry, and it is bounded
+    by construction: no issuer's alphabet contains ``<`` or ``>`` (base64url, hex,
+    JWT and UUID all exclude them), every vendor prefix is lowercase, and a
+    human-chosen password must additionally be spelled with capitals on BOTH the
+    base and the argument and carry **no digit, no symbol and no word break**.
+    A credential that meets all of that is not distinguishable from a type by
+    spelling at all, so it is recorded here rather than guessed at.
+
+    **The confinement is ENFORCED, not just documented** (agent review R1-1, R1-2).
+    Every condition the release is stated to have is a check this function runs,
+    because the first implementation documented four and enforced one: a digit on
+    either side of the angle brackets, a lowercase base, and a bare ``::`` path each
+    released the value WHOLE with NO hit at all. The conditions, in the order they
+    are checked:
+
+    * **no symbol** — the ``_TYPE_ALPHABET`` membership test below, and it is
+      necessary rather than sufficient: a symbol-less password is confined to the
+      alphabet too;
+    * **no digit** — :func:`_carries_a_non_primitive_digit`, which allows a digit
+      only inside a primitive name, so ``Option<Vec<u8>>`` still parses and
+      ``Ident<Ident7>`` does not;
+    * **no word break** — the base and every argument must each be a single
+      :data:`_TYPE_NAME` token, and the base's own verdict is no longer overwritten
+      by the generic that follows it (``foo<Bar>`` is a word, not a type);
+    * **no bare path** — a value that is a ``::`` path and NOTHING else is refused,
+      so ``Sv::Secret`` is not released; only an attached argument list
+      (``collections::HashMap``) is evidence enough.
+
+    A separate release sits underneath this clause and is NOT its doing: a value
+    carrying ``[``, ``]``, ``(`` or ``)`` is released earlier by the pre-existing
+    expressions clause — ``DB_PASSWORD=x(y)``, ``a[b]`` and ``P@ss(w)0rd`` are
+    released identically at base and head — which is the same
+    "the type alphabet is not a credential's alphabet" gap and is recorded here
+    rather than claimed away.
+
+    What remains released is therefore the digit-free, symbol-free, single-token,
+    application-or-bare-name spelling — and nothing wider. The price is taken in the
+    safe direction: a digit-carrying type name (``Option<Sha256>``) is now masked,
+    which is the false positive this clause *reduces* rather than one it eliminates.
+    """
+    if not value:
+        return False
+    if not any(char in value for char in "<:&"):
+        # No type-ONLY character. A bare word or path here is indistinguishable
+        # from a credential by spelling, and the CamelCase clause above already
+        # releases the bare TYPE NAME spelling, so nothing is owed to this case.
+        return False
+    if not set(value) <= _TYPE_ALPHABET:
+        return False
+    if _carries_a_non_primitive_digit(value):
+        return False
+    base = value.split("<", 1)[0]
+    if _base_is_a_credential_stem(base):
+        # A credential-stem base refuses the release WHATEVER the argument is
+        # (agent review R2-1). Qualifying this with a bare-primitive-argument test
+        # read the discriminating fact in the wrong place, and it is the same
+        # mistake R1-2 made one spelling over: the BASE is what says a person chose
+        # this value, and an argument that is a CamelCase name (``Pass<Phrase>``) or
+        # a nested application (``Pass<Vec<u8>>``) is no more proof of a type than
+        # ``int`` was — yet every such spelling was released whole, with no hit,
+        # while the qualifier stood. NO primitive-carrying base in the paired tables is
+        # a stem, and that is the property this refusal has: the claim is about EVERY
+        # ``::`` SEGMENT of the base (agent review R3-3 corrected this sentence once, and
+        # R4-1 is the reason the correction is now about segments rather than a single
+        # one — it read as a property of types, and R3-1 lived underneath exactly that
+        # reading, while R4-1 lived underneath the narrower "LAST segment" one). A type's
+        # own base is not spelled as a credential word in any of its segments, so
+        # ``Vec<u8>``, ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their release:
+        # the refusal sits on the BASE and is silent about the argument,
+        # which is the direction that cannot trade containment back.
+        return False
+    if any(is_credential_name(part) for part in _type_token_segments(base)):
+        # The BASE is a credential WORD, whatever the arguments are (agent review
+        # R1-2): ``Pass<int>``, ``Pass<any>``, ``Token<void>``, ``Secret<str>``. A
+        # type's base is not spelled as a credential word in the paired tables —
+        # ``Vec``, ``Option``, ``HashMap``, ``String`` and every custom type name are not
+        # (the R3-3 correction applies to this sentence too, and R4-1 widens it: the
+        # property is about every ``::`` SEGMENT of the base, not its leaf) — so this rejects
+        # the class the argument grammar alone cannot, and it does it on the base
+        # rather than on the argument, which is what keeps a real annotation over a
+        # primitive (``Vec<u8>``, ``Option<Vec<u8>>``) released.
+        # EVERY segment is read through the same helper as the stem test above (agent
+        # reviews R3-1 and R4-1): these are the two release-side extractions of the SAME
+        # slice, and passing a NARROWER window to one of them is what left the qualified
+        # class, and then the interior-segment one, released. ``base`` is deliberately
+        # reused rather than re-split so the two cannot drift apart again, and the helper
+        # returns the full segment set so a positional gap cannot be introduced at
+        # either site.
+        return False
+    path = _TYPE_PATH_RE.fullmatch(value)
+    if path:
+        # A qualified path and NOTHING else: ``Sv::Secret``, ``collections::HashMap``.
+        # The conditions above do not reach this spelling (no digit, one token per
+        # segment, a type-shaped leaf), and a person writing a credential with a path
+        # separator reaches for exactly it, so the path must obey the MODULE-PATH
+        # CONVENTION to be a type: every segment but the leaf is lowercase (
+        # ``std::collections::HashMap``), because a namespace segment is never
+        # CamelCase. ``Sv::Secret`` and ``Camel::Word9`` violate it and mask
+        # (agent review R1-1); ``std::collections::HashMap`` keeps its corpus row.
+        segments = value.split("::")
+        if any(seg != seg.lower() for seg in segments[:-1]):
+            return False
+    parsed, index, is_a_type_name = _parse_type_expression(value, 0, len(value), 0)
+    return parsed and index == len(value) and is_a_type_name
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1034,6 +1553,24 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         # ...and no digit: ``FwoGZXIvYXdzEBYaDExampleTokenValue1234567890`` is a
         # real AWS session token and is in the original corpus, while every type
         # name in this tree is digit-free.
+        return True
+    # A TYPE APPLICATION is a reference too, and this is the clause that covers
+    # the annotations the clause above cannot: ``api_key: Option<String>``,
+    # ``Vec<String>``, ``HashMap<String, String>``, ``Result<String, Error>``,
+    # ``Arc<Mutex<String>>``, ``Box<dyn Trait>``, ``std::string::String``,
+    # ``&SomeVeryLongEnumName``. The bare-name clause above is a single-identifier
+    # test, so a GENERIC gone through it is not a type at all — it is 14 characters
+    # of opaque text beside a credential-shaped name, on a STRONG name, which is
+    # why the value proof returned ``False`` and the type was masked.
+    #
+    # Measured: reading three real source files put two of these in a transcript
+    # (``api_key: Option<String>`` twice, in one file), both of them masked, one
+    # family of them ESCALATED, and the escalation stopped a release pending a
+    # rotation verdict for a type annotation. That is the cost this clause exists
+    # to prevent, and it is the reason the release is a PARSE of the whole value
+    # rather than a shape test — see :func:`_is_type_expression` for the grammar,
+    # the confinement check, and the residual this deliberately accepts.
+    if _is_type_expression(value):
         return True
     # A bare ``_``-led identifier with no digit is a reference, even under a strong
     # name: ``get_api_key=_oauth_api_key``. Restored unchanged from ``origin/main``
