@@ -2468,7 +2468,36 @@ def _tool_batch_in_flight(session: object) -> bool:
     feeds a predicate that ends the process, so a state we cannot read must not be
     the thing that fires it, and a session with no context has nothing running.
     (The opposite direction is right for :func:`_work_motion`, whose docstring
-    argues it: that tuple decides when to stop WAITING.)
+    argues it: that tuple decides when to stop WAITING.) The scan itself is
+    :func:`_unanswered_tail_step`, which RAISES, so the callers that ask about
+    different processes can answer the one rule in opposite directions instead of
+    carrying a copy of it each.
+    """
+    try:
+        return _unanswered_tail_step(session)
+    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
+        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        return False
+
+
+def _unanswered_tail_step(session: object) -> bool:
+    """The scan behind :func:`_tool_batch_in_flight`, RAISING on a failed read.
+
+    ONE RULE, TWO DIRECTIONS, and which one applies is the CALLER's question
+    because the callers ask about different processes: this session's own tail
+    answers "no batch" when its read fails (:func:`_tool_batch_in_flight`, whose
+    docstring argues that direction), while a CHILD LANE's answers "in flight"
+    (:func:`_lane_step_in_flight`) — a lane whose state cannot be read is a lane
+    whose work cannot be ruled out, and the standing preference in this module is
+    to spare a process past a bound rather than cut one that is working.
+
+    SPLIT RATHER THAN DUPLICATED deliberately: this module has already paid once
+    for a hand-copied version of ``unanswered_tail_call_ids``' rule drifting from
+    it (agent review round 1 on :func:`_tool_batch_in_flight`), and a second copy
+    of the scan is how that gets paid for twice.
+
+    AN ABSENT CONTEXT IS NOT A FAILED READ: a session with no context has nothing
+    open, which is this function's ``False``. Only a RAISE means "unreadable".
     """
     context = getattr(session, "_context", None)
     messages = getattr(context, "messages", None)
@@ -2478,11 +2507,157 @@ def _tool_batch_in_flight(session: object) -> bool:
     # child's boot path, and ``protocol`` pulls the session graph in.
     from local_operator.session.protocol import unanswered_tail_call_ids
 
+    return bool(unanswered_tail_call_ids(messages))
+
+
+#: The class ``record.child`` holds, resolved on FIRST USE rather than at import
+#: time: this module is the child runtime's own boot path, and a lane read happens
+#: long after any ``Session`` exists, so by then the import is a ``sys.modules``
+#: lookup. Cached because ``_lane_step_in_flight`` runs once per live lane per
+#: sample, where a repeated import statement is a real cost.
+_LANE_CLASS: "type | None" = None
+
+
+def _lane_step_in_flight(lane: object) -> bool:
+    """Is one IN-PROCESS child lane executing a step of its own?
+
+    THE SAME QUESTION :func:`_step_in_flight` ASKS THE PARENT, one layer out, and
+    the parent's own terms cannot answer it: a lane's tool batch and a lane's
+    on-demand compaction are the LANE's state, not this session's. The shape it
+    closes is a manager whose own loop burns CPU walking the roster projection
+    while its lanes hold steps — no motion (nothing bumps
+    ``_subagent_roster_generation`` while a step is merely OPEN), nothing in
+    flight by the parent's own reading, CPU advancing — so all three progress legs
+    held and the process was cut while it was working (``stall_watchdog`` names
+    that shape and the O(N^2) walk behind it).
+
+    WHY THE LANE'S PROVIDER REQUEST IS NOT READ HERE: it does not need to be.
+    Every in-process lane takes its stream from ``SessionStreamFn.fork``
+    (``harness.subagent._construct_child_session``), the forks share ONE counter,
+    and :func:`_step_in_flight` already reads that counter at O(1) for the whole
+    tree. Reading each lane's own counter would read the same scalar N times.
+    What no counter can express is a step OPEN with no provider call outstanding —
+    a tool batch whose results have not landed, a compaction rewriting history —
+    and that is exactly and only what this adds.
+
+    THE NARROW QUESTION IS DELIBERATE. ``lane._is_streaming`` would be cheaper
+    still and is refused: it is true for the whole of a lane's turn, so one lane
+    parked in a gate, or in a provider call that never returns, would spare its
+    parent's spin for as long as it lived — the maximally-inclusive trap
+    :func:`_step_in_flight` refuses for ``is_busy``. ITS OWN RESIDUAL IS STATED in
+    ``stall_watchdog``: a step that never CLOSES (a wedged in-process tool, a hung
+    compaction) holds this answer "in flight" for the life of the lane, which is
+    the same property reached through the narrow question.
+
+    FAIL CLOSED ON A SHAPE IT CANNOT READ, and it is stated rather than implied
+    because the alternative is silent. THE GATE IS AN ``isinstance``, ON THE CLASS,
+    and what it excludes is precise: any object on ``record.child`` that is not a
+    ``Session`` — a test double, a lane class built on another base — is HELD rather
+    than judged idle, with the hold announced at WARNING. A ``Session`` SUBCLASS
+    passes that gate and is then judged by its own flags and its tail, so a subclass
+    whose ``_compacting`` reads a real ``False`` with no tail to scan is spent as
+    "not in flight" — the same answer a settled lane gives. The flag itself is read
+    as plain truthiness, not as a ``bool``. (Both clauses were stated more widely
+    than the code does before agent review round 2, MINOR 1; nothing reachable
+    changes, because ``Session`` sets ``_compacting`` from ``True``/``False`` only and
+    ``attach`` is always handed a ``Session``.)
+
+    Plain truthiness was the defect (agent review round 1, MINOR 3), in BOTH of its
+    directions: a ``MagicMock``'s attribute
+    is truthy for the life of the process, so it answered "in flight" forever with
+    nothing recording that the read never worked, and a shape whose attribute read a
+    real ``False`` while having no tail to scan was spent as "not in flight" — the
+    same answer a settled lane gives. The consequence for the probe is stated so a
+    reader does not have to infer it: while such a record is attached,
+    ``_step_in_flight`` answers "in flight" at EVERY sample, so the progress leg
+    DEFERS — it never closes a window (the three outcomes are named in
+    ``stall_watchdog``) — and the liveness leg is the only one left that can end the
+    run, on a frozen frame. That is this module's standing preference (spare rather
+    than cut), and the warning is what keeps the deferral from being silent.
+
+    UNREADABLE HOLDS, the opposite direction from the parent's own tail, and
+    :func:`_unanswered_tail_step` states why the two differ.
+    """
     try:
-        return bool(unanswered_tail_call_ids(messages))
-    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
-        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        global _LANE_CLASS
+        lane_class = _LANE_CLASS
+        if lane_class is None:
+            from local_operator.session.session import Session
+
+            lane_class = _LANE_CLASS = Session
+        if not isinstance(lane, lane_class):
+            logger.warning(
+                "stall watchdog: a child lane of unrecognised shape (%s) cannot be read; "
+                "holding the process rather than judging it idle",
+                type(lane).__name__,
+            )
+            return True
+        if getattr(lane, "_compacting", False):
+            return True
+        return _unanswered_tail_step(lane)
+    except Exception:  # noqa: BLE001 — an unreadable lane must not authorise a cut
+        logger.debug("stall watchdog: could not read a child lane's step", exc_info=True)
+        return True
+
+
+def _child_lanes_in_flight(session: object) -> bool:
+    """Is any LIVE in-process child lane of this session executing a step?
+
+    WHERE THE LANES COME FROM, and the private read is on purpose.
+    ``SubagentComms`` keeps one record per lane and holds the live child session
+    on ``record.child`` (set by ``attach``, cleared by ``detach``), and it
+    publishes no reader for those sessions: ``roster``/``nodes`` are DISPLAY
+    projections that sort, settle and describe every record, which is the
+    O(N^2) walk this read must not pay per sample. The public
+    ``session.subagent_comms`` property is refused for a sharper reason — it is
+    MINTED ON FIRST USE and the mint SUBSCRIBES a frontend projector — so reading
+    it from the sampler's foreign thread could construct comms state as a side
+    effect of a diagnostic. ``_subagent_comms`` is the side-effect-free
+    attribute, and ``serving.py`` reads it the same way.
+
+    ONE FLAT SCAN IS THE WHOLE TREE, so this does not recurse: a lane's own lane
+    is constructed against the comms instance it inherited from the root
+    (``harness.subagent._construct_child_session`` hands the PARENT's
+    ``subagent_comms`` down), so every lane in the process is a record on this one
+    instance, with the lineage on ``parent_job_id``.
+
+    FAILS CLOSED, and the asymmetry with this session's own tail is deliberate. A
+    missing roster is the ordinary case — a session that never delegated, or a
+    reduced host/double — and answers ``False``. A roster that EXISTS but cannot
+    be read is a different fact and answers ``True``: the lanes are known to be
+    there, so "I could not read them" must not be spent as "no lane holds work".
+    The values are copied into a tuple before iterating because the event loop
+    mutates this map while the sampler looks at it.
+
+    COST, measured rather than assumed, because the module this feeds once refused
+    this read as "not cheap" before there was a number for it: the cost table at
+    N = 0/1/8/64/256 live lanes is in ``stall_watchdog``'s docstring (0.75-1.3 µs of
+    CPU per lane, ~1.2 ms per minute at the width measured on this fleet), and the
+    structural half of the claim is pinned in
+    ``tests/unit/session/runtime/test_child_lane_progress.py``. Two facts keep the
+    walk bounded: each live lane is asked once per sample, and a lane holding a
+    step is answered by the FIRST message the tail scan reaches, so the in-flight
+    case is the CHEAP one.
+
+    N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``. ``_evict_overflow`` evicts only
+    records with no live child and no running job, so the cap bounds the map's
+    evictable tail rather than lane concurrency (300 attached lanes measured 300
+    records). The other half of the cost is the LANE's own tail length, because the
+    scan is linear in the rows it walks: see ``stall_watchdog``'s cost section,
+    which states that dependence with its figures rather than quoting one number.
+    """
+    try:
+        records = getattr(getattr(session, "_subagent_comms", None), "_records", None)
+        if not records:
+            return False
+        for record in tuple(records.values()):
+            lane = getattr(record, "child", None)
+            if lane is not None and _lane_step_in_flight(lane):
+                return True
         return False
+    except Exception:  # noqa: BLE001 — an unreadable roster must not fire a bound
+        logger.debug("stall watchdog: could not read the child-lane roster", exc_info=True)
+        return True
 
 
 def _step_in_flight(handle: object) -> bool:
@@ -2495,17 +2670,25 @@ def _step_in_flight(handle: object) -> bool:
     incident this leg exists for had four running lanes that had produced
     nothing for seven minutes. Reusing ``is_busy`` here would have spared the
     very state the leg is for, so what it asks is narrower and about THIS
-    process: is a tool batch running, a compaction rewriting history, or a
-    delegated child stream awaiting its provider. The stream's counter is child-
-    only, so this does not mistake the manager's own provider request for child
-    work. If reading the counter fails, preserve the process rather than letting
-    an unreadable active-work signal trigger the watchdog.
+    process: is a tool batch running, a compaction rewriting history, a
+    delegated child stream awaiting its provider, or an in-process CHILD LANE
+    holding any of those of its own. The stream's counter is child-only, so this
+    does not mistake the manager's own provider request for child work. If
+    reading the counter, the tail or the lane roster fails, preserve the process
+    rather than letting an unreadable active-work signal trigger the watchdog.
 
-    Arbitrary child in-process tool calls are still not represented here. A lane
-    that is stepping is covered from the other end: its step boundaries move
-    ``_work_motion``'s roster generation, so the NO MOTION leg fails first.
-    This provider-request signal does not claim to solve a child tool that parks
-    without an outstanding model call.
+    WHAT STILL IS NOT REPRESENTED, named so the next reader does not assume
+    coverage: a step that is open in no sense this module can read — a lane (or
+    the manager) burning CPU inside one synchronous call, with no tool batch
+    open, no compaction and no provider request outstanding. For a LANE that is
+    also invisible to the liveness leg's frame observation, which watches only
+    the two threads that beat (the planes' own loops), so such a lane is cut with
+    its parent. Closing that means reading a lane's frames, which is a different
+    change from this one. THE MIRROR CASE, named in ``stall_watchdog``, is the
+    price of this widening: a lane's step that never CLOSES makes this leg defer
+    for as long as the lane lives, so a reader who finds a runtime alive past its
+    bound with a lane holding a step is looking at the one leg that cannot see it
+    and should stop the process by hand.
     """
     session = getattr(handle, "_session", None)
     if session is None:
@@ -2519,7 +2702,13 @@ def _step_in_flight(handle: object) -> bool:
     except Exception:  # noqa: BLE001 — an unreadable child-work signal must not fire a bound
         logger.debug("stall watchdog: could not read child provider request state", exc_info=True)
         return True
-    return _tool_batch_in_flight(session)
+    # THE PARENT'S OWN BATCH IS TESTED BEFORE THE LANES FOR COST, never for
+    # precedence: it is one scan against the roster's N, and its failure
+    # direction (``False`` on an unreadable context) must not be allowed to mask
+    # a lane that holds a step, so it can only be an early return on a TRUE.
+    if _tool_batch_in_flight(session):
+        return True
+    return _child_lanes_in_flight(session)
 
 
 def _progress_probe() -> "tuple[object, bool]":
