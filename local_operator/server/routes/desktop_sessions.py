@@ -2209,7 +2209,7 @@ async def command(session_id: str, body: Command, request: Request):
         # gesture (decision D3); any other `/session` text forwards as before.
         raise HTTPException(
             422,
-            f"/session {SESSION_COPY_FLAG} works in the terminal; the /session view shows the ID",
+            f"{SESSION_COPY_FLAG} works only in the terminal; the /session view shows the ID",
         )
     refusal = command_argument_refusal(spec, body.args)
     if refusal is not None:

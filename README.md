@@ -408,8 +408,8 @@ per account and a hop would re-pay to rebuild it.
   windows and account spend; `/accounts` lists every signed-in provider account
   (the `lop secret` store is separate); `/session` reports the current session's
   cost, cache, and request
-  diagnostics, and `/session --copy` copies its ID. One exception: QwenCloud's
-  personal Token Plan window needs a
+  diagnostics, and `/session --copy` copies the session ID. One exception:
+  QwenCloud's personal Token Plan window needs a
   [console ticket](./local_operator/guides/qwencloud/GUIDE.md) stored alongside
   the login.
 

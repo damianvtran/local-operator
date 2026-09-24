@@ -6554,7 +6554,7 @@ async def test_the_session_copy_flag_is_refused_by_name_and_bare_session_still_o
     )
     assert refused.status_code == 422, refused.text
     assert refused.json()["detail"] == (
-        "/session --copy works in the terminal; the /session view shows the ID"
+        "--copy works only in the terminal; the /session view shows the ID"
     )
 
     bare = await client.post(
