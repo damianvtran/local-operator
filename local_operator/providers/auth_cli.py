@@ -535,7 +535,10 @@ def _apply_login_defaults(provider_id: str) -> None:
     try:
         from local_operator.config import ConfigManager
         from local_operator.paths import config_dir
-        from local_operator.providers.login_defaults import plan_login_defaults
+        from local_operator.providers.login_defaults import (
+            apply_login_defaults,
+            plan_login_defaults,
+        )
 
         manager = ConfigManager(config_dir())
         plan = plan_login_defaults(
@@ -543,13 +546,9 @@ def _apply_login_defaults(provider_id: str) -> None:
             manager.get_config_value("hosting"),
             manager.get_config_value("model_name"),
         )
-        if plan.hosting is not None:
-            manager.set_config_value("hosting", plan.hosting)
-            # ``None`` means leave it alone; ``""`` means clear a model that
-            # belonged to the provider we just replaced. Compared against None
-            # explicitly so the clearing case is not swallowed by a falsy test.
-            if plan.model_name is not None:
-                manager.set_config_value("model_name", plan.model_name)
+        # The write is shared too (``apply_login_defaults``): a plan may set only
+        # the model, which a hosting-gated write here used to drop.
+        apply_login_defaults(manager, plan)
         # Printed on the NO-WRITE path too, and that is not symmetry for its own
         # sake: a decision-only provider (TypeSafe's Jev) stores its credential,
         # deliberately leaves the routing alone, and explains itself in

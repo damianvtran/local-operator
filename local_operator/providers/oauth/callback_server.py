@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -516,6 +517,45 @@ class LoginCallbacks:
     # Endpoint setup is a sequence of explicit fields, not an OAuth code. The
     # host decides how to capture them; the controller never touches stdin.
     on_setup_input: Callable[[str, str, bool], Awaitable[str | None] | str | None] | None = None
+    #: Structured facts about the flow a host renders as CONTROLS rather than
+    #: prose: ``user_code`` (a device flow's code), ``launch_url`` (the short
+    #: loopback ``/launch`` alias) and ``expires_in`` (seconds until the flow's
+    #: own deadline). Each flow calls it once, with whatever it knows, BEFORE
+    #: ``on_auth_url``, so a host that publishes on the URL has the details already.
+    #:
+    #: Separate from ``instructions`` on purpose. ``instructions`` is display text a
+    #: terminal prints verbatim ("Enter code: ABCD-1234"), and the desktop renderer
+    #: used to regex the code back OUT of it to show a copyable chip -- a contract
+    #: nobody had written down, broken by any rewording. The text stays for the
+    #: hosts that print it; this hook is the typed channel for the ones that do
+    #: not. Optional and reporting-only (``report_safely``), so no host has to
+    #: implement it and a raising sink cannot cost a sign-in.
+    on_flow_details: Callable[..., Awaitable[None] | None] | None = None
+
+
+async def report_flow_details(
+    callbacks: LoginCallbacks,
+    *,
+    user_code: str | None = None,
+    launch_url: str | None = None,
+    expires_in: float | None = None,
+) -> None:
+    """Tell the host the flow's structured details, if it asked for them.
+
+    One helper so every flow calls the hook with the same keyword shape; a flow
+    passes only what it knows and the rest arrive as ``None``.
+    """
+    hook = callbacks.on_flow_details
+    if hook is None:
+        return
+    await report_safely(
+        functools.partial(
+            hook,
+            user_code=user_code or None,
+            launch_url=launch_url or None,
+            expires_in=expires_in,
+        )
+    )
 
 
 _T = TypeVar("_T")
@@ -1197,6 +1237,11 @@ class OAuthCallbackFlow(ABC):
             auth_url = await self.generate_auth_url(state, redirect_uri)
             self._pending_auth_url = auth_url
 
+            await report_flow_details(
+                self.callbacks,
+                launch_url=self._launch_url(),
+                expires_in=self.options.timeout_seconds,
+            )
             if self.callbacks.on_auth_url is not None:
                 await maybe_await(
                     self.callbacks.on_auth_url(auth_url, instructions=self._instructions())

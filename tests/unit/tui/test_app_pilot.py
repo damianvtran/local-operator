@@ -958,17 +958,19 @@ async def test_login_from_bad_provider_setup_state_repairs_the_config(
     assert repaired.get_config_value("hosting") == "deepseek"
     # The model belonged to the provider that was replaced, so it is replaced
     # too -- otherwise a real provider is pointed at a model that never existed.
-    assert repaired.get_config_value("model_name") == "deepseek-chat"
+    assert repaired.get_config_value("model_name") == "deepseek-flash"
 
 
 @pytest.mark.parametrize(
     "provider, expect_setup",
     [
-        # The two loginable providers with no default model: `/login` here
-        # writes a registry-VALID hosting with a CLEARED model, which is the
-        # config the repair produces on purpose.
-        ("alibaba-token-plan", True),
-        ("alibaba-token-plan-oauth", True),
+        # Providers with no default model -- the local runtimes, whose models
+        # are whatever the user pulled: the repair writes a registry-VALID
+        # hosting with a CLEARED model, which is the config it produces on
+        # purpose. (The Token Plan used to be the example; it now has a
+        # suggested model, qwen3.8-max.)
+        ("ollama", True),
+        ("vllm", True),
         # Control: an ordinary provider brings its own default, so the repaired
         # config boots straight through and must NOT land in setup. Without it
         # this test would pass on a build that sent every login to setup.
@@ -986,7 +988,7 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
     The coverage gap this closes: every other assertion about the repair stops
     at the plan or at the config file, and none asserted that the config the
-    repair writes can actually start a session. `alibaba-token-plan` has no
+    repair writes can actually start a session. A local runtime has no
     default model, so the repair clears the model deliberately — and the
     resolver used to answer that with a plain `ValueError`, which misses the
     recoverable-error gate in `_on_boot_failed` and painted the red "session
@@ -1069,8 +1071,8 @@ async def test_repaired_config_boots_into_an_escapable_state(
         # It names the provider and points at the command that can actually
         # fix this. `/login` must NOT be promised: hosting is already
         # registry-valid, so a login writes nothing and the user loops.
-        assert provider.startswith("alibaba")
-        assert "alibaba-token-plan" in notice
+        assert provider in ("ollama", "vllm")
+        assert provider in notice
         assert "/model" in notice
         assert "failed" not in notice.lower()
         # Budget check, same rule as the sibling splash assertions. The notice
@@ -1124,7 +1126,7 @@ async def test_missing_model_is_recoverable_not_fatal_on_every_surface() -> None
 
     class _Cfg:
         def get_config_value(self, key, default=None):
-            return {"hosting": "alibaba-token-plan", "model_name": ""}.get(key, default)
+            return {"hosting": "ollama", "model_name": ""}.get(key, default)
 
     with pytest.raises(ModelNotConfiguredError) as caught:
         resolve_hosting_model(
@@ -1143,9 +1145,9 @@ async def test_missing_model_is_recoverable_not_fatal_on_every_surface() -> None
     assert isinstance(error, ValueError)
     # The informative text survives: it names concrete model ids, which is what
     # the non-interactive paths print.
-    assert "alibaba-token-plan" in str(error)
-    assert "gpt-4o" in str(error)
-    assert error.hosting == "alibaba-token-plan"
+    assert "ollama" in str(error)
+    assert "gpt-6-astra" in str(error)
+    assert error.hosting == "ollama"
 
 
 def test_non_interactive_preflight_still_fails_fast_without_a_model(
@@ -1162,7 +1164,7 @@ def test_non_interactive_preflight_still_fails_fast_without_a_model(
     from local_operator.config import ConfigManager
 
     config = ConfigManager(tmp_path)
-    config.set_config_value("hosting", "alibaba-token-plan")
+    config.set_config_value("hosting", "ollama")
     config.set_config_value("model_name", "")
     args = argparse.Namespace(hosting=None, model=None)
 

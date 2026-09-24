@@ -38218,7 +38218,10 @@ class OperatorApp(App[None]):
         try:
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
-            from local_operator.providers.login_defaults import plan_login_defaults
+            from local_operator.providers.login_defaults import (
+                apply_login_defaults,
+                plan_login_defaults,
+            )
 
             manager = ConfigManager(config_dir())
             # The POLICY is shared with `local-operator login` (see
@@ -38236,19 +38239,13 @@ class OperatorApp(App[None]):
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
             )
-            if plan.hosting is None:
-                # Nothing to write, but there can still be something to SAY: a
-                # decision-only provider (TypeSafe's Jev) leaves the routing
-                # exactly as it was and says so in ``receipt``. Returning None
-                # here — as this did — swallowed that line and made the login
-                # look like it had silently done nothing.
-                return plan.receipt
-            manager.set_config_value("hosting", plan.hosting)
-            # ``None`` = leave it; ``""`` = clear a model belonging to the
-            # provider just replaced. The explicit None test is what keeps the
-            # clearing case from being swallowed by a falsy check.
-            if plan.model_name is not None:
-                manager.set_config_value("model_name", plan.model_name)
+            # A plan with nothing to write can still have something to SAY: a
+            # decision-only provider (TypeSafe's Jev) leaves the routing exactly
+            # as it was and says so in ``receipt``, so the receipt is returned
+            # whether or not anything was written. The write itself is the shared
+            # ``apply_login_defaults``, which also covers a plan that fills only
+            # an empty model beside an already-right hosting.
+            apply_login_defaults(manager, plan)
             return plan.receipt
         except Exception as error:  # noqa: BLE001 — never fail a completed login
             return f"logged in, but could not save default hosting/model: {error}"

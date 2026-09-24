@@ -558,8 +558,8 @@ def _no_model_message(hosting: str) -> str:
     return (
         f"Model name is not configured for hosting '{hosting}', and no default "
         "is known for it. Set one with `local-operator config edit model_name "
-        "<model>` or the --model flag (e.g. gpt-4o, claude-3-5-sonnet-latest, "
-        "deepseek-chat)."
+        "<model>` or the --model flag (e.g. gpt-6-astra, claude-opus-5-5, "
+        "deepseek-flash)."
     )
 
 

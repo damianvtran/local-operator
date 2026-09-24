@@ -27,6 +27,16 @@ async def test_desktop_controls_over_real_http(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     token = secrets.token_hex(32)
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    # The key save below asks the provider whether the key is valid before storing
+    # it (`providers.key_check`). This test needs no provider credential and must
+    # not reach the network, so the verdict is stubbed to "could not check" -- the
+    # branch that stores the key, which is what the assertions below read back.
+    from local_operator.providers import key_check
+
+    async def _unchecked(_provider_id, _key, **_kwargs):
+        return key_check.KeyCheck(None, None)
+
+    monkeypatch.setattr(key_check, "check_api_key", _unchecked)
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

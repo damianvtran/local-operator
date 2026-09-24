@@ -752,7 +752,9 @@ async def test_actual_registry_key_login_input_cancel_and_persistence(desktop):
     operation_id = started.json()["result"]["id"]
     awaiting = await wait_for_state(client, operation_id, "input_required")
     assert awaiting["input_required"]
-    assert (await client.post("/v1/auth/login", json={"provider": "radient"})).status_code == 409
+    # A second start no longer answers 409: it SUPERSEDES the active operation
+    # (see `test_a_new_sign_in_supersedes_a_leftover_one`), so that case is not
+    # exercised here -- it would cancel the operation this test goes on to finish.
     secret = "registry-login-secret"
     response = await client.post(
         f"/v1/auth/operations/{operation_id}/input",
@@ -911,3 +913,256 @@ async def test_unmanaged_mode_keeps_the_schedules_surface_open(desktop, monkeypa
         401,
         403,
     )
+
+
+# ---------------------------------------------------------------------------
+# Suggested models, first-run defaults and key validation on the desktop routes
+# ---------------------------------------------------------------------------
+
+
+async def test_provider_census_carries_the_suggested_model(desktop):
+    """The renderer shows "Suggested: ..." from THIS field; it carries no table."""
+    client, _ = desktop
+    rows = {
+        row["id"]: row
+        for row in (await client.get("/v1/auth/providers")).json()["result"]["providers"]
+    }
+    assert rows["anthropic"]["suggested_model"] == {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+    }
+    assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-flash"
+    assert rows["ollama"]["suggested_model"] is None
+    assert rows["typesafe"]["suggested_model"] is None
+    # Per method, because the route decides the spelling (Kimi).
+    kimi = {m["method_id"]: m["suggested_model"]["id"] for m in rows["kimi"]["auth_methods"]}
+    assert kimi == {"kimi": "k3", "kimi:api-key": "kimi-k3"}
+
+
+async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
+    client, app = desktop
+    response = await client.put(
+        "/v1/auth/providers/deepseek/key", json={"value": "sk-first-run-secret"}
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["valid"] is None  # the conftest stubs the live check
+    assert result["defaults_applied"] == {
+        "hosting": "deepseek",
+        "model": "deepseek-flash",
+        "model_name": "DeepSeek V4.1 Flash",
+        "receipt": "Set default hosting to 'deepseek', model to 'deepseek-flash'.",
+    }
+    assert "sk-first-run-secret" not in response.text
+    # The side effect, read from disk through a fresh manager.
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "deepseek"
+    assert on_disk.get_config_value("model_name") == "deepseek-flash"
+
+
+async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
+    client, app = desktop
+    app.state.config_manager.set_config_value("hosting", "anthropic")
+    app.state.config_manager.set_config_value("model_name", "claude-sonnet-5")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-second"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["defaults_applied"] is None
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "anthropic"
+    assert on_disk.get_config_value("model_name") == "claude-sonnet-5"
+
+
+async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop):
+    client, app = desktop
+    app.state.config_manager.set_config_value("hosting", "deepseek")
+    app.state.config_manager.set_config_value("model_name", "")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-fill"})
+    applied = response.json()["result"]["defaults_applied"]
+    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
+    assert ConfigManager(app.state.config_manager.config_dir).get_config_value("model_name") == (
+        "deepseek-flash"
+    )
+
+
+async def test_key_save_reads_config_written_elsewhere_since_boot(desktop):
+    """The server's manager is re-read: a hosting chosen by the TUI after this
+    server booted must not be treated as empty (and then overwritten)."""
+    client, app = desktop
+    ConfigManager(app.state.config_manager.config_dir).set_config_value("hosting", "anthropic")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-elsewhere"})
+    assert response.json()["result"]["defaults_applied"] is None
+    assert ConfigManager(app.state.config_manager.config_dir).get_config_value("hosting") == (
+        "anthropic"
+    )
+
+
+async def test_a_rejected_key_is_refused_and_not_stored(desktop, monkeypatch):
+    from local_operator.providers import key_check
+
+    async def rejected(_provider, _key, **_kwargs):
+        return key_check.KeyCheck(False, "DeepSeek rejected this API key. Check it and try again.")
+
+    monkeypatch.setattr(key_check, "check_api_key", rejected)
+    client, app = desktop
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-bad-key"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "DeepSeek rejected this API key. Check it and try again."
+    assert "sk-bad-key" not in response.text
+    assert not app.state.desktop_auth.store.list_credentials("deepseek")
+    # No defaults either: nothing usable was connected.
+    assert not ConfigManager(app.state.config_manager.config_dir).get_config_value("hosting")
+
+
+async def test_a_verified_key_reports_valid(desktop, monkeypatch):
+    from local_operator.providers import key_check
+
+    async def accepted(_provider, _key, **_kwargs):
+        return key_check.KeyCheck(True, None)
+
+    monkeypatch.setattr(key_check, "check_api_key", accepted)
+    client, app = desktop
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-good"})
+    result = response.json()["result"]
+    assert (result["valid"], result["reason"]) == (True, None)
+    assert app.state.desktop_auth.store.list_credentials("deepseek")
+
+
+def _stub_login(monkeypatch, provider: str, login):
+    definition = registry.get_provider_definition(provider)
+    assert definition is not None
+    monkeypatch.setitem(registry._BY_ID, provider, dataclasses.replace(definition, login=login))
+
+
+async def test_the_first_login_reply_carries_the_auth_url(desktop, monkeypatch):
+    """The reported bug: the browser never opened until "reopen", because the
+    first reply was snapshotted before the flow ran a step (auth_url null)."""
+    client, _ = desktop
+    release = asyncio.Event()
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        await asyncio.sleep(0.01)  # a real flow binds a port and builds PKCE first
+        from local_operator.providers.oauth.callback_server import report_flow_details
+
+        await report_flow_details(
+            callbacks, launch_url="http://localhost:54549/launch", expires_in=300
+        )
+        callbacks.on_auth_url("https://radienthq.com/authorize?x=1", instructions=None)
+        await release.wait()
+        return {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+
+    _stub_login(monkeypatch, "radient", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    assert started["state"] == "waiting"
+    assert started["auth_url"] == "https://radienthq.com/authorize?x=1"
+    assert started["launch_url"] == "http://localhost:54549/launch"
+    # The flow's own deadline, not the host's 900 s cap.
+    assert 290 <= started["expires_in"] <= 300
+    assert started["input_optional"] is False
+    release.set()
+    done = await wait_for_state(client, started["id"], "succeeded")
+    assert done["auth_url"] is None and done["launch_url"] is None
+
+
+async def test_a_device_flow_publishes_its_user_code(desktop, monkeypatch):
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        from local_operator.providers.oauth.callback_server import report_flow_details
+
+        await report_flow_details(callbacks, user_code="WXYZ-1234", expires_in=600)
+        callbacks.on_auth_url("https://auth.x.ai/device", instructions="Enter code: WXYZ-1234")
+        await asyncio.Event().wait()
+
+    _stub_login(monkeypatch, "xai-oauth", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "xai-oauth"})).json()["result"]
+    assert started["user_code"] == "WXYZ-1234"
+    # Kept for compatibility with renderers that print it.
+    assert started["instructions"] == "Enter code: WXYZ-1234"
+    assert 590 <= started["expires_in"] <= 600
+
+
+async def test_the_flow_timeout_reads_expired_not_failed(desktop, monkeypatch):
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        from local_operator.providers.oauth.callback_server import LoginTimeoutError
+
+        raise LoginTimeoutError()
+
+    _stub_login(monkeypatch, "radient", login)
+    operation_id = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()[
+        "result"
+    ]["id"]
+    done = await wait_for_state(client, operation_id, "expired", "failed")
+    assert done["state"] == "expired"
+    assert "expired" in done["message"].lower()
+
+
+async def test_a_new_sign_in_supersedes_a_leftover_one(desktop, monkeypatch):
+    """A 409 here blocked exactly the retry that was the user's way out."""
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        await asyncio.Event().wait()
+
+    _stub_login(monkeypatch, "radient", login)
+    first = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    second = await client.post("/v1/auth/login", json={"provider": "radient"})
+    assert second.status_code == 200, second.text
+    assert second.json()["result"]["id"] != first["id"]
+    old = (await client.get(f"/v1/auth/operations/{first['id']}")).json()["result"]
+    assert old["state"] == "cancelled"
+    assert old["message"] == "Replaced by a new sign-in."
+    # A DIFFERENT provider supersedes too; only one flow is ever live.
+    third = await client.post("/v1/auth/login", json={"provider": "openrouter"})
+    assert third.status_code == 200
+    replaced = (await client.get(f"/v1/auth/operations/{second.json()['result']['id']}")).json()[
+        "result"
+    ]
+    assert replaced["state"] == "cancelled"
+
+
+async def test_an_optional_paste_keeps_the_browser_primary(desktop, monkeypatch):
+    """Anthropic: the paste box is a fallback; the copy must lead with the browser."""
+    client, _ = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        await callbacks.on_manual_code_input()
+        await asyncio.Event().wait()
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    assert started["input_optional"] is True
+    waiting = await wait_for_state(client, started["id"], "waiting")
+    for _ in range(200):
+        waiting = (await client.get(f"/v1/auth/operations/{started['id']}")).json()["result"]
+        if waiting["input_required"]:
+            break
+        await asyncio.sleep(0)
+    assert waiting["input_required"] is True
+    assert waiting["state"] == "waiting"
+    assert waiting["message"].startswith("Finish signing in in your browser")
+    assert "Paste the key" not in waiting["message"]
+
+
+async def test_oauth_success_applies_and_reports_the_suggested_default(desktop, monkeypatch):
+    client, app = desktop
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://claude.ai/oauth/authorize", instructions=None)
+        return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
+
+    _stub_login(monkeypatch, "anthropic", login)
+    started = (await client.post("/v1/auth/login", json={"provider": "anthropic"})).json()["result"]
+    done = await wait_for_state(client, started["id"], "succeeded")
+    assert done["defaults_applied"] == {
+        "hosting": "anthropic",
+        "model": "claude-opus-5-5",
+        "model_name": "Claude Opus 5.5",
+        "receipt": "Set default hosting to 'anthropic', model to 'claude-opus-5-5'.",
+    }
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "anthropic"
+    assert on_disk.get_config_value("model_name") == "claude-opus-5-5"

@@ -261,6 +261,9 @@ class TestTheCycleOrder:
 #: which is the whole point: the table is an interpretation of this list, and a
 #: test that re-derived it could only ever agree with itself.
 _DOC_SUPPORTED = {
+    # Added from the same page read 2026-09-24: "Claude Opus 5.5 supports all
+    # five effort levels, and `medium` is the default".
+    "claude-opus-5-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",
