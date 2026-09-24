@@ -1783,7 +1783,7 @@ async def _construct_child_session(
 
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
-    from local_operator.prompts_api import build_system_blocks
+    from local_operator.prompts_api import CHANNEL_HUB, build_system_blocks
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
@@ -2070,6 +2070,24 @@ async def _construct_child_session(
             repo_guidance=repo_guidance,
             credentials=names,
             model_label=model_label,
+            # THE PARENT'S ANSWER, read live off the parent's holder for the same
+            # reason ``goal=`` above is: a child cannot answer this itself (no
+            # control socket, no registrant), and whether an interface is attached
+            # is a fact about the PARENT's session — the surface the operator is
+            # attached to. ``interactivity()`` rather than ``is_interactive()``:
+            # a parent with no runtime probe answers "unmeasured", and a child of
+            # one must render nothing rather than inherit the fail-open default.
+            #
+            # ``CHANNEL_HUB`` is stated HERE rather than derived, because only this
+            # call site knows it is a child: a top-level session also holds ``hub``
+            # (it is how ITS children reach it), so inventory membership cannot tell
+            # the two apart, and the child's hub is the one that reaches the
+            # operator — one hop out, through the parent. The alternative the
+            # builder would infer (``ask``) is a tool no child has
+            # (``build_ask_tool`` refuses without a hook), which is exactly what the
+            # round-1 reviews found this child being told to use (BLOCKER).
+            interactive=parent_session.interactivity(),
+            channel=CHANNEL_HUB,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
         )
@@ -2160,6 +2178,21 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # THE CHILD CANNOT ANSWER THIS ITSELF, so its own holder gets the PROBE
+    # OBJECT rather than a copied value: the child holds no control socket and no
+    # registrant, and its only channel to a human is ``hub`` -> parent, so "is an
+    # interface attached" is a fact about the PARENT's session. Installing the
+    # object (exactly as ``goal=`` reads the parent live) keeps the child's answer
+    # live per turn, and keeps it in agreement with the browser text the child
+    # renders (``ToolContext.attached_probe`` reads the same holder).
+    #
+    # The parent's HOLDER is deliberately NOT shared. ``GoalState`` also carries
+    # ``team_brief`` and ``agent_brief``; a child that inherited those through the
+    # holder would silently start rendering the parent's ``<team>`` block, which
+    # is an instruction-precedence bug rather than an inheritance.
+    parent_probe = parent_session.interactivity_probe
+    if parent_probe is not None:
+        child._goal_state.interactive_probe = parent_probe
     if child_stream is not parent_stream:
         child.add_dispose_hook(child_stream.close)
     # Undo ``Session.__init__``'s capability merge, DEPTH-AWARE. The set is

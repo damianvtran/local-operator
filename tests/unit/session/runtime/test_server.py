@@ -16,7 +16,8 @@ import logging
 import statistics
 import threading
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from typing import Any, Callable, Coroutine, cast
 
 import pytest
@@ -29,6 +30,7 @@ from local_operator.mobile.types import (
 from local_operator.session.frontend_state import FrontendSubscription
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS, PROTOCOL_VERSION
 
 
@@ -2096,6 +2098,339 @@ async def test_desktop_watch_lease_separates_visibility_and_notification_deliver
         await desktop.detach()
         await terminal.detach()
         runtime.close()
+
+
+# ---------------------------------------------------------------------------
+# ATTACHED vs ATTENDED (docs/design/attached-interface-signal.md §2)
+#
+# The incident: a desktop app that was open, FOCUSED and VISIBLE, holding a live
+# lease on this session's conversation, whose machine-wide record could not NAME
+# the conversation it was showing (``session_id: ""``) — so the attention
+# predicate denied, the model-facing probe answered False, and at least twenty
+# live sessions carried a block telling their model ``nobody is watching a
+# screen``. The operator was reading one of them.
+#
+# Two questions are pinned apart here, and each consumer reads exactly one:
+# ATTACHED ("an interface can PRESENT a question") for the model; ATTENDED ("a
+# person is looking right now") for notification rung 1, unchanged.
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _desktop_presence_claim(
+    root, *, session_id: str, focused: bool = True, visible: bool = True
+) -> Iterator[None]:
+    """Publish the machine-wide delivery record the incident was read from (§1.1).
+
+    Written through the REAL publisher, so the record carries this process's pid
+    and a fresh heartbeat — the file's shape is the contract between the app and
+    this reader, and a hand-built dict would stop testing it. Closed on exit:
+    ``close`` withdraws only the publisher's OWN record (R6) and reaps its beat
+    task, so nothing outlives the test.
+    """
+    from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
+    from local_operator.session.runtime import presence
+
+    publisher = DesktopDeliveryPublisher(root)
+    publisher.update(
+        "sub-1",
+        can_notify=True,
+        can_notify_kinds=["complete", "error"],
+        session_id=session_id,
+        window={"exists": True, "focused": focused, "visible": visible, "minimized": False},
+    )
+    # The reader caches its answer for PRESENCE_CACHE_TTL_S, so a write must
+    # never be masked by an answer taken before it.
+    presence.reset_cache()
+    try:
+        yield
+    finally:
+        publisher.close()
+        presence.reset_cache()
+
+
+def _desktop_connection(runtime: RuntimeServer):
+    """The live desktop attach connection in this runtime's table."""
+    return next(c for c in runtime._clients.values() if c.surface == "desktop")
+
+
+@pytest.mark.asyncio
+async def test_a_focused_desktop_pane_that_cannot_name_its_conversation_is_still_attached(
+    monkeypatch, tmp_path
+) -> None:
+    """THE INCIDENT REPRODUCTION (§1.1, §2.3).
+
+    A desktop app with a focused, visible window, a live delivery lease and this
+    session's pane mounted, whose record cannot name the conversation, must count
+    as ATTACHED — and must still count as UNATTENDED, because focus/visibility on
+    a machine-wide record is rung 1's business, not the model's.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=False, can_notify=True)
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            # Tier B deliberately does NOT move here: `desktop_visible` is false,
+            # so nobody is looking at this session — which is what routing needs.
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unfocused_desktop_pane_is_attached_though_nobody_is_watching(
+    monkeypatch, tmp_path
+) -> None:
+    """§1.3: focus is the wrong question for the model, and it FLAPS.
+
+    A window that is visible but not focused (the operator is reading a terminal
+    beside it) reports ``attended=False``, so rung 1 correctly sees no watcher —
+    while the pane is mounted and a card painted now would be there when they
+    look. Tier A must answer across that difference; Tier B must not.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id="s1", focused=False):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_multiplexed_terminal_away_from_this_session_is_attached_but_not_attended() -> None:
+    """A viewer holding this session in a tab it is not displaying (§1.3).
+
+    Tier A counts the connection, because that process can paint the card the
+    moment the operator switches to it; Tier B must keep dropping it, which is
+    the whole of the ``viewer_watch`` fix it was written for.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    terminal = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _wait_record()
+        await terminal.connect(record, "s1")
+        await terminal.viewer_watch(displaying=False)
+        assert runtime.attached_surfaces() == frozenset({"attach"})
+        assert runtime.watching_surfaces() == frozenset()
+    finally:
+        await terminal.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_connection_is_never_attached() -> None:
+    """The mobile daemon's ADOPTION dial covers every session on the machine.
+
+    Counting it would let a machine running ``lop mobile`` report an interface on
+    every session, including one nobody has ever opened — the same reasoning as
+    rung 1's (``server.py::watching_surfaces``), applied to the model-facing
+    question because a model told "a question WILL be presented" has to be told
+    the truth.
+    """
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        _reader, writer = await _dial(record)
+        assert runtime.attached_surfaces() == frozenset()
+        assert runtime.watching_surfaces() == frozenset()
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_fifty_real_focus_changes_move_neither_tier_a_nor_its_answer() -> None:
+    """FIFTY REAL FOCUS CHANGES ON THE REAL WIRE (round 1, MINOR 5 / NIT 8).
+
+    The churn requirement is that raising and lowering the window cannot move the
+    block inside the persisted system prompt. The desktop arm used to be
+    ``lease and (visible or can_notify)``, and the wire's ``visible`` is already
+    the app's ``visibilityState === 'visible' && hasFocus()`` — so on a host with
+    no OS-notification channel that arm WAS focus, and fifty flaps flipped the
+    model-facing answer fifty times, writing a ``[session-state]`` row each way.
+
+    The churn test in ``test_prompts_api`` cannot see this: it feeds the renderer
+    a constant. This one drives the real ``desktop_watch`` handler with both
+    notification configurations and both window states, and asserts the answer
+    never moves — while the ATTENTION tier, which is supposed to follow the
+    window, does.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        answers: set[frozenset[str]] = set()
+        for can_notify in (False, True):
+            for index in range(50):
+                await desktop.desktop_watch(visible=bool(index % 2), can_notify=can_notify)
+                answers.add(runtime.attached_surfaces())
+        assert answers == {frozenset({"desktop"})}
+
+        # The two tiers stay separable: the window is now unfocused/hidden, so
+        # nothing is being LOOKED AT — while the pane is still the surface a
+        # question would appear on.
+        await desktop.desktop_watch(visible=False, can_notify=True)
+        assert runtime.watching_surfaces() == frozenset()
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_reaper_still_sees_no_viewer_without_a_visible_panel() -> None:
+    """THE NEGATIVE THAT MUST NOT MOVE: residency was not loosened (§1.5).
+
+    ``attach_clients()`` is the predicate that keeps a runtime resident. A
+    desktop connection that is neither visible nor notification-capable is not a
+    front end, so it still counts for nothing THERE — a runtime with no panel on
+    screen still exits.
+
+    TIER A SPLITS FROM IT HERE, deliberately (round 1, MINOR 5). The LEASE is a
+    heartbeat that names this session's own subscription and is withdrawn when
+    the pane leaves, so "lease live" IS "a pane holds this conversation" — the
+    fact the model-facing block is about — and ``visible``/``can_notify`` are
+    attention and reachability, which is why the two predicates are no longer the
+    same expression. The churn the old clause caused is the reason it had to
+    change: ``desktop_visible`` is the app's ``visible && focused``, so on a host
+    with no notification channel the arm collapsed to focus, and raising and
+    lowering that window moved the block inside the persisted system prompt.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    runtime.start()
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    try:
+        record = await _wait_record()
+        await desktop.connect(record, "s1")
+        await desktop.desktop_watch(visible=False, can_notify=False)
+        assert runtime.attach_clients() == 0
+        assert runtime.attached_surfaces() == frozenset({"desktop"})
+    finally:
+        await desktop.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_that_cannot_name_a_session_falls_back_to_the_connection(
+    monkeypatch, tmp_path
+) -> None:
+    """ABSENCE OF EVIDENCE IS NOT EVIDENCE AGAINST (§2.3).
+
+    The publisher blanks ``session_id`` whenever it cannot vouch for it, so an
+    empty field says nothing about which conversation is on screen. The
+    per-connection flag is the per-session answer, and falling through to it is
+    the pre-presence behaviour the reader's docstring promises an older app.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is True
+            assert runtime.watching_surfaces() == frozenset({"desktop"})
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_naming_another_session_still_denies(monkeypatch, tmp_path) -> None:
+    """The denied direction is preserved where the record IS evidence.
+
+    An app that names a DIFFERENT conversation must not suppress this session's
+    background banner: that is exactly the case the record exists to catch.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id="some-other-session"):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            await desktop.desktop_watch(visible=True, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is False
+            assert runtime.watching_surfaces() == frozenset()
+        finally:
+            await desktop.detach()
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_presence_record_that_cannot_name_a_session_does_not_suppress_an_unfocused_banner(
+    monkeypatch, tmp_path
+) -> None:
+    """The fallback is SCOPED: an unfocused window still banners (§2.3).
+
+    Falling through to ``conn.desktop_visible`` only grants when the pane really
+    is visible, so a window behind another app keeps raising the OS banner —
+    otherwise the empty field would silence every surface for a conversation
+    nobody is looking at, which is the defect the record was built to stop.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    desktop = AttachClient(lambda _projection: None, lambda _reason: None, surface="desktop")
+    with _desktop_presence_claim(tmp_path, session_id=""):
+        runtime.start()
+        try:
+            record = await _wait_record()
+            await desktop.connect(record, "s1")
+            # THE UNFOCUSED CASE IS EXPRESSED THROUGH ``visible=False``, NOT
+            # ``focused=False``, because that is what the app actually SENDS: the
+            # desktop host computes the wire ``visible`` as
+            # ``visibilityState === 'visible' && hasFocus()``
+            # (``local-operator-ui/src/main/desktop-notifier.ts``), so focus is
+            # already folded into it. Flipping the RECORD's ``focused=`` would
+            # test a different seam (Tier B's presence read), not this one.
+            await desktop.desktop_watch(visible=False, can_notify=True)
+            assert runtime._desktop_visible(_desktop_connection(runtime)) is False
+            assert runtime.watching_surfaces() == frozenset()
+            # ...and the app is still reachable for the out-of-band toast.
+            assert runtime.notification_surfaces() == frozenset({"desktop"})
+            # Attached all the same: the pane is mounted, so a question is
+            # presentable the moment the operator returns to it.
+            assert runtime.attached_surfaces() == frozenset({"desktop"})
+        finally:
+            await desktop.detach()
+            runtime.close()
 
 
 @pytest.mark.asyncio
@@ -4429,6 +4764,27 @@ class _OffLoopCapableHeldBindHandle(_HeldBindHandle):
         return self._frontend.subscribe_threadsafe(on_update)
 
 
+class _DrainingOffLoopCapableHeldBindHandle(_OffLoopCapableHeldBindHandle):
+    """The parked-owner double WITH the production drain latch available on it.
+
+    Bound as a class attribute rather than called unbound, which is the pattern
+    ``test_serving_drain``'s ``DrainHost`` uses: a double that re-implemented the latch
+    would pin nothing about the state a viewer actually meets, and the attributes the
+    real method writes are declared here so the cells can read them back.
+    """
+
+    begin_drain = ServingSessionHandle.begin_drain
+    end_drain = ServingSessionHandle.end_drain
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: Written by ``begin_drain`` / cleared by ``end_drain``, read by the cells.
+        self._draining = False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._disposing = False
+
+
 class _CountingBindHandle(FakeHandle):
     """A HEALTHY handle: binds at once, and records if the fallback was used.
 
@@ -4551,6 +4907,72 @@ async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_rela
         # assertion above, so a stream that ended here is the claim.
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(reader.readline(), timeout=0.3)
+    finally:
+        handle.bind_gate.set()
+        handle.release_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_draining_owner_still_lands_the_canonical_sync_inside_the_envelope() -> None:
+    """THE OPERATOR'S SYMPTOM, with the drain latched: a viewer still gets its state.
+
+    The incident's configuration, not an invented one. The runtime that could not be
+    attached had latched a stale-build drain (``begin_drain``, taken here through the
+    PRODUCTION latch rather than a fake that re-implements it) and was still stepping
+    three subagent lanes, so its session loop was exactly as busy as the parked owner
+    below models — the attach then missed the 15 s envelope and the operator got
+    ``RuntimeUnresponsiveError`` while the session was, technically, alive and serving.
+
+    So this is the parked-owner rig re-driven under a drain. Two things are asserted,
+    and the second is the one a future change is most likely to break: the canonical
+    ``frontend_sync`` LANDS, inside a bound well under the attach envelope, and it
+    lands through the OFF-LOOP fallback — a draining runtime still serves a joining
+    viewer. Gating the fallback on "not draining" (a plausible-looking reading of "a
+    runtime that is leaving should not bind new viewers") is what this cell fails on,
+    and the cost of that gate is another attach nobody can complete.
+
+    The latch is asserted while the sync is in flight, because the property is about a
+    DRAINING owner: a test that released the drain before dialling would prove nothing
+    about the state the operator was in.
+    """
+    handle = _DrainingOffLoopCapableHeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        # The PRODUCTION latch over this reduced handle: ``begin_drain`` asks only for
+        # ``_disposing`` and an optional ``session.retire_wakes_to_inbox``, so the same
+        # method the real handle runs is the one under test here.
+        assert handle.begin_drain("stale-build", "0.62.9 -> 0.62.12")
+        assert (
+            handle._draining is True
+        ), "the drain has to be latched for this cell to mean anything"
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        started = time.monotonic()
+        sync = await _until(reader, "frontend_sync")
+        landed_after = time.monotonic() - started
+
+        assert sync["data"].get("sequence") is not None, "the sync carried no canonical state"
+        assert landed_after < 10.0, (
+            "a draining owner's viewer waited "
+            f"{landed_after:.1f}s for its state, and the attach envelope is 15 s: this is "
+            "the shape that made the runtime unattachable"
+        )
+        assert handle.off_loop_binds == 1, (
+            "the parked on-loop bind carried the sync, so the off-loop fallback a "
+            "draining runtime needs was not used"
+        )
+        assert runtime.frontend_off_loop_binds == 1
+        assert handle._draining is True, (
+            "the drain was released under the viewer, so this no longer says anything "
+            "about a DRAINING owner"
+        )
     finally:
         handle.bind_gate.set()
         handle.release_gate.set()

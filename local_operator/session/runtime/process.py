@@ -74,6 +74,7 @@ from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_DWELL_S,
     BUILD_DRAIN_PROGRESS_S,
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
@@ -1937,12 +1938,25 @@ async def _pump_update_heartbeat(handle: object, *, interval: float) -> None:
 async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: float) -> None:
     """The half every arm that KEEPS the build this runtime loaded has in common.
 
-    Two steps, and they are the same two wherever a handover gives up: the messages
-    the departure queued come back IN — they run here, on the build the operator
-    still has, rather than leaving a receipt for a successor that is not coming —
-    and the failure is PUBLISHED, on the record and as an incident row carrying
-    ``types.UPDATE_FAILED_CAUSE`` (the operator's own requirement: "indicate that
-    the update failed so that it can be reported as an issue and addressed").
+    Two steps, and they are the same two wherever a handover gives up: the failure is
+    PUBLISHED, on the record and as an incident row carrying ``types.UPDATE_FAILED_CAUSE``
+    (the operator's own requirement: "indicate that the update failed so that it can be
+    reported as an issue and addressed"), and the messages the departure queued come back
+    IN — they run here, on the build the operator still has, rather than leaving a receipt
+    for a successor that is not coming.
+
+    PUBLISH FIRST, AND THAT ORDER IS THE REPAIR RATHER THAN A TIDY (QA round 1, Q-2). The
+    re-admission can run the spooled owner prompts — real turns, measured at 27-37 s — and
+    the reaper may find the work done ONE TICK after it lands (``REAP_CHECK_S``), at which
+    point this runtime exits and the record is withdrawn with it. Published second, the
+    failure was therefore observable on the fleet row for as little as a second, or not at
+    all, which is the operator's requirement failing in exactly the state it was written
+    for. The two steps touch DISJOINT state — one delivers the inbox, the other writes the
+    record and an incident row — so neither can read the other's output, no invariant is
+    ordered by it, and the publish is strictly more reliable here: it no longer depends on
+    the drain returning at all (:func:`_drain_inbox_into` is best-effort per row and
+    swallows its own failures, but nothing about that should be able to take the record's
+    account down with it).
 
     FACTORED OUT rather than written twice because the two callers are the two
     shapes of the same decision — the update window that ran out of its bound
@@ -1953,13 +1967,13 @@ async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: 
     The runtime is never killed here. That is the whole contract of this module's
     give-up arms: a failed update leaves a working session on the build it loaded.
     """
-    await _drain_inbox_into(handle)
     note = getattr(runtime, "note_update_failed", None)
     if callable(note):
         try:
             await cast("Callable[..., Awaitable[None]]", note)(pair, bound)
         except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
             logger.warning("could not publish the failed update", exc_info=True)
+    await _drain_inbox_into(handle)
 
 
 async def _abandon_update_window(handle: object, runtime: object, pair: str, bound: float) -> None:
@@ -1970,14 +1984,18 @@ async def _abandon_update_window(handle: object, runtime: object, pair: str, bou
     1. the window CLOSES — the lock is released and the record's ``updating`` is
        cleared, so no admission is queued against a handover that is not coming
        and no surface keeps reading "updating";
-    2. the messages the window QUEUED are drained back IN, so they run here, on
-       the build the operator still has — the alternative is a receipt for a
-       successor that never boots;
+    2. the handle REMEMBERS the pair, so the automatic rung does not re-open the
+       same window on its next check and burn the bound again forever;
     3. the failure is PUBLISHED, on the record and as an incident row carrying
        ``types.UPDATE_FAILED_CAUSE``, which is what makes it reportable instead
-       of silent (the operator's "so that it can be reported as an issue");
-    4. the handle REMEMBERS the pair, so the automatic rung does not re-open the
-       same window on its next check and burn the bound again forever.
+       of silent (the operator's "so that it can be reported as an issue") —
+       BEFORE the queued messages come back in, for the reason
+       :func:`_keep_loaded_build` states: the re-admission can run real turns,
+       and a runtime that exits a tick after it lands would take the record's
+       account of the failure with it;
+    4. the messages the window QUEUED are drained back IN, so they run here, on
+       the build the operator still has — the alternative is a receipt for a
+       successor that never boots.
 
     The runtime is never killed here — that is the whole contract. A failed
     update leaves a working session on the build it loaded.
@@ -2364,22 +2382,35 @@ class _DrainProgress:
     measured against. Nothing here is advanced by the caller's own cadence, and
     that is what makes this a bound on the WORK rather than a second timeout: a
     runtime whose turn is stepping, whose lane is reporting, whose jobs are
-    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a
-    hold that is moving is never cut however long it runs.
+    settling or whose spool is filling keeps pushing ``moved_at`` forward, so a hold
+    that is moving is never cut BY THIS CLOCK, however long it runs — the hold has a
+    second clock (``latched_at``, below) and that one is not moved by the work.
 
     ``abandoned`` is the drain's own record that its hold was ended by the bound —
     the runtime kept the build it loaded rather than being cut — and it is also the
     guard that keeps the give-up from running twice.
+
+    ``latched_at`` is the instant this clock was opened, i.e. the drain's first
+    tick, and it is deliberately NOT the movement clock: it advances only when the
+    drain object is new, so it measures the HOLD while ``moved_at`` measures the
+    work. It feeds :data:`types.BUILD_DRAIN_DWELL_S`, the bound that exists
+    precisely because the movement clock can be pushed forward forever by a lane
+    that keeps stepping (see that constant for the measurement). The first tick is
+    used rather than the latch's own instant because the reaper is what owns the
+    latch-to-tick gap (``REAP_CHECK_S``, quarter-second), and taking the clock the
+    runtime actually reads keeps every assertion in the suite on one number instead
+    of two that differ by up to a tick.
     """
 
     motion: "tuple[Any, ...]" = ()
     moved_at: float = 0.0
     abandoned: bool = False
+    latched_at: float = 0.0
 
     @classmethod
     def started(cls, handle: object, at: float) -> "_DrainProgress":
         """Open the clock on the drain's first tick, already sampled."""
-        return cls(motion=_work_motion(handle), moved_at=at)
+        return cls(motion=_work_motion(handle), moved_at=at, latched_at=at)
 
     def sample(self, handle: object, at: float) -> bool:
         """One observation. True when the work moved since the last one."""
@@ -2393,6 +2424,15 @@ class _DrainProgress:
     def stalled_s(self, at: float) -> float:
         """How long this drain's work has shown no movement, in seconds."""
         return at - self.moved_at
+
+    def dwell_s(self, at: float) -> float:
+        """How long this drain has been HELD, in seconds, movement or not.
+
+        The other half of the pair, and the one the movement clock cannot answer:
+        ``stalled_s`` is reset by anything the work reports, so a hold that keeps
+        reporting is unbounded by it (``types.BUILD_DRAIN_DWELL_S``).
+        """
+        return at - self.latched_at
 
 
 #: The handle of the runtime this process is currently running, for the stall
@@ -2428,7 +2468,36 @@ def _tool_batch_in_flight(session: object) -> bool:
     feeds a predicate that ends the process, so a state we cannot read must not be
     the thing that fires it, and a session with no context has nothing running.
     (The opposite direction is right for :func:`_work_motion`, whose docstring
-    argues it: that tuple decides when to stop WAITING.)
+    argues it: that tuple decides when to stop WAITING.) The scan itself is
+    :func:`_unanswered_tail_step`, which RAISES, so the callers that ask about
+    different processes can answer the one rule in opposite directions instead of
+    carrying a copy of it each.
+    """
+    try:
+        return _unanswered_tail_step(session)
+    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
+        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        return False
+
+
+def _unanswered_tail_step(session: object) -> bool:
+    """The scan behind :func:`_tool_batch_in_flight`, RAISING on a failed read.
+
+    ONE RULE, TWO DIRECTIONS, and which one applies is the CALLER's question
+    because the callers ask about different processes: this session's own tail
+    answers "no batch" when its read fails (:func:`_tool_batch_in_flight`, whose
+    docstring argues that direction), while a CHILD LANE's answers "in flight"
+    (:func:`_lane_step_in_flight`) — a lane whose state cannot be read is a lane
+    whose work cannot be ruled out, and the standing preference in this module is
+    to spare a process past a bound rather than cut one that is working.
+
+    SPLIT RATHER THAN DUPLICATED deliberately: this module has already paid once
+    for a hand-copied version of ``unanswered_tail_call_ids``' rule drifting from
+    it (agent review round 1 on :func:`_tool_batch_in_flight`), and a second copy
+    of the scan is how that gets paid for twice.
+
+    AN ABSENT CONTEXT IS NOT A FAILED READ: a session with no context has nothing
+    open, which is this function's ``False``. Only a RAISE means "unreadable".
     """
     context = getattr(session, "_context", None)
     messages = getattr(context, "messages", None)
@@ -2438,11 +2507,157 @@ def _tool_batch_in_flight(session: object) -> bool:
     # child's boot path, and ``protocol`` pulls the session graph in.
     from local_operator.session.protocol import unanswered_tail_call_ids
 
+    return bool(unanswered_tail_call_ids(messages))
+
+
+#: The class ``record.child`` holds, resolved on FIRST USE rather than at import
+#: time: this module is the child runtime's own boot path, and a lane read happens
+#: long after any ``Session`` exists, so by then the import is a ``sys.modules``
+#: lookup. Cached because ``_lane_step_in_flight`` runs once per live lane per
+#: sample, where a repeated import statement is a real cost.
+_LANE_CLASS: "type | None" = None
+
+
+def _lane_step_in_flight(lane: object) -> bool:
+    """Is one IN-PROCESS child lane executing a step of its own?
+
+    THE SAME QUESTION :func:`_step_in_flight` ASKS THE PARENT, one layer out, and
+    the parent's own terms cannot answer it: a lane's tool batch and a lane's
+    on-demand compaction are the LANE's state, not this session's. The shape it
+    closes is a manager whose own loop burns CPU walking the roster projection
+    while its lanes hold steps — no motion (nothing bumps
+    ``_subagent_roster_generation`` while a step is merely OPEN), nothing in
+    flight by the parent's own reading, CPU advancing — so all three progress legs
+    held and the process was cut while it was working (``stall_watchdog`` names
+    that shape and the O(N^2) walk behind it).
+
+    WHY THE LANE'S PROVIDER REQUEST IS NOT READ HERE: it does not need to be.
+    Every in-process lane takes its stream from ``SessionStreamFn.fork``
+    (``harness.subagent._construct_child_session``), the forks share ONE counter,
+    and :func:`_step_in_flight` already reads that counter at O(1) for the whole
+    tree. Reading each lane's own counter would read the same scalar N times.
+    What no counter can express is a step OPEN with no provider call outstanding —
+    a tool batch whose results have not landed, a compaction rewriting history —
+    and that is exactly and only what this adds.
+
+    THE NARROW QUESTION IS DELIBERATE. ``lane._is_streaming`` would be cheaper
+    still and is refused: it is true for the whole of a lane's turn, so one lane
+    parked in a gate, or in a provider call that never returns, would spare its
+    parent's spin for as long as it lived — the maximally-inclusive trap
+    :func:`_step_in_flight` refuses for ``is_busy``. ITS OWN RESIDUAL IS STATED in
+    ``stall_watchdog``: a step that never CLOSES (a wedged in-process tool, a hung
+    compaction) holds this answer "in flight" for the life of the lane, which is
+    the same property reached through the narrow question.
+
+    FAIL CLOSED ON A SHAPE IT CANNOT READ, and it is stated rather than implied
+    because the alternative is silent. THE GATE IS AN ``isinstance``, ON THE CLASS,
+    and what it excludes is precise: any object on ``record.child`` that is not a
+    ``Session`` — a test double, a lane class built on another base — is HELD rather
+    than judged idle, with the hold announced at WARNING. A ``Session`` SUBCLASS
+    passes that gate and is then judged by its own flags and its tail, so a subclass
+    whose ``_compacting`` reads a real ``False`` with no tail to scan is spent as
+    "not in flight" — the same answer a settled lane gives. The flag itself is read
+    as plain truthiness, not as a ``bool``. (Both clauses were stated more widely
+    than the code does before agent review round 2, MINOR 1; nothing reachable
+    changes, because ``Session`` sets ``_compacting`` from ``True``/``False`` only and
+    ``attach`` is always handed a ``Session``.)
+
+    Plain truthiness was the defect (agent review round 1, MINOR 3), in BOTH of its
+    directions: a ``MagicMock``'s attribute
+    is truthy for the life of the process, so it answered "in flight" forever with
+    nothing recording that the read never worked, and a shape whose attribute read a
+    real ``False`` while having no tail to scan was spent as "not in flight" — the
+    same answer a settled lane gives. The consequence for the probe is stated so a
+    reader does not have to infer it: while such a record is attached,
+    ``_step_in_flight`` answers "in flight" at EVERY sample, so the progress leg
+    DEFERS — it never closes a window (the three outcomes are named in
+    ``stall_watchdog``) — and the liveness leg is the only one left that can end the
+    run, on a frozen frame. That is this module's standing preference (spare rather
+    than cut), and the warning is what keeps the deferral from being silent.
+
+    UNREADABLE HOLDS, the opposite direction from the parent's own tail, and
+    :func:`_unanswered_tail_step` states why the two differ.
+    """
     try:
-        return bool(unanswered_tail_call_ids(messages))
-    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
-        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        global _LANE_CLASS
+        lane_class = _LANE_CLASS
+        if lane_class is None:
+            from local_operator.session.session import Session
+
+            lane_class = _LANE_CLASS = Session
+        if not isinstance(lane, lane_class):
+            logger.warning(
+                "stall watchdog: a child lane of unrecognised shape (%s) cannot be read; "
+                "holding the process rather than judging it idle",
+                type(lane).__name__,
+            )
+            return True
+        if getattr(lane, "_compacting", False):
+            return True
+        return _unanswered_tail_step(lane)
+    except Exception:  # noqa: BLE001 — an unreadable lane must not authorise a cut
+        logger.debug("stall watchdog: could not read a child lane's step", exc_info=True)
+        return True
+
+
+def _child_lanes_in_flight(session: object) -> bool:
+    """Is any LIVE in-process child lane of this session executing a step?
+
+    WHERE THE LANES COME FROM, and the private read is on purpose.
+    ``SubagentComms`` keeps one record per lane and holds the live child session
+    on ``record.child`` (set by ``attach``, cleared by ``detach``), and it
+    publishes no reader for those sessions: ``roster``/``nodes`` are DISPLAY
+    projections that sort, settle and describe every record, which is the
+    O(N^2) walk this read must not pay per sample. The public
+    ``session.subagent_comms`` property is refused for a sharper reason — it is
+    MINTED ON FIRST USE and the mint SUBSCRIBES a frontend projector — so reading
+    it from the sampler's foreign thread could construct comms state as a side
+    effect of a diagnostic. ``_subagent_comms`` is the side-effect-free
+    attribute, and ``serving.py`` reads it the same way.
+
+    ONE FLAT SCAN IS THE WHOLE TREE, so this does not recurse: a lane's own lane
+    is constructed against the comms instance it inherited from the root
+    (``harness.subagent._construct_child_session`` hands the PARENT's
+    ``subagent_comms`` down), so every lane in the process is a record on this one
+    instance, with the lineage on ``parent_job_id``.
+
+    FAILS CLOSED, and the asymmetry with this session's own tail is deliberate. A
+    missing roster is the ordinary case — a session that never delegated, or a
+    reduced host/double — and answers ``False``. A roster that EXISTS but cannot
+    be read is a different fact and answers ``True``: the lanes are known to be
+    there, so "I could not read them" must not be spent as "no lane holds work".
+    The values are copied into a tuple before iterating because the event loop
+    mutates this map while the sampler looks at it.
+
+    COST, measured rather than assumed, because the module this feeds once refused
+    this read as "not cheap" before there was a number for it: the cost table at
+    N = 0/1/8/64/256 live lanes is in ``stall_watchdog``'s docstring (0.75-1.3 µs of
+    CPU per lane, ~1.2 ms per minute at the width measured on this fleet), and the
+    structural half of the claim is pinned in
+    ``tests/unit/session/runtime/test_child_lane_progress.py``. Two facts keep the
+    walk bounded: each live lane is asked once per sample, and a lane holding a
+    step is answered by the FIRST message the tail scan reaches, so the in-flight
+    case is the CHEAP one.
+
+    N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``. ``_evict_overflow`` evicts only
+    records with no live child and no running job, so the cap bounds the map's
+    evictable tail rather than lane concurrency (300 attached lanes measured 300
+    records). The other half of the cost is the LANE's own tail length, because the
+    scan is linear in the rows it walks: see ``stall_watchdog``'s cost section,
+    which states that dependence with its figures rather than quoting one number.
+    """
+    try:
+        records = getattr(getattr(session, "_subagent_comms", None), "_records", None)
+        if not records:
+            return False
+        for record in tuple(records.values()):
+            lane = getattr(record, "child", None)
+            if lane is not None and _lane_step_in_flight(lane):
+                return True
         return False
+    except Exception:  # noqa: BLE001 — an unreadable roster must not fire a bound
+        logger.debug("stall watchdog: could not read the child-lane roster", exc_info=True)
+        return True
 
 
 def _step_in_flight(handle: object) -> bool:
@@ -2455,17 +2670,25 @@ def _step_in_flight(handle: object) -> bool:
     incident this leg exists for had four running lanes that had produced
     nothing for seven minutes. Reusing ``is_busy`` here would have spared the
     very state the leg is for, so what it asks is narrower and about THIS
-    process: is a tool batch running, a compaction rewriting history, or a
-    delegated child stream awaiting its provider. The stream's counter is child-
-    only, so this does not mistake the manager's own provider request for child
-    work. If reading the counter fails, preserve the process rather than letting
-    an unreadable active-work signal trigger the watchdog.
+    process: is a tool batch running, a compaction rewriting history, a
+    delegated child stream awaiting its provider, or an in-process CHILD LANE
+    holding any of those of its own. The stream's counter is child-only, so this
+    does not mistake the manager's own provider request for child work. If
+    reading the counter, the tail or the lane roster fails, preserve the process
+    rather than letting an unreadable active-work signal trigger the watchdog.
 
-    Arbitrary child in-process tool calls are still not represented here. A lane
-    that is stepping is covered from the other end: its step boundaries move
-    ``_work_motion``'s roster generation, so the NO MOTION leg fails first.
-    This provider-request signal does not claim to solve a child tool that parks
-    without an outstanding model call.
+    WHAT STILL IS NOT REPRESENTED, named so the next reader does not assume
+    coverage: a step that is open in no sense this module can read — a lane (or
+    the manager) burning CPU inside one synchronous call, with no tool batch
+    open, no compaction and no provider request outstanding. For a LANE that is
+    also invisible to the liveness leg's frame observation, which watches only
+    the two threads that beat (the planes' own loops), so such a lane is cut with
+    its parent. Closing that means reading a lane's frames, which is a different
+    change from this one. THE MIRROR CASE, named in ``stall_watchdog``, is the
+    price of this widening: a lane's step that never CLOSES makes this leg defer
+    for as long as the lane lives, so a reader who finds a runtime alive past its
+    bound with a lane holding a step is looking at the one leg that cannot see it
+    and should stop the process by hand.
     """
     session = getattr(handle, "_session", None)
     if session is None:
@@ -2479,7 +2702,13 @@ def _step_in_flight(handle: object) -> bool:
     except Exception:  # noqa: BLE001 — an unreadable child-work signal must not fire a bound
         logger.debug("stall watchdog: could not read child provider request state", exc_info=True)
         return True
-    return _tool_batch_in_flight(session)
+    # THE PARENT'S OWN BATCH IS TESTED BEFORE THE LANES FOR COST, never for
+    # precedence: it is one scan against the roster's N, and its failure
+    # direction (``False`` on an unreadable context) must not be allowed to mask
+    # a lane that holds a step, so it can only be an early return on a TRUE.
+    if _tool_batch_in_flight(session):
+        return True
+    return _child_lanes_in_flight(session)
 
 
 def _progress_probe() -> "tuple[object, bool]":
@@ -2791,18 +3020,31 @@ async def _drain_for(
     idle instant arrives. Nothing in flight is aborted: the wait is bounded by
     the work.
 
-    AND ONLY BY THE WORK THAT IS STILL MOVING — see :func:`_abandon_move`, the
-    one rung here that draws a bound at all. It reads no clock of the drain: the
-    clock it reads is reset by every observable sign that the work advanced
-    (:func:`_work_motion`), so it cannot fire on a turn that is merely long, and
-    what it bounds is not the hold but STALENESS. The state it exists for has no
-    other exit: ``is_busy()`` counts a gate parked on a user and a lane parked
-    behind a child process, both of which can hold for hours, and a drain that
-    holds forever takes its session with it (measured: 2 h and still refusing,
+    AND ONLY BY THE WORK, OR BY THE HOLD ITSELF — see :func:`_abandon_move`, the
+    one rung here that draws a bound at all, and it draws two. The FIRST is the
+    staleness bound (:data:`types.BUILD_DRAIN_PROGRESS_S`): it reads no clock of
+    the drain — the clock it reads is reset by every observable sign that the work
+    advanced (:func:`_work_motion`), so it cannot fire on a turn that is merely
+    long, and what it bounds is not the hold but STALENESS. The state it exists for
+    has no other exit: ``is_busy()`` counts a gate parked on a user and a lane
+    parked behind a child process, both of which can hold for hours, and a drain
+    that holds forever takes its session with it (measured: 2 h and still refusing,
     ``state=wedged``, three lanes stalled behind a 23-minute bash child). And a
     stale hold that cannot be waited out is now RECORDED rather than cut: the
     bound abandons the handover, publishes the failure, and leaves the session
     running on the build it loaded.
+
+    THE SECOND BOUND IS THE DWELL, and it exists because the first one cannot be
+    reached by the state that wedged this host: ``_work_motion`` is reset by the
+    very reports a stepping lane makes, so work that KEEPS reporting bounds nothing
+    at all and the drain holds for the runtime's whole life (measured: EIGHT HOURS
+    on the reporting session, and the staleness bound only fired once the lanes
+    stopped). The dwell
+    (:data:`types.BUILD_DRAIN_DWELL_S`) is measured from the drain's first tick and
+    ignores the work entirely, so it is the arm that ends a handover which is
+    progressing and merely long; it is checked SECOND, because an expired staleness
+    clock is the sharper observation of the two and 15 min is inside 30, so a silent
+    hold never reaches it.
 
     The viewer term of :func:`_should_exit` is deliberately absent, exactly as
     it is absent from ``may_refresh``. The ``retiring`` frame went out at drain
@@ -2821,9 +3063,9 @@ async def _drain_for(
     waits for hours of work, and a reason that names the build pair of the
     latch asserts a transition the install left long ago.
 
-    ``now`` is the caller's clock, injectable for the one test that has to cross
-    a fifteen-minute bound without waiting it out — the same convention
-    ``_BuildWatch.poll`` uses.
+    ``now`` is the caller's clock, injectable for the tests that have to cross a
+    fifteen-minute bound — or the half-hour dwell above it — without waiting it
+    out: the same convention ``_BuildWatch.poll`` uses.
     """
     at = time.monotonic() if now is None else now
     if drain.progress is None:
@@ -2839,6 +3081,20 @@ async def _drain_for(
     if not _idle_for_refresh(handle):
         if drain.progress.stalled_s(at) >= BUILD_DRAIN_PROGRESS_S:
             await _abandon_move(drain, handle, runtime, at=at)
+            return False
+        # THE DWELL, and it is the SECOND question because it is the WEAKER
+        # observation: an expired staleness clock names what the runtime saw the
+        # work NOT do, while an expired dwell says only that the hold is old. A
+        # hold that has been SILENT FOR the staleness bound is therefore always
+        # diagnosed by the arm above (15 min is inside 30), and what reaches this
+        # line is every other hold: a handover whose work keeps reporting, AND one
+        # whose work went quiet inside the staleness bound and is merely younger
+        # than 15 min of silence — which is why nothing here says anything about
+        # the work (see the log line below). Ordered, not folded into one
+        # comparison, so the log and the published bound say which of the two the
+        # runtime actually ran out of.
+        if drain.progress.dwell_s(at) >= BUILD_DRAIN_DWELL_S:
+            await _abandon_move(drain, handle, runtime, at=at, dwell=True)
             return False
         return False
     begin_retire = getattr(handle, "begin_retire", None)
@@ -2858,8 +3114,23 @@ async def _abandon_move(
     runtime: object,
     *,
     at: float,
+    dwell: bool = False,
 ) -> None:
     """The drain could not reach idle: ABANDON the move and KEEP SERVING.
+
+    TWO BOUNDS REACH THIS, and which one did is a keyword rather than a re-read of
+    the clock, because the two say different things to a reader and the log line and
+    the PUBLISHED BOUND are the only places that can say them:
+
+    * the STALENESS bound (:data:`types.BUILD_DRAIN_PROGRESS_S`), the default — the
+      work has reported nothing for fifteen minutes, so what the runtime saw is
+      stated as silence;
+    * the DWELL bound (``dwell=True``, :data:`types.BUILD_DRAIN_DWELL_S`) — the drain
+      has been HELD for half an hour with work STILL IN FLIGHT. Nothing is claimed
+      about that work here, and that is deliberate: the dwell decides on the hold
+      alone, so it reaches a hold whose lanes keep reporting AND one that went quiet
+      less than the staleness bound ago — the state a lane that steps can hold for as
+      long as it likes, and the one the eight-hour measurement came from.
 
     Replaces a force-cut that ended the runtime and its turn together after
     :data:`types.BUILD_DRAIN_PROGRESS_S` of no movement from the work in flight.
@@ -2902,6 +3173,18 @@ async def _abandon_move(
     is already latched as a commitment (the record still says it is leaving for the
     build on disk when its turn ends, which is still true).
 
+    THAT RETRY IS ALSO WHAT MAKES THE DWELL ARM SAFE TO FIRE EARLY, which is the
+    half a reader of the dwell bound needs: on the STALENESS arm the work has stopped
+    reporting, so releasing the latch cannot make the hold longer; on the DWELL arm
+    the work is still going, and a released latch ADMITS MORE WORK — so a dwell that
+    fires on a handover which would have converged in the next minute delays that
+    handover rather than losing it. Nothing is discarded by doing so: the departure
+    is retried at every tick, so it lands at the first idle instant the session
+    reaches, and the newer build is asked about again rather than forgotten. This is
+    the trade the bound exists to make — an operator who can use the session now,
+    and a build move that happens later, in place of a session nobody can write to
+    for as long as a lane keeps stepping.
+
     THE RECORD KEEPS ``LEAVING_FOR_BUILD`` THROUGH THE ABANDON, and that is deliberate
     rather than a leftover (agent review round 1, MINOR-2; design round 1, D4 read the
     same pair from the rendered frame): the COMMITMENT is what survives — the drain
@@ -2925,31 +3208,65 @@ async def _abandon_move(
     truth (``update_failed`` plus the build still running), which is the same split
     the update window's abandon already relies on.
     """
-    stalled = drain.progress.stalled_s(at) if drain.progress is not None else BUILD_DRAIN_PROGRESS_S
-    if drain.progress is not None:
+    progress = drain.progress
+    if progress is not None:
         # ONCE PER DRAIN, and the flag is the guard rather than a caller's check:
         # the reaper ticks every ``REAP_CHECK_S`` and a released latch does not
         # stop ``_drain_for`` being called with the SAME drain object, so without
         # this a runtime that cannot reach idle would publish its failure four
         # times a minute.
-        if drain.progress.abandoned:
+        if progress.abandoned:
             return
-        drain.progress.abandoned = True
-    logger.warning(
-        "session runtime: the build drain for %s held with no movement for %.0fs "
-        "(bound %.0fs); ABANDONING the handover and keeping %s",
-        drain.reason,
-        stalled,
-        BUILD_DRAIN_PROGRESS_S,
-        _loaded_build_label(runtime),
-    )
+        progress.abandoned = True
+    if dwell:
+        # The dwell arm's own two numbers. ``at`` is the caller's instant, so the
+        # spent figure is read from the same clock the bound was compared against.
+        spent = progress.dwell_s(at) if progress is not None else BUILD_DRAIN_DWELL_S
+        bound = BUILD_DRAIN_DWELL_S
+        # A WARNING OF ITS OWN, because the two arms have to be separable from a
+        # log alone: this one fired while the runtime was still observing progress,
+        # so a reader must not be told the work went quiet (it did not) and must be
+        # told the build pair the abandoned handover was for, or the line cannot be
+        # matched to the update it abandoned.
+        logger.warning(
+            "session runtime: the build drain for %s was latched for %.0fs with work "
+            "still in flight (dwell bound %.0fs, handover to %s, pid %d); ABANDONING the "
+            "handover, releasing the latch and keeping %s — the work continues and this "
+            "runtime keeps serving it",
+            drain.reason,
+            spent,
+            bound,
+            drain.to or "<unnamed>",
+            # THE PID, as every latch and exit line in this module carries it: this is
+            # the line an operator greps for in a shared, rotated runtime log, where
+            # session ids repeat across builds and a bare pair does not identify the
+            # process whose drain was given up (QA round 1, Q-3).
+            os.getpid(),
+            _loaded_build_label(runtime),
+        )
+    else:
+        spent = progress.stalled_s(at) if progress is not None else BUILD_DRAIN_PROGRESS_S
+        bound = BUILD_DRAIN_PROGRESS_S
+        logger.warning(
+            "session runtime: the build drain for %s held with no movement for %.0fs "
+            "(bound %.0fs, pid %d); ABANDONING the handover and keeping %s",
+            drain.reason,
+            spent,
+            bound,
+            # THE PID, as the dwell arm's line carries it and as every latch and exit line
+            # in this module does: this is the line an operator greps for in a shared,
+            # rotated runtime log, and the arm that fires FIRST of the two abandon bounds
+            # was the one a pid-filtered scan could not find (QA round 1, Q-5).
+            os.getpid(),
+            _loaded_build_label(runtime),
+        )
     end = getattr(handle, "end_drain", None)
     if callable(end):
         try:
             end()
         except Exception:  # noqa: BLE001 — a failed release must not stop the report
             logger.debug("could not release the drain latch", exc_info=True)
-    await _keep_loaded_build(handle, runtime, drain.to, BUILD_DRAIN_PROGRESS_S)
+    await _keep_loaded_build(handle, runtime, drain.to, bound)
 
 
 async def _hand_wakes_to_successor(handle: object) -> int:

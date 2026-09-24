@@ -3962,8 +3962,41 @@ class RuntimeServer:
         Deduped like :meth:`set_busy`, and it matters more here: the drain calls
         this once, but a repeat signal or a second drain arm on the same runtime
         must not put a staged write and rename on the far side of a signal.
+
+        A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
+        rule one rung over (its NIT 4) and is required here for the same reason plus
+        one of its own. The reason is the window's: without it the record keeps
+        describing an abandoned move after the runtime has started a NEW one, so a
+        fleet row reads "update failed" about a session that is moving right now.
+
+        The reason it has one of its own is that the record's OTHER half,
+        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
+        keeps the ordinary build phrase by design (``process._abandon_move``), so
+        that field is the only thing separating a handover still waiting from one
+        that was given up, and its readers are the fleet surfaces that print the two
+        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
+        row). A stale failure left beside a freshly latched drain makes that pair
+        report the new attempt as the abandoned one. Cleared here rather than only on
+        a change of phrase, because the second attempt at the same build announces
+        the same words — the case that matters would otherwise be the one it got
+        wrong.
+
+        WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
+        ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
+        the bound it spent on the detail), which is the account an issue report
+        cites, and the field is re-published if THIS attempt fails too. The handle's
+        own memo is NOT part of that account — it is the WINDOW rung's
+        (``serving.ServingSessionHandle.note_update_failed``, written by
+        ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
+        rung's ONE permitted retry: the pair is refused only once ``_update_retried``
+        already holds it, so the memo stops a THIRD attempt rather than "re-opening a
+        window that burned its bound") and the drain rung deliberately does
+        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
         """
-        if self._leaving == phrase:
+        superseded = bool(phrase) and bool(self._record.update_failed)
+        if superseded:
+            self._record.update_failed = ""
+        if self._leaving == phrase and not superseded:
             return
         self._leaving = phrase
         self._record.leaving = phrase
@@ -4229,6 +4262,21 @@ class RuntimeServer:
         See :meth:`_visible_attach_surfaces` for why the machine-wide answer
         wins where it exists and the renderer's flag is the fallback where it
         does not.
+
+        AN EMPTY ``session_id`` IS NOT EVIDENCE AGAINST THIS SESSION. The
+        publisher blanks the field whenever it cannot vouch for which
+        conversation the window shows (``server/utils/desktop_presence.py``), and
+        a renderer-report lapse blanks it too, so denial on an empty name reads
+        absence of evidence as evidence against — which is precisely what told
+        the operator's own focused, visible app that nobody was at a screen.
+        The per-connection flag is the per-session answer, and it is set by a
+        heartbeat that names THIS session's subscription, so falling through to
+        it is also the pre-presence behaviour the docstring above promises an
+        older app: byte-identical for an old UI.
+
+        The denied direction is preserved where the record IS evidence: an app
+        naming a DIFFERENT conversation still denies, which is what stops it
+        suppressing a background session's banner while showing someone else.
         """
         try:
             from local_operator.session.runtime.presence import desktop_presence
@@ -4238,6 +4286,8 @@ class RuntimeServer:
             logger.debug("could not read the desktop presence", exc_info=True)
             return conn.desktop_visible
         if not presence.present:
+            return conn.desktop_visible
+        if not presence.session_id:
             return conn.desktop_visible
         record = getattr(self, "_record", None)
         session_id = str(getattr(record, "session_id", "") or "")
@@ -4260,6 +4310,69 @@ class RuntimeServer:
             )
             else frozenset()
         )
+
+    def attached_surfaces(self) -> frozenset[str]:
+        """Which KINDS of interface can PRESENT a card the operator will see.
+
+        Sibling of :meth:`watching_surfaces`, NOT a replacement. That one answers
+        "is a person looking at this session right now" and is the whole of rung 1
+        of the notification ladder (``docs/DESKTOP_API.md``, "The notification
+        eligibility ladder"). This one answers "is there an interface that could
+        show this session a question, and that the operator returns to" — the
+        question the MODEL needs, because a question asked now is answered when
+        they look, not when they are looking.
+
+        FOCUS IS DELIBERATELY ABSENT, and it must not be "tidied" into agreement
+        with :meth:`_visible_attach_surfaces`. Focus flaps with window z-order,
+        and this answer is rendered into the persisted system-prompt tail
+        (``prompts_api.build_system_blocks``), so every flap would move a block
+        the model carries on every request. A window that is merely not frontmost
+        still holds a mounted pane this conversation can be painted into.
+
+        THE DESKTOP CLAUSE IS THE LEASE AND NOTHING ELSE (round 1, MINOR 5). It
+        used to read ``lease and (desktop_visible or desktop_can_notify)`` — the
+        ``attach_clients()`` clause, on the theory that both asked "could this
+        front end present something". That theory costs the model-facing answer
+        its stability: ``desktop_visible`` is the app's ``visible &&
+        focused``, so on a host with no OS-notification channel
+        (``can_notify`` false — the JSON transport, browser dev) the clause
+        collapses to ``visible``, and raising and lowering the window flips the
+        persisted block and writes a ``[session-state]`` row. The lease is what
+        the question actually asked for: it is renewed by a heartbeat that names
+        THIS session's subscription and is withdrawn when the pane leaves
+        (``desktop_watch``), so "lease live" IS "a pane holds this
+        conversation", with no window state and no notification capability in
+        it. ``can_notify`` belongs to reachability (:meth:`notification_surfaces`)
+        and ``visible`` to attention; neither is attachment.
+
+        The reaper's own count (:meth:`attach_clients`) keeps the extra clause:
+        it answers a RESIDENCY question, where an app that can neither show nor
+        notify is not a reason to stay up, and the two are now deliberately not
+        the same expression.
+
+        A terminal attach is counted even while it is displaying ANOTHER session
+        (``terminal_displaying`` False): the connection is the process that can
+        paint the card the moment the operator switches back to it. This asks
+        about presentation, not about attention.
+        """
+        attached: set[str] = set()
+        # SNAPSHOT BEFORE ITERATING (C8): read from the session's loop while the
+        # runtime's own loop registers and drops clients in this dict — the same
+        # hazard ``attach_clients`` documents.
+        for conn in list(self._clients.values()):
+            if conn.kind != "attach":
+                continue
+            if conn.surface == "desktop":
+                if self._desktop_lease_live(conn):
+                    attached.add("desktop")
+            else:
+                attached.add("attach")
+        if self.watch_supported and self.phone_watchers > 0:
+            # Reported as ``viewer`` rather than ``daemon``, for the reason given
+            # on :meth:`watching_surfaces`: a relay being dialled is true of every
+            # session on a machine running ``lop mobile``.
+            attached.add("viewer")
+        return frozenset(attached)
 
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.

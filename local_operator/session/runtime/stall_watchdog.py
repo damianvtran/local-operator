@@ -275,27 +275,160 @@ lane is stepping, so ``_subagent_roster_generation`` moves). A run where all
 three legs held for 300 continuous seconds is not a slow step; it is a process
 burning a core to produce nothing.
 
-WHAT THIS LEG STILL CANNOT SEE, named so a reader does not assume coverage. The
-in-flight leg reads the PROCESS's own step and its compaction. A SUBAGENT LANE
-running a long in-process tool of its own is not "in flight" by that measure, so
-a lane parked in private CPU work with no step boundary for longer than the
-window is cut with its parent. Widening the probe to every child session is its
-own change — ``comms._records`` holds those sessions privately today — and is NOT
-in this one.
+WHAT THIS LEG NOW READS ABOUT CHILD LANES, IN TWO HALVES AND TWO CHANGES. Both
+halves are closed, and they cover different things a lane can be doing:
 
-IT ALSO CANNOT TELL A PARKED CHILD LANE FROM A SPIN, and that gap is the same
-false-positive class the liveness leg was just taught to see, one layer out. The
-shape: a parent driving subagents IN PROCESS, every child parked in a long model
-call, so no lane closes a step and ``_subagent_roster_generation`` does not move
-(the roster bumps on a completed assistant message, a model change or a lifecycle
-event — not on a call being outstanding), while the PARENT's own loop burns CPU in
-the same per-event projection walk the fires above were caught in. All three legs
-then hold and the diagnostic timer fires while the process is working. The measured
-cost of that walk is superlinear in the roster: ``nodes()`` calls ``node()`` per record and
+* a PROVIDER REQUEST outstanding in any FORKED child stream — every in-process
+  lane takes its stream from ``SessionStreamFn.fork``
+  (``harness.subagent._construct_child_session``), those forks share ONE counter
+  with the runtime's own stream, and the probe reads it as the scalar
+  ``child_model_requests_in_flight``: O(1) for the whole tree at once, and the
+  manager's own request never counts;
+* a STEP OPEN IN THE LANE ITSELF — its own tool batch, its own on-demand
+  compaction — which no counter can express, read per live lane by
+  ``process._child_lanes_in_flight`` off the roster's private records.
+
+WHAT THE SECOND READ COSTS, MEASURED RATHER THAN ASSUMED — AND IT IS LINEAR IN
+ROWS SCANNED, NOT IN LANES ALONE. It is the read the paragraph above refused as
+"not cheap" before there was a number for it, and the refusal does not survive the
+number; but the number has TWO axes, and quoting only the lane axis is how a
+tail-dependent figure gets read as a tail-independent one. Both are below.
+
+THE LANE AXIS. On this host (2026-09-23, CPython 3.12.13, load average 128-280 over
+the sweeps — the figures are CPU, so the fleet's load does not enter them), over a
+REAL ``SubagentComms`` roster of real child sessions, each holding a completed-turn
+tail (four rows plus the ``user`` boundary the scan breaks on):
+
+    live lanes   widened read (µs CPU/sample)     per lane
+    0            0.19-0.21                        --
+    1            0.85-0.87                        0.85-0.87
+    8            6.02-8.88                        0.75-1.11
+    64           59.09-62.04                      0.92-0.97
+    256          290.49-331.93                    1.13-1.30
+
+(two sweeps of ONE rig, so the ranges are this host's run-to-run spread; the
+reviewer's and QA's own rigs put N = 256 at 278-315 µs, so the ORDERING and the
+~1 µs per-lane constant are the stable part of this table and a single digit is
+not). The sampler reads it once per ``_sample_interval`` — 15 s at the shipped
+300 s bound, four samples a minute — so at that tail the widest measured roster
+spends ~1.2-1.3 ms of CPU per minute: about 0.002% of one core, three orders of
+magnitude below the :data:`PROGRESS_CPU_FLOOR` (5% of one core) the leg demands of
+the very spin this read exists to judge.
+
+THE TAIL AXIS IS THE REAL DRIVER, AND THE PER-ROW CONSTANT IS A PROPERTY OF THE
+ROW CLASS, so it is only meaningful with the class beside it. What the scan walks
+is not "a lane": it is the run of rows after the last ``user`` boundary that are
+neither that boundary nor an assistant row carrying tool calls — the rows
+``unanswered_tail_call_ids`` steps over one at a time. One lane, one row class per
+sweep, same rig, CPU via ``time.thread_time()``, the minimum of three sweeps:
+
+    row class                                   N=514     N=4098   marginal
+    CustomMessage, the product's own ctors      849.65    6706.46   1.65 µs/row
+    CustomMessage, bare                         937.03    7039.58   1.72
+    CustomMessage carrying a role extra         659.00    7391.50   1.80
+    Message(role='assistant') with text          38.36     305.96   0.075
+    Message(role='assistant') with tool_calls     0.29       1.00   returns there
+    SimpleNamespace(role='assistant')            31.81     250.38   0.061
+
+THE CLASSES ARE 20-30x APART, so a µs/row figure means nothing without its class.
+The 0.08-0.12 µs/row table this paragraph used to carry was measured on the CHEAP
+class — ``Message`` and ``SimpleNamespace`` rows (0.061-0.075 here) — while the
+sentence above it named the ``CustomMessage`` row the incident lands on, which is
+1.65-1.80. At the class the rule names, 4098 rows cost ~6.7 ms on ONE lane rather
+than ~0.46 ms. What is walked in the incident shape IS the ``CustomMessage`` class:
+that is what a hub message, a job result, a compaction marker and an incident all
+are.
+
+WHAT A REAL TAIL IS, COUNTED RATHER THAN ASSUMED: over the 10,482 saved
+transcripts under ``~/.local-operator/sessions``, the walk — rows from the end to
+the first assistant row carrying calls, or to the last ``user`` row — is a MEDIAN
+OF 5 ROWS, p95 7, p99 9, p99.9 16, and the widest is 25. Of the 43,194 rows those
+walks step over, 21,809 (50.5%) are ``CustomMessage``-class entries and 21,341
+(49.4%) are ``Message`` rows (44 are journal rows that never enter a live context).
+A real tail is short, and about half of it is the cheap class. A WHOLE-TRANSCRIPT
+COUNT IS NOT THIS NUMBER, and the gap is the reason the paragraph this one replaces
+was wrong to divide by the lane count alone: the same corpus's transcripts hold a
+MEDIAN OF 63 ``custom`` entries, p99 612, up to 3057 — they accumulate over the
+whole conversation, while the walk stops at the last ``user`` boundary.
+
+AT A REAL WIDTH THE READ IS CHEAP AND THE FLOOR IS UNDER NO PRESSURE. The widest
+walk those transcripts show, on a 256-lane roster, is 11.7-13.5 ms of CPU per
+sample: 47-54 ms of a CPU minute, ~0.08-0.09% of one core, about 55x below the
+:data:`PROGRESS_CPU_FLOOR`. At the median 5-row walk it is 2.3-2.7 ms per sample,
+~0.015-0.018% of a core, ~300x below it. That is the honest form of the "three
+orders" claim: it holds for the tail rows a real lane carries, and it is about ROWS
+more than lanes — the lane axis alone, over a real completed-turn tail (four rows
+plus the boundary the scan breaks on), is 191-239 µs at 256 lanes, 0.75-0.93 µs per
+lane, this round's own re-measure at the low end of the table above and inside the
+rig spread that paragraph names.
+
+THE SHAPE THAT BREACHES THE FLOOR, NAMED, BECAUSE THE FLOOR KEEPS ITS ROLE: 256
+lanes whose tails are 4098 ``CustomMessage`` rows each — the shape this paragraph
+used to extrapolate — costs 1.88-2.03 s of CPU per sample, 7.5-8.1 s of a CPU
+minute, ~12.5-13.5% of one core. That is ABOVE the 5% floor, not below it. Even on
+the real 50/50 row mix counted above the same shape is ~1.1 s per sample, ~7.5% of
+a core, still above. The floor itself does not move: it is the demand the legs make
+and the number this read is judged against, and what this section now says is that
+at that tail the read does not meet it. Two consequences, stated rather than left
+to inference:
+
+* 4098 rows is SYNTHETIC, not a rate seen in the field — it is 164x the widest walk
+  in those 10,475 transcripts, and it is structurally hard to reach, because the
+  walk ends at the last ``user`` boundary: a tail that long needs thousands of
+  incident / hub / job-result rows on top of one open batch. The steady state is
+  the 0.08% case above.
+* Should tails that long ever become real, the fix is a BOUNDED read rather than a
+  smaller constant, and the bound belongs in ``protocol.unanswered_tail_call_ids``
+  — the one rule this read shares with the two display predicates. That is a
+  different change from this one, with a wider blast radius, and it is not taken
+  here. A CHEAP BOUND WAS CONSIDERED AND REFUSED, measured rather than argued: a
+  fast path that skips a row class it "knows" cannot qualify is NOT
+  semantics-preserving, because ``CustomMessage`` is ``extra="allow"`` and the scan
+  reads its ``role`` and ``tool_calls`` — a ``CustomMessage`` carrying
+  ``role='assistant'`` and ``tool_calls`` IS the qualifying row (its calls come
+  back as unanswered), one carrying ``role='tool'`` plus ``tool_call_id`` ANSWERS
+  the batch below it (the answer flips from ``{'open-1'}`` to empty), and one
+  carrying ``role='user'`` STOPS the walk. Short-circuiting on the first qualifying
+  row is already what the loop does. A bound that can miss an unanswered call is
+  not one to take.
+
+Two structural facts keep the walk as small as it is, and both are pinned in
+``tests/unit/session/runtime/test_child_lane_progress.py``: each live lane is asked
+once per sample, and a lane that DOES hold a step answers on the first row the scan
+reaches, so the in-flight case is the cheaper one (measured on that same 256-lane
+roster: 1.5 µs per sample with an open batch on the FIRST record, against 211 µs
+with one on the LAST, where every lane is asked).
+
+N IS THE LIVE LANE COUNT, NOT ``MAX_RECORDS``, and the cap is not a budget for this
+read. ``_evict_overflow`` evicts only records with no live child AND no running
+job, so it bounds the map's evictable tail rather than lane concurrency: measured
+here, 300 attached lanes leave 300 records, and a record detached without settling
+is not evictable either. A live roster has been measured at 296 records on this
+fleet. What bounds this read is how many lanes one manager is running, which is a
+scheduling fact and not a constant in this module.
+
+THE SHAPE BOTH HALVES ABOVE EXIST FOR, AND WHY ITS CPU IS THERE. A parent
+driving subagents IN PROCESS, every child parked in a long model call, so no lane
+closes a step and ``_subagent_roster_generation`` does not move (the roster bumps
+on a completed assistant message, a model change or a lifecycle event — not on a
+call being outstanding), while the PARENT's own loop burns CPU in the same
+per-event projection walk the fires above were caught in. All three legs then
+hold — no motion, nothing in flight by the parent's own reading, CPU advancing —
+and the diagnostic timer fires while the process is working; that is the false
+positive the two reads above close, one half at a time. The step half was
+measured on this change's OWN child: with a lane mid-batch and nothing else in
+flight, the production probe answered ``not in flight`` and the bound's fire
+ended the process — the policy that build carried then, since production expiry
+is dump-only now (:data:`DUMP_POLICY_MARKER`), so the same reading fires here
+and this runtime SURVIVES it.
+The measured cost of that walk is superlinear in the roster: ``nodes()`` calls
+``node()`` per record and
 ``_describe()`` calls ``_live_twin()``, which re-scans ``_records`` for each one, so
-the walk is O(N^2) in the lane count, and ``MAX_RECORDS`` is 256 — measured AT the
-cap on this machine on 2026-09-22 (one session's ``subagent-roster.v1.json`` holds
-exactly 256 records, four more hold 146-243). The coordinator on this change
+the walk is O(N^2) in the lane count, and the widest roster measured on this
+machine on 2026-09-22 holds 256 records (one session's
+``subagent-roster.v1.json`` holds exactly 256, four more hold 146-243) — a
+measured width, not the ``MAX_RECORDS`` cap, which does not bound a live roster
+(see the note above). The coordinator on this change
 measured one ``_refresh_state``'s subagent work at 46 ms at 64 records, 113 ms at
 128, 165 ms at 192 and 422 ms at 256 on an idle box against the real
 ``SubagentComms`` (this change's own synthetic re-measurement, on bare records with
@@ -303,16 +436,59 @@ no ``child`` or job state, gives 0.5 ms at 64 and 2.0 ms at 256 — the shape is
 same and the constant is the real records', so quote the ordering, not the
 constant).
 
-THIS CHANGE DOES NOT RELAX THAT LEG, and no part of the fix above depends on the
-mechanism behind those fires being settled: the abstention rests on an OBSERVED
-moving frame, not on a theory of why the stamp was late. What would close this gap
-is a probe field that reads "this session has a child lane with a model call
-outstanding", and it is NOT cheap: it means reading every child session's own
-context off the sampler's foreign thread, behind ``comms._records``, at every
-sample — the same cross-thread live-state read this change is REDUCING (see
-:func:`_read_probe` on why the probe no longer runs under ``_LOCK``). Adding a
-second reader of that state to save a bound is the wrong trade until the
-bookkeeping walk is linear; that work is a separate change.
+THE RESIDUAL, STATED PLAINLY BECAUSE THE WIDENING IS A REAL TRADE, on both sides
+of it. Still uncovered: a lane parked in synchronous CPU work with NO step open —
+inside one C call or one long callback, no tool batch, no compaction, no provider
+request outstanding — which the liveness leg's frame observation cannot see
+either, because that watches only the two threads that beat. Such a lane still
+holds all three legs, so the bound FIRES on a process that is working — the fatal
+arms this module used to carry would have cut it — and closing the gap means
+reading a lane's frames, which is a different change from this one.
+
+AND THE MIRROR RESIDUAL, WHICH THIS WIDENING EXPOSES RATHER THAN CLOSES, named
+because it is the shape closest to the incident this leg was written for. A step
+that never CLOSES — a lane wedged inside an in-process tool whose results never
+land, a compaction that hangs — holds its lane's answer "in flight" for as long as
+it lives, which is the very property ``lane._is_streaming`` is refused for below,
+reached through the narrow question instead. For that shape BOTH LEGS NOW ABSTAIN,
+and the consequence is worth spelling out: the liveness leg watches the two planes'
+stamps and frames and never reads CPU, so a parent that keeps looping while one
+lane holds an open step is ended by nothing in this module. The run stays resident,
+with no ``no progress:`` line to find. The founding incident (four running lanes
+that had produced nothing for seven minutes) is this shape's neighbour: had those
+lanes been parked MID-BATCH rather than idle, this leg would now spare the run. A
+reader who finds a runtime alive past its bound with a lane holding a step should
+read it as "possibly stalled in a lane" and stop it by hand — ``lop stop``, the
+route the held arm already documents — rather than assume the bound is watching;
+closing it means bounding a LANE's own step, which is a different change from this
+one. The direction is still the right one (spare a process that is working past
+any bound rather than cut a dead one late), and it is why the lane question is
+asked narrowly, about a step being OPEN, and never as ``lane._is_streaming``: that
+is true for a lane's whole turn, so one lane parked in a provider call that never
+returns would keep its parent's spin unobservable forever, with not even a step to
+point at.
+
+AND IN THE SPARED SHAPE THE BOUND DOES NOT FIRE AT ALL — IT DEFERS. That is a
+THIRD outcome beside the two the exit leg distinguishes, and the vocabulary is
+worth keeping straight because a dump carries evidence of only two of them.
+**Deferred**: the probe answers "in flight" at every sample, so :func:`_sample`
+restarts the progress clock each time and no window ever closes — the file carries
+the ARM-time header and neither the ``Timeout (`` fired marker nor a
+``no progress:`` line, however many bounds the process outlives. That is what a
+lane holding an open step produces, and it is an ABSTENTION rather than a fire
+that was held. **Fired and held**: reached only once the probe STOPS answering in
+flight while the exit leg still holds work (a job in flight, a live subagent); the
+fire writes the fired marker, the progress line and :data:`HELD_MARKER`, re-arms
+for the next episode, and leaves the process running. **Fired and observed**: a
+fire on an idle runtime — the arm a LEGACY build took a native ``_exit(1)`` on,
+and :data:`OBSERVED_MARKER` here — where production expiry writes the dump and
+leaves the process serving. A reader looking at a header-only dump on a process
+that outlived several bounds is looking at the first of the three, not at a fire
+that was held.
+
+AND NO PART OF THE FIX ABOVE DEPENDS ON THE MECHANISM BEHIND THOSE FIRES BEING
+SETTLED: the abstention rests on an OBSERVED moving frame, and now on an OBSERVED
+open step, not on a theory of why the stamp was late.
 
 THE TICK ITSELF CAN DIE, AND UNTIL THIS ITS DEATH WAS INVISIBLE
 --------------------------------------------------------------
