@@ -55,6 +55,26 @@ class SessionRow(BaseModel):
     #: with both values here rather than omitted for the local case.
     locality: Literal["local", "remote"] = "local"
     peer: dict[str, Any] | None = None
+    #: -- THE FLAT LOCALITY FIELDS (mesh build plan, Addendum 2 B). The renderer
+    #: groups and labels from THESE, not from the nested ``peer`` block: with only
+    #: the nested shape every remote row was filed under one heading, because the
+    #: client reads ``owner_device`` and nothing else. They are declared here —
+    #: rather than left to ``extra="allow"`` — for the reason ``pinned`` gives:
+    #: this model is the contract a renderer mirrors by hand.
+    #:
+    #: PRESENT WITH A VALUE ON EVERY ROW, local ones included (``""``/``""``/
+    #: ``True``/``""``), which is the merge rule the row shape follows everywhere:
+    #: a client's merge is "an absent key is not a claim", so a row that MOVED home
+    #: would otherwise keep its stale ``remote`` mark and stay filed under a peer it
+    #: no longer lives on.
+    owner_device: str = ""
+    owner_device_name: str = ""
+    #: Whether the owning device answered THIS poll (always true for a local row).
+    reachable: bool = True
+    #: One sentence when ``reachable`` is false, in the backend's words — the
+    #: relay's protocol tokens are glossed at this boundary
+    #: (``resume.peer_reason_words``) so no renderer keeps a glossary of its own.
+    unreachable_reason: str = ""
     #: Where the session runs (``local``/``peer``/``pool``) and the policy that
     #: governs it, from the session's own ``mesh.json``. Always present for a row
     #: this build writes, so a reader can tell "local" from "written by a build
@@ -225,6 +245,18 @@ class SessionSearchRow(BaseModel):
     #: otherwise. Dropping the key would make the two answers indistinguishable
     #: to a client merging hits into the rows it holds.
     archived: bool
+    #: -- THE FLAT LOCALITY FIELDS, the catalogue's six keys on the search's own
+    #: row (Addendum 2, B). DECLARED RATHER THAN LEFT TO ``extra``, and that is
+    #: the whole reason they are here: this model does not allow extras, so a
+    #: projection that set them would have had them SILENTLY DROPPED from the
+    #: answer — the client would see a search hit with no ``locality`` while the
+    #: same conversation carried one in the catalogue, which is exactly the
+    #: disagreement the field exists to prevent.
+    locality: Literal["local", "remote"] = "local"
+    owner_device: str = ""
+    owner_device_name: str = ""
+    reachable: bool = True
+    unreachable_reason: str = ""
 
 
 class SessionSearch(BaseModel):

@@ -2900,6 +2900,14 @@ class SessionPage:
     rows: list[dict[str, Any]]
     pinned_off_page: list[dict[str, Any]]
     truncated: bool
+    #: The sessions OTHER devices hold, present only for a listing that asked for
+    #: them (``include_peers``). A SEPARATE FIELD rather than concatenated here, and
+    #: the route concatenates: ``rows`` is the page a ``limit`` describes and
+    #: ``truncated`` is a verdict about it, so folding a population that no ``limit``
+    #: governs into the same list would make the count mean two things — the trap
+    #: ``pinned_off_page`` already documents one level up. ``truncated`` says nothing
+    #: about these rows, deliberately: a peer's catalogue is not this device's history.
+    remote: list[dict[str, Any]] = field(default_factory=list)
 
 
 class DesktopSessions:
@@ -3617,8 +3625,17 @@ class DesktopSessions:
         status_stamps: tuple[str, dict[str, int]] | None = None,
         *,
         include_archived: bool = False,
+        include_peers: bool = False,
     ) -> SessionPage:
         """One page of rows, plus the pinned rows the page does not carry.
+
+        ``include_peers`` appends the sessions OTHER devices hold, as
+        ``SessionPage.remote`` — the transport's federated catalogue
+        (``session.peer_rows``, the same TTL-cached projection the sidebar's peer
+        heading groups on). It is FALSE by default and the default is the contract:
+        a client that did not ask for peers receives the byte-identical answer it
+        always did, which is what lets a pre-mesh renderer and every existing test
+        keep reading this route unchanged.
 
         ``limit`` IS THE PAGE SIZE and the truncation verdict is computed here,
         because the two are one question: the caller used to ask for
@@ -3660,6 +3677,12 @@ class DesktopSessions:
         """
 
         def rows() -> SessionPage:
+            # IMPORTED HERE, not at module scope: the desktop's mesh reads pull the
+            # network package onto every ``lop serve`` boot, and a listing that did
+            # not ask for peers must not pay for it (the same rule ``routes/auth.py``
+            # states for its own lazy imports).
+            from local_operator.server.utils.desktop_mesh import remote_session_rows
+
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
             # `read_pins` already applies both the store's own read-time prune
@@ -3769,7 +3792,17 @@ class DesktopSessions:
                         # document's, and they are here so a remote row needs no
                         # second shape when that lands.
                         "locality": "local",
+                        # The nested block is the TRANSPORT's shape and stays for
+                        # the surfaces that read it (the TUI's rows); the desktop
+                        # groups from the FLAT fields below (Addendum 2 B), and a
+                        # local row publishes them as the local answer rather than
+                        # omitting them — for the reason ``pinned`` gives, a row
+                        # that moved home must be able to UNSET a stale remote mark.
                         "peer": None,
+                        "owner_device": "",
+                        "owner_device_name": "",
+                        "reachable": True,
+                        "unreachable_reason": "",
                         "placement": (
                             stamp.placement.to_json()
                             if stamp is not None
@@ -3806,12 +3839,24 @@ class DesktopSessions:
                 # from `entries` rather than from the page alone because the
                 # probe row was ASKED for and correctly answered this.
                 truncated=len(entries) > limit,
+                # THE PEER HALF, read in THIS worker thread and only when asked:
+                # the projection dials this device's relay, which is a socket read
+                # the request's own loop must not pay, and a listing that did not
+                # ask for peers costs nothing at all — not even the module import.
+                # ``pins`` is the request's own read, so a remote row's pin and a
+                # local row's pin come from one snapshot.
+                remote=(remote_session_rows(self.root, pins=pins) if include_peers else []),
             )
 
         return await asyncio.to_thread(rows)
 
     async def search(
-        self, query: str, limit: int, *, include_archived: bool = False
+        self,
+        query: str,
+        limit: int,
+        *,
+        include_archived: bool = False,
+        include_peers: bool = False,
     ) -> list[dict[str, Any]]:
         """Past conversations matching ``query``, each carrying its pin state.
 
@@ -3830,9 +3875,13 @@ class DesktopSessions:
         """
 
         def rows() -> list[dict[str, Any]]:
+            # Lazy for ``list``'s reason: the mesh projection drags the network
+            # package in, and a search that did not ask for peers must not pay it.
+            from local_operator.server.utils.desktop_mesh import remote_session_rows
+
             matches = search_store(self.root, query, limit=limit, include_archived=include_archived)
             pins = set(read_pins(self.root))
-            return [
+            hits = [
                 {
                     "id": match.row.id,
                     "name": match.row.name,
@@ -3850,9 +3899,46 @@ class DesktopSessions:
                     # not return one at all, so every hit of a default search is
                     # `false` and the key exists for the answer that is not.
                     "archived": bool(match.row.archived),
+                    # THE FLAT LOCALITY FIELDS, local values included — the same
+                    # six keys the catalogue carries them on, for the same merge
+                    # reason: a search hit is the one row a client can SYNTHESISE
+                    # the catalogue never sent, and a synthesised row with no
+                    # ``locality`` would keep whatever mark the row it replaces had.
+                    "locality": "local",
+                    "owner_device": "",
+                    "owner_device_name": "",
+                    "reachable": True,
+                    "unreachable_reason": "",
                 }
                 for match in matches
             ]
+            if not include_peers:
+                return hits
+            # THE PEER HALF, and it is a FILTER rather than a second search: a
+            # peer's transcript is not on this disk, so a remote hit can only ever
+            # match by name or id (``body_match`` stays False — never a body match
+            # this device cannot prove) and is ranked with the same tiers the local
+            # half uses: name is rank 0, id is rank 1. Appended AFTER the local
+            # hits, so every remote row sorts below every row this device searched.
+            needle = query.strip().casefold()
+            for row in remote_session_rows(self.root, pins=pins, query=query):
+                hits.append(
+                    {
+                        "id": row["id"],
+                        "name": row["name"],
+                        "mtime": row["mtime"],
+                        "rank": 0 if needle and needle in str(row["name"]).casefold() else 1,
+                        "body_match": False,
+                        "pinned": bool(row.get("pinned")),
+                        "archived": bool(row.get("archived")),
+                        "locality": "remote",
+                        "owner_device": row.get("owner_device") or "",
+                        "owner_device_name": row.get("owner_device_name") or "",
+                        "reachable": bool(row.get("reachable")),
+                        "unreachable_reason": row.get("unreachable_reason") or "",
+                    }
+                )
+            return hits
 
         return await asyncio.to_thread(rows)
 

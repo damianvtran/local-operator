@@ -332,6 +332,34 @@ async def capabilities():
                 # an old renderer ignores the extra fields, and bumping would
                 # hide a working sign-in flow behind an update it does not need.
                 "tunnel": 1,
+                # THE MESH, and both keys gate AFFORDANCES rather than shapes.
+                #
+                # `peers` is the peer catalogue's key (mesh-session-mobility.md
+                # §9.3, `mesh-ui.md` §2.6): the `GET /v1/desktop/peers` route, the
+                # `include_peers` parameter on the session list, the flat
+                # `locality`/`owner_device*` fields on every row, the peer `peer`
+                # on create, and the Networks tab's data. ABSENT ⇒ no peer
+                # sections and no remote marks at all — and the `Peers` group must
+                # be NOT MOUNTED rather than mounted-empty, because a reserved
+                # empty section advertises a feature the user does not have (the
+                # argument `session_pins` already makes).
+                #
+                # `session_transfer` is ITS OWN KEY, not a bump of `peers`, by
+                # the rule `session_search`/`session_delete` state above: a
+                # backend can show a peer's sessions and be unable to move one,
+                # and on `peers` alone the renderer would draw its
+                # `Move a chat here…` row against a route that 404s. Absent ⇒ the
+                # control is not mounted and the list is not offered.
+                #
+                # ADVERTISED UNCONDITIONALLY, including on a machine in no
+                # network, because the KEYS answer "what can this backend do"
+                # rather than "is this machine in a mesh": a renderer that had to
+                # ask a second question would gate its own controls on a
+                # configuration read it cannot make. A device in no network
+                # answers an empty catalogue, and an empty catalogue mounts
+                # nothing.
+                "peers": 1,
+                "session_transfer": 1,
             },
         },
     )
