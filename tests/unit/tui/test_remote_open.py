@@ -10,6 +10,9 @@ and says what happened in the design's words.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import time
 from typing import Any
 
@@ -18,6 +21,7 @@ import pytest
 from local_operator.network.mobility import MOVE_RESULT_PHASES
 from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry
+from local_operator.session.runtime.registry import scan as record_scan
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_move import (
     AMBIGUOUS_MOVE,
@@ -646,6 +650,22 @@ async def test_a_relayed_connection_without_delete_cannot_archive_through_this_a
             assert "delete" in refused["text"], refused
         assert writes == [], writes
 
+        # AND THE HALF THAT IS NOT IMPLIED BY THE LOCALITY (round 3, R3-3): a
+        # relayed connection that forwarded NO capability set at all — the keyword
+        # left out, which is exactly what a caller that has resolved nothing sends —
+        # must be refused too. ``None`` means "not said", not "said none", and until
+        # this cell existed the mutation
+        # ``may_run_delete_scoped_slash = lambda loc, caps: loc == "local" or caps is
+        # None or "delete" in caps`` passed every delete-gate test in the suite: the
+        # routed cells above always carried a set, and the terminal carrier hides
+        # the gap behind its allowlist.
+        for command in ("archive", "unarchive", "delete"):
+            refused = await app.run_slash_authoritative(command, "yes", locality="remote")
+            assert refused["kind"] == "notice", refused
+            assert refused["style"] == "warning", refused
+            assert "delete" in refused["text"], refused
+        assert writes == [], writes
+
         # THE NEGATIVE CONTROL: the same command from a connection that DID
         # resolve ``delete`` reaches the handler. (The fake session has no
         # transcript, so the handler's own answer here is "nothing saved yet" —
@@ -655,3 +675,250 @@ async def test_a_relayed_connection_without_delete_cannot_archive_through_this_a
         )
         assert allowed["kind"] == "notice", allowed
         assert "capability" not in allowed["text"], allowed
+
+
+async def _phone_dial(record: Any, *, locality: str | None = "remote") -> tuple[Any, Any]:
+    """One connection carrying the PHONE's own auth frame.
+
+    ``mobile/daemon.py`` authenticates with ``{"key": …, "locality": "remote"}`` and
+    no capabilities at all, so that is what this sends — the shape the round-3
+    review used to show the allowlist turning the operator's phone away.
+
+    The record is selected by PID rather than by position: ``registry.scan()`` lists
+    every live runtime on this machine, and dialling the first one reaches a
+    FOREIGN session's socket (measured) instead of this test's host.
+    """
+    deadline = asyncio.get_running_loop().time() + 20
+    target = None
+    while asyncio.get_running_loop().time() < deadline:
+        for candidate, liveness in record_scan():
+            if liveness == "live" and candidate.pid == os.getpid():
+                target = candidate
+                break
+        if target is not None:
+            break
+        await asyncio.sleep(0.05)
+    seen = [(r.pid, live) for r, live in record_scan()]
+    assert (
+        target is not None
+    ), f"this process published no live runtime record: scanned {seen}, mine={os.getpid()}"
+    auth: dict[str, Any] = {"key": target.control_key}
+    if locality is not None:
+        auth["locality"] = locality
+    reader = writer = None
+    for _ in range(30):
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", target.control_port, limit=1 << 20
+            )
+            break
+        except OSError:
+            # The record is published before the listener finishes binding.
+            await asyncio.sleep(0.1)
+    assert reader is not None and writer is not None, "the host never accepted a dial"
+    writer.write(json.dumps(auth).encode() + b"\n")
+    await writer.drain()
+    welcome = await asyncio.wait_for(reader.readline(), timeout=10)
+    assert json.loads(welcome)["op"] == "projection", welcome
+    # SETTLE BEFORE SENDING: the runtime refuses every non-priority op while this
+    # connection's canonical sync is still pending ("this viewer is still
+    # connecting … retry once the interface has connected"), and that flag clears
+    # in the BIND task's ``finally``. The refusal it answers with carries no
+    # ``req``, so a request/reply caller waits forever for a reply that was sent —
+    # measured as the first three cells of a fresh host, in whichever order they
+    # were asked. Reading until the pushes stop is what the round-2 stream tests
+    # do for the same reason.
+    for _ in range(40):
+        try:
+            await asyncio.wait_for(reader.readline(), timeout=0.25)
+        except (asyncio.TimeoutError, TimeoutError):
+            break
+    return reader, writer
+
+
+async def _phone_call(
+    pilot: Any, reader: Any, writer: Any, command: str, args: str, req: int
+) -> str:
+    """Send one ``slash`` frame and pump the APP's loop until the receipt lands.
+
+    The receipt waits on ``TuiSessionHandle._on_app`` — a hop onto the app's own
+    loop — so a caller that merely awaits the socket starves the task it is waiting
+    for. Measured on a fresh host: the first three frames of the first connection
+    timed out at 20 s each that way, and answered immediately when the wait pumped
+    the pilot.
+    """
+    writer.write(
+        json.dumps({"op": "slash", "req": req, "command": command, "args": args}).encode() + b"\n"
+    )
+    await writer.drain()
+    for _ in range(400):
+        await pilot.pause()
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=0.05)
+        except (asyncio.TimeoutError, TimeoutError):
+            continue
+        frame = json.loads(raw.decode("utf-8", "replace"))
+        # ``ack`` IS the reply for this op: ``slash`` is not a payload op, so the
+        # receipt travels in ``detail`` rather than in ``result`` (measured — a
+        # reader that matched only ``result``/``error`` waited forever for a reply
+        # that had already arrived).
+        if frame.get("req") == req and frame.get("op") in ("result", "error", "ack"):
+            payload = frame.get(
+                "result", frame.get("data", frame.get("detail", frame.get("message")))
+            )
+            return payload if isinstance(payload, str) else json.dumps(payload)
+    raise AssertionError("no reply arrived")
+
+
+@pytest.mark.asyncio
+async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3-1 through the REAL host: the phone's own auth frame, server, handle and app.
+
+    The two round-3 halves, in one measured cell: what the phone must KEEP
+    (``/rename``, ``/model``, ``/mcp login``, ``/stop``) and what it must not reach
+    (``/move``, ``/archive``, ``/delete``, ``/exit``, ``/update``). The lanes are
+    the design decision — the owner's TERMINAL via ``_run_slash_command``, or the
+    per-verb-gated DISPATCHER via ``run_slash_authoritative`` — and the receipts are
+    what the caller sees.
+
+    A local caller is measured in the same run as the control: the phone's shape
+    routes, an unmarked loopback connection still types into the terminal.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime.server import RuntimeServer
+
+    session = FakeSession()
+    moved: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "local_operator.tui.app.run_session_move",
+        lambda *args, **kwargs: moved.append((args, kwargs)),
+    )
+    writes: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "local_operator.session.archived.archive_change",
+        lambda *args, **kwargs: writes.append((args, kwargs)) or (False, []),
+    )
+    app = OperatorApp(lambda: _factory(session), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(400):
+            await pilot.pause()
+            if app._session is session:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("the app never adopted the session")
+
+        terminal: list[str] = []
+        dispatched: list[tuple[str, Any, Any]] = []
+        real_terminal = app._run_slash_command
+
+        def spy_terminal(line: str, attachments: Any = None) -> Any:
+            terminal.append(line)
+            return real_terminal(line, attachments)
+
+        app._run_slash_command = spy_terminal  # type: ignore[method-assign]
+        real_dispatch = app.run_slash_authoritative
+
+        async def spy_dispatch(command: str, args: str, images: Any = None, **kw: Any) -> Any:
+            dispatched.append((command, kw.get("locality"), kw.get("capabilities")))
+            return await real_dispatch(command, args, images, **kw)
+
+        app.run_slash_authoritative = spy_dispatch  # type: ignore[method-assign]
+
+        handle = TuiSessionHandle(app)
+        server = RuntimeServer(handle, kind="tui")
+        server.start()
+        try:
+            assert await server.wait_until_published(timeout=15), "no record published"
+            reader, writer = await _phone_dial(record=None)
+            req = 500
+            try:
+                # THE FOUR THE REVIEW NAMED, and the lane each must reach. The
+                # EFFECT is asserted where the app can produce one (the rename
+                # lands on the session), and the LANE everywhere, because the
+                # lanes are what the routing decides; the receipts are the app's
+                # own words either way (``/rename``'s is "renamed: …", not a
+                # transport string, measured).
+                for command, args, lane in (
+                    ("rename", "probe title", "dispatcher"),
+                    ("model", "", "dispatcher"),
+                    ("mcp", "login notion", "dispatcher"),
+                    ("stop", "", "terminal"),
+                ):
+                    terminal.clear()
+                    dispatched.clear()
+                    req += 1
+                    receipt = await _phone_call(pilot, reader, writer, command, args, req)
+                    assert receipt, (command, receipt)
+                    if lane == "terminal":
+                        assert terminal == [f"/{command}"], (command, terminal)
+                        assert dispatched == [], (command, dispatched)
+                    else:
+                        assert command in [row[0] for row in dispatched], (command, dispatched)
+                        assert terminal == [], (command, terminal)
+                    # NEVER the carrier's own words: no refusal of this gate's
+                    # reached these verbs.
+                    assert "not available" not in receipt or command == "rename", (command, receipt)
+                # The rename really landed on the session the phone was watching.
+                assert session.conversation_name == "probe title", session.conversation_name
+
+                # AND THE FIVE THAT MUST BE REFUSED. The delete-scoped pair is
+                # refused by the capability gate before a lane is chosen; `move`,
+                # `exit` and `update` reach the dispatcher and come back with the
+                # app's OWN sentence, which is what makes the phone's "no" honest
+                # rather than a second copy of it here.
+                terminal.clear()
+                dispatched.clear()
+                for command, args, expect in (
+                    ("move", "abc --to evil", "attached terminal"),
+                    ("exit", "", "attached terminal"),
+                    ("update", "", "attached terminal"),
+                    ("archive", "", "delete"),
+                    ("delete", "yes", "delete"),
+                ):
+                    req += 1
+                    receipt = await _phone_call(pilot, reader, writer, command, args, req)
+                    assert not receipt.startswith("ran "), receipt
+                    assert expect in receipt, (command, receipt)
+                assert moved == [], moved
+                assert terminal == [], terminal
+                # ``/move`` reaches the dispatcher and dies there (no branch);
+                # the delete-scoped pair never reaches a lane at all.
+                assert [row[0] for row in dispatched] == ["move", "exit", "update"], dispatched
+            finally:
+                writer.close()
+
+            # THE CONTROL: an unmarked loopback connection is still LOCAL, and every
+            # one of those same commands runs in the terminal exactly as before.
+            reader2, writer2 = await _phone_dial(record=None, locality=None)
+            try:
+                terminal.clear()
+                dispatched.clear()
+                for command, args in (("rename", "local title"), ("move", "abc --to evil")):
+                    req += 1
+                    receipt = await _phone_call(pilot, reader2, writer2, command, args, req)
+                    assert receipt, (command, receipt)
+                assert dispatched == [], dispatched
+                # Both commands a PHONE is refused ran here. The rename's own
+                # effect is asserted on the phone's cell above, where the
+                # dispatcher's producer answers synchronously; this control is
+                # about the LANE, which is what the local reading decides.
+                assert terminal == ["/rename local title", "/move abc --to evil"], terminal
+
+            finally:
+                writer2.close()
+
+            # R3-2: the ROUTED entry's own default is fail-closed too, and this is
+            # the carrier that feeds the app's delete gate. Omitting ``locality``
+            # entirely — the shape a forgotten forward takes — must not be read as
+            # local. Mutate that default back to ``locality: str = "local"`` on
+            # ``TuiSessionHandle.run_slash_authoritative`` and this cell writes the
+            # archive instead of answering with the capability sentence.
+            denied = await handle.run_slash_authoritative("archive", "", None)
+            assert denied["style"] == "warning", denied
+            assert "delete" in denied["text"], denied
+            assert writes == [], writes
+        finally:
+            server.close()

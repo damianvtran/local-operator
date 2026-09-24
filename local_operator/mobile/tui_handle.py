@@ -787,44 +787,67 @@ class TuiSessionHandle(SessionHandle):
         locality: str | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> str:
-        """Run one slash line in THIS terminal — for a LOCAL caller only.
+        """Run one slash line, in this terminal or on the per-verb-gated dispatcher.
 
-        Unlike ``run_slash_authoritative`` — which answers a typed result the
-        follower renders — this runs the command's own UI HERE, in the owner's
-        terminal, and returns a ``ran /…`` receipt. That is why the decision is an
-        ALLOWLIST for a relaying connection rather than a list of forbidden
-        effects: the line reaches ``OperatorApp._run_slash_command``, whose verbs
-        are the terminal's own. Round 1 guarded the three delete-scoped verbs, and
-        round 2's review found the same carrier running ``/move <id> --to
-        <device>`` for a member holding no ``move`` — custody of the session
-        handed to another device, or copied off it with ``--keep`` — with
-        ``/exit``, ``/update`` and ``/resume`` behind it in the same set. A routed
-        command (``/rename``, ``/model``, ``/theme``) arrives as a ``slash_result``
-        frame instead — ``route_shared_slash`` is the seam that carries it — and
-        reaches ``run_slash_authoritative``, which answers without painting in this
-        terminal. The RUNTIME host's twin of this method refuses the same commands
-        for the same reason ("terminal-only here"), so a follower is not losing a
-        capability here that it has there: the refusal is what makes the two hosts
-        agree on the un-imaged ``slash`` frame.
+        TWO LANES, AND THE CARRIER PICKS BETWEEN THEM. This method is the one that
+        can type a line into the OWNER's own terminal — ``OperatorApp._run_slash_command``
+        — where the verbs are the terminal's own and the effects are the machine's:
+        ``/exit`` ends the owner's app, ``/update`` rebuilds its install,
+        ``/resume``/``/new``/``/clear`` drive its session store, and
+        ``/move <id> --to <device>`` hands a session's custody to another device or
+        copies its whole transcript there with ``--keep`` (round 2's review drove
+        that last one through here for a member holding no ``move``). The other lane
+        is ``run_slash_authoritative``, which answers a typed receipt the caller
+        renders, gates per verb, and has no branch for any of those four.
 
-        THE DECISION AND THE WORDS ARE NOT HERE. Both live in
-        ``network.types.terminal_slash_refusal``, which is also where the DEFAULT
-        was inverted: ``locality`` is ``None`` when a caller did not forward it,
-        and ``None`` is read as RELAYED, so a carrier that forgets the forward
-        refuses instead of running the line. Round 1's ``locality="local"``
-        default was the permissive direction, and every forgotten forward in this
-        slice has taken it.
+        SO A RELAYED COMMAND GOES TO THE TERMINAL ONLY IF
+        :func:`network.types.may_run_slash_in_the_owners_terminal` says so — a local
+        caller, the session-scoped set the runtime host also runs down this op, or a
+        delete-scoped verb this connection resolved — and to the DISPATCHER
+        otherwise. ROUTING RATHER THAN REFUSING IS THE POINT (agent review round 3,
+        R3-1): the operator's phone sends every typed ``/…`` line as this op and
+        authenticates as ``locality="remote"`` with no capabilities, so a refusal
+        here is a refusal for the phone, and the phone must keep ``/model``,
+        ``/rename``, ``/mcp login`` and ``/stop``. What the dispatcher cannot answer
+        — ``/move``, ``/exit``, ``/update``, ``/btw`` — it refuses in its own words,
+        which name where the command does work.
+
+        THE RECEIPT FOR A ROUTED COMMAND MIRRORS THE RUNTIME HOST EXACTLY
+        (``ServingSessionHandle.slash_images``): the notice's text, or ``ran /…``
+        when the typed result carries none. This caller consumes a string — the
+        phone renders it as a notice — so the two hosts must not answer it
+        differently, or the same command would read differently depending on which
+        machine happened to own the session.
+
+        THE DEFAULT IS THE OTHER HALF OF THE FIX: ``locality`` is ``None`` when a
+        caller did not forward it, and ``None`` is read as RELAYED, so a carrier that
+        forgets the forward routes to the dispatcher instead of into the owner's
+        terminal. Round 1's ``locality="local"`` default was the permissive
+        direction, and every forgotten forward in this slice took it.
 
         The alias is resolved first because the decision matches registry PRIMARY
         names, and the helper cannot resolve it (``network.types`` is stdlib-only by
         contract, ``slash_commands`` is not).
         """
-        from local_operator.network.types import terminal_slash_refusal
+        from local_operator.network.types import (
+            delete_scope_refusal,
+            may_run_slash_in_the_owners_terminal,
+        )
         from local_operator.slash_commands import primary_slash_name
 
-        refusal = terminal_slash_refusal(primary_slash_name(command), locality, capabilities)
-        if refusal is not None:
-            return refusal
+        primary = primary_slash_name(command)
+        if not may_run_slash_in_the_owners_terminal(primary, locality, capabilities):
+            # The dispatcher's own gate answers the delete-scoped verbs, but it
+            # answers them with a typed receipt this caller would have to render;
+            # the capability sentence is the same one both hosts give, so ask for it
+            # directly and let everything else fall through to the dispatcher.
+            refusal = delete_scope_refusal(primary, locality, capabilities)
+            if refusal is not None:
+                return refusal
+            result = await self.run_slash_authoritative(
+                command, args, images, locality=locality, capabilities=capabilities
+            )
+            return str(result.get("text") or f"ran /{command}")
         line = f"/{command}" + (f" {args}" if args else "")
 
         def apply() -> None:
@@ -840,7 +863,13 @@ class TuiSessionHandle(SessionHandle):
         args: str,
         images: list[dict[str, str]] | None,
         *,
-        locality: str = "local",
+        # ``None`` = "not said", read as RELAYED by the app's gates (agent review
+        # round 3, R3-2): this is the carrier that feeds ``OperatorApp``'s
+        # delete-scoped gate, so its default belongs to the same fail-closed family
+        # as ``slash``/``slash_images``. In production nobody reaches the default —
+        # ``RuntimeServer`` always forwards ``conn.locality`` — which is exactly why
+        # leaving it permissive was the same latent hole R2-1 closed on the others.
+        locality: str | None = None,
         consumers: Iterable[str] | None = None,
         may_loosen: bool | None = None,
         capabilities: frozenset[str] | None = None,

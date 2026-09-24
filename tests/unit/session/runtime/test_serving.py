@@ -2490,3 +2490,33 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
 
     assert "serves decision-model calls, not chat completions" in str(refused.value)
     assert applied == [], "the session must not be switched onto a provider that cannot chat"
+
+
+@pytest.mark.asyncio
+async def test_the_runtimes_routed_seam_refuses_a_delete_verb_with_no_capability_set() -> None:
+    """R3-3 on the RUNTIME host: the capability half, with the keyword left out.
+
+    ``ServingSessionHandle._slash_result`` is the seam a relayed frame lands on, and
+    its delete-scoped gate reads ``capabilities``. Until this cell existed, the
+    mutation ``may_run_delete_scoped_slash = lambda loc, caps: loc == "local" or caps
+    is None or "delete" in caps`` passed every delete-gate test in the suite — the
+    routed cells all carried a set — so a relayed caller that forwarded NO set could
+    archive on this host. Both spellings of "nothing" are pinned, and the allowed
+    direction with them, so a gate that simply refused every relayed caller could
+    not satisfy this either.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, _session = make_handle()
+    for locality in ("remote", None):
+        for capabilities in (None, frozenset()):
+            refused = await handle._slash_result(
+                "archive", "", SlashResult, locality, None, capabilities
+            )
+            assert refused.kind == "notice", refused
+            assert refused.style == "warning", refused
+            assert "delete" in refused.text, refused
+    allowed = await handle._slash_result(
+        "archive", "", SlashResult, "remote", None, frozenset({"slash", "delete"})
+    )
+    assert "capability" not in allowed.text, allowed
