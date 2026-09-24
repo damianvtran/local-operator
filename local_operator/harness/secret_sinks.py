@@ -1075,9 +1075,7 @@ _SHELL_OPERATORS = (
 _STAGE_ENDS = frozenset({"\n", ";", "&", "&&", "||", ";;", "(", ")"})
 
 #: Redirection operators whose next word is a path (or a delimiter, for here-docs).
-_REDIRECTS = frozenset(
-    {">", ">>", ">|", "<", "<>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>"}
-)
+_REDIRECTS = frozenset({">", ">>", ">|", "<", "<>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>"})
 #: `{name}` touching a redirection: bash allocates a fresh descriptor into
 #: `name`, so the word is the redirection's, not the command's.
 _FD_VARIABLE_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -2187,6 +2185,24 @@ class _ShellAnalyzer:
             found.append((fd, operator, item))
         return found
 
+    @staticmethod
+    def _resolve_destination(text: str, fds: dict[str, tuple[str, str]]) -> tuple[str, str]:
+        """The ``(kind, path)`` a redirect target names, given the fd table.
+
+        A device target is not a file: `/dev/stdout` and `/dev/null` are the
+        descriptors they name AT THAT MOMENT, so they resolve through ``fds``
+        rather than being written down as paths. It is shared with the `tee`
+        operand walk because a device operand is the same question there
+        (round 6).
+        """
+        if text in _DISCARD_DEVICES:
+            return ("null", "")
+        if text in _STDOUT_DEVICES:
+            return fds["1"]
+        if text in _STDERR_DEVICES:
+            return fds["2"]
+        return ("path", text)
+
     @classmethod
     def _stdout_destination(cls, stage: _Stage) -> tuple[str, str]:
         """Where this stage's STDOUT finally points: ``(kind, path)``.
@@ -2211,22 +2227,13 @@ class _ShellAnalyzer:
         """
         fds: dict[str, tuple[str, str]] = {"1": ("result", ""), "2": ("stderr", "")}
 
-        def resolve(text: str) -> tuple[str, str]:
-            if text in _DISCARD_DEVICES:
-                return ("null", "")
-            if text in _STDOUT_DEVICES:
-                return fds["1"]
-            if text in _STDERR_DEVICES:
-                return fds["2"]
-            return ("path", text)
-
         for fd, op, target in cls._fd_redirections(stage):
             text = cls._word_text(target).strip().strip("'\"")
             if op in ("&>", "&>>"):
-                fds["1"] = fds["2"] = resolve(text)
+                fds["1"] = fds["2"] = cls._resolve_destination(text, fds)
             elif op in (">", ">>", ">|"):
                 if fd in fds:
-                    fds[fd] = resolve(text)
+                    fds[fd] = cls._resolve_destination(text, fds)
             elif op in (">&", "<&"):
                 if text == "-":
                     if fd in fds:
@@ -2238,8 +2245,35 @@ class _ShellAnalyzer:
                         fds[fd] = fds.get(text, ("result", ""))
                 elif op == ">&" and fd == "1":
                     # `>&FILE` is bash's older spelling of `&>FILE`.
-                    fds["1"] = fds["2"] = resolve(text)
+                    fds["1"] = fds["2"] = cls._resolve_destination(text, fds)
         return fds["1"]
+
+    def _tee_operands_to_stderr(self, words: list[_Word], stdout: tuple[str, str]) -> bool:
+        """Register every file `tee` writes, and report a device STDERR operand.
+
+        `tee` is the one emitter that writes the value somewhere OTHER than its
+        own stdout, and it writes to every operand. Reading only the first
+        operand's path (and treating a device as a path) meant
+        `get X | tee /dev/stderr >/dev/null` was contained while the value sat
+        in this result's stderr section (round 6) — so each operand is resolved
+        the way a redirect target is, and a fd-2 device is the leak signal.
+
+        A `-` operand is NOT stdout — measured against GNU tee, which writes a
+        file named `-` — so it is registered as a path like any other operand;
+        only real flags are skipped.
+        """
+        fds = {"1": stdout, "2": ("stderr", "")}
+        to_stderr = False
+        for operand in words[1:]:
+            text = self._word_text(operand).strip().strip("'\"")
+            if not text or (text.startswith("-") and text != "-"):
+                continue
+            kind, path = self._resolve_destination(text, fds)
+            if kind == "stderr":
+                to_stderr = True
+            elif kind == "path":
+                self._register_path(path, operand.span)
+        return to_stderr
 
     @staticmethod
     def _redirections(stage: list[_Word | _Op | _Body]) -> list[tuple[str, _Word]]:
@@ -3402,12 +3436,23 @@ class _ShellAnalyzer:
             if emits:
                 # Same order as the source branch: where stdout goes decides,
                 # and the stderr flag is read only when stdout is this result.
+                # `tee` writes the value to every operand, so an operand that
+                # is a descriptor re-opens the leak the stage's own redirect
+                # may have closed; the files it names are registered here too.
+                tee_stderr = command == "tee" and self._tee_operands_to_stderr(
+                    words, (stdout_kind, stdout_target)
+                )
+                # The stage's own stdout decides first, then the stderr signal:
+                # a `2>` beside a redirect changes where STDERR goes, not where
+                # this value went. A `tee` operand on a fd-2 device is the
+                # exception — there the value really is written to stderr as
+                # well, so it is checked before `discarded`.
                 if stdout_path is not None:
                     self._register_path(stdout_path, span)
-                elif discarded:
-                    pass
-                elif to_stderr:
+                if tee_stderr or (stdout_path is None and to_stderr):
                     self._add("shell.source-to-stderr", span, name)
+                elif stdout_path is None and discarded:
+                    pass
                 elif reaches_result:
                     if path_hit and not flow_in.value:
                         self._add("shell.read-of-secret-file-path", path_span or span, name)
@@ -3417,13 +3462,6 @@ class _ShellAnalyzer:
                         self._add("shell.read-of-secret-file-path", span, name)
                     else:
                         self._add("shell.print-of-source", span, name)
-                # A `tee` names another file the same bytes are written to.
-                if command == "tee":
-                    for word in words[1:]:
-                        text = self._word_text(word).strip()
-                        if text and not text.startswith("-"):
-                            self._register_path(text, word.span)
-                            break
             if discarded:
                 return _Flow()
             if stdout_path is not None:
