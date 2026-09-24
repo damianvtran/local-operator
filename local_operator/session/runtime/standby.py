@@ -124,10 +124,12 @@ IDLE_REAP_S = 900.0
 ADOPT_TIMEOUT_S = 2.0
 
 #: Environment switch that turns the whole mechanism off — no warm and no
-#: adoption — for an operator who wants the cold spawn exactly. The test suite
-#: does not need it: warming is opt-in per process (:func:`enable_warming`, called
-#: only by the TUI and desktop-daemon boot paths), so a test that engages a
-#: runtime never leaves a warmed interpreter behind unless it asked for one.
+#: adoption — for an operator who wants the cold spawn exactly, and for the test
+#: suite, which sets it process-wide in ``tests/conftest.py``: warming is opt-in
+#: per process (:func:`enable_warming`, called only at the TUI and ``serve`` CLI
+#: launch points), but the suite drives exactly those launch points through
+#: ``cli.main()``, and a standby is detached by design, so without the switch a
+#: run leaves live interpreters behind (measured, and why the switch is there).
 DISABLE_ENV = "LOP_RUNTIME_STANDBY_DISABLED"
 
 #: The keys of the spawn contract a standby is allowed to receive. The same
@@ -423,12 +425,17 @@ def enable_warming(root: "Path | None" = None) -> None:
     """
     if disabled() or os.environ.get("LOP_MOBILE_CHILD_RESUME"):
         return
-    _WARMING[0] = True
     try:
         from local_operator.paths import config_dir
         from local_operator.session.runtime.launch import _spawn_interpreter
 
         target = root if root is not None else config_dir()
+        # A real directory path or nothing: a standby outlives its warmer, so a
+        # root that is a test double (or a relative path resolved against some
+        # later cwd) would leave a process bound to a directory nobody owns.
+        if not isinstance(target, Path) or not target.is_absolute():
+            return
+        _WARMING[0] = True
         interpreter = _spawn_interpreter()
     except Exception:  # noqa: BLE001 — a missing warm is a slower first engage
         logger.debug("could not resolve a standby target", exc_info=True)

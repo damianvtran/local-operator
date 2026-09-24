@@ -272,6 +272,14 @@ _AMBIENT_VARS = (
 _PROCESS_DESKTOP_GATES: tuple[tuple[str, str], ...] = (
     ("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1"),
     ("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1"),
+    # The runtime standby (``session/runtime/standby.py``) is a DETACHED
+    # interpreter that outlives whoever warmed it by design. The suite drives
+    # ``cli.main()`` for ``serve`` and the TUI launch, which are the two warming
+    # points, and a run without this switch left real standbys re-parented to
+    # pid 1, bound to a MagicMock config dir written into the working tree
+    # (measured on the branch that introduced them). The standby's own tests
+    # clear it for the processes they start and reap.
+    ("LOP_RUNTIME_STANDBY_DISABLED", "1"),
 )
 
 

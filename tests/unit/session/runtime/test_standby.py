@@ -70,6 +70,7 @@ def test_warming_is_off_unless_a_host_enables_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     spawned: list[Any] = []
+    monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
     monkeypatch.setattr(standby, "_WARMING", [False])
     monkeypatch.setattr(standby, "_spawn_standby", lambda *a: spawned.append(a))
     standby.ensure_warm(tmp_path, sys.executable)
@@ -82,6 +83,26 @@ def test_warming_is_off_unless_a_host_enables_it(
     monkeypatch.delenv("LOP_MOBILE_CHILD_RESUME")
     standby.ensure_warm(tmp_path, sys.executable)
     assert len(spawned) == 1
+
+
+def test_the_suite_runs_with_standbys_disabled() -> None:
+    """The conftest gate: ``cli.main()`` for ``serve``/the TUI is driven all over
+    the suite, and each would otherwise leave a detached standby behind it."""
+    assert standby.disabled()
+
+
+def test_a_root_that_is_not_a_real_path_is_never_warmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(standby, "_WARMING", [False])
+    spawned: list[Any] = []
+    monkeypatch.setattr(standby, "warm_in_background", lambda *a: spawned.append(a))
+    standby.enable_warming(MagicMock())
+    standby.enable_warming(Path("relative/root"))
+    assert spawned == [] and standby._WARMING == [False]
 
 
 def test_the_disable_switch_turns_off_adoption(
