@@ -350,9 +350,14 @@ resumed.write_text("returned normally", encoding="utf-8")
 #: the C timer really fires and the process really leaves. A FIRE IS WHAT LEAVES THE
 #: TWO FILES BEHIND (its exit path never disarms), which is what the next life of the
 #: pid then has to inherit.
+#: The recycle child waits in PYTHON (``time.sleep``), not in a ``ctypes`` park, and that
+#: difference IS the migration for the two cells below: their subject is a bound that FIRES
+#: and the file state a life leaves behind, and the fire is taken by the sampler now, which
+#: needs the GIL the park would hold. The park's own cell is where that absence is asserted;
+#: here it would only mean no fire and no evidence either.
 _RECYCLE_CHILD = """
-import ctypes
 import sys
+import time
 
 from local_operator.session.runtime import stall_watchdog
 
@@ -363,9 +368,7 @@ if sys.argv[3] == "beat":
     stall_watchdog.beat(stall_watchdog.SERVING)
 print(f"armed:{pid}", flush=True)
 
-lib = ctypes.PyDLL(None)
-lib.sleep.argtypes = [ctypes.c_uint]
-lib.sleep(600)
+time.sleep(600)
 """
 
 
@@ -757,12 +760,15 @@ def test_a_runtime_that_never_engaged_fires_at_the_armed_value_with_no_sibling(
 
     MUTATION THIS CELL CATCHES: write the sibling in ``arm`` as well — the file now
     advertises a deadline for a process that never beat, and the absence signal is lost.
+
+    THE CHILD WAITS IN PYTHON (``_IDLE_CHILD``) RATHER THAN PARKING IN A C CALL, and it
+    has to: this cell is about a bound that FIRES, the fire is taken by the sampler now
+    (see the module docstring), and a GIL-held park starves that thread — the park's own
+    cell is the one that asserts the absence a park produces instead. Waiting in Python
+    changes nothing else the cell observes: the child still never beats, so the fired
+    value is still the one ``arm`` set and the sibling is still absent.
     """
-    result = _run_script(
-        _PARKED_CHILD,
-        tmp_path,
-        args=(str(tmp_path / "resumed.txt"), str(SHORT_BOUND_S)),
-    )
+    result = _run_script(_IDLE_CHILD, tmp_path, args=(str(SHORT_BOUND_S),))
     assert result.returncode == 1, f"the bound did not fire: {result.stdout!r} {result.stderr!r}"
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
@@ -892,31 +898,20 @@ def test_a_beat_whose_rearm_failed_says_the_sibling_is_behind_the_last_beat(
 
     MUTATION THIS CELL CATCHES: drop the ``_write_dump_line`` call from that branch -- the
     mtime is frozen after a failed re-arm and nothing in the artifact says why.
+
+    THE FAILURE IS INJECTED AT THE RECORDER NOW, and that is the seam the fix moved it to.
+    The re-arm used to have a C call in it, so a double could make THAT raise; there is no
+    C timer any more and the whole of a re-arm is the RECORD of when the bound next holds,
+    so :func:`stall_watchdog._arm_timer` -- the one spelling every deadline site goes
+    through -- is what fails here. It is also the only part of a re-arm that can fail on a
+    live host (a disk that will not take the write), which is what keeps this cell a
+    statement about the failure mode rather than about a stub.
+
+    WHAT THE DOUBLE MUST NOT DO, and the retired version had to say this about the cancel:
+    raise from anywhere else. A re-arm that failed for some other reason still lands in the
+    same ``except``, so a wide patch would let the cell pass while the branch it names was
+    never reached.
     """
-
-    real_faulthandler = stall_watchdog.faulthandler
-
-    class _RefusingFaulthandler:
-        """The re-arm RAISES, and the cancel still reaches the real C timer.
-
-        The cancel is delegated rather than stubbed because this cell arms the REAL
-        timer before patching this in: a stub would leave a 30 s ``exit=True`` timer
-        live past the cell and take a passing pytest worker with it, which is the
-        failure mode the whole module is written against.
-        """
-
-        def dump_traceback_later(self, *args: object, **kwargs: object) -> None:
-            raise OSError("no timer for you")
-
-        def cancel_dump_traceback_later(self) -> None:
-            real_faulthandler.cancel_dump_traceback_later()
-
-        def register(self, *args: object, **kwargs: object) -> None:
-            raise OSError("no signal leg for you")
-
-        def unregister(self, *args: object, **kwargs: object) -> None:
-            return
-
     stall_watchdog.disarm()
     assert stall_watchdog.arm(seconds=30.0, directory=tmp_path) is True
     try:
@@ -926,7 +921,10 @@ def test_a_beat_whose_rearm_failed_says_the_sibling_is_behind_the_last_beat(
         beat_mtime = sibling.stat().st_mtime
         time.sleep(0.05)
 
-        monkeypatch.setattr(stall_watchdog, "faulthandler", _RefusingFaulthandler())
+        def refuse_the_record(armed: object, remaining: float) -> None:
+            raise OSError("no deadline for you")
+
+        monkeypatch.setattr(stall_watchdog, "_arm_timer", refuse_the_record)
         stall_watchdog.beat(stall_watchdog.SERVING)
 
         assert (
@@ -1477,7 +1475,6 @@ def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
 #: child does with one (agent review round 1, R1-1). The attribution it was there to pin
 #: — the fired value, the absent sibling — is asserted by both of that child's cells.
 _ENGAGE_CHILD = """
-import ctypes
 import os
 import sys
 import time
@@ -1501,9 +1498,12 @@ print(
     flush=True,
 )
 
-lib = ctypes.PyDLL(None)
-lib.sleep.argtypes = [ctypes.c_uint]
-lib.sleep(600)
+# THE WAIT IS PYTHON'S, and it has to be for this cell to be about a BOUND at all:
+# the fire is taken by the sampler now, and a GIL-held ``ctypes`` park would starve
+# that thread and leave the child running for ever with nothing written (the park's
+# own cell asserts exactly that absence). ``time.sleep`` releases the GIL, so silence
+# after the engagement is still silence a bound can cut.
+time.sleep(600)
 """
 
 
@@ -2086,12 +2086,13 @@ def test_a_never_engaging_boot_with_NO_work_in_flight_is_still_cut(
 
 
 # This child proves the counterexample to an unconditional reading of the boot value:
-# engage moves the in-memory bound, but an unsuccessful timer replacement leaves the
-# original C timer in force and records why the boot value may still fire.
+# engage moves the in-memory bound, but a re-arm whose RECORD raised leaves the
+# in-memory deadline exactly where the arm put it, so the boot value is still what the
+# fire carries — and the dump says why.
 _ENGAGE_REARM_FAILURE_CHILD = """
-import ctypes
 import os
 import sys
+import time
 
 from local_operator.session.runtime import stall_watchdog
 
@@ -2109,7 +2110,9 @@ try:
 finally:
     stall_watchdog._arm_timer = real_arm_timer
 print(f"engage:{moved} bound:{armed.boot_seconds:g}->{armed.seconds:g}", flush=True)
-ctypes.PyDLL(None).sleep(600)
+# Python's wait, not a ``ctypes`` park: the fire is the sampler's now, so the child
+# has to keep leaving it the GIL (see ``_ENGAGE_CHILD``).
+time.sleep(600)
 """
 
 
@@ -2135,7 +2138,7 @@ def test_engagement_rearm_failure_qualifies_a_boot_bound_fire(
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
     assert _fired_seconds(text) == pytest.approx(float(boot)), text[:900]
     assert stall_watchdog.REARM_FAILED_MARKER in text, text[-800:]
-    # Assert on the actual C-timer artifact, not only on the source constant: the
+    # Assert on the artifact a reader opens, not only on the source constant: the
     # separate boot note is insufficient if this general reading stays unconditional.
     assert "PROVIDED THE RE-ARM SUCCEEDED" in text, text[:1600]
     assert "An ENGAGE whose timer replacement FAILED is the exception" in text, text[:1600]
@@ -2159,12 +2162,15 @@ def test_engagement_moves_the_bound_to_the_steady_one_and_stamps_both_planes(
 ) -> None:
     """THE INVARIANT CELL: after engaging, silence for the STEADY bound is still cut.
 
-    A 4 s boot bound and a 1 s steady bound, then an engage and a park: the fire must
-    carry the steady bound, not the boot one, and the sibling engage wrote must count
-    down from the engagement instant. Both halves matter to the fleet — the boot bound
-    buys a slow boot its time, and the steady bound is what #1438's executing-loop
-    abstention and #1439's in-flight protection act on, so an engage that carried the
-    boot bound forward for the process's whole life would quietly disable them.
+    A 4 s boot bound and a 1 s steady bound, then an engage and a PYTHON WAIT — the
+    child waits in Python rather than parking in a C call, because the fire is taken
+    by the sampler now and a GIL-held park would starve it (see ``_ENGAGE_CHILD``).
+    The fire must carry the steady bound, not the boot one, and the sibling engage
+    wrote must count down from the engagement instant. Both halves matter to the
+    fleet — the boot bound buys a slow boot its time, and the steady bound is what
+    #1438's executing-loop abstention and #1439's in-flight protection act on, so an
+    engage that carried the boot bound forward for the process's whole life would
+    quietly disable them.
 
     MUTATION THIS CELL CATCHES: widen the steady bound inside ``engage`` (e.g. set it to
     ``DEFAULT_STALL_S``, or ``max`` the two) — the fired value becomes the wide one and
@@ -2225,6 +2231,10 @@ def test_the_deadline_resets_on_engagement_not_on_arm(tmp_path: Path) -> None:
     MUTATION THIS CELL CATCHES: an ``engage`` whose bound move is a no-op (or an
     ``arm`` that arms the steady bound) — the first fires at the boot value, the second
     kills the child before it can print.
+
+    THE CHILD WAITS IN PYTHON after the engagement, for the reason ``_ENGAGE_CHILD``
+    gives: the deadline is taken by the sampler now, and the GIL a ``ctypes`` park would
+    hold is the GIL that thread needs to fire at all.
     """
     boot, steady, delay = 4 * SHORT_BOUND_S, SHORT_BOUND_S, 2.0
     result, _pid, dump, elapsed = _engage_run(tmp_path, boot, steady, delay)
@@ -2250,24 +2260,50 @@ def test_the_deadline_resets_on_engagement_not_on_arm(tmp_path: Path) -> None:
 # -- the structure a real firing cannot be asked about -----------------------
 
 
-def test_the_header_is_written_before_the_timer_is_armed(
+def test_the_header_is_written_before_the_deadline_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Write-then-act, as an ordering fact rather than as a promise.
 
-    ``faulthandler`` writes with a raw descriptor from a C thread, so a header
-    deferred to fire time would never exist for the reader who arrives after the
-    process is gone. The spy reads the file's text at arm time, so a reordering
-    that armed first and wrote later fails here.
-    """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    WHY THE ORDER STILL MATTERS WITHOUT A C TIMER: a reader who arrives after the
+    process is gone has only the files, and the deadline is what a supervisor reads to
+    decide the runtime is DUE. So the header has to be on disk before anything acts on
+    the bound, which is exactly what this cell observes.
 
-    assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
-    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [(5.0, True)], fake.armed
-    assert stall_watchdog.ARM_MARKER in fake.text_at_arm
-    assert str(os.getpid()) in fake.text_at_arm
-    assert fake.armed[0][2].read_text(encoding="utf-8") == fake.text_at_arm
+    THE SEAM MOVED WITH THE MECHANISM, and the assertion moved with it: the spy used to
+    read the file from the double's own ``dump_traceback_later``, the call that WAS the
+    arming. There is no such call now -- a re-arm RECORDS the deadline through
+    :func:`stall_watchdog._arm_timer` -- so the recorder is what reads the file here.
+    That is a stronger place for the check, not a weaker one: ``_arm_timer`` is the one
+    spelling every deadline site goes through (the arm, a beat, an engagement, the
+    progress fire, the executing-loop extension), so this cell now pins the order for
+    ALL of them rather than for the arm alone.
+
+    MUTATION THIS CELL CATCHES: move the header write below the ``_rearm`` in ``arm`` —
+    a reader then finds a deadline with no header to attribute it to, and this cell goes
+    red while nothing else in the file does.
+    """
+    seen: dict[str, str] = {}
+    real_recorder = stall_watchdog._arm_timer
+
+    def record_and_look(armed: object, remaining: float) -> None:
+        path = stall_watchdog.dump_path(os.getpid(), tmp_path)
+        seen["text_at_record"] = path.read_text(encoding="utf-8") if path.is_file() else ""
+        real_recorder(armed, remaining)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(stall_watchdog, "_arm_timer", record_and_look)
+    try:
+        assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
+        armed = stall_watchdog._ARMED
+        assert armed is not None
+        assert stall_watchdog.ARM_MARKER in seen["text_at_record"], seen["text_at_record"][:400]
+        assert str(os.getpid()) in seen["text_at_record"]
+        # THE RECORD ITSELF, which is what replaced the spy's ``armed`` list: the bound
+        # this process is now judged against, and the instant it holds.
+        assert armed.due_seconds == 5.0, armed.due_seconds
+        assert armed.due_at == pytest.approx(time.monotonic() + 5.0, abs=1.0)
+    finally:
+        stall_watchdog.disarm()
 
 
 def test_each_plane_is_tracked_apart_and_a_silent_one_shrinks_the_bound(
