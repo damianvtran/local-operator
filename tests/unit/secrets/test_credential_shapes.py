@@ -387,6 +387,23 @@ _STEM_BASE_MUST_MASK: tuple[tuple[str, str], ...] = (
     ("Pass" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "a stem base over a NESTED application"),
     ("Pass" + _LT + "Vec" + _LT + "Phrase" + _GT + _GT, "a nested application of names"),
     ("Pass" + _LT + "Word" + _GT, "the residual BEFORE this round: a stem base masks"),
+    # --- the R3-1 class: the same refusal with a QUALIFICATION in front of the stem ---
+    # ``_base_is_a_credential_stem`` read the WHOLE base, so a qualified spelling hid the
+    # stem behind a module path and every row below was released whole, with NO hit, at
+    # the head that round reviewed — while masking at ``origin/main``. The last row is the
+    # same mistake with a REFERENCE MARKER in front of the name instead of a ``::`` path:
+    # the marker is spelling, the fact is the name after it. These rows are what reds if
+    # the leaf read is reverted; the corpus could not, because it had no qualified row
+    # (agent review R3-2).
+    ("foo" + "::" + "Pass", "a QUALIFIED stem base, no argument list"),
+    ("foo" + "::" + "Pass" + _LT + "Word" + _GT, "the same over a CamelCase argument"),
+    ("core" + "::" + "Secret", "a qualified credential WORD base, no argument list"),
+    (
+        "foo" + "::" + "Pass" + _LT + "Vec" + _LT + "u8" + _GT + _GT,
+        "the same over a nested application",
+    ),
+    ("foo" + "::" + "bar" + "::" + "Pass", "a stem leaf TWO segments deep"),
+    ("&" + "Pass" + _LT + "Word" + _GT, "a REFERENCE-marked stem base: the marker is not the name"),
 )
 
 #: The other side of :data:`_STEM_BASE_MUST_MASK`, in the same shape: a type's OWN base
@@ -399,6 +416,15 @@ _STEM_BASE_STAYS_RELEASED: tuple[tuple[str, str], ...] = (
     ("Vec" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "a type base over a nested application"),
     ("Option" + _LT + "Vec" + _LT + "u8" + _GT + _GT, "the same one type down"),
     ("Arc" + _LT + "Mutex" + _LT + "String" + _GT + _GT, "a two-level type application"),
+    # The same qualification over a type's OWN base, so the pair still reads as "the base
+    # decides": the leaf read must not mask a qualified path whose LEAF is a type name,
+    # and a reference marker is not a name either.
+    ("foo" + "::" + "Vec" + _LT + "String" + _GT, "a qualified type base over a type name"),
+    ("std" + "::" + "Option" + _LT + "String" + _GT, "the same one type over"),
+    ("foo" + "::" + "String", "a qualified path whose leaf is a type name, no argument list"),
+    ("foo" + "::" + "HashMap", "the same with a two-word type name"),
+    ("&" + "str", "a REFERENCE-marked primitive: the marker is not a name either"),
+    ("&&" + "str", "the same twice over"),
 )
 
 
@@ -514,10 +540,31 @@ def test_the_type_clause_refuses_a_credential_stem_base_whatever_the_argument() 
     — is released. Taken together that is the evidence the release is decided by the
     BASE and not by the argument, which is the inversion both R1-2 and R2-1 shipped.
 
+    **R3-1 is the third spelling of the same inversion, and the qualified rows at the
+    end of each table are its regression (R3-2).** The gate read the WHOLE base, so a
+    module-qualified stem hid behind the path and the entire class — 5 module prefixes
+    x 12 stem leaves x 6 argument shapes — was released whole with no hit, on a spelling
+    that masks at ``origin/main``; a reference marker in front of the name defeated it
+    the same way, which is why the reference rows are in the same tables rather than in a
+    second one. Those rows are what REDS if the leaf read is reverted: the corpus cannot
+    red on it, because it has no qualified row at all, and that is exactly how the hole
+    survived two rounds (agent review R3-2).
+
     Each mask must carry a real hit rather than being silent: a hit is what registers
     the value for the exact-value pass, so a silent mask contains it only on this line.
     """
     import local_operator.redaction_shapes as rs
+
+    # The refusal reads the base's LEAF as well as the whole base, and the leaf is
+    # extracted by the one helper both release-side tests share — a marker or a path in
+    # front of the name is SPELLING, and neither is part of what the token is called.
+    assert rs._type_token_leaf("foo" + "::" + "bar" + "::" + "Pass") == "Pass"
+    assert rs._type_token_leaf("&" + "str") == "str"
+    assert rs._type_token_leaf("&" + "&" + "Pass") == "Pass"
+    assert rs._base_is_a_credential_stem("foo" + "::" + "Pass") is True
+    assert rs._base_is_a_credential_stem("&" + "Pass") is True
+    assert rs._base_is_a_credential_stem("foo" + "::" + "Vec") is False
+    assert rs._base_is_a_credential_stem("&" + "str") is False
 
     for value, condition in _STEM_BASE_MUST_MASK:
         assert rs._is_type_expression(value) is False, condition
@@ -530,6 +577,12 @@ def test_the_type_clause_refuses_a_credential_stem_base_whatever_the_argument() 
         assert masked != text, f"released with no hit: {condition}"
         _, hits = rs.scrub_shapes_with_hits(text)
         assert hits, f"a SILENT mask does not register the value: {condition}"
+        # The HIT is the assertion, not the mask. A hit is what registers the value for
+        # the rest of the session's exact-value pass, so a silent mask contains the
+        # credential on this line and nowhere else — and the LABEL says which arm filed
+        # it, which is how a row held by a different clause is caught. Measured for
+        # every row of all three tables: exactly one, always ``credential-assignment``.
+        assert [hit.label for hit in hits] == ["credential-assignment"], condition
 
     for value, condition in _STEM_BASE_STAYS_RELEASED:
         assert rs._is_type_expression(value) is True, condition
@@ -3772,7 +3825,32 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    the assembled tuples, not counted by hand. The two digit rows whose reason line
 #:    named a condition the row does not exercise are corrected in the same change
 #:    (agent review R2-3).
-_CORPUS_GRADING_DIGEST = "c9f9fc543a0f62cc5783c5695ef02bb95bed53f3d11682934f6705f508ffb07f"
+#:
+#: MOVED ONCE MORE on 2026-09-23, in the R3-1 remediation, and the argument has the two
+#: halves this constant's history asks for:
+#:
+#: 5. **The MODULE change moved NOTHING, and that was measured before the corpus grew.**
+#:    ``_base_is_a_credential_stem`` now reads the base's LEAF as well as the whole base,
+#:    and ``is_credential_name`` is handed that same leaf (agent review R3-1, through one
+#:    ``_type_token_leaf`` helper shared by both call sites), so the qualified class — 360
+#:    of 360 combinations of 5 module prefixes, 12 stem leaves and 6 argument shapes — went
+#:    from RELEASED with no hit to MASKED with a real hit, and the reference-marked spelling
+#:    went with it (the same read, the same fact one marker over). Graded against the corpus
+#:    as it stood, the digest was BYTE FOR BYTE the constant it replaced, computed under the
+#:    fixed module: no pre-existing row moves in either direction, because the corpus had NO
+#:    qualified or reference-marked stem row at all — which is precisely why nothing could
+#:    red on R3-1, and that is the gap R3-2 is about.
+#:
+#: 6. **The corpus change is THREE additions, and they are the whole of the move.** They are
+#:    a qualified credential-stem base with no argument list, the same qualification with an
+#:    argument list, and the reference-marked spelling. All three are masks, so
+#:    ``POSITIVE_CASES`` moves 295 -> 298 while ``NEGATIVE_CASES`` is unchanged at 194, and
+#:    ``TYPE_ANNOTATION_POSITIVES`` moves 26 -> 29. Both counts are measured from the
+#:    assembled tuples. Every added row is 8 characters or longer ON PURPOSE: below the
+#:    assignment rule's own value floor nothing matches at ANY revision (``a::Pass`` is
+#:    released at this head and at ``origin/main`` alike, while the type clause refuses it),
+#:    so a shorter row would pin a reading neither revision can reach.
+_CORPUS_GRADING_DIGEST = "6407c2d8b729b6f9b2724bec82092fa168e038d785ef3aa46ec148cd86feb3e9"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
