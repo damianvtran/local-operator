@@ -62,6 +62,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -535,7 +536,50 @@ def _spawn_runtime(
         handoff.close()
         handle.close()
     setattr(process, "lop_capture_path", capture)
+    _harvest_on_exit(process)
     return process
+
+
+def _harvest_on_exit(process: "subprocess.Popen[bytes]") -> None:
+    """Wait on the child on a daemon thread, so its exit does not leave a zombie.
+
+    THE CHILD IS DETACHED AND NOBODY OWNED ITS EXIT. ``detached_popen_kwargs``
+    gives it its own session, and the engage loop only ever calls ``poll()`` — so a
+    runtime that exits (a loser leaving without the lease, a ``/stop``, an
+    idle-exit, a move's retirement) stayed in the process table as ``<defunct>``
+    under whoever spawned it until THAT process exited. Measured on a real relay
+    across two EC2 peers: three ``Zs`` children of the relay on one device and one
+    on the other, alive as corpses for 18-47 minutes, one per remote engage
+    (cross-host QA, Q-XH-5). A relay is the spawner that lives for weeks, so that is
+    where they piled up.
+
+    WHY A WAITING THREAD RATHER THAN ``SIGCHLD`` OR ``waitpid(-1)``.
+    ``SIGCHLD`` ignored would reap at the kernel, but it is process-wide and this
+    spawner is also every ``lop exec`` and the desktop server: it would change what
+    ``subprocess`` sees for every OTHER child in the process, and a reduced exit
+    status is exactly the shape of a masked failure. ``waitpid(-1)`` has the same
+    reach — it can steal a status some other thread is waiting on. This reaps the
+    ONE child this call created, by pid, and touches nothing else. ``Popen.wait``
+    is safe to run beside the engage loop's ``poll()``: CPython serialises both on
+    the object's own ``_waitpid_lock``, so the loop still reads the true status.
+
+    The thread is a daemon and it blocks until the child exits, so a spawner that
+    exits first (a CLI one-shot) leaves nothing behind and the cost on a long-lived
+    relay is one parked thread per runtime it has started.
+
+    A REDUCED DOUBLE IS NOT A CHILD. Tests pass stand-in process objects through this
+    path (``_Popen`` in test_launch_arbitration has no ``wait``), and this file's own
+    ``remember_operator_cap`` call guards the same way for the same reason: a spawn
+    that cannot name a pid, or a process object that cannot be waited on, is not
+    something this process can reap, and inventing a child here would be the fake
+    driving the product.
+    """
+    wait = getattr(process, "wait", None)
+    pid = getattr(process, "pid", None)
+    if not callable(wait) or not isinstance(pid, int):
+        return
+    thread = threading.Thread(target=wait, name=f"reap-{pid}", daemon=True)
+    thread.start()
 
 
 #: Upper bound on captured child output quoted back to a caller. Enough for a
