@@ -724,6 +724,15 @@ does not surface, add it as a purely additive method there (§8 Q2).
   the honest mitigations are the short TTL, the immediate link-level refusal
   (`mesh-network.md` §5.6) and the operator's ability to rotate the credential
   at the provider. This must be stated in the guide, not glossed.
+  **Measured (PR #1513 QA round 1):** with the owner's relay running, new
+  borrows were refused 2.3 s after `credential revoke` and an already-lent
+  grant stopped at the borrower's next re-ask. `grant_ttl_s` bounds only a
+  well-behaved borrower: the same bearer, copied out of the borrower's process,
+  answered HTTP 200 at the provider 15 s after the grant expired, because the
+  access token lives until its own expiry at the provider. Three latencies, so
+  three statements: new grants stop now; a lent grant stops within
+  `grant_ttl_s`; a copied bearer stops only when the token expires or is
+  revoked at the provider. `lop network credential revoke` prints all three.
 - **A malicious holder can spend the operator's quota.** `holders` is a real
   capability increase and is granted explicitly. Least authority is the
   defence: `scope: "session"` by default, `api-key-static` default-off.

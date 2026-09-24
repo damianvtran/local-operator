@@ -306,6 +306,21 @@ class MeshCredentialBroker:
         P0 added is unreachable from here by construction.
         """
         req = frame.get("req")
+        if req is None:
+            # A FRAME WITH NO ``req`` CAN NEVER BE ANSWERED, so it is refused BEFORE
+            # any work (QA round 1, Q2). The sender's ``PeerLink.request`` registers no
+            # waiter for such a frame, and the reply is dropped as a stray on arrival.
+            # Serving it anyway is what made every failed borrow on the first build
+            # cost the owner a real token POST — refreshed, audited as a grant, and
+            # thrown away. Refused by name through the transport's own refusal, never
+            # an ack: there is nobody to read either, and an ack would look served.
+            from local_operator.network.types import MeshRefusal
+
+            raise MeshRefusal(
+                "protocol_error",
+                "a net_broker request must carry a req so its answer can be matched; "
+                "nothing was refreshed or lent",
+            )
         kind = str(frame.get("kind") or "")
         if kind == "grant":
             detail = self.grant(link, frame)
@@ -775,8 +790,17 @@ class MeshCredentialBroker:
           device's registry does not know — is NOTED, never widened: the block READ
           matches a scope by substring (``is_blocked_for_model``), so an unknown or
           short slug could stop far more than the family it names.
-        * **The owner's duration, not the peer's.** ``retry_after_ms`` is capped at
-          :data:`REMOTE_QUOTA_BLOCK_MAX_MS`.
+        * **The owner's duration, not the peer's.** The block is ALWAYS
+          :data:`REMOTE_QUOTA_BLOCK_MAX_MS`, and ``retry_after_ms`` is not read at all.
+          The owner's own path writes ``max(60 s, retry_after)``, so 60 s is the
+          shortest block it would write on its own evidence; honouring a smaller claim
+          went below that, and a non-numeric one crashed this arm after it had spent
+          the holder's slot (review round 2, m1).
+        * **Never over a live block.** A family already out of rotation — on the
+          owner's own evidence or an earlier report — is left exactly as it is. The
+          store's write is an unconditional upsert, so writing here rewrote a 45-minute
+          block the owner had measured down to the peer's 1 s (review round 2, m2). A
+          second-hand report may start a short block; it never shortens or extends one.
         * **Once per holder per window.** :data:`REPORT_BLOCK_MIN_INTERVAL_S`.
         """
         if is_mcp_key(key):
@@ -795,12 +819,18 @@ class MeshCredentialBroker:
         if last is not None and now - last < REPORT_BLOCK_MIN_INTERVAL_S:
             return {"kind": "ack", "key": key, "action": "coalesced"}
         self._report_blocked[slot] = now
-        claimed = int(frame.get("retry_after_ms") or 0)
-        block_ms = (
-            min(claimed, REMOTE_QUOTA_BLOCK_MAX_MS) if claimed > 0 else REMOTE_QUOTA_BLOCK_MAX_MS
-        )
+        block_ms = REMOTE_QUOTA_BLOCK_MAX_MS
+        store = self._auth_store_instance()
         try:
-            self._auth_store_instance().block_credential(
+            # ``is_blocked_for_model`` matches a scoped block by its slug appearing in
+            # the model id, so asking with the bare slug is exactly "is a block for
+            # THIS family (or the whole account) live now" — the read the owner's own
+            # routing uses, so the two cannot disagree about what counts as blocked.
+            if store.is_blocked_for_model(
+                credential_id, entry.provider, scope.removeprefix("model:")
+            ):
+                return {"kind": "ack", "key": key, "action": "noted", "reason": "already_blocked"}
+            store.block_credential(
                 credential_id, entry.provider, block_scope=scope, block_ms=block_ms
             )
         except Exception:  # noqa: BLE001 — a failed block is not a failed turn

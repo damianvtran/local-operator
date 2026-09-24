@@ -122,6 +122,20 @@ class PlacementState:
         stamp = row.get("last_grant_at")
         return float(stamp) if stamp else None
 
+    def last_grant_from(self, device: str) -> float | None:
+        """When ``device`` last served this device a grant, for any key, or ``None``.
+
+        The owner-offline sentence's "last seen" reads this: a grant is proof the
+        owner was up, and it is the only sighting a borrower records durably.
+        """
+        stamps = [
+            float(row.get("last_grant_at") or 0.0)
+            for row in self._observations.values()
+            if row.get("owner_device") == device
+        ]
+        latest = max(stamps, default=0.0)
+        return latest or None
+
     # -- writes -------------------------------------------------------------
 
     def observe(
