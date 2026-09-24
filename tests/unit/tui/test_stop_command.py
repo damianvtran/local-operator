@@ -344,15 +344,22 @@ async def test_the_arm_listing_marks_a_target_the_press_will_decline(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(110, 30), (80, 24)])
 async def test_the_arm_listing_does_not_promise_to_leave_a_stalled_drain_alone(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int]
 ) -> None:
     """Agent review round 1, m2: a drain the ladder no longer believes is stopped.
 
     The press asks ``control._drain_stalled`` for every leaving target, and a stalled
     one falls through to the ordinary ladder. So the listing must not group it under
-    "asked again, then left alone": it gets its own qualifier, in the ladder's words,
-    and only the drains the press really declines keep the old one.
+    "asked again, then left alone": it gets its own qualifier, and only the drains the
+    press really declines keep the old one.
+
+    Design round 1: the tag names the reason in the words ``lop sessions``/``lop stop``
+    use (D1), each qualifier is its own line once there are two kinds (D2), and the
+    listing says "finish", never "drain" (D4). At 110 columns (where Q-5 measured the
+    old header wrapping) and 80 (where D2 measured the wrap sharing an indent with the
+    qualifier line), no line may exceed the block's own body budget.
     """
     from dataclasses import replace as _replace
 
@@ -370,9 +377,7 @@ async def test_the_arm_listing_does_not_promise_to_leave_a_stalled_drain_alone(
     )
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
-    # 110 COLUMNS, the width QA round 2 (Q-5) measured the two-qualifier header wrapping
-    # at: every line of the listing must fit the block's own body budget there.
-    async with app.run_test(size=(110, 30)) as pilot:
+    async with app.run_test(size=size) as pilot:
         await _booted(app, pilot, session)
         app._run_slash_command("/stop all")
         for _ in range(20):
@@ -381,20 +386,20 @@ async def test_the_arm_listing_does_not_promise_to_leave_a_stalled_drain_alone(
                 break
         listing = [n for n in _notices(app) if "will stop" in n]
         assert listing, _notices(app)
-        header = listing[0].splitlines()[0]
-        assert "1 already leaving — asked again, then left alone" in header, header
-        # FUTURE TENSE, on its own line: a plan the identity gate can still refuse, not
-        # a result (Q-5), and never folded into the header where it wrapped.
-        assert "stalled" not in header, header
-        assert (
-            "(1 leaving but stalled — not left to drain; it will be stopped)"
-            in listing[0].splitlines()
-        ), listing[0]
+        lines = listing[0].splitlines()
+        assert lines[0] == "will stop 3 sessions:", lines[0]
+        assert lines[1] == "(1 already leaving — asked again, then left alone)", lines
+        assert lines[2] == (
+            "(1 leaving, not reporting — it will be stopped, not left to finish)"
+        ), lines
+        assert "drain" not in listing[0] and "stalled" not in listing[0], listing[0]
         assert re.search(r"pid +101  alpha \(already leaving\)$", listing[0], re.M), listing[0]
-        assert re.search(r"pid +102  beta \(leaving, but stalled\)$", listing[0], re.M), listing[0]
+        assert re.search(
+            r"pid +102  beta \(leaving, not reporting for 5h\)$", listing[0], re.M
+        ), listing[0]
         budget = NoticeBlock.body_budget(max(0, app._transcript_view().size.width - 1))
-        too_wide = [line for line in listing[0].splitlines() if len(line) > budget]
-        assert not too_wide, f"wraps at 110 columns (body budget {budget}): {too_wide}"
+        too_wide = [line for line in lines if len(line) > budget]
+        assert not too_wide, f"wraps at {size[0]} columns (body budget {budget}): {too_wide}"
 
 
 @pytest.mark.asyncio
