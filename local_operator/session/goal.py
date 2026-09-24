@@ -118,12 +118,30 @@ class GoalState:
     #: which reads as interactive: a plain CLI or a test has a person in
     #: front of it by construction.
     #:
+    #: THAT FAIL-OPEN IS FOR THE DECISIONS THAT NEED A DIRECTION — parking a
+    #: gate, the browser tool's attached probe (:meth:`is_interactive`). The
+    #: MODEL-FACING block asks :meth:`interactivity`, whose ``None`` third value
+    #: means "nothing measured" and renders no claim at all; the two must not be
+    #: collapsed, or an ``exec`` run is told about an interface it never probed.
+    #:
     #: A PROBE rather than a stored flag on purpose. Attach state changes
     #: whenever a viewer opens or closes, and a cached copy would need an
     #: event per change — the token accumulation this exists to avoid. The
     #: prompt closure calls this at turn start and the answer costs one line
     #: whatever happened in between.
     interactive_probe: "Callable[[], bool] | None" = None
+    #: Live probe answering "can THIS session put a question in front of a
+    #: person?" — the ``ask`` hook, published here by ``Session.__init__`` for
+    #: exactly the reason the probe above is: the system-prompt provider closure
+    #: is built BEFORE the session facade exists, so a shared holder is the only
+    #: seam through which a fact the session learns later — the TUI installs the
+    #: hook from a worker, in ``_adopt_session`` — reaches the next turn's prompt.
+    #:
+    #: ``None`` means "this holder's session was not built by the session facade"
+    #: (a delegated child, a bare test), which the block builder reads as "not
+    #: stated" and resolves from tool membership. Never a copied flag: the hook is
+    #: installed AND uninstalled mid-session by ``set_ask_handler``.
+    ask_probe: "Callable[[], bool] | None" = None
 
     def is_interactive(self) -> bool:
         """Whether a surface can answer a question right now (default True)."""
@@ -134,6 +152,46 @@ class GoalState:
             return bool(probe())
         except Exception:  # noqa: BLE001 — an unreadable probe must not kill a turn
             return True
+
+    def interactivity(self) -> bool | None:
+        """Tier A as a MEASURED fact: attached, detached, or nothing measured.
+
+        The tri-state twin of :meth:`is_interactive`, for the model-facing block
+        only, where ``None`` must render nothing: a host that installed no probe
+        (a plain CLI, an ``exec`` run, a scheduled run) has no attachment answer at
+        all, and a block asserting one is the same unmeasured claim the incident
+        was made of — a scheduled run is not told about an interface nobody
+        checked for.
+
+        :meth:`is_interactive` keeps its fail-open ``True`` for the decisions that
+        need a direction (parking a gate, the browser tool's attached probe): an
+        unmeasured answer there must resolve to attached. Here an unreadable probe
+        is ``None`` for the same reason, in the other register — a probe that
+        raised measured nothing, so the block may say nothing.
+        """
+        probe = self.interactive_probe
+        if probe is None:
+            return None
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 — an unreadable probe must not kill a turn
+            return None
+
+    def can_ask(self) -> bool | None:
+        """Whether THIS session can put a question in front of a person.
+
+        ``None`` means the answer was not stated here, and the block builder falls
+        back to tool membership — which is the honest answer for a delegated child,
+        whose inventory holds no ``ask`` tool because ``build_ask_tool`` is gated on
+        the hook every child is built without.
+        """
+        probe = self.ask_probe
+        if probe is None:
+            return None
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 — an unreadable probe states nothing
+            return None
 
     def set(self, text: str) -> str:
         """Store a trimmed, length-capped goal and return what was stored."""

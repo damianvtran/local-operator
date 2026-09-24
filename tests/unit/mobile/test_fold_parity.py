@@ -342,7 +342,10 @@ def test_an_unattended_gate_timeout_reaches_the_phone() -> None:
 
     assert row.kind == "notice"
     assert row.text == (
-        "waited 2h for approval with nobody attached, then denied it — bash · rm -rf /x"
+        # No "with nobody attached": attachment-first parking expires a gate that
+        # HAD a pane (the operator did not get to it), so the row reports the wait
+        # it measured and stops there (round 1, D7).
+        "waited 2h for approval, then expired unanswered — bash · rm -rf /x"
     )
     assert row.details["severity"] == "warning"
 

@@ -2231,6 +2231,18 @@ class Session:
         # ``set_ask_handler`` after that front end has its session, and until
         # it does the ``ask`` tool is simply not advertised.
         self._ask_user: AskUserFn | None = None
+        # PUBLISH THE LIVE ANSWER on the goal holder, for the same reason the
+        # runtime publishes its attachment probe there: the system-prompt provider
+        # closure is built BEFORE this Session exists, so a shared holder is the
+        # only seam through which a fact this session learns LATER can reach the
+        # next turn's block. It has to: a front end that resolves its session in a
+        # worker installs the ask hook from ``set_ask_handler`` after
+        # construction, so the provider's own ``tools`` list (the factory's
+        # snapshot) never gains ``ask``.
+        #
+        # A PROBE, not a copied flag: the hook is installed and uninstalled
+        # mid-session, and the block must follow it in both directions.
+        self._goal_state.ask_probe = lambda: self._ask_user is not None
 
         self._loop = AgentLoop()
         replayed_messages = list(transcript.build_llm_history())
@@ -4505,6 +4517,52 @@ class Session:
     def goal(self) -> str:
         """The session's standing objective ("" when unset)."""
         return self._goal_state.text
+
+    @property
+    def interactivity_probe(self) -> Callable[[], bool] | None:
+        """The live probe answering "can a question be PRESENTED to anyone".
+
+        Read-only view onto the same holder the prompt closure reads, exposed
+        because a SUBAGENT cannot answer this question itself: a child Session is
+        constructed in-process, holds no control socket and has no registrant, so
+        its only source is the parent's runtime. ``_build_child_session`` installs
+        this probe OBJECT on the child's holder rather than copying its value,
+        which keeps the child's answer live per turn exactly as ``goal=`` does —
+        and the holder itself is deliberately not shared, because it also carries
+        the team and agent briefs.
+
+        ``None`` for every host that never installed one (a plain CLI, a test),
+        which reads as attached: a person is in front of those by construction.
+        The runtime is the only writer, through
+        ``serving._install_interactivity_probe``.
+        """
+        return self._goal_state.interactive_probe
+
+    def is_interactive(self) -> bool:
+        """Whether a question can be PRESENTED to anyone (default True).
+
+        Tier A as a plain answer, for callers that want the fact rather than the
+        probe — ``_build_child_session`` asks its PARENT this, because a child has
+        no control socket and cannot answer it. Live per call: it forwards to the
+        holder, so two calls across an attach/detach get the two answers.
+
+        The FAIL-OPEN default is deliberate here (see ``GoalState.is_interactive``):
+        a decision that needs a direction must not resolve to "detached" on a host
+        that simply never installed a probe. The model-facing block asks
+        :meth:`interactivity` instead, where the unmeasured case is its own answer.
+        """
+        return self._goal_state.is_interactive()
+
+    def interactivity(self) -> bool | None:
+        """Tier A as MEASURED — attached, detached, or ``None`` for unmeasured.
+
+        The model-facing reading, and the one a provider must pass to
+        ``build_system_blocks``: ``None`` means no runtime probe was installed (a
+        plain CLI, an ``exec`` run, a scheduled run), so the block states nothing
+        rather than asserting an interface nobody checked for. A CHILD asks its
+        parent through this, because the attachment it renders is the parent's.
+        """
+        return self._goal_state.interactivity()
 
     @property
     def agent_brief(self) -> str:
@@ -9443,6 +9501,14 @@ class Session:
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
+            # The BOUND METHOD, not its value: this context is a snapshot taken
+            # once per turn, so a stored boolean would freeze the answer for the
+            # whole turn and a re-read per call is what the browser flow needs
+            # (``_bridge_access`` asks at TEXT-RENDER time: immediately after the
+            # ``request_access`` RPC, and at the END of an ``await_access`` wait,
+            # so a surface that attached while the model waited is reported as
+            # attached).
+            attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
