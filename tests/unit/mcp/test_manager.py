@@ -5289,6 +5289,25 @@ class TestAuthBlockRevalidation:
             store.close()
 
 
+def test_the_retry_rule_still_sees_a_tombstone() -> None:
+    """The witness remediation must not have narrowed the rule to two axes.
+
+    Before the witness existed the rule was ``marker == known`` over the whole
+    tuple, so a peer tombstoning the grant we blocked on bought one attempt. The
+    first cut of the two-axis rule compared only the stamp and the witness and
+    silently dropped that. It is inert through the real store today — the store
+    strips ``grant_dead_at`` on write (the deferred tombstone finding) — which is
+    exactly why the end-to-end guards cannot pin it, and why this one tests the
+    rule directly: the strip's fix must inherit an axis that still works.
+    """
+    from local_operator.mcp.auth import GrantMarker
+    from local_operator.mcp.manager import _grant_change_is_evidence
+
+    known = GrantMarker(500.0, False, 900.0)
+    assert _grant_change_is_evidence(GrantMarker(500.0, True, 900.0), known) is True
+    assert _grant_change_is_evidence(GrantMarker(500.0, False, 900.0), known) is False
+
+
 class TestAttemptMarkerUnknownSemantics:
     """``None`` (the store was unreadable) is not "the caller did not say".
 
