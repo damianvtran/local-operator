@@ -171,6 +171,52 @@ class _FakeFaulthandler:
         self.unregistered.append(signum)
 
 
+class _DeadlineRecorder:
+    """Records the deadline the module RECORDS — the seam the C timer left behind.
+
+    THIS IS NOT THE RETIRED SPY UNDER A NEW NAME. ``_FakeFaulthandler`` recorded the
+    arguments of ``faulthandler.dump_traceback_later``, and that call exists NOWHERE
+    any more — so a double for it would pass while proving nothing about the code that
+    ships, which is the one thing this migration must not do.
+    :func:`stall_watchdog._arm_timer` is the ONE spelling every site that decides a
+    deadline goes through (the arm, a plane's beat, an engagement, the progress fire,
+    the executing-loop extension), and it RECORDS rather than calls, so what this
+    observes is the decision the shipping code actually made.
+
+    IT DELIBERATELY RECORDS NO EXIT LEG, and that omission IS the migration: the leg was
+    a parameter of the arm because a C thread carried it into a fire no Python frame
+    witnessed. There is no such call now — the leg is read at the fire
+    (:func:`_fire` -> :func:`_holds_work`) — so ``armed.held`` is what a cell asserts
+    about the leg, never a flag on an arm. A recorder that grew an ``exit_`` field would
+    be describing a mechanism that has been removed.
+    """
+
+    def __init__(self) -> None:
+        #: The value the bound was armed with, in the units the fired line reports and
+        #: through ``_arm_timer``'s own clamp — so a cell comparing this against a bound
+        #: compares against what the code decided rather than against its own arithmetic.
+        self.remaining: list[float] = []
+        #: The dump's text AT THE MOMENT OF EACH RECORD, which is the write-then-act
+        #: ordering a cell can assert: the header must already be on disk by then.
+        self.text_at_record: list[str] = []
+
+
+def _record_deadlines(monkeypatch: pytest.MonkeyPatch) -> _DeadlineRecorder:
+    """Watch every deadline decision this process makes, and then let it happen."""
+    recorder = _DeadlineRecorder()
+    real_recorder = stall_watchdog._arm_timer
+
+    def record(armed: Any, remaining: float) -> None:
+        recorder.remaining.append(max(stall_watchdog.MIN_REARM_S, remaining))
+        recorder.text_at_record.append(
+            armed.path.read_text(encoding="utf-8") if armed.path.is_file() else ""
+        )
+        real_recorder(armed, remaining)
+
+    monkeypatch.setattr(stall_watchdog, "_arm_timer", record)
+    return recorder
+
+
 def _child_env(config_dir: Path, **extra: str) -> dict[str, str]:
     """A child environment that can only touch ``config_dir``.
 
@@ -1476,12 +1522,11 @@ def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
     """
     not_a_directory = tmp_path / "file"
     not_a_directory.write_text("not a directory", encoding="utf-8")
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
 
     assert stall_watchdog.arm(directory=not_a_directory / "logs") is False
     assert stall_watchdog.is_armed() is False
-    assert fake.armed == [], "a timer was armed for a dump that cannot be written"
+    assert spy.remaining == [], "a timer was armed for a dump that cannot be written"
 
 
 # ============================================================================
@@ -1583,14 +1628,19 @@ def test_the_entry_point_arms_the_boot_bound_and_engagement_moves_it_down(
     which is what idempotence buys a boot path that might reach the line twice.
 
     MUTATION THIS CELL CATCHES: make ``engage`` a no-op (or let it move the bound
-    without stamping a plane) — the armed list stays at one entry and the stamps stay
-    at the arm instant, so the boot bound is all this process can ever fire at.
+    without stamping a plane) — the recorded list stays at one entry and the stamps
+    stay at the arm instant, so the boot bound is all this process can ever fire at.
+
+    WHAT IS OBSERVED, AND WHY IT MOVED: these numbers used to come off an arm into
+    ``faulthandler``. There is no such call — a re-arm RECORDS its deadline
+    (:func:`_arm_timer`) — so the spy is on the recorder, and the quantity is the same
+    one the retired double saw: the value the bound holds, in the units the fired line
+    reports. See :class:`_DeadlineRecorder` for why the exit leg is not asserted here.
     """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
     try:
         assert stall_watchdog.arm(directory=tmp_path) is True
-        assert [seconds for seconds, _, _ in fake.armed] == [stall_watchdog.DEFAULT_BOOT_STALL_S]
+        assert spy.remaining == [stall_watchdog.DEFAULT_BOOT_STALL_S], spy.remaining
         armed = stall_watchdog._ARMED
         assert armed is not None
         assert armed.boot_seconds == stall_watchdog.DEFAULT_BOOT_STALL_S
@@ -1606,7 +1656,7 @@ def test_the_entry_point_arms_the_boot_bound_and_engagement_moves_it_down(
         # and that subtraction carries float error -- 300.00000000000006 on a Linux
         # runner where macOS produced exactly 300.0. The claim is which bound was armed,
         # and a half-second band states that without pinning an arithmetic accident.
-        armed_bounds = [seconds for seconds, _, _ in fake.armed]
+        armed_bounds = list(spy.remaining)
         assert armed_bounds[:1] == [stall_watchdog.DEFAULT_BOOT_STALL_S], armed_bounds
         assert armed_bounds[1:] == pytest.approx(
             [stall_watchdog.DEFAULT_STALL_S]
@@ -1629,7 +1679,7 @@ def test_the_entry_point_arms_the_boot_bound_and_engagement_moves_it_down(
         )
 
         assert stall_watchdog.engage() is False, "a second engage moved the bound again"
-        assert len(fake.armed) == 2, fake.armed
+        assert len(spy.remaining) == 2, spy.remaining
     finally:
         stall_watchdog.disarm()
 
@@ -1651,27 +1701,31 @@ def test_engage_never_widens_the_steady_bound(
     MUTATION THIS CELL CATCHES: ``armed.seconds = max(armed.seconds, steady_seconds)``,
     or an unconditional ``armed.seconds = DEFAULT_STALL_S`` — the first is caught by the
     explicit-bound arm, the second by both.
+
+    THE RECORDED LIST IS THE SAME FACT THE RETIRED SPY READ OFF THE ARM, through
+    :func:`_arm_timer` instead of a call into ``faulthandler`` (see
+    :class:`_DeadlineRecorder`): engagement must not add an entry, and must not change
+    the one that is there.
     """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
     try:
         assert stall_watchdog.arm(seconds=SHORT_BOUND_S, directory=tmp_path) is True
         assert (
             stall_watchdog.engage() is False
         ), "engagement re-armed a process that stated one bound for its whole arming"
-        assert [seconds for seconds, _, _ in fake.armed] == [float(SHORT_BOUND_S)], fake.armed
+        assert spy.remaining == [float(SHORT_BOUND_S)], spy.remaining
 
         stall_watchdog.disarm()
         monkeypatch.setenv(stall_watchdog.ENV_SECONDS, "1200")
         assert stall_watchdog.arm(directory=tmp_path) is True
-        assert [seconds for seconds, _, _ in fake.armed] == [
+        assert spy.remaining == [
             float(SHORT_BOUND_S),
             1200.0,
         ], "the armed bound is not the larger of the two bounds"
         assert (
             stall_watchdog.engage() is False
         ), "engagement extended a bound an operator set ABOVE the boot bound"
-        assert [seconds for seconds, _, _ in fake.armed] == [float(SHORT_BOUND_S), 1200.0]
+        assert spy.remaining == [float(SHORT_BOUND_S), 1200.0]
     finally:
         stall_watchdog.disarm()
 
@@ -1845,12 +1899,11 @@ def test_a_boot_knob_spelled_off_arms_the_steady_bound_and_only_the_steady_knob_
     before the split), while ``0`` on the STEADY knob must still leave the process
     completely untouched.
     """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
     try:
         monkeypatch.setenv(stall_watchdog.ENV_BOOT_SECONDS, "off")
         assert stall_watchdog.arm(directory=tmp_path) is True
-        assert [seconds for seconds, _, _ in fake.armed] == [stall_watchdog.DEFAULT_STALL_S]
+        assert list(spy.remaining) == [stall_watchdog.DEFAULT_STALL_S]
         assert stall_watchdog.engage() is False, "there was no boot phase to end"
 
         stall_watchdog.disarm()
@@ -1885,8 +1938,7 @@ def test_a_boot_bound_below_the_steady_one_is_announced_not_silently_dropped(
     clamp that did not happen. The arithmetic is asserted unchanged in both halves, so
     a future edit cannot satisfy this cell by moving the bound.
     """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
     try:
         with caplog.at_level(logging.WARNING, logger=stall_watchdog.logger.name):
             assert stall_watchdog.arm(boot_seconds=60.0, seconds=300.0, directory=tmp_path) is True
@@ -1899,14 +1951,14 @@ def test_a_boot_bound_below_the_steady_one_is_announced_not_silently_dropped(
             "boot_seconds=60" in message and "below the steady bound of 300" in message
             for message in messages
         ), f"the dropped boot bound was not announced: {messages}"
-        assert [seconds for seconds, _, _ in fake.armed] == [300.0], (
+        assert list(spy.remaining) == [300.0], (
             "the warning must not change the arithmetic: boot is still never armed "
-            f"tighter than the steady bound, but the timer took {fake.armed}"
+            f"tighter than the steady bound, but the timer took {spy.remaining}"
         )
 
         stall_watchdog.disarm()
         caplog.clear()
-        fake.armed.clear()
+        spy.remaining.clear()
         with caplog.at_level(logging.WARNING, logger=stall_watchdog.logger.name):
             assert stall_watchdog.arm(directory=tmp_path) is True
         noisy = [
@@ -1917,9 +1969,7 @@ def test_a_boot_bound_below_the_steady_one_is_announced_not_silently_dropped(
         assert (
             not noisy
         ), f"the shipped default pair warned, which would put a line on every boot: {noisy}"
-        assert [seconds for seconds, _, _ in fake.armed] == [
-            stall_watchdog.DEFAULT_BOOT_STALL_S
-        ], fake.armed
+        assert list(spy.remaining) == [stall_watchdog.DEFAULT_BOOT_STALL_S], spy.remaining
     finally:
         stall_watchdog.disarm()
 
@@ -2363,45 +2413,50 @@ def test_each_plane_is_tracked_apart_and_a_silent_one_shrinks_the_bound(
     the arm, and every one of its ticks must SHORTEN the timer toward the silent
     plane's deadline rather than push it out.
 
-    Also pins the two properties a later edit is most likely to lose: a beat never
-    cancels a live timer (the re-arm replaces it, and a cancel-then-fail leaves the
-    process with NO bound while the comment claims otherwise — A3), and arming is
-    idempotent so a second call cannot leak a handle or displace the file.
+    Also pins the two properties a later edit is most likely to lose: a beat REPLACES the
+    deadline rather than cancelling and re-arming (the retired design's cancel-then-fail
+    could leave the process with NO bound while the comment claimed otherwise — A3; there
+    is no cancel call at all now, and the phase's own source pin keeps it that way), and
+    arming is idempotent so a second call cannot leak a handle or displace the file.
+
+    WHAT MOVED: the numbers come off :class:`_DeadlineRecorder` instead of a double for a
+    call into ``faulthandler``, which no longer exists. What is asserted is unchanged —
+    the recorded value per decision, in the units the fired line reports.
     """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
 
     stall_watchdog.beat(stall_watchdog.WORKLOAD)
-    assert fake.cancels == 0 and fake.armed == [], "a beat armed a timer no one asked for"
+    assert spy.remaining == [], "a beat recorded a deadline no one asked for"
 
     assert stall_watchdog.arm(seconds=10.0, directory=tmp_path) is True
     assert stall_watchdog.arm(seconds=99.0, directory=tmp_path) is True
-    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [
-        (10.0, True)
-    ], "a second arm displaced the first instead of being a no-op"
+    assert spy.remaining == [10.0], "a second arm displaced the first instead of being a no-op"
 
     stall_watchdog.beat(stall_watchdog.SERVING)
     stall_watchdog.beat(stall_watchdog.SERVING)
-    assert fake.cancels == 0, "a beat cancelled a live timer; the re-arm replaces it"
-    armed_for = [seconds for seconds, _, _ in fake.armed]
+    armed_for = list(spy.remaining)
     assert len(armed_for) == 3, armed_for
     assert (
         armed_for[1] < armed_for[0] and armed_for[2] < armed_for[0]
     ), f"the healthy plane re-armed for the FULL bound, so it can mask a silent one: {armed_for}"
-    assert all(exit_ for _, exit_, _ in fake.armed), "the timer is not armed to exit"
 
     # A typo is not a third plane: it is logged and ignored rather than creating a
     # stamp that nothing would ever refresh (which would fire on a healthy runtime).
     stall_watchdog.beat("servring")
-    assert [seconds for seconds, _, _ in fake.armed] == armed_for
+    assert spy.remaining == armed_for
     assert stall_watchdog.is_armed() is True
 
     # A clean disarm removes the file: see the module docstring on why this
     # ``unlink`` is allow-listed, and on what a surviving file then means.
-    file = fake.armed[0][2]
+    file = stall_watchdog.dump_path(os.getpid(), tmp_path)
     stall_watchdog.disarm()
     assert stall_watchdog.is_armed() is False
-    assert fake.cancels == 1, "disarm must cancel the bound it is giving up"
+    # AND THE BOUND IS NO LONGER RECORDED, which is what replaced the retired cell's
+    # ``cancels == 1``: there is no timer to cancel any more (no call exists to make),
+    # so the claim that survives is that nothing downstream still records a deadline for
+    # a process that has left. A beat is the cheapest way to ask.
+    stall_watchdog.beat(stall_watchdog.SERVING)
+    assert spy.remaining == armed_for, "a beat after disarm still recorded a deadline"
     assert not file.exists(), "a clean disarm left the dump behind, so it no longer means 'fired'"
 
 
@@ -3393,8 +3448,7 @@ def test_the_progress_leg_needs_all_three_facts_at_once(
     """
     fake = _FakeClock()
     monkeypatch.setattr(stall_watchdog, "time", fake)
-    spy = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    spy = _record_deadlines(monkeypatch)
 
     state: dict[str, Any] = {"motion": "still", "in_flight": False, "cpu_per_step": 1.0}
 
@@ -3491,36 +3545,54 @@ def test_the_progress_leg_needs_all_three_facts_at_once(
     # 0.05 x 200 = 10 samples of it, which is what a cumulative mean would need.
     idle_then_spin = fires([0.0] * 200 + [1.0] * 60)
     assert idle_then_spin is not None and idle_then_spin <= 208, idle_then_spin
-    # THE FIRE REUSES THE LIVENESS LEG'S EXIT — the same C timer, armed to expire
-    # now, and `exit=True` — so the dump is written and the process leaves.
-    assert spy.armed, "the progress fire never reached the C timer"
-    assert spy.armed[-1][1] is True, "a progress fire must exit, like the liveness leg"
-    assert spy.armed[-1][0] <= stall_watchdog.MIN_REARM_S
+    # THE FIRE ARMS THE DEADLINE IT IS DUE AT: the progress leg's own deadline is set to
+    # the sample instant, so :meth:`_Armed.deadline` takes the minimum over the legs and
+    # the clamp in :func:`_arm_timer` is what makes this verdict due rather than a
+    # statement with no bound behind it.
+    #
+    # THE ASSERTION CHANGED SHAPE WITH THE MECHANISM. The retired form was
+    # ``armed[-1][1] is True`` -- an EXIT flag, because the arm used to carry the leg
+    # into a fire no Python frame witnessed. There is no arm-time leg any more:
+    # :func:`_fire` reads it from the busy probe when the fire is taken. So what is
+    # asserted here is the deadline this fire recorded; the leg itself is pinned in the
+    # cells that drive a real fire.
+    assert spy.remaining, "the progress fire never recorded a deadline"
+    assert spy.remaining[-1] <= stall_watchdog.MIN_REARM_S
     handle.close()
     text = dump.read_text(encoding="utf-8")
     assert stall_watchdog.PROGRESS_MARKER in text
     assert incidents.STALL_BOUND_CAUSE in text
 
 
-def test_arming_with_a_probe_starts_the_sampler_and_disarming_stops_it(
+def test_the_sampler_lives_with_or_without_a_probe_and_disarm_stops_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The leg is inert without a probe, and it is a THREAD that has to be stopped.
+    """The SAMPLER is unconditional; the PROGRESS leg is what a probe turns on.
 
-    ``arm`` is reachable from the child's entry point only (see the interlock
-    cells below), and the progress leg is opt-in per call site: an in-process host
-    or a test of the liveness leg alone passes no probe and must get exactly the
-    bound it had before. A sampler left running after ``disarm`` would be a thread
-    judging a runtime that has already gone.
+    THE CLAIM MOVED, and the name moved with it. This cell used to assert
+    ``armed.thread is None`` for a probe-less arm — "the leg is inert without a probe"
+    was true while a native timer took the fire and this thread existed only to judge
+    the progress predicate. There is no native timer any more: THE SAMPLER IS THE FIRE
+    (see the ``_fire`` call in ``_progress_sampler``), so a probe-less arm that did not
+    start one would hold a bound nothing could ever take — the opposite of inert, and a
+    silent regression of the liveness leg for every caller that arms without a probe. So
+    the thread is asserted present in BOTH arms and what is asserted inert is the
+    progress leg: ``armed.probe is None``. A sampler left running after ``disarm`` would
+    still be a thread judging a runtime that has already gone, and that is unchanged.
+
+    MUTATION THIS CELL CATCHES: drop ``_start_sampler`` from ``arm``, or gate it on a
+    probe — the first leaves no leg able to fire at all, the second re-breaks exactly
+    the probe-less callers this cell is about.
     """
-    spy = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
-
     assert stall_watchdog.arm(seconds=SHORT_BOUND_S, directory=tmp_path, pid=4242)
     armed = stall_watchdog._ARMED
     assert armed is not None
-    assert armed.thread is None, "a probe-less arm must not start a sampler"
+    assert armed.thread is not None and armed.thread.is_alive()
+    assert armed.probe is None, "a probe-less arm recorded a probe"
+    stop = armed.stop
+    assert stop is not None and not stop.is_set()
     stall_watchdog.disarm()
+    assert stop.is_set(), "the sampler was left running past a clean exit"
 
     assert stall_watchdog.arm(
         seconds=SHORT_BOUND_S,
@@ -3712,8 +3784,7 @@ async def test_a_real_tool_batch_holds_the_progress_leg(
 
     fake = _FakeClock()
     monkeypatch.setattr(stall_watchdog, "time", fake)
-    spy = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    spy = _record_deadlines(monkeypatch)
 
     dump = tmp_path / f"{stall_watchdog.DUMP_PREFIX}-5252.log"
     opened = dump.open("w", encoding="utf-8")
@@ -3738,7 +3809,7 @@ async def test_a_real_tool_batch_holds_the_progress_leg(
             "false positive that would kill a legitimate in-process tool"
         )
         assert armed.progress_deadline is None
-        assert spy.armed == [], "the progress leg armed the C timer during a live tool batch"
+        assert spy.remaining == [], "the progress leg armed the C timer during a live tool batch"
     finally:
         release.set()
         await asyncio.wait_for(turn, timeout=30.0)
@@ -3757,7 +3828,7 @@ async def test_a_real_tool_batch_holds_the_progress_leg(
             "the leg never fired after the tool batch returned, so the first half "
             "of this cell proves nothing about a guard that is doing work"
         )
-    assert spy.armed, "the fire never reached the C timer"
+    assert spy.remaining, "the fire never reached the C timer"
     opened.close()
     assert stall_watchdog.PROGRESS_MARKER in dump.read_text(encoding="utf-8")
 
@@ -5182,8 +5253,7 @@ def test_a_recycled_ident_does_not_extend_a_plane_whose_loop_ended(
     monkeypatch.setattr(stall_watchdog, "time", fake)
     fake_sys = _FakeSys()
     monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
-    spy = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    spy = _record_deadlines(monkeypatch)
 
     dump, handle = _observed_dump(tmp_path, 4251)
     armed = stall_watchdog._Armed(dump, handle, 4.0, 4251, lambda: ("still", True))
@@ -5241,10 +5311,10 @@ def test_a_recycled_ident_does_not_extend_a_plane_whose_loop_ended(
         )
         # ...and the sibling's own beat re-arms the SHARED timer from that same
         # unchanged deadline, which is the path the extension would have travelled.
-        spy.armed.clear()
+        spy.remaining.clear()
         stall_watchdog.beat(stall_watchdog.SERVING)
-        assert spy.armed, "the sibling's beat did not reach the timer"
-        assert spy.armed[-1][0] == pytest.approx(
+        assert spy.remaining, "the sibling's beat did not reach the timer"
+        assert spy.remaining[-1] == pytest.approx(
             104.0 - fake.wall, abs=1e-9
         ), "a beat re-armed the shared timer for an extension a dead plane never earned"
     finally:
@@ -5270,15 +5340,14 @@ def test_a_raising_probe_does_not_move_the_deadline_a_sibling_beats_on(
 
     The discriminating assertion is therefore on ``pin()`` and on the duration a
     sibling's ``beat`` actually hands the C timer, not on whether the sampler armed
-    anything: ``spy.armed == []`` was already true and stayed true, which is why the
+    anything: ``spy.remaining == []`` was already true and stayed true, which is why the
     pre-fix cell was green while the process was unbounded.
     """
     fake = _FakeClock()
     monkeypatch.setattr(stall_watchdog, "time", fake)
     fake_sys = _FakeSys()
     monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
-    spy = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    spy = _record_deadlines(monkeypatch)
 
     def broken() -> tuple[object, bool]:
         raise RuntimeError("the probe cannot read live session state right now")
@@ -5306,11 +5375,11 @@ def test_a_raising_probe_does_not_move_the_deadline_a_sibling_beats_on(
         104.0,
     ), "an unevaluable probe moved the deadline, so the runtime is unbounded"
     # THE SIBLING IS THE CARRIER, and this is the number it hands the C timer.
-    spy.armed.clear()
+    spy.remaining.clear()
     stall_watchdog.beat(stall_watchdog.SERVING)
-    assert spy.armed, "the sibling's beat did not reach the timer"
-    assert spy.armed[-1][0] == pytest.approx(104.0 - fake.wall, abs=1e-9), (
-        f"the sibling's beat re-armed for {spy.armed[-1][0]}s instead of counting down "
+    assert spy.remaining, "the sibling's beat did not reach the timer"
+    assert spy.remaining[-1] == pytest.approx(104.0 - fake.wall, abs=1e-9), (
+        f"the sibling's beat re-armed for {spy.remaining[-1]}s instead of counting down "
         f"from the plane's own stamp plus the bound"
     )
     handle.close()
@@ -5386,8 +5455,7 @@ def test_the_abstention_records_the_observation_and_re_arms_the_timer(
     monkeypatch.setattr(stall_watchdog, "time", fake)
     fake_sys = _FakeSys()
     monkeypatch.setattr(stall_watchdog, "sys", fake_sys)
-    spy = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    spy = _record_deadlines(monkeypatch)
 
     dump, handle = _observed_dump(tmp_path, 4244)
     armed = stall_watchdog._Armed(dump, handle, 4.0, 4244, lambda: ("still", True))
@@ -5403,7 +5471,7 @@ def test_the_abstention_records_the_observation_and_re_arms_the_timer(
     fake_sys.frames[ident] = _Frame("loop.py", 12, "walk")
     fake.wall += 1.0
     assert stall_watchdog._sample(armed) is False, "an executing loop was cut"
-    assert spy.armed, "the abstention never reached the C timer, so the bound still ran out"
+    assert spy.remaining, "the abstention never reached the C timer, so the bound still ran out"
     assert stall_watchdog.executing_planes(4244, tmp_path) == (
         stall_watchdog.WORKLOAD,
     ), f"the dump does not say the loop was executing: {dump.read_text(encoding='utf-8')!r}"
@@ -5423,11 +5491,11 @@ def test_the_abstention_records_the_observation_and_re_arms_the_timer(
         bare, stall_watchdog.WORKLOAD, fake_sys.frames, _Frame("loop.py", 11, "walk")
     )
     assert stall_watchdog._sample(bare) is False
-    spy.armed.clear()
+    spy.remaining.clear()
     fake_sys.frames[bare_ident] = _Frame("loop.py", 13, "walk")
     fake.wall += 1.0
     assert stall_watchdog._sample(bare) is False
-    assert spy.armed == [], (
+    assert spy.remaining == [], (
         "the bound abstained with no progress leg to hand the runtime to, so a "
         "frames-moving loop would now be unbounded"
     )
@@ -6248,11 +6316,16 @@ def test_a_caller_with_no_busy_probe_keeps_the_old_exit_leg(
     the one production arm site always supplies one, so holding on absence would
     only disarm the bound for the rigs and reduced hosts that cannot speak.
     """
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
 
     assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
-    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [(5.0, True)], fake.armed
+    armed = stall_watchdog._ARMED
+    assert armed is not None
+    # THE LEG IS NO LONGER A FIELD ON THE ARM ... it is read at the fire, and what the
+    # arm holds is ``held`` -- False here, because a caller with no probe cannot report
+    # work and keeping today's behaviour for it is the documented contract.
+    assert armed.held is False, "a caller with no probe must not hold the exit"
+    assert spy.remaining == [5.0], spy.remaining
 
 
 def test_a_busy_probe_that_raises_holds_the_exit_leg(
@@ -6268,11 +6341,15 @@ def test_a_busy_probe_that_raises_holds_the_exit_leg(
     def exploding() -> bool:
         raise RuntimeError("the session's busy state could not be read")
 
-    fake = _FakeFaulthandler()
-    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    spy = _record_deadlines(monkeypatch)
 
     assert stall_watchdog.arm(seconds=5.0, busy=exploding, directory=tmp_path) is True
-    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [(5.0, False)], fake.armed
+    armed = stall_watchdog._ARMED
+    assert armed is not None
+    # A PROBE THAT RAISED HOLDS: the runtime said it has a way to report and the report
+    # could not be read. The arm holds that answer, and the fire reads it from here.
+    assert armed.held is True, "an unreadable work report must hold the exit"
+    assert spy.remaining == [5.0], spy.remaining
 
 
 def test_a_held_fire_is_read_off_the_marker_and_nothing_else(
