@@ -685,8 +685,7 @@ def test_a_current_plist_on_a_moved_build_is_restarted_exactly_once(
     captured = capsys.readouterr()
     assert captured.err == ""
     assert [line for line in captured.out.splitlines() if "daemon:" in line] == [
-        "tunnel daemon: restarted onto the new build (was on "
-        f"{running}) — remote access reconnects by itself"
+        "tunnel daemon: restarted onto the new build " "— expect a brief remote-access blip"
     ], captured.out
 
 
@@ -857,7 +856,7 @@ def test_a_restart_launchd_accepted_but_that_brought_nothing_up_is_not_a_move(
     captured = capsys.readouterr()
     assert "restarted onto the new build" not in captured.out
     assert "warning: tunnel daemon was not refreshed:" in captured.err
-    assert "did not bring a new process up" in captured.err
+    assert "did not report a new process within" in captured.err
     assert moved in captured.err
     assert _RECOVERY["tunnel"] in captured.err, captured.err
     assert "STOPPED" not in captured.err, captured.err

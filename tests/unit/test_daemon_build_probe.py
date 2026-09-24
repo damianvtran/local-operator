@@ -179,16 +179,50 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
         # The raw reading travels into the message: if this ever fails on a runner
         # again, the row `ps` actually returned is in the failure, rather than a
         # second round spent guessing which branch produced the `None`.
+        #
+        # THE PARSE RUNS ON THAT SAME ROW, and the composite is asserted after it, so
+        # the row in the message is the row the first assertion decided on — a
+        # `generation_of_process` call would make a second `ps` call, and on a
+        # fork/exec-window failure the message could then show a perfectly good row
+        # beside a failing assertion (review round 2, NIT-4).
         raw = update_mod._process_argv(child.pid)
-        assert (
-            update_mod.generation_of_process(child.pid) == root / "generations" / generation
+        assert update_mod.generation_in_argv(raw or "") == (
+            root / "generations" / generation
         ), f"argv0={argv0!r} COLUMNS={os.environ.get('COLUMNS')!r} ps said {raw!r}"
+        assert update_mod.generation_of_process(child.pid) == root / "generations" / generation
     finally:
         os.close(read_fd)
         os.close(write_fd)
         if child is not None:
             child.kill()
             child.wait(timeout=10)
+
+
+def test_the_argv_probe_asks_for_the_whole_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag that keeps this probe's answer independent of the screen width.
+
+    THE LOCAL GUARD THE ``COLUMNS`` PIN CANNOT BE (review round 2, MINOR-1). That
+    pin is inert on the platform everyone develops on: macOS `ps` truncates only when
+    it writes to a TERMINAL, so through the pipe this probe uses, the row is whole
+    with or without `-ww` — removing the flag would be caught only by the Linux
+    shards, which is the asymmetry that let the original defect through three local
+    rounds. This asserts the command itself, which is true on every platform.
+    """
+    seen: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        seen.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    update_mod._process_argv(os.getpid())
+
+    assert seen, "the probe made no call at all"
+    assert "-ww" in seen[0], (
+        "the probe must ask for the whole row: without `-ww` `ps` cuts it to the "
+        f"screen width and a severed generation id reads as no move; argv was {seen[0]!r}"
+    )
 
 
 def test_a_child_that_has_not_exec_d_yet_reports_its_parents_argv() -> None:
