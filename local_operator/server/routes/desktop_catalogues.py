@@ -114,7 +114,18 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
     try:
         failures: dict[str, str] = {}
         if live:
-            entries, statuses = await controller.live_catalogue()
+            # THE PICKER'S OWN CADENCE, never discovery's 24 h default. This read
+            # is the user pressing "Refresh from providers": they are asking NOW,
+            # and a document inside the hard TTL is otherwise served from disk
+            # without a request -- which is how a model the provider published
+            # since the last fetch fails to appear on the very click meant to find
+            # it. `PICKER_TTL_S` is the same constant the TUI's
+            # `_refresh_catalogue` and the mobile daemon pass, for the same
+            # reason; a document YOUNGER than the cadence is still served as-is,
+            # because the cadence bounds the refetch rather than removing it.
+            from local_operator.providers.controller import PICKER_TTL_S
+
+            entries, statuses = await controller.live_catalogue(ttl_s=PICKER_TTL_S)
             # ``live_catalogue`` returns a STATUS for EVERY provider it
             # considered (``ok``/``cached``/``stale``/``static``/
             # ``unauthenticated``/``empty``), not a failure map. Naming every key
