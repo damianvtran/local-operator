@@ -1730,6 +1730,20 @@ class _PagingLease:
         return getattr(view, "parent", object()) is not None
 
 
+def _viewport_message_budget(height: int) -> int:
+    """Messages that fill one screen of a ``height``-row app: ``max(12, height // 2)``.
+
+    ONE SPELLING for one question — "enough messages for a screenful" — which
+    the sidebar's prepared window, its re-projection, the pending-tail pages and
+    the viewport-first resume all ask. It was written out as a literal at each
+    of them, so a change to one silently disagreed with the others (review
+    round 1, F4). A message averages about two rows at the widths this app is
+    measured at, hence half the height, floored so a short terminal still paints
+    a real turn or two.
+    """
+    return max(12, height // 2)
+
+
 def _resume_tail_start(history: list[Any], bound: int) -> int:
     """Index of the first message the initial resume frame should paint.
 
@@ -2387,6 +2401,54 @@ RESUME_CONNECT_WALL_S, RESUME_CONNECT_BOUND_S = _resume_connect_limits()
 #: have to survive — the transient it must survive is `COLD_FALLBACK_S`.
 RESUME_CONNECT_ATTEMPTS = _attempts_outlasting(RESUME_CONNECT_WALL_S)
 
+#: When a paint-first open's ATTACH is narrated, and when it is judged.
+#:
+#: Paint-first (`/resume` and `lop --resume` onto a live owner with the
+#: conversation on disk) opens a cold viewer and lets the ordinary background
+#: engage bind it behind the paint. That engage is silent until it FAILS, and
+#: against a frozen owner it fails only when the registry ages the heartbeat out
+#: (~45 s): measured in UX round 1 (U1), the band read `starting…` alone for
+#: 42.2 s and the first account of why nothing was arriving came at ~45 s, where
+#: the dialling arm this replaced had explained itself at ~18 s. The redial loop's
+#: own narration and 27 s budget were unreachable on this path, because the
+#: paint-first branch leaves that loop before it narrates.
+#:
+#: So the attach gets the redial's schedule back, on the engage it now rides:
+#: the redial's own "still trying, about N s in total" row once the wait is long
+#: enough to be watched (the same 10 s `START_ENGAGE_PATIENCE_S` calls watched;
+#: every healthy attach measured here lands in well under a second, so a merely
+#: slow one stays quiet), and a verdict at the redial's wall clock. Separate
+#: names rather than reuses because the tests that shorten the patience filter
+#: must not arm this narration as a side effect.
+ATTACH_BEHIND_NARRATE_S = 10.0
+ATTACH_BEHIND_BOUND_S = RESUME_CONNECT_WALL_S
+#: The verdict, and its restatement once the owner answers after all. "session",
+#: never "runtime": it is the user's word for what they opened (UX round 1, U5).
+#:
+#: The next step is its OWN authored row, the pattern the redial's give-up
+#: sentence already uses (design D2 there): as one flowing sentence an 80-column
+#: pane split "send a message to retry" across two rows (UX round 2, U9), and the
+#: half that splits is the half the user acts on.
+ATTACH_BEHIND_VERDICT = (
+    "session {session_id} is not answering — the conversation is here.\n" "Send a message to retry."
+)
+ATTACH_BEHIND_RECOVERED = "session {session_id} is answering again"
+#: A message sent while the paint-first attach was still pending, whose bind
+#: then failed: it NEVER reached the owner, so it comes back to the composer and
+#: its echo row comes down (UX round 2, U6). The transport's own reason ("owner
+#: did not send its state") is logged, not shown — it names an owner and a
+#: protocol step, and says nothing about the one thing the user needs to know,
+#: which is where their text went (U8).
+#:
+#: Two authored rows for the same reason as the verdict (U9), and the first is
+#: the SHORTER one now: "…is back in the composer." wrapped at 80 columns (UX
+#: round 3, U13), so where the text went moves into the actionable row, which
+#: is the one the user acts on and the one that has to stay whole.
+ATTACH_BEHIND_UNSENT = (
+    "session {session_id} did not answer — your message was not sent.\n"
+    "It is back in the composer: send it again to retry."
+)
+
 
 def _resume_redial_clock() -> float:
     """The redial's clock reading, as a SEAM rather than a direct call.
@@ -2729,6 +2791,422 @@ class _HeldAnswerKey:
     def still_aimed_at(self, live: "AskPickerScreen | None") -> bool:
         """Whether the question this key was meant for is still the live one."""
         return live is self.prompt and self.prompt.question_index == self.question_index
+
+
+class _AttachBehindAttempt:
+    """ONE conversation's paint-first attach: its narration, its bound, its carriers.
+
+    KEYED ON THE CONVERSATION IT WAS STARTED FOR, NEVER ON WHAT IS ON SCREEN.
+    The watch this replaced asked "is the app still bound to my token?" before
+    every step and built its tokens from the app's CURRENT binding, so the
+    moment the user switched conversations each step either bailed or acted on
+    the wrong one (UX round 3 on #1474: U10 an echo row left standing for a
+    message that came back, U11 the "back in the composer" row painted into the
+    conversation switched TO, U12 a re-narrated row that never reached its
+    verdict; agent review round 3: a verdict token rebuilt from current state).
+    Four symptoms, one defect. So identity is CAPTURED — the conversation's
+    ``SessionInteraction`` and its session facade — and every later step keys
+    on those: which row to restate, which band cue to silence, which composer
+    gets the text back.
+
+    The ROW is not held here. What the attempt says goes into the
+    conversation's :class:`_AttachBehindAccount`, which lives on the source and
+    outlives both this attempt (it ends when a carrier binds) and the view the
+    row was painted into (a re-commit replaces it) — agent review round 4, F-1.
+
+    CARRIERS. The attach is carried by the background engage and by every
+    message sent while it is pending (each message's send runs its own
+    foreground bind, which preempts the engage). The attempt ends when a carrier
+    binds (:meth:`landed`), and it is judged when the last carrier fails, so a
+    preempted engage cannot silence the wait while a message is still binding
+    (round 2, U6). The bound is the attempt's, not a carrier's: a carrier that
+    joins an attempt already running — the engage a switch back starts — rides
+    the same narrate/verdict schedule instead of restarting it (U12).
+    """
+
+    def __init__(self, app: "OperatorApp", source: SessionInteraction, session: Any) -> None:
+        self._app = app
+        self.source = source
+        self.session = session
+        self._session_id = str(getattr(session, "session_id", "") or "")
+        #: "pending" (nothing said yet), "narrated", "judged", "unsent" (a
+        #: message came back), "landed" (a carrier bound).
+        self.phase = "pending"
+        self._carriers = 0
+        self._timers: list[Any] = []
+        self._arm()
+
+    @property
+    def _account(self) -> "_AttachBehindAccount":
+        """The conversation's account of this attach, held on its SOURCE.
+
+        Not on the attempt: the attempt ends when a carrier binds, and what it
+        said must outlive it (agent review round 4, F-1; UX round 4, U14).
+        """
+        return _AttachBehindAccount.of(self._app, self.source)
+
+    # -- schedule --------------------------------------------------------
+
+    def _arm(self) -> None:
+        self._stop_timers()
+        app = self._app
+        self._timers = [
+            app.set_timer(ATTACH_BEHIND_NARRATE_S, self._narrate),
+            app.set_timer(ATTACH_BEHIND_BOUND_S, self._judge),
+        ]
+
+    def _stop_timers(self) -> None:
+        for timer in self._timers:
+            timer.stop()
+        self._timers = []
+
+    def _registered(self) -> bool:
+        return self._app._attach_behind_attempts.get(self.source.token) is self
+
+    def _alive(self) -> bool:
+        """Still the attempt for a live conversation holding the same facade."""
+        if self.source.retired or self.source.session is not self.session:
+            self.close()
+            return False
+        return self._registered()
+
+    @property
+    def silences_cue(self) -> bool:
+        """The row states an outcome, so `starting…` beside it would contradict it."""
+        return self.phase in ("judged", "unsent")
+
+    def _narration(self) -> str:
+        # The dialling arm's own sentence, with THIS path's bound: the redial's
+        # "about 42 s" is its wall plus one dial envelope, while this row is
+        # judged at `ATTACH_BEHIND_BOUND_S` (UX round 2, U7; design D5).
+        return (
+            f"reconnecting to session {self._session_id} — still trying, about "
+            f"{ATTACH_BEHIND_BOUND_S:g}\u00a0s in total"
+        )
+
+    def _bound_elsewhere(self) -> bool:
+        """The facade bound on a path that is not one of this attempt's carriers.
+
+        The sidebar's own connect (a switch back) binds through ``bind_runtime``
+        and never reports here, so a timer firing after it must end the wait as
+        a landing rather than narrate or judge an owner that IS answering (UX
+        round 5, U15).
+        """
+        if getattr(self.session, "is_cold", True):
+            return False
+        self.landed()
+        return True
+
+    def _narrate(self) -> None:
+        if not self._alive() or self.phase != "pending" or self._bound_elsewhere():
+            return
+        self.phase = "narrated"
+        self._account.say(self._narration(), "warning")
+
+    def _judge(self) -> None:
+        if (
+            not self._alive()
+            or self.phase not in ("pending", "narrated")
+            or self._bound_elsewhere()
+        ):
+            return
+        # `not answering`, never `no runtime yet`: an owner exists, holds a live
+        # record and was dialled (UX round 1, U2); "session" is the user's word
+        # for what they opened (U5).
+        self.phase = "judged"
+        self._stop_timers()
+        self._account.say(
+            ATTACH_BEHIND_VERDICT.format(session_id=self._session_id), "warning", outcome=True
+        )
+        # The pending cue ends WITH the verdict — for THIS conversation's band
+        # only, read through `silences_cue`, never by clearing an app-wide flag
+        # the conversation on screen may own.
+        self._app._push_starting_band()
+
+    # -- carriers ---------------------------------------------------------
+
+    def join(self) -> None:
+        """A carrier (the engage, or a message's own bind) starts on this attempt.
+
+        Joining an attempt that already ENDED in a verdict or a returned message
+        is a new try: the schedule re-arms and the SAME row says so at once, so
+        a resend never sits under "is not answering" with `starting…` beside it.
+        """
+        if self._carriers == 0 and self.phase in ("judged", "unsent"):
+            self.phase = "narrated"
+            self._arm()
+            self._account.say(self._narration(), "warning")
+            self._app._push_starting_band()
+        self._carriers += 1
+
+    def carrier_failed(self) -> bool:
+        """A carrier ended without binding; ``True`` when this attempt owns the account.
+
+        ``False`` only when nothing has been said yet and nothing else is
+        carrying the attach: a failure faster than the narration is the
+        ordinary report path's business (the patience filter decides), and the
+        attempt closes so it cannot speak later.
+        """
+        self._carriers = max(0, self._carriers - 1)
+        if not self._alive():
+            return True
+        if self._carriers:
+            # A message is still binding: the attach is pending, now carried by
+            # it (round 2, U6). Nothing to report and the schedule stays armed.
+            return True
+        if self.phase == "pending":
+            self.close()
+            return False
+        if self.phase == "narrated":
+            self._judge()
+        return True
+
+    def carrier_left(self) -> None:
+        """A carrier stepped off WITHOUT a verdict on the attach (cancelled, swapped).
+
+        Not a failure: the schedule stays armed, so the verdict still lands on
+        the attempt's own bound, and the engage a switch back starts joins the
+        same attempt rather than a fresh one (UX round 3, U12).
+        """
+        self._carriers = max(0, self._carriers - 1)
+
+    def returned(self) -> None:
+        """A message sent on this attempt came back unsent: say so in ITS conversation.
+
+        OWED EVEN WHEN THIS ATTEMPT IS OVER. Another carrier can bind the attach
+        (``landed`` closes the attempt) and the facade go cold again before this
+        message's own bind fails — ``is_cold``'s third disjunct,
+        ``not _ready_for_events``, is exactly that window. The text has already
+        gone back to the composer by then, so an attempt that answered "not
+        alive" with silence handed it back with no account at all (agent review
+        round 4, F-1a; a regression against ``3424719f``, which painted it). The
+        account lives on the source, so the row is painted whether or not the
+        attempt can still speak; only a conversation that no longer exists is
+        owed nothing.
+        """
+        self._carriers = max(0, self._carriers - 1)
+        if self.source.retired:
+            return
+        if self._alive():
+            # One row per state: a second return restates the same row,
+            # whichever conversation is on screen when it lands (review round 3).
+            self.phase = "unsent"
+            self._stop_timers()
+        self._account.say(
+            ATTACH_BEHIND_UNSENT.format(session_id=self._session_id), "warning", outcome=True
+        )
+        self._app._push_starting_band()
+
+    def landed(self) -> None:
+        """A carrier BOUND: retire the narration, or restate an outcome as recovered."""
+        if not self._alive() or self.phase == "landed":
+            return
+        self.phase = "landed"
+        self._account.settle()
+        # Always closed: the row no longer needs the attempt to outlive the bind
+        # in order to be re-posted, so nothing lingers in the table (round 4, m-1).
+        self.close()
+        self._app._push_starting_band()
+
+    def close(self) -> None:
+        self._stop_timers()
+        if self._registered():
+            del self._app._attach_behind_attempts[self.source.token]
+
+
+class _AttachBehindAccount:
+    """What a paint-first attach has told ONE conversation: its row and last words.
+
+    Held on the conversation's ``SessionInteraction`` (``attach_behind_account``),
+    never on the attempt, because two things end sooner than the account may
+    (agent review round 4 on #1474, F-1; UX round 4, U14; QA round 4, Q-1):
+
+    * the ATTEMPT ends when a carrier binds, while a message sent on it can still
+      come back afterwards and is still owed its "did not answer" row (F-1a);
+    * the VIEW the row was painted into is replaced whenever the conversation is
+      re-committed — the switch back's own connect worker swaps in a fresh
+      replay as soon as the bind lands, and a frontend row is part of no replay —
+      so a row that lived only in a widget left with that widget, the "is
+      answering again" restatement U3 forbids removing included (F-1b).
+
+    So the account remembers what was said, and :meth:`resurface` re-posts it
+    into whatever view the conversation has in front. It never decides WHOSE row
+    it is; that was captured when the attempt was made (UX round 3, U10-U12).
+    """
+
+    def __init__(self, app: "OperatorApp", source: SessionInteraction) -> None:
+        self._app = app
+        self.source = source
+        self.session_id = str(getattr(source.session, "session_id", "") or "")
+        self.row: NoticeBlock | None = None
+        #: The transcript ``row`` was mounted into. Kept beside the row because
+        #: a row's own ancestry is no answer once it is detached, and "take it
+        #: down" must still find it there (QA round 5, Q-2).
+        self._row_view: TranscriptView | None = None
+        #: What the row says now, so a view that replaced the one holding it can
+        #: be given the same one row.
+        self.said: tuple[str, NoticeKind] | None = None
+        #: The row has stated an OUTCOME (a verdict, a returned message). Kept
+        #: across a re-armed retry, so the bind that finally lands restates the
+        #: row as recovered instead of removing what the user read (U3).
+        self.outcome = False
+
+    @classmethod
+    def of(cls, app: "OperatorApp", source: SessionInteraction) -> "_AttachBehindAccount":
+        account = source.attach_behind_account
+        if not isinstance(account, cls):
+            account = cls(app, source)
+            source.attach_behind_account = account
+        return account
+
+    def say(self, text: str, kind: NoticeKind, *, outcome: bool = False) -> None:
+        self.said = (text, kind)
+        self.outcome = self.outcome or outcome
+        row = self.row
+        if row is not None and row.is_attached:
+            # Where it stands — the transcript in front, or the conversation's
+            # parked view, whose widgets outlive the switch.
+            row.restate(text, kind)
+            return
+        self.row = None
+        if self._app._is_current(self.source):
+            self._paint(text, kind)
+        # Otherwise OWED: `said` is kept and `resurface` paints it on return.
+
+    def _paint(self, text: str, kind: NoticeKind) -> None:
+        self._row_view = self._app._transcript_view()
+        self.row = self._app._system_notice_block(text, kind)
+
+    def settle(self) -> None:
+        """A bind LANDED, on whatever path bound it: the wait is over.
+
+        The ONE place the account learns the owner answered, and deliberately
+        not gated on an attempt being alive: the attempt's death is exactly the
+        case that needs it (UX round 5, U15; QA round 5, Q-1). A bind carried
+        by the attempt's own engage or a message's own send reaches here through
+        ``landed``; the sidebar's connect on a switch back and a message that
+        went out over an already-bound facade reach it through
+        ``OperatorApp._settle_attach_behind``. Before this, only the first kind
+        did, so an owner answering after a switch back left "did not answer —
+        send it again" standing above the reply the resend produced.
+
+        An OUTCOME is restated as recovered, never removed — the reader may have
+        read it (UX round 1, U3). Narration alone was never an outcome, and a
+        bind makes it false, so nothing is owed and it comes down. Idempotent.
+        """
+        if self.said is None:
+            return
+        if not self.outcome:
+            self.retire()
+            return
+        recovered = (ATTACH_BEHIND_RECOVERED.format(session_id=self.session_id), "info")
+        if self.said != recovered:
+            self.say(*recovered)
+
+    def resurface(self) -> None:
+        """The conversation is in front again: make sure the view in front says it.
+
+        "Has its row" means a row IN THE VIEW NOW IN FRONT. A row still attached
+        to the outgoing view — the one a re-commit is replacing — counts as
+        missing (the old guard saw it attached and returned, QA round 4, Q-1),
+        so it is taken down there and painted here, once. When the conversation
+        is not in front nothing is painted and nothing is spent: the claim stays
+        owed for the adopt that does bring it in front (review round 4, n-1).
+        """
+        said = self.said
+        if said is None or not self._app._is_current(self.source):
+            return
+        row = self.row
+        stale = _owning_transcript(row)
+        if stale is not None and stale is self._app._transcript_view():
+            return
+        if row is not None and stale is not None:
+            stale.remove_block(row)
+        self._paint(*said)
+
+    def retire(self) -> None:
+        """Nothing is owed any more: take the row down from ITS transcript.
+
+        From the view it was painted into as well as from its current ancestry:
+        a row whose ancestry no longer answers was otherwise left painted on a
+        view the conversation had stopped owning (QA round 5, Q-2).
+        """
+        row, self.row = self.row, None
+        painted_into, self._row_view = self._row_view, None
+        self.said = None
+        self.outcome = False
+        if row is not None:
+            for view in {_owning_transcript(row), painted_into}:
+                if view is not None and row in view.blocks():
+                    view.remove_block(row)
+        if self.source.attach_behind_account is self:
+            self.source.attach_behind_account = None
+
+
+def _owning_transcript(block: Any) -> "TranscriptView | None":
+    """The transcript a mounted block lives in, whichever conversation owns it."""
+    if block is None or not getattr(block, "is_attached", False):
+        return None
+    for node in block.ancestors_with_self:
+        if isinstance(node, TranscriptView):
+            return node
+    return None
+
+
+class _AttachBehindSend:
+    """One message sent while its conversation's paint-first attach was pending.
+
+    CAPTURED AT SEND TIME, which is the whole point: the conversation, its
+    attempt, and the echo rows the submit painted together with the view that
+    holds them. A return then withdraws THIS message's rows from THAT view —
+    on screen or parked — instead of the newest submit's rows from whatever
+    view is in front, which is how a returned message stayed drawn as sent
+    while its text sat in the composer (UX round 3, U10; QA round 3, Q-2).
+    """
+
+    def __init__(
+        self,
+        attempt: _AttachBehindAttempt,
+        blocks: tuple[Any, list[Any]] | None,
+        view: TranscriptView | None,
+    ) -> None:
+        self.attempt = attempt
+        #: The echo rows as captured; public so the worker can tell whether the
+        #: interaction's single ``submitted_blocks`` slot still names them.
+        self.blocks = blocks
+        self._blocks = blocks
+        self._view = view
+        self._done = False
+        attempt.join()
+
+    def landed(self) -> None:
+        if not self._done:
+            self._done = True
+            self.attempt.landed()
+
+    def returned(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        held, self._blocks = self._blocks, None
+        view = self._view
+        if held is not None and view is not None and view.is_attached:
+            # THIS message's rows, from the view the submit painted them into —
+            # never "the newest submit" and never "the view in front".
+            user_block, image_blocks = held
+            for block in (*image_blocks, user_block):
+                view.remove_block(block)
+        self.attempt.returned()
+
+    def ended(self, *, bound: bool) -> None:
+        """Any other way the send ended (cancelled, oversize, stopped); idempotent."""
+        if self._done:
+            return
+        self._done = True
+        if bound:
+            self.attempt.landed()
+        else:
+            self.attempt.carrier_left()
 
 
 RESIZE_REFIT_DELAY_S = 0.05
@@ -4764,6 +5242,16 @@ class OperatorApp(App[None]):
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
+        #: Each conversation's paint-first attach, keyed by its
+        #: ``SessionInteraction.token`` — the conversation, never the screen
+        #: (see :class:`_AttachBehindAttempt`).
+        self._attach_behind_attempts: dict[str, _AttachBehindAttempt] = {}
+        #: Prompts sent while their viewer was cold, keyed by a per-send marker,
+        #: valued by the ``SessionInteraction.token`` of the conversation they
+        #: were sent from; see :meth:`_push_starting_band`.
+        self._prompts_awaiting_bind: dict[object, str] = {}
+        #: What the band was last told, so a re-push is free.
+        self._starting_shown = False
         self._subagent_focus_restore: Any | None = None
         # The org-chart mode (``/team chart``), a sibling of the subagent view
         # with its own open/close and the same MODE contract: it hides the
@@ -6274,7 +6762,7 @@ class OperatorApp(App[None]):
             # `running`.
             replay.prepare(
                 history,
-                bound=max(12, self.size.height // 2),
+                bound=_viewport_message_budget(self.size.height),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
                 live_call_ids=live_projection_call_ids(session),
             )
@@ -7315,6 +7803,7 @@ class OperatorApp(App[None]):
         if not self._sidebar_source_releasable(source, reason=reason):
             return
         source.retired = True
+        self._retire_attach_behind(source)
         if source.unsubscribe_frontend is not None:
             source.unsubscribe_frontend()
             source.unsubscribe_frontend = None
@@ -7805,7 +8294,9 @@ class OperatorApp(App[None]):
                 self._resume_mounted_ids.clear()
                 self._resume_head_notice = None
                 self._resume_tail_notice = None
-                self._project_settled_rows(history, bound=max(12, self.size.height // 2))
+                self._project_settled_rows(
+                    history, bound=_viewport_message_budget(self.size.height)
+                )
             if incoming.needs_live_projection and self._controller is not None:
                 self._controller.restore_live_projection(
                     session.frontend_state, self._resume_mounted_ids, set(self._resume_results)
@@ -7847,6 +8338,7 @@ class OperatorApp(App[None]):
             for text, kind in source.notices:
                 self._system_notice(text, kind)
             source.notices.clear()
+            self._resurface_attach_behind(source)
             if not source.display_only:
                 self._submit_boot_prompt(session)
                 session.resume_viewer_gates()
@@ -10896,17 +11388,155 @@ class OperatorApp(App[None]):
         # Re-armed with the rest of the resume state: a new conversation's
         # first arrival at the top owes a page (see `_resume_in_zone`).
         self._resume_in_zone = False
-        self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
-        # A message budget is a PROXY for height, and a poor one. Whether the
-        # first frame can be scrolled is a question about ROWS, and only the
-        # laid-out widgets can answer it — so ask them, once the mount has
-        # settled, and top up if the answer is "no".
+        # VIEWPORT FIRST, THEN THE REST OF THE SAME WINDOW (B-F3). The 80-message
+        # frame is ~85 blocks, and building + mounting them before the first
+        # paint was the whole of a 0.6-1.3 s open: measured on the real app over
+        # a 2,000-message session, render CPU 93-147 ms at 80 messages against
+        # 34 ms at 20, first paint 386-478 ms against 91-133 ms. So the first
+        # paint carries only what one screen shows, and the remainder of the
+        # window mounts as ONE page after that paint.
         #
-        # Marked active BEFORE the first attempt is scheduled, not inside it:
-        # the frames between this mount and that callback are the earliest
-        # ones a reader sees, and they are exactly as provisional as the ones
-        # between attempts.
-        self._start_resume_fill()
+        # Both cuts come from the SAME snapping rule (`_resume_tail_start`), and
+        # the remainder is exactly `history[full_cut:first_cut]`, so once it has
+        # mounted the transcript holds the identical block list, the identical
+        # `_resume_pending_head`, and the identical head notice the one-shot
+        # projection produced — and the ordinary fill then runs from the state it
+        # always ran from. That identity is what makes the settled frame the
+        # frame main paints, rather than a lookalike built by a second rule.
+        #
+        # `_viewport_message_budget` is the budget the sidebar's prepared window
+        # already uses for the same question ("enough messages for one
+        # screen"). The split is skipped when it would not paint less than the
+        # full window — a short conversation, or a terminal tall enough that one
+        # screen IS the window.
+        full_cut = (
+            _resume_tail_start(history, RESUME_RENDER_MESSAGES)
+            if len(history) > RESUME_RENDER_MESSAGES
+            else 0
+        )
+        screenful = _viewport_message_budget(self.size.height)
+        first_cut = _resume_tail_start(history, screenful) if len(history) > screenful else 0
+        if first_cut <= full_cut:
+            self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
+            # A message budget is a PROXY for height, and a poor one. Whether the
+            # first frame can be scrolled is a question about ROWS, and only the
+            # laid-out widgets can answer it — so ask them, once the mount has
+            # settled, and top up if the answer is "no".
+            #
+            # Marked active BEFORE the first attempt is scheduled, not inside it:
+            # the frames between this mount and that callback are the earliest
+            # ones a reader sees, and they are exactly as provisional as the ones
+            # between attempts.
+            self._start_resume_fill()
+            return
+        # The rows the backfill will add must not widen the ledger's shared name
+        # column AFTER the first paint (see `TranscriptView.reserve_name_col`).
+        # Every call in the window counts, painted or not: a reserve wider than
+        # the rows need can only come from a name the finished frame shows.
+        view = self._transcript_view()
+        view.reserve_name_col(
+            str(getattr(call, "name", "") or "")
+            for message in history[full_cut:first_cut]
+            for call in (getattr(message, "tool_calls", None) or ())
+        )
+        # Held until the backfill settles, so no layout pass between the first
+        # paint and the finished window puts a following reader off the tail
+        # (`TranscriptView.hold_tail_through_layout`).
+        view.hold_tail_through_layout(True)
+        self._project_settled_rows(history, start=first_cut)
+        self._backfill_resume_window(first_cut - full_cut, drop_notice=full_cut == 0)
+
+    def _backfill_resume_window(self, count: int, *, drop_notice: bool) -> None:
+        """Mount the newest ``count`` held messages as one page, after the paint.
+
+        The second half of the viewport-first resume (see
+        :meth:`_render_resumed_history`). The page goes through
+        :meth:`_mount_older_resume_page` — the one seam that inserts older rows
+        beneath the head notice with the anchor held — so the reader following
+        the tail stays on the tail across the insert, exactly as they do when
+        the ordinary fill mounts a page.
+
+        THE PAGING LEASE IS TAKEN NOW, before the paint, and handed to that
+        mount. Between this call and the page landing, a wheel notch or a click
+        on the head notice would otherwise page the held head by
+        :data:`RESUME_PAGE_MESSAGES` cuts, and the window would end on different
+        boundaries than the one-shot frame — still correct, but no longer the
+        same frame. With the lease held those gestures stand down against
+        ``_resume_paging`` for the one refresh this waits, and the head notice
+        reads its loading copy rather than an instruction nobody can carry out.
+
+        ``drop_notice`` is the case where the one-shot frame had NO head notice
+        (the whole conversation fit in :data:`RESUME_RENDER_MESSAGES`): the
+        first paint needed one because it held messages back, and once they
+        are mounted there is nothing above them to announce. Removing the row
+        — rather than letting it restate itself as "start of conversation" — is
+        what keeps that frame identical to main's.
+
+        Fenced to this exact source and view: a switch or a re-render between
+        the paint and the callback owns the transcript now, and the lease this
+        took is released rather than stranded.
+        """
+        view = self._transcript_view()
+        source = self._interaction
+        lease = self._acquire_paging_lease(source)
+        if lease is None:
+            # Unreachable today (`_render_resumed_history` pops this source's
+            # lease first); degrade to the ordinary fill rather than mounting
+            # a page against a gate someone else holds.
+            self._start_resume_fill()
+            return
+        self._resume_fill_active = True
+
+        def settled() -> None:
+            view.release_name_col_reserve()
+            if drop_notice and not self._resume_pending_head:
+                notice = self._resume_head_notice
+                if notice is not None:
+                    self._resume_head_notice = None
+                    view.remove_block(notice)
+            # Released only after the layout the removal above causes: that
+            # removal SHRINKS the extent by the notice's rows, and without the
+            # hold its first frame paints two rows off the tail (measured on
+            # the 50-message fixture). The hold is cleared on the refresh after.
+            if not view.call_after_refresh(view.hold_tail_through_layout, False):
+                view.hold_tail_through_layout(False)
+            # Handed back BEFORE the ordinary fill starts, which re-raises it:
+            # the flag is `_start_resume_fill`'s to own from here, and leaving
+            # it set would claim a fill in flight on any path where that start
+            # declines to run one.
+            self._resume_fill_active = False
+            self._start_resume_fill()
+
+        def mount() -> None:
+            if (
+                not self._is_current(source)
+                or self._transcript is not view
+                or self._paging_leases.get(source.token) is not lease
+            ):
+                self._release_paging_lease(lease)
+                view.release_name_col_reserve()
+                view.hold_tail_through_layout(False)
+                return
+            try:
+                self._mount_older_resume_page(
+                    on_settled=settled,
+                    lease=lease,
+                    start=max(0, len(self._resume_pending_head) - count),
+                )
+            except BaseException:
+                # The mount has already restored the head and released the
+                # lease (it re-raises by design); only this caller's two holds
+                # are left to drop, or the tail hold would outlive the resume.
+                view.release_name_col_reserve()
+                view.hold_tail_through_layout(False)
+                raise
+
+        # AFTER the refresh, which is the paint: `call_after_refresh` runs once
+        # the screen has composited the frame this projection produced. A pump
+        # that refuses the post (closing) will not paint either, so the page is
+        # mounted inline and the frame simply arrives whole.
+        if not view.call_after_refresh(mount):
+            mount()
 
     def _prefill_resume_before_reveal(self) -> None:
         """Fill the incoming projection to its goal INSIDE the commit.
@@ -11602,7 +12232,9 @@ class OperatorApp(App[None]):
                     # when the turn dies instead of returning a result.
                     live_cards[block.tool_call_id] = block
 
-    def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
+    def _project_settled_rows(
+        self, history: list[Any], *, bound: int | None = None, start: int | None = None
+    ) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
         session = self._session
@@ -11682,7 +12314,9 @@ class OperatorApp(App[None]):
             # `_stop_multiplexer_broadcast` instead. A line number in a comment
             # survives only until the next edit above it.
             fold_width = self._transcript_view().scrollable_content_region.width
-            projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
+            projected = project_settled_rows(
+                self, history, bound=bound, start=start, fold_width=fold_width
+            )
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
             # must be able to settle when the turn dies.
@@ -11880,7 +12514,9 @@ class OperatorApp(App[None]):
             # Live output (or an earlier End) already supplies the true tail.
             # The middle gap stays reachable without moving it after that tail.
             return
-        start = _resume_tail_start(self._resume_pending_tail, max(12, self.size.height // 2))
+        start = _resume_tail_start(
+            self._resume_pending_tail, _viewport_message_budget(self.size.height)
+        )
         page, self._resume_pending_tail = (
             self._resume_pending_tail[start:],
             self._resume_pending_tail[:start],
@@ -11912,7 +12548,7 @@ class OperatorApp(App[None]):
             view.restore_navigation_anchor(
                 anchor.navigation_anchor_id, anchor.navigation_anchor_part, top - anchor.region.y
             )
-        count = min(len(self._resume_pending_tail), max(12, self.size.height // 2))
+        count = min(len(self._resume_pending_tail), _viewport_message_budget(self.size.height))
         page, self._resume_pending_tail = (
             self._resume_pending_tail[:count],
             self._resume_pending_tail[count:],
@@ -12408,7 +13044,11 @@ class OperatorApp(App[None]):
             self._fill_resume_until_scrollable(target=view.scroll_y + viewport)
 
     def _mount_older_resume_page(
-        self, on_settled: Callable[[], None] | None = None, *, lease: _PagingLease | None = None
+        self,
+        on_settled: Callable[[], None] | None = None,
+        *,
+        lease: _PagingLease | None = None,
+        start: int | None = None,
     ) -> None:
         """Mount the next older page of a bounded resume, at the top.
 
@@ -12457,7 +13097,11 @@ class OperatorApp(App[None]):
         # a tool result whose call is still in the remaining head would
         # paint a reply with no question at the top of the newly revealed
         # history.
-        start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
+        # ``start`` is a cut the CALLER already snapped: the viewport-first
+        # resume's backfill mounts the rest of the initial window at the exact
+        # boundary the one-shot frame would have used (`_backfill_resume_window`).
+        if start is None:
+            start = _resume_tail_start(head, RESUME_PAGE_MESSAGES)
         page, self._resume_pending_head = head[start:], head[:start]
         # Dedupe by stable ID, never by position: the tail was sliced off
         # the same list, so an overlap should be impossible — but a message
@@ -12918,6 +13562,7 @@ class OperatorApp(App[None]):
         # never calls this path and therefore never retires its loops.
         navigation_generation = self._sidebar_navigation.generation
         self._interaction.retired = True
+        self._retire_attach_behind(self._interaction)
         previous_id = self._conversation_id()
         previous_len = self._history_length()
         preserve_outgoing = preserve_outgoing or (
@@ -14724,6 +15369,7 @@ class OperatorApp(App[None]):
 
         attempt = 0
         remote: Any = None
+        attach_behind = False
         # TAKEN ONCE, AND CHARGED FOR EVERYTHING THE LOOP SPENDS. Each attempt's
         # own duration comes off this deadline as it is spent and each backoff
         # is clamped to what is left, so a silent owner cannot buy more dials by
@@ -14816,6 +15462,48 @@ class OperatorApp(App[None]):
                             "warning",
                         )
                         return
+                    if (
+                        record is not None
+                        and frontend_attach_refusal(record) is None
+                        and (config_root / "sessions" / concrete / "transcript.jsonl").is_file()
+                    ):
+                        # PAINT FIRST, ATTACH BEHIND. A blocking `connect` held
+                        # the screen for the owner's whole canonical sync —
+                        # 15 s and then a refusal against a busy owner, and
+                        # every redial another 15 s — before a single row was
+                        # drawn. The conversation is on disk, so the cold
+                        # facade paints it now, and the eager engage after the
+                        # adopt binds it to this same owner behind the paint:
+                        # the band says `starting…` meanwhile, the composer
+                        # stays usable (a prompt takes the foreground bind and
+                        # the background one yields to it), and
+                        # `AttachedSession._replay_cold_gap` paints whatever
+                        # the owner wrote after the read. A cold open that
+                        # fails falls through to the dial below unchanged.
+                        #
+                        # FIRST ATTEMPT ONLY, and only with a transcript and a
+                        # dialable record: a paint-first open with nothing to
+                        # paint buys nothing (an owner that defers its journal
+                        # until the first write keeps the dial), a static
+                        # refusal keeps its own sentence below, and a redial
+                        # already under way keeps the loop it was narrating.
+                        try:
+                            remote = await AttachedSession.cold(
+                                concrete,
+                                config_dir=config_root,
+                                cwd=str(record.cwd or os.getcwd()),
+                                takeover_factory=takeover_factory,
+                            )
+                            # Read by the engage that binds behind this paint,
+                            # so the wait is narrated and bounded on the redial's
+                            # own schedule (`_AttachBehindAttempt`) rather than
+                            # left as a bare `starting…` (UX round 1, U1).
+                            remote.attach_behind = True
+                            attach_behind = True
+                            settled = True
+                            break
+                        except Exception:  # noqa: BLE001 — the dial is the fallback
+                            logger.debug("paint-first resume unavailable", exc_info=True)
                 if record is None:
                     # An owner that is not there THIS MOMENT: paced and retried,
                     # never reported (see the first-attempt block above).
@@ -14949,6 +15637,11 @@ class OperatorApp(App[None]):
         try:
             self._reset_ledger_for_swap()
             self._adopt_session(remote)
+            if attach_behind:
+                # The bind behind the paint: the same engage a cold boot runs,
+                # which finds this owner's record and attaches to it rather
+                # than starting anything (see the paint-first branch above).
+                self._engage_runtime_eagerly()
             await self._preflight_usage(remote)
         finally:
             self._swapping_session = False
@@ -18879,8 +19572,18 @@ class OperatorApp(App[None]):
         # "whose" survive a re-bind of the SAME conversation.
         binding_token = (self._binding_epoch, str(getattr(session, "session_id", "") or ""))
         self._set_starting(True)
+        # Captured with the binding: the conversation this engage carries the
+        # attach FOR. Its failure and its bind report to that attempt whatever
+        # is on screen by the time they land.
+        attempt = self._attach_behind_attempt_for(self._interaction, session)
+        if attempt is not None:
+            attempt.join()
 
         async def run() -> None:
+            # This carrier reports to its attempt exactly once: the failure arm
+            # below, or the `finally` (bound, or cancelled by a swap).
+            reported = False
+            cancelled = False
             try:
                 # BACKGROUND envelope. Nobody is waiting on this engage and it
                 # is silent on failure, so it can afford to outlast an owner
@@ -18888,6 +19591,9 @@ class OperatorApp(App[None]):
                 # condition that used to leave the session cold and make the
                 # user's first command pay for a fresh bind.
                 await cast(Callable[..., Awaitable[None]], ensure)(foreground=False)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             except Exception as error:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent WHILE the
                 # failure is too quick to have been watched: the user has not
@@ -18906,6 +19612,15 @@ class OperatorApp(App[None]):
                 # Same reason as the skip above: nothing bound, so there is no
                 # change to name and the pending stamp must not outlive it.
                 self._refreshed_from = None
+                # A paint-first attach that has already told the user something
+                # restates THAT row with its verdict rather than adding a second
+                # sentence under it (UX round 1, U2/U3) — and says nothing at all
+                # while a message is still carrying the attach (round 2, U6).
+                if attempt is not None:
+                    reported = True
+                    if attempt.carrier_failed():
+                        self._start_engage_reported_for = binding_token
+                        return
                 self._report_start_engage_failure(
                     reason=reason,
                     error=error,
@@ -18915,6 +19630,16 @@ class OperatorApp(App[None]):
                 return
             finally:
                 self._set_starting(False)
+                if attempt is not None and not reported:
+                    # Bound, or cancelled by a swap. A cancelled carrier is not a
+                    # failure of the attach: it steps off, and the engage a switch
+                    # back starts re-joins the same attempt on its schedule.
+                    if not getattr(session, "is_cold", True):
+                        attempt.landed()
+                    elif cancelled:
+                        attempt.carrier_left()
+                    else:
+                        attempt.carrier_failed()
             # AFTER a successful bind, which is the only moment the OWNER's
             # build is knowable: the pre-spawn check above runs while the
             # facade is still cold, so its C branch always returns at the
@@ -18944,6 +19669,95 @@ class OperatorApp(App[None]):
                 self._settle_handed_over_queues(interaction)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _attach_behind_attempt_for(
+        self, source: SessionInteraction, session: Any
+    ) -> "_AttachBehindAttempt | None":
+        """The paint-first attach attempt of ``source``'s conversation (UX round 1, U1).
+
+        Only for a viewer opened cold IN FRONT OF a live owner
+        (``session.attach_behind``) and still cold: an ordinary cold open waits
+        on nothing that exists yet. A paint-first attach waits on an owner that
+        DOES exist, and the engage carrying it is silent until it fails, so the
+        attempt posts the redial's own row on the redial's own schedule —
+        narrated at :data:`ATTACH_BEHIND_NARRATE_S`, judged "not answering" at
+        :data:`ATTACH_BEHIND_BOUND_S`, removed or restated when a carrier binds.
+
+        REUSED for as long as the conversation holds the same facade, so a
+        second carrier — a message, or the engage a switch back starts — joins
+        the attempt already running and keeps its schedule and its one row
+        (UX round 3, U12). A new facade (a reload, a fresh `/resume`) is a new
+        attach and gets a new attempt.
+        """
+        if source is None or not getattr(session, "attach_behind", False):
+            return None
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None and attempt.session is session and not source.retired:
+            return attempt
+        if attempt is not None:
+            attempt.close()
+        if not getattr(session, "is_cold", False):
+            return None
+        attempt = _AttachBehindAttempt(self, source, session)
+        self._attach_behind_attempts[source.token] = attempt
+        return attempt
+
+    def _resurface_attach_behind(self, source: SessionInteraction) -> None:
+        """A conversation came back in front: repaint its attach row if it has none.
+
+        Read from the SOURCE, not from the attempt table: the attempt may be long
+        over (a carrier bound it) while its row is still owed (review round 4,
+        F-1 / U14).
+        """
+        self._settle_attach_behind(source)
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            account.resurface()
+        self._push_starting_band()
+
+    def _settle_attach_behind(self, source: SessionInteraction) -> None:
+        """Settle ``source``'s account when its facade is bound, whoever bound it.
+
+        The attempt's carriers report their own binds (``landed``); this is for
+        the binds that are NOT carriers — the sidebar's connect worker, which
+        binds through ``bind_runtime`` and re-commits the conversation (so this
+        runs from the adopt, via ``_resurface_attach_behind``), and a message
+        delivered over a facade that was already bound, which is never an
+        ``_AttachBehindSend`` (UX round 5, U15 and its item 4; QA round 5, Q-1).
+        Keyed on the SOURCE's own facade, never the one on screen.
+        """
+        account = source.attach_behind_account
+        session = source.session
+        if not isinstance(account, _AttachBehindAccount) or session is None:
+            return
+        if getattr(session, "is_cold", True):
+            return
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None:
+            # Ends the schedule too, so no timer judges an owner that answered.
+            attempt.landed()
+            attempt.close()
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            account.settle()
+        self._push_starting_band()
+
+    def _retire_attach_behind(self, source: SessionInteraction) -> None:
+        """The conversation is gone: drop its attempt and its account (review round 4, m-1).
+
+        Without this a judged or returned attempt — timers stopped, never
+        revisited — kept its ``SessionInteraction``, facade and detached row in
+        ``_attach_behind_attempts`` for the life of the app.
+        """
+        attempt = self._attach_behind_attempts.get(source.token)
+        if attempt is not None:
+            attempt.close()
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            # Taken down, not just forgotten: dropping the reference left the
+            # row painted with nothing left to remove it (QA round 5, Q-2).
+            account.retire()
+        source.attach_behind_account = None
 
     def _report_start_engage_failure(
         self, *, reason: str, error: Exception, elapsed: float, binding_token: tuple[int, str]
@@ -19052,9 +19866,9 @@ class OperatorApp(App[None]):
             # ``HEARTBEAT_TIMEOUT_S``. "not answering" is the honest register
             # for it, and it is the one verb that stays true of the no-record
             # ceiling too.
-            body = "the runtime is not answering yet — send a message to retry"
+            body = "the session is not answering yet — send a message to retry"
         else:
-            body = "no runtime yet — it may still be starting; send a message to retry"
+            body = "the session may still be starting — send a message to retry"
         self._start_engage_reported_for = binding_token
         # INFO, not DEBUG: this line is the one record that the user was told
         # something, and the two ceilings it covers are exactly what an operator
@@ -19401,13 +20215,41 @@ class OperatorApp(App[None]):
         engage runs at mount, and again on the first keystroke after a failed
         one), and a band that said nothing would read as half-loaded.
         """
-        if self._starting_runtime == starting:
-            return
         self._starting_runtime = starting
+        self._push_starting_band()
+
+    def _push_starting_band(self) -> None:
+        """Show ``starting…`` while the engage runs OR a prompt waits on the bind.
+
+        Two sources, one cue (UX round 1, U4). The engage alone ended it too
+        early: the moment a prompt is accepted the background engage SURRENDERS
+        its place to the prompt's foreground bind (``_BACKGROUND_YIELD_BUDGET_S``)
+        and clears its flag, and the band read ``working`` for the whole frozen
+        window while nothing had reached the owner — the not-attached cue gone at
+        exactly the moment the user acted on it. A prompt dispatched against a
+        cold viewer therefore holds the cue until its own send returns, which is
+        the bind landing (or the send failing and reporting itself).
+
+        Counted per BINDING, so a prompt left in flight by a swap cannot hold
+        the cue up over the conversation that replaced it.
+        """
+        source = self._interaction
+        attempt = self._attach_behind_attempts.get(source.token) if source else None
+        if attempt is not None and attempt.silences_cue:
+            # THIS conversation's attach ended in an outcome its row states; an
+            # optimistic `starting…` beside it would contradict it.
+            shown = False
+        else:
+            shown = self._starting_runtime or (
+                source is not None and source.token in self._prompts_awaiting_bind.values()
+            )
+        if shown == self._starting_shown:
+            return
+        self._starting_shown = shown
         if self._status is not None:
             setter = getattr(self._status, "set_starting", None)
             if callable(setter):
-                setter(starting)
+                setter(shown)
         self._refresh_band()
 
     def on_editor_draft_started(self, message: EditorDraftStarted) -> None:
@@ -25465,6 +26307,22 @@ class OperatorApp(App[None]):
         # subject. Reload still cancels: see `_cancel_naming_attempt`.
         if self._is_current(source):
             self._status.update(streaming=True)
+        # NOT YET ATTACHED: the send below binds first, and until it returns the
+        # band keeps saying so rather than `working` (UX round 1, U4).
+        awaiting_bind: object | None = None
+        attach_send: _AttachBehindSend | None = None
+        if self._is_current(source) and getattr(session, "is_cold", False):
+            awaiting_bind = object()
+            self._prompts_awaiting_bind[awaiting_bind] = source.token
+            # EVERYTHING the return path needs, captured NOW: which attempt,
+            # which rows, which view holds them. Nothing later may re-derive
+            # them from the screen (UX round 3, U10/U11).
+            attempt = self._attach_behind_attempt_for(source, session)
+            if attempt is not None:
+                attach_send = _AttachBehindSend(
+                    attempt, source.turn.submitted_blocks, self._transcript_view()
+                )
+            self._push_starting_band()
 
         source.active_workers += 1
 
@@ -25474,6 +26332,18 @@ class OperatorApp(App[None]):
             try:
                 async with source.turn.provider_lock:
                     receipt = await session.prompt(text, images, **echo.prompt_kwargs())
+                # A prompt that went through is a BIND that landed, so a
+                # paint-first verdict still claiming the owner is not answering
+                # is now false (UX round 1, U3).
+                if attach_send is not None:
+                    attach_send.landed()
+                # DELIVERED, so the owner answered whether or not this send was
+                # a carrier: a "did not answer — send it again" row must not
+                # stand above the message it asked for (UX round 5, item 4).
+                self._settle_attach_behind(source)
+                if awaiting_bind is not None:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._push_starting_band()
                 # DELIVERED — so if the transport had to shrink an attachment to
                 # get it here, this is the moment the user can be told. See
                 # `_report_wire_refit_for`.
@@ -25632,6 +26502,45 @@ class OperatorApp(App[None]):
                     # a live owner, and each append made the screen longer
                     # without making it truer (QA round 2, U6).
                     self._notice_unsent_runtime(source)
+                elif (
+                    attach_send is not None
+                    and getattr(session, "is_cold", False)
+                    and isinstance(error, (ConnectionError, TimeoutError))
+                    and not getattr(error, "actionable", False)
+                ):
+                    # SENT DURING A PAINT-FIRST ATTACH, AND NEVER DELIVERED
+                    # (UX round 2, U6). The prompt was dispatched against a cold
+                    # viewer and its own bind failed — the owner is alive but
+                    # silent, so the welcome read timed out ("owner did not send
+                    # its state") or the sync did. Still cold means the bind
+                    # never landed, so `send_command` never ran: the message is
+                    # certainly unsent. The generic branch below printed the
+                    # transport's sentence and left the echo standing with the
+                    # composer empty — the user's text gone, under a row that
+                    # looked sent, 4/4 in UX round 2's runs.
+                    #
+                    # So it gets the in-pattern refusal the siblings above give
+                    # an undelivered message: echo down, draft back, and one row
+                    # in the product's words. Scoped to `attach_behind` because
+                    # this arm's verdict is what invites the send ("send a
+                    # message to retry"); an ordinary cold open's failures keep
+                    # the copy their own tests pin.
+                    #
+                    # EVERY step keys on what the send captured: `attach_send`
+                    # withdraws THIS message's rows from the view that holds
+                    # them (on screen or parked), and its attempt restates the
+                    # ONE row of the conversation the message was sent from.
+                    # `_restore_unsent_for(source, …)` routes the text to that
+                    # conversation's composer or its stored draft. Nothing here
+                    # asks which conversation is in front (UX round 3, U10/U11).
+                    logger.info("prompt bind failed during a paint-first attach: %s", error)
+                    # The shared slot is cleared only while it still names THIS
+                    # message: a second send may have overwritten it, and its
+                    # own refusal must still find its rows.
+                    if source.turn.submitted_blocks is attach_send.blocks:
+                        source.turn.submitted_blocks = None
+                    attach_send.returned()
+                    self._restore_unsent_for(source, text, images, accepted=accepted, seam=True)
                 else:
                     # THROUGH the same helper the `agent_end` path uses. This
                     # branch printed a bare `str(error)` while the event path
@@ -25647,6 +26556,14 @@ class OperatorApp(App[None]):
                 # the entry.
                 self._discard_user_echo_for(source, echo)
             finally:
+                if awaiting_bind is not None and awaiting_bind in self._prompts_awaiting_bind:
+                    self._prompts_awaiting_bind.pop(awaiting_bind, None)
+                    self._push_starting_band()
+                if attach_send is not None:
+                    # Every other way the send can end (cancelled, oversize,
+                    # stopped): this carrier is off the attempt. A no-op when a
+                    # branch above already landed or returned it.
+                    attach_send.ended(bound=not getattr(session, "is_cold", True))
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
                 # The echo is only withdrawable while the send's outcome is
@@ -44022,7 +44939,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 126
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 127
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

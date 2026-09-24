@@ -8741,6 +8741,16 @@ def main() -> int:
                 # getattr, like the additive flags above it: `exec` is not the
                 # only subcommand routed through this Namespace in tests, and a
                 # missing attribute must read as "off", never raise.
+                # NOT implied by ``--workstream``, deliberately. Every exec run
+                # already publishes its discovery record and serves the control
+                # socket (``exec_control`` — publication and gate installation
+                # are separate), so a workstream row is followable and steerable
+                # without this flag. What ``--control`` adds is an APPROVAL
+                # POSTURE: gates park for up to a day instead of being denied,
+                # and a ``--tools`` declaration stops standing as the approval.
+                # Implying it silently parked the fan-out shape
+                # (`--workstream --background --tools bash,write`) on its first
+                # write (PR #1436 agent review round 1, F1).
                 control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
                 # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
@@ -8754,6 +8764,12 @@ def main() -> int:
                 # handoff`), which is why that cell exists rather than an in-process
                 # probe (agent review round 6, R6-5).
                 supervisor_fd=getattr(args, "supervisor_fd", None),
+                # THE OPERATOR'S OWN REQUEST THAT THIS RUN BE A WORKSTREAM
+                # (`lop exec --workstream`), carried to `session_factory._prepare`
+                # through the narrow namespace: absent, the run is ephemeral and
+                # hidden exactly as before. In `STARTUP_FIELDS`, so the detached
+                # worker is told the same thing.
+                workstream=bool(getattr(args, "workstream", False)),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast
@@ -9003,7 +9019,10 @@ def main() -> int:
 
                 from local_operator.harness.types import ModelSpec
                 from local_operator.mobile.attach_client import find_runtime_record
-                from local_operator.session.attached import AttachedSession
+                from local_operator.session.attached import (
+                    AttachedSession,
+                    frontend_attach_refusal,
+                )
                 from local_operator.session_factory import resolve_hosting_model
 
                 config_directory = config_manager.config_dir
@@ -9065,6 +9084,36 @@ def main() -> int:
                         find_runtime_record, config_directory, session_id
                     )
                 degraded_reason = ""
+                paint_first_cwd = ""
+                # PAINT FIRST, ATTACH BEHIND for a live owner whose conversation
+                # is on disk: the cold facade below paints it, and the TUI's eager
+                # engage binds it to that owner after the first paint (the bind
+                # replays whatever the owner wrote in between). The blocking
+                # `connect` held `lop --resume` on the owner's canonical sync —
+                # 15 s against a busy one — before anything was drawn. A model
+                # override is still sent through the live attach below, which is
+                # the one path that can hand it to an existing owner; a cold
+                # viewer's override is consumed by its bind.
+                #
+                # A STATICALLY REFUSED record (an owner on an older build) keeps
+                # the dial below, mirroring the TUI's `/resume` branch: `connect`
+                # raises that refusal, and it is the only thing that sets
+                # `degraded_reason`, i.e. the "opened without live session state
+                # — needs protocol >= N" sentence. Painting first there would
+                # open an inert conversation with no word about why (review
+                # round 1, F1), and the dial costs nothing: it refuses before
+                # any socket is opened.
+                if (
+                    record is not None
+                    and frontend_attach_refusal(record) is None
+                    and not (initial_model is not None and (birth_args.hosting or birth_args.model))
+                    and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
+                ):
+                    # The owner's directory, not this terminal's: the band paints
+                    # it before the bind lands, and a live conversation's cwd is
+                    # the one it is working in.
+                    paint_first_cwd = str(record.cwd or os.getcwd())
+                    record = None
                 if record is not None:
                     try:
                         attached = await AttachedSession.connect(
@@ -9111,7 +9160,7 @@ def main() -> int:
                 viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
-                    cwd=os.getcwd(),
+                    cwd=paint_first_cwd or os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,
                     # Only a RESOLVED spec can be a deliberate override. Setup
@@ -9124,6 +9173,12 @@ def main() -> int:
                 )
                 if degraded_reason:
                     viewer.degraded_reason = degraded_reason
+                if paint_first_cwd:
+                    # Tells the TUI that a live owner is being attached behind
+                    # this paint, so it narrates and bounds that wait rather than
+                    # leaving `starting…` as the only account of it (UX round 1,
+                    # U1).
+                    viewer.attach_behind = True
                 return viewer
 
             async def session_factory():

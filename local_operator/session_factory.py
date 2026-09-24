@@ -3509,9 +3509,20 @@ async def _prepare(
         # promised it (review round 2, F1). ``fresh_directory`` keeps
         # `--resume` honest: adopting the operator's own conversation must not
         # hide their chat.
+        #
+        # ``workstream`` chooses WHICH machine-started value is written: the
+        # operator asked for this one as a long-lived parallel workstream
+        # (`lop exec --workstream`), so it is listed with its opener recorded
+        # rather than hidden. ``getattr`` because this namespace is the narrow
+        # one each entry point builds, and the interactive path has no such
+        # field — an absent field reads as "off", never as an error.
         from local_operator.agent_shell import stamp_agent_shell_session
 
-        stamp_agent_shell_session(transcript_dir, created_here=fresh_directory)
+        stamp_agent_shell_session(
+            transcript_dir,
+            created_here=fresh_directory,
+            delegated_workstream=bool(getattr(args, "workstream", False)),
+        )
 
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the

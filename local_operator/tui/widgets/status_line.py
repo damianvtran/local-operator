@@ -2212,15 +2212,28 @@ class StatusLine:
         # new attribute directly turned three of those into AttributeErrors —
         # a widget's renderer must tolerate the reduced hosts its own suite
         # builds, the same way the fork/subagent fields here already do.
-        if getattr(self, "_starting", False) and not self._streaming:
+        if getattr(self, "_starting", False):
             # Before the runtime exists there is nothing to report but the
             # wait itself, and the caption carries the whole meaning — so it is
             # always spelled out, unlike the working indicator whose word is
             # suppressed when the shimmer is already saying it.
+            #
+            # IT OUTRANKS `working`. A prompt accepted while the viewer is not
+            # yet attached marks the band streaming at once, but nothing has
+            # reached the owner until the bind lands, and the app keeps this
+            # flag up for exactly that wait (`OperatorApp._push_starting_band`).
+            # Letting `working` win hid the one not-attached cue the moment the
+            # user acted on it (UX round 1, U4). A normal turn never has both:
+            # the flag is only ever up while the viewer is cold.
+            #
+            # `muted`, not `dim`: this caption is the only on-screen statement
+            # that the attach is still pending, and `dim` on the band's ground
+            # measured 4.18:1, under AA's 4.5:1 (design round 1, D3); `muted`
+            # is 7.93:1, the band's own secondary-text step.
             if parts:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
-            left.append(" starting…", style=dim)
+            left.append(" starting…", style=muted)
         elif self._streaming:
             # The aggregate working LINE (WorkingBlock) carries the shimmer; the
             # band keeps a quiet activity glyph so a still frame still reads

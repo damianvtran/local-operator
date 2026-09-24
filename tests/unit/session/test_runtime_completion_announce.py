@@ -678,3 +678,65 @@ async def test_an_exception_after_the_claim_hands_it_back(
         assert _delivered(session_id, token) is False, "the claim survived a raise"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_machine_started_session_never_announces_a_completion(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """A session the operator's own listings HIDE must not reach his lock screen.
+
+    THE RULE, and the reason it is the runtime that owns it: the completion of a
+    delegated run belongs to the session that asked for it, which is already
+    showing it, and the operator was never told this run existed. Before this
+    gate the run's own process was the one leak left on the path — every listing
+    filtered the hidden origin and this arm did not, so a throwaway
+    ``lop exec`` put its last assistant line on the screen.
+
+    Both halves of the outcome are asserted, because either alone is a weaker
+    claim: nothing was spawned, AND no delivery claim was taken, so the durable
+    unseen mark is exactly as eligible as it was for whatever surface does own
+    the row.
+    """
+    from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
+
+    session, handle = await _rig(tmp_path, monkeypatch)
+    mark_session_origin(session._transcript.directory, ORIGIN_AGENT_SHELL)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = await _arm(handle, session_id)
+        assert calls == [], "a hidden session raised a banner"
+        assert _delivered(session_id, token) is False, "a hidden session spent the claim"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_workstream_the_operator_asked_for_still_announces(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """THE MIRROR CASE, and it matters as much as the gate.
+
+    ``agent-workstream`` is a USER origin: the operator asked for the run, so it
+    is listed — and a gate that silenced it would be the very bug this change
+    exists to fix, one rung up. The pair with the cell above is the whole point:
+    the two sessions differ only by the marker.
+    """
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+
+    session, handle = await _rig(tmp_path, monkeypatch)
+    mark_session_origin(
+        session._transcript.directory,
+        ORIGIN_AGENT_WORKSTREAM,
+        opened_by={"session": "req000000001"},
+    )
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = await _arm(handle, session_id)
+        assert calls, "the workstream the operator asked for was silenced"
+        assert calls[0]["session_id"] == session_id
+        assert _delivered(session_id, token) is True
+    finally:
+        await session.dispose()

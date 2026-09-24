@@ -20,7 +20,7 @@ import logging
 import random
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any, Callable, Collection, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Protocol
 
 import httpx
 
@@ -1950,61 +1950,93 @@ class ProviderController:
         return entries
 
     def initial_catalogue(self, *, cache_dir: Any = None) -> list[CatalogueEntry]:
-        """First frame catalogue: shipped models and authoritative cached listings.
+        """First frame catalogue: every provider's rows, from its CACHED listing.
 
-        Synchronous, non-blocking, and network-free. While direct providers have
-        stable shipped static models in the registry, aggregator providers
-        (OpenRouter, Radient) have no hardcoded registry models and rely on their
-        dynamic catalogues. When a previous live listing exists on disk, reading it
-        via :func:`cached_available_models` allows hundreds of available models to
-        paint on the very first frame rather than appearing only after a network
-        round trip. DeepSeek's native inventory also owns its selectable set:
-        using the shipped rows here would flash retired ids even when the live
-        catalogue was already cached. Its cache reader supplies the ordinary
-        static fallback when no trustworthy native listing exists.
+        Synchronous, non-blocking and NETWORK-FREE: the reader is
+        :func:`cached_available_models`, which peeks at the document on disk and
+        never takes a fetch lease, spawns a revalidation thread or issues a
+        request. A picker has to paint on the keystroke that opened it.
+
+        NOT I/O-FREE, and the distinction is measured rather than assumed: the
+        frame reads config.yml ONCE (see ``values`` below) and, when a cached
+        listing contributed a row the registry does not have, one keyless price
+        document (:func:`_price_listing_only_rows`). Both are disk reads with no
+        request behind them.
+
+        WHY EVERY PROVIDER AND NOT JUST THE AGGREGATORS. This used to hand a
+        direct provider the shipped static registry alone, so the first frame --
+        and, for the desktop composer's inline ``/model `` argument list, the
+        ONLY frame -- could not offer a model the provider lists and the registry
+        does not carry. Aggregators were read through the cache because they ship
+        no static rows at all; that was never a special rule, it was just the one
+        provider class where the gap was fatal enough to be noticed.
+
+        The policy lives where it already lived, in the reader: on a cold or
+        unusable cache :func:`cached_available_models` falls back to the shipped
+        rows, so the first frame is field-for-field the one this method always
+        painted, and a local provider whose configured endpoint cannot be
+        resolved contributes its shipped rows rather than raising (see that
+        reader).
+
+        WHAT THIS FRAME DOES NOT READ, stated because the earlier wording here
+        claimed otherwise: the reader takes the PLAIN document name
+        (``<credential>.listing``), never a credential-scoped one, so
+        ``openai.oauth.<hash>.listing`` and ``kimi.oauth.listing`` do not reach
+        frame one and the account-scoped prune inside ``_listing_replaces_static``
+        is never entered from here. Deepseek is the only provider whose cached
+        listing OWNS the set on this path. Sweeping the hashed documents instead
+        would be wrong for a frame asked without an account: it could only offer
+        whichever account's catalogue it happened to pick, and a first frame has
+        no credential in hand to pick with.
+
+        ORDER, which pickers rely on: within a provider the cached listing comes
+        first (providers list newest-first) and the registry-only ids it did not
+        mention follow; between providers it is the ``_chat_providers()``
+        registry order. With nothing cached that is the registry's own dict order.
         """
         entries: list[CatalogueEntry] = []
         usable = self.usable_providers()
+        # ONE config read for the whole frame, and only when a local provider is in
+        # the registry at all: the endpoint resolution below reads config.yml per
+        # provider when it is not handed one, and this method runs on the keystroke
+        # that opens a picker -- and, on the desktop, on every keystroke typing a
+        # `/model ` argument. Five reads turned the frame from 0.24 ms into 14.5 ms
+        # (agent review round 2, R2-2).
+        values: Mapping[str, Any] | None = None
+        listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]] = []
         for definition in _chat_providers():
+            if definition.local_setup and values is None:
+                from local_operator.providers.local import config_values
+
+                values = config_values()
+            models, _status = cached_available_models(
+                definition.id, cache_dir=cache_dir, values=values
+            )
+            listed.append((definition, models))
+        priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
+        for definition, models in listed:
             connected = usable is None or definition.id in usable
-            if definition.id in AGGREGATOR_PROVIDERS or definition.id == "deepseek":
-                models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
-                for model in models:
-                    entries.append(
-                        CatalogueEntry(
-                            provider=definition.id,
-                            model_id=model.id,
-                            label=model_label(definition.id, model.id, model.name or "").full,
-                            listing_name=model.name or "",
-                            context_window=max(0, model.context_window),
-                            default_context_window=model.default_context_window,
-                            max_context_window=model.max_context_window,
-                            input_price=_price(model.input_price, definition, free=model.free),
-                            output_price=_price(model.output_price, definition, free=model.free),
-                            connected=connected,
-                            aggregated=definition.id in AGGREGATOR_PROVIDERS,
-                            routed=model.routed,
-                            time_of_use=model.time_of_use,
-                        )
+            for model in models:
+                # The price chain's answer, where it has one, for a row the SHIPPED
+                # registry does not describe (see `_price_listing_only_rows`).
+                model = priced.get((definition.id, model.id), model)
+                entries.append(
+                    CatalogueEntry(
+                        provider=definition.id,
+                        model_id=model.id,
+                        label=model_label(definition.id, model.id, model.name or "").full,
+                        listing_name=model.name or "",
+                        context_window=max(0, model.context_window),
+                        default_context_window=model.default_context_window,
+                        max_context_window=model.max_context_window,
+                        input_price=_price(model.input_price, definition, free=model.free),
+                        output_price=_price(model.output_price, definition, free=model.free),
+                        connected=connected,
+                        aggregated=definition.id in AGGREGATOR_PROVIDERS,
+                        routed=model.routed,
+                        time_of_use=model.time_of_use,
                     )
-            else:
-                for model_id, info in static_models(definition.id).items():
-                    entries.append(
-                        CatalogueEntry(
-                            provider=definition.id,
-                            model_id=model_id,
-                            label=model_label(definition.id, model_id, info.name or "").full,
-                            listing_name=info.name or "",
-                            context_window=max(0, info.context_window or 0),
-                            default_context_window=info.default_context_window,
-                            max_context_window=info.max_context_window,
-                            input_price=_price(info.input_price, definition),
-                            output_price=_price(info.output_price, definition),
-                            connected=connected,
-                            aggregated=False,
-                            time_of_use=info.time_of_use,
-                        )
-                    )
+                )
         return entries
 
     def entry_for(
@@ -2374,6 +2406,8 @@ def _invalidate_cached_listing(storage_id: str) -> None:
 
 def _enrich_prices(
     listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]],
+    *,
+    cache_dir: Any = None,
 ) -> dict[str, list[DiscoveredModel]]:
     """Each provider's rows with price/limit HOLES filled from the keyless chain.
 
@@ -2403,7 +2437,7 @@ def _enrich_prices(
     """
     from local_operator.model.prices import models_dev_providers, price_row
 
-    models_dev = models_dev_providers()
+    models_dev = models_dev_providers(cache_dir=cache_dir)
     openrouter: list[DiscoveredModel] = next(
         (rows for definition, rows in listed if definition.id == "openrouter"), []
     )
@@ -2456,6 +2490,52 @@ def _enrich_prices(
             )
         result[definition.id] = enriched
     return result
+
+
+def _price_listing_only_rows(
+    listed: list[tuple[ProviderDefinition, list[DiscoveredModel]]],
+    *,
+    cache_dir: Any = None,
+) -> dict[tuple[str, str], DiscoveredModel]:
+    """The keyless price chain, applied ONLY to rows a cached listing contributed.
+
+    WHY ONLY THOSE. A first frame painted from the cache carries whatever money
+    the provider's own listing stated, and for a model the shipped registry has
+    never heard of that is nothing -- so the row paints ``-1.0/-1.0``, the
+    picker's blank cell, where the live path paints the real rate. On the
+    composer's inline ``/model `` list that blank is PERMANENT, because that
+    surface never goes live, so nothing would ever fill it (agent review round 2,
+    R2-3). The chain that fills it is the one ``live_catalogue`` already runs
+    (:func:`_enrich_prices`): disk only, no request, one document read for the
+    whole frame -- 0.9-1.0 ms here for the whole helper against a 138 KiB
+    models.dev projection, 0.9-2.1 ms for the document read inside it (measured
+    2026-09-24 on the fleet host: isolated cache, 25-call median after a
+    warm-up; the range is three runs and the magnitude is rig-dependent). It is
+    not entered at all when nothing needs it, so a cold cache costs this frame
+    exactly what it cost before.
+
+    WHY NOT EVERY ROW, which would be the smaller change: the SHIPPED rows are
+    the frame's contract with the registry. With nothing cached, frame one is
+    ``static_catalogue()`` field for field, and the live pass is what upgrades
+    it; pricing rows the registry already describes here would silently break
+    that equality -- including for shipped rows whose price the registry does not
+    know, which today paint blank on frame one and on the live frame alike.
+    Returns a ``(provider id, model id)`` keyed map, so the caller splices by
+    identity and needs to know nothing about the chain's own ranking.
+    """
+    wanted: list[tuple[ProviderDefinition, list[DiscoveredModel]]] = []
+    for definition, models in listed:
+        shipped = static_models(credential_provider_id(definition.id))
+        only = [row for row in models if row.id not in shipped]
+        if only:
+            wanted.append((definition, only))
+    if not wanted:
+        return {}
+    return {
+        (provider_id, row.id): row
+        for provider_id, rows in _enrich_prices(wanted, cache_dir=cache_dir).items()
+        for row in rows
+    }
 
 
 def _price(value: float | None, definition: ProviderDefinition, *, free: bool = False) -> float:
