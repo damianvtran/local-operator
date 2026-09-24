@@ -27,6 +27,7 @@ from local_operator.server.utils.desktop_auth import (
     LOGIN_READY_TIMEOUT_S,
     DesktopAuth,
     LoginOperation,
+    SignInUnavailableError,
     apply_desktop_login_defaults,
 )
 
@@ -291,6 +292,12 @@ async def login(body: LoginRequest, host: DesktopAuth = Depends(get_desktop_auth
     """
     try:
         op = await host.start(body.provider)
+    except SignInUnavailableError as error:
+        # 503, not 422: the request was valid and the server is shutting down.
+        # The renderer classifies 503 as "backend not answering"
+        # (``isServerUnreachable``), which is exactly this state; nothing in the
+        # desktop client branches on a 422 from this route.
+        raise HTTPException(503, str(error)) from None
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     try:

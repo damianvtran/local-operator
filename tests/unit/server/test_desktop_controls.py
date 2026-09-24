@@ -1614,12 +1614,18 @@ async def test_a_hung_teardown_does_not_block_later_starts(desktop, monkeypatch)
         }
         assert len(running) == 1 and running <= newer
         # And the abandoned flow is not charged to later starts: a fourth start
-        # supersedes only the live one, whose teardown is instant.
-        loop = asyncio.get_running_loop()
-        began = loop.time()
+        # supersedes only the live one. Asserted structurally, not on a clock
+        # (review round 3, MINOR 3; AGENTS.md "Wait on the event"): the stuck
+        # task was cancelled exactly ONCE, by the second start. A re-cancel --
+        # which is what re-charges the teardown bound -- would make it two.
+        assert stale.task.cancelling() == 1
         fourth = await client.post("/v1/auth/login", json={"provider": "radient"})
         assert fourth.status_code == 200
-        assert loop.time() - began < desktop_auth.CANCEL_TEARDOWN_TIMEOUT_S
+        assert stale.task.cancelling() == 1, "a later start re-cancelled the lingering flow"
+        # And neither may a repeated DELETE on it (review round 3, MINOR 2).
+        deleted = await client.delete(f"/v1/auth/operations/{first['id']}")
+        assert deleted.status_code == 200
+        assert stale.task.cancelling() == 1, "DELETE re-cancelled the lingering flow"
     finally:
         release.set()
         await asyncio.sleep(0)
@@ -1666,13 +1672,221 @@ async def test_close_racing_a_start_leaves_no_flow_running(desktop, monkeypatch,
     assert all(task.done() for task in started), "a flow outlived close()"
     assert host.operations == {}
     if first == "close":
-        assert isinstance(outcome, ValueError), outcome
+        from local_operator.server.utils.desktop_auth import SignInUnavailableError
+
+        assert isinstance(outcome, SignInUnavailableError), outcome
     else:
         # It won the lock, so it created its op -- and close then cancelled it.
         assert not isinstance(outcome, BaseException), outcome
         assert outcome.state == "cancelled", outcome
     # Nothing left for the fixture's own close to find.
     app.state.desktop_auth = None
+
+
+async def test_a_start_after_close_answers_503(desktop):
+    """Review round 3, NIT 2: a start refused because the server is shutting down
+    is not an invalid request, so it is not 422. 503 is also what the renderer's
+    ``isServerUnreachable`` reads as "the backend is not answering"."""
+    client, app = desktop
+    await client.get("/v1/auth/providers")  # builds the host
+    host = app.state.desktop_auth
+    await host.close()
+    refused = await client.post("/v1/auth/login", json={"provider": "radient"})
+    assert refused.status_code == 503, refused.text
+    assert "shuts down" in refused.json()["detail"]
+    # An unknown provider is still the caller's mistake: 422, unchanged.
+    app.state.desktop_auth = None
+    unknown = await client.post("/v1/auth/login", json={"provider": "no-such-provider"})
+    assert unknown.status_code == 422, unknown.text
+
+
+@pytest.mark.parametrize("returns_from", ["provider_login", "controller"])
+async def test_an_abandoned_flow_that_finishes_late_writes_nothing(
+    desktop, monkeypatch, returns_from
+):
+    """Review round 3, MINOR 2: a flow that absorbs its cancellation and then
+    RETURNS a credential after the teardown bound used to flip its op from
+    ``cancelled`` to ``succeeded``, store the credential and rewrite
+    ``config.yml`` defaults for the provider the user had walked away from. Once
+    cancelled, every one of those writes is a no-op: state, auth URL, stored
+    credentials and the config file are all exactly as the cancel left them.
+
+    ``provider_login`` returns through the real ``ProviderController.login``,
+    whose aborted-signal check refuses the credential write. ``controller``
+    replaces that method with one that ignores the signal and returns normally,
+    so the HOST's own guards (terminal state, login defaults) are pinned on their
+    own rather than only behind the controller's."""
+    from local_operator.providers.controller import ProviderController
+    from local_operator.server.utils import desktop_auth
+
+    monkeypatch.setattr(desktop_auth, "CANCEL_TEARDOWN_TIMEOUT_S", 0.05)
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    applied: list[str] = []
+    real_apply = desktop_auth.apply_desktop_login_defaults
+
+    def spy_apply(manager, provider_id, *, oauth):
+        applied.append(provider_id)
+        return real_apply(manager, provider_id, oauth=oauth)
+
+    monkeypatch.setattr(desktop_auth, "apply_desktop_login_defaults", spy_apply)
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Swallow the cancel and carry on, as a stuck provider flow would.
+            cancelled.set()
+        await release.wait()
+        # A late progress callback, then a credential.
+        callbacks.on_auth_url("https://radienthq.com/authorize?late=1", instructions=None)
+        return {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+
+    if returns_from == "controller":
+
+        async def controller_login(self, provider_id, **kwargs):
+            definition = registry.get_provider_definition(provider_id)
+            assert definition is not None
+            await login(self._login_callbacks(definition), **kwargs)
+            return "Logged in."
+
+        monkeypatch.setattr(ProviderController, "login", controller_login)
+    else:
+        _stub_login(monkeypatch, "radient", login)
+    client, app = desktop
+    config_file = Path(app.state.config_manager.config_dir) / "config.yml"
+    config_before = config_file.read_bytes() if config_file.exists() else None
+    started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    host = app.state.desktop_auth
+    op = host.operations[started["id"]]
+
+    deleted = await client.delete(f"/v1/auth/operations/{op.id}")
+    assert deleted.json()["result"]["state"] == "cancelled"
+    assert cancelled.is_set() and op.task is not None and not op.task.done()
+    assert op.task in host._lingering
+
+    release.set()
+    await asyncio.wait_for(op.task, timeout=5.0)
+
+    after = (await client.get(f"/v1/auth/operations/{op.id}")).json()["result"]
+    assert after["state"] == "cancelled", after
+    assert after["auth_url"] is None, "a late callback repainted the abandoned op"
+    assert applied == [], "login defaults were applied for an abandoned sign-in"
+    assert not host.store.list_credentials("radient"), "an abandoned sign-in stored a credential"
+    assert (config_file.read_bytes() if config_file.exists() else None) == config_before
+
+
+async def test_a_second_cancel_of_a_lingering_flow_returns_at_once(desktop, monkeypatch):
+    """Review round 3, MINOR 2: ``cancel`` on an op already abandoned used to
+    cancel the stuck task again and wait out the full bound a second time. It now
+    returns without touching the task -- asserted on the task's own cancel count,
+    not on a clock."""
+    from local_operator.server.utils import desktop_auth
+
+    monkeypatch.setattr(desktop_auth, "CANCEL_TEARDOWN_TIMEOUT_S", 0.05)
+    release = asyncio.Event()
+
+    async def login(callbacks, *, signal=None, **_kwargs):
+        callbacks.on_auth_url("https://radienthq.com/authorize", instructions=None)
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                pass
+
+    _stub_login(monkeypatch, "radient", login)
+    client, app = desktop
+    started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
+    host = app.state.desktop_auth
+    op = host.operations[started["id"]]
+    try:
+        await host.cancel(op)
+        assert op.task is not None and not op.task.done()
+        assert op.task.cancelling() == 1
+        waits: list[Any] = []
+        real_wait = asyncio.wait
+
+        async def counting_wait(*args, **kwargs):
+            waits.append(args)
+            return await real_wait(*args, **kwargs)
+
+        monkeypatch.setattr(desktop_auth.asyncio, "wait", counting_wait)
+        await host.cancel(op)
+        assert waits == [], "a second cancel waited on the teardown bound again"
+        assert op.task.cancelling() == 1, "a second cancel re-cancelled the task"
+        assert op.state == "cancelled"
+    finally:
+        release.set()
+        if op.task is not None:
+            await asyncio.wait_for(op.task, timeout=5.0)
+
+
+def test_each_event_loop_keeps_its_own_start_lock():
+    """Review round 3, MINOR 1: the lock used to be ONE slot, swapped whenever the
+    running loop changed. With two loops live at once, a call from loop B
+    replaced it while a task on loop A held the old one, so the next start on A
+    got a fresh, unheld lock and ran alongside the holder. Reproduced exactly:
+    A1 holds the lock on loop A, loop B (another thread) asks for its lock, then
+    A2 on loop A must wait for A1."""
+    import threading
+
+    from local_operator.server.utils.desktop_auth import DesktopAuth
+
+    host = DesktopAuth(MagicMock(), None, None)
+    loop_b_locked = threading.Event()
+    b_lock: list[asyncio.Lock] = []
+
+    def on_loop_b() -> None:
+        async def take() -> None:
+            lock = host._lock()
+            b_lock.append(lock)
+            async with lock:
+                loop_b_locked.set()
+
+        asyncio.run(take())
+
+    async def on_loop_a() -> dict[str, bool]:
+        a1_holds = asyncio.Event()
+        a1_release = asyncio.Event()
+        a2_entered = asyncio.Event()
+
+        async def a1() -> None:
+            async with host._lock():
+                a1_holds.set()
+                await a1_release.wait()
+
+        async def a2() -> None:
+            async with host._lock():
+                a2_entered.set()
+
+        first = asyncio.create_task(a1())
+        await a1_holds.wait()
+        held = host._lock()
+        # Loop B asks for a lock while A1 still holds loop A's.
+        other = threading.Thread(target=on_loop_b)
+        other.start()
+        await asyncio.to_thread(other.join)
+        assert loop_b_locked.is_set()
+        second = asyncio.create_task(a2())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        result = {
+            "same_lock_on_a": host._lock() is held,
+            "b_got_its_own": b_lock[0] is not held,
+            "a2_entered_while_a1_held": a2_entered.is_set(),
+        }
+        a1_release.set()
+        await asyncio.gather(first, second)
+        result["a2_entered_after"] = a2_entered.is_set()
+        return result
+
+    assert asyncio.run(on_loop_a()) == {
+        "same_lock_on_a": True,
+        "b_got_its_own": True,
+        "a2_entered_while_a1_held": False,
+        "a2_entered_after": True,
+    }
 
 
 def test_every_callback_login_accepts_the_desktop_opener():

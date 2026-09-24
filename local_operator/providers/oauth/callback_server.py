@@ -874,7 +874,17 @@ class OAuthCallbackFlow(ABC):
             self._handle_connection, "127.0.0.1", port, start_serving=False
         )
         self._bound_port = self._socket_port()
-        await self._server.start_serving()
+        try:
+            await self._server.start_serving()
+        except OSError:
+            # ``start_serving`` is where ``listen()`` actually runs, so it can
+            # fail on a socket that is already bound. The caller retries or falls
+            # back to ``_listen(0)``, both of which overwrite ``self._server`` --
+            # so close this one now or its bound socket leaks for the life of the
+            # process (review round 3, NIT 1).
+            server, self._server, self._bound_port = self._server, None, None
+            server.close()
+            raise
 
     def _port_unavailable_message(self, candidates: tuple[int, ...], holders: str = "") -> str:
         """Explain a failed bind in terms the user can act on.

@@ -2927,3 +2927,39 @@ async def test_a_cancel_at_any_point_of_the_bind_never_leaves_a_listener() -> No
         if not _bindable(port):
             leaked.append(turns)
     assert leaked == [], f"a listener survived a cancel after {leaked} loop turns"
+
+
+async def test_a_listen_failure_closes_the_bound_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 3, NIT 1: ``_listen`` records the server and then awaits
+    ``start_serving()``, which is where ``listen()`` runs. When that raised
+    ``OSError`` the caller retried or fell back to ``_listen(0)`` and overwrote
+    ``self._server`` without closing it, so the bound socket leaked. The failed
+    server must be closed, and the fallback must still produce a working one."""
+    closed: list[asyncio.Server] = []
+    real_start_serving = asyncio.Server.start_serving
+    real_close = asyncio.Server.close
+    failures = iter([True])
+
+    async def flaky_start_serving(self: asyncio.Server) -> None:
+        if next(failures, False):
+            raise OSError("listen failed")
+        await real_start_serving(self)
+
+    def recording_close(self: asyncio.Server) -> None:
+        closed.append(self)
+        real_close(self)
+
+    monkeypatch.setattr(asyncio.Server, "start_serving", flaky_start_serving)
+    monkeypatch.setattr(asyncio.Server, "close", recording_close)
+    port = _free_port()
+    flow = _EchoFlow(
+        CallbackFlowOptions(preferred_port=port, timeout_seconds=30.0), LoginCallbacks()
+    )
+    await flow._start_server()
+    try:
+        assert len(closed) == 1, "the server whose listen() failed was never closed"
+        assert closed[0] is not flow._server
+        assert closed[0].sockets == (), "the failed server still holds its socket"
+        assert flow._server is not None and flow._server.is_serving()
+    finally:
+        await flow._stop_server()

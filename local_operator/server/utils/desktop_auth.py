@@ -11,10 +11,12 @@ import asyncio
 import logging
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from local_operator.harness.types import AbortSignal
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
@@ -78,6 +80,16 @@ OPTIONAL_PASTE_MESSAGE = (
 )
 
 
+class SignInUnavailableError(RuntimeError):
+    """A start refused because the host is shutting down.
+
+    Its own class, not a ``ValueError``, because the route maps ``ValueError`` to
+    422 ("your request was invalid") and this request was fine -- the server is
+    going away, which is 503 (review round 3, NIT 2). The renderer shows the
+    message either way; the status is what a client classifies on.
+    """
+
+
 @dataclass
 class LoginOperation:
     id: str
@@ -113,6 +125,20 @@ class LoginOperation:
     #: Set once the operation has something for the renderer to act on (a URL, a
     #: prompt) or has ended; ``POST /v1/auth/login`` waits on it before replying.
     ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    #: Aborted by ``cancel``: the op is ABANDONED from that moment, whether or not
+    #: its task has finished unwinding. One flag with two readers: this host's
+    #: own writes (callbacks, terminal state, login defaults) stand down on it,
+    #: and ``ProviderController.login`` -- which does the credential write this
+    #: host cannot reach -- refuses to store a result once it is aborted. Without
+    #: it a flow that outlived the teardown bound could still finish: flip
+    #: ``cancelled`` back to ``succeeded``, store its credential and rewrite
+    #: ``config.yml`` for a provider the user had abandoned, possibly after the
+    #: newer sign-in set its own defaults (review round 3, MINOR 2).
+    signal: AbortSignal = field(default_factory=AbortSignal, repr=False)
+
+    @property
+    def abandoned(self) -> bool:
+        return self.signal.aborted
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -215,11 +241,13 @@ class DesktopAuth:
         # to prevent. ``close`` takes it too, so a shutdown cannot interleave a
         # start and leave an operation running past ``store.close()``.
         #
-        # Created lazily per event loop (see ``_lock``): an ``asyncio.Lock``
-        # binds to the loop of its first CONTENDED use and raises on any other,
-        # so one built here would break a host driven from a second loop.
-        self._start_lock: asyncio.Lock | None = None
-        self._start_lock_loop: asyncio.AbstractEventLoop | None = None
+        # One per event loop (see ``_lock``): an ``asyncio.Lock`` binds to the
+        # loop of its first CONTENDED use and raises on any other, so one built
+        # here would break a host driven from a second loop. Weakly keyed so a
+        # finished loop (a test's) takes its lock with it.
+        self._start_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+            weakref.WeakKeyDictionary()
+        )
         #: Set by ``close``; a start queued behind it must not create a flow on
         #: a store that is already closed.
         self._closed = False
@@ -235,14 +263,20 @@ class DesktopAuth:
         host exercised from a second loop (a test reusing an app, a second
         client), where a lock bound to the first loop would raise on contention
         (review round 2, NIT 4). Mutual exclusion across loops is meaningless --
-        a task on one loop cannot await a lock owned by another -- so a fresh
-        lock per loop loses nothing.
+        a task on one loop cannot await a lock owned by another -- so each loop
+        gets its own.
+
+        A lock PER loop, never one replaceable slot: with a slot, a call from
+        loop B swapped the lock out while a task on loop A still held the old
+        one, and the next start on loop A took the fresh, unheld lock and ran
+        alongside the holder -- two supersedes at once on one loop, the state
+        the lock exists to prevent (review round 3, MINOR 1).
         """
         loop = asyncio.get_running_loop()
-        if self._start_lock is None or self._start_lock_loop is not loop:
-            self._start_lock = asyncio.Lock()
-            self._start_lock_loop = loop
-        return self._start_lock
+        lock = self._start_locks.get(loop)
+        if lock is None:
+            lock = self._start_locks[loop] = asyncio.Lock()
+        return lock
 
     def controller(self) -> ProviderController:
         from local_operator.providers.controller import ProviderController
@@ -269,7 +303,7 @@ class DesktopAuth:
         async with self._lock():
             if self._closed:
                 # A start queued behind ``close``: its store is gone.
-                raise ValueError("Sign-in is unavailable while the server shuts down.")
+                raise SignInUnavailableError("Sign-in is unavailable while the server shuts down.")
             # A flow already cancelled and left unwinding past the bound
             # (``_lingering``) is not re-cancelled: it reads ``cancelled``
             # already, and waiting on it again would charge every later start
@@ -295,7 +329,18 @@ class DesktopAuth:
             return op
 
     async def _run(self, op: LoginOperation, definition: ProviderDefinition) -> None:
+        # Every write below is guarded on ``op.abandoned``: once ``cancel`` has
+        # run, the op's public state is ``cancelled`` and owned by ``cancel``, and
+        # a flow still unwinding past the bound must not repaint it (a late
+        # ``on_auth_url`` set ``waiting`` + a URL the renderer read as a live
+        # sign-in) or finish it.
+        def settle(state: str, message: str) -> None:
+            if not op.abandoned:
+                op.state, op.message = state, message
+
         def on_url(url: str, instructions: str | None = None) -> None:
+            if op.abandoned:
+                return
             parsed = urlsplit(url)
             if (
                 parsed.scheme not in {"http", "https"}
@@ -319,6 +364,8 @@ class DesktopAuth:
             launch_url: str | None = None,
             expires_in: float | None = None,
         ) -> None:
+            if op.abandoned:
+                return
             # The launch alias is only ever a loopback URL (``_launch_url``), but
             # it is checked like the auth URL anyway: it reaches a browser opener.
             if launch_url:
@@ -332,9 +379,14 @@ class DesktopAuth:
         def on_warning(_message: str) -> None:
             # Provider errors can include HTTP bodies or a rejected paste.
             # Relay an actionable state, never those uncontrolled strings.
-            op.message = "Sign-in could not use that response. Check it and try again."
+            if not op.abandoned:
+                op.message = "Sign-in could not use that response. Check it and try again."
 
         async def on_input() -> str | None:
+            if op.abandoned:
+                # No prompt for a flow nobody is watching; None is the paste
+                # flows' own "declined", so they end as cancelled.
+                return None
             pending = asyncio.get_running_loop().create_future()
             op.pending_input = pending
             op.prompt_id = str(uuid.uuid4())
@@ -376,52 +428,68 @@ class DesktopAuth:
         )
         try:
             async with asyncio.timeout(LOGIN_TIMEOUT_S):
-                await controller.login(definition.id, open_browser=lambda _url: None)
-            # Off the event loop: it reads and writes config.yml.
-            op.defaults_applied = await asyncio.to_thread(
-                apply_desktop_login_defaults,
-                self.config_manager,
-                definition.id,
-                oauth=definition.login_kind != "api_key",
-            )
-            op.state, op.message = "succeeded", "Sign-in complete."
+                # ``signal`` is what stops the CREDENTIAL write for an abandoned
+                # flow: the controller stores inside this call, out of this
+                # host's reach, and refuses once the signal is aborted.
+                await controller.login(
+                    definition.id, open_browser=lambda _url: None, signal=op.signal
+                )
+            if not op.abandoned:
+                # Off the event loop: it reads and writes config.yml.
+                op.defaults_applied = await asyncio.to_thread(
+                    apply_desktop_login_defaults,
+                    self.config_manager,
+                    definition.id,
+                    oauth=definition.login_kind != "api_key",
+                )
+            settle("succeeded", "Sign-in complete.")
         except asyncio.CancelledError:
-            op.state, op.message = "cancelled", "Sign-in cancelled."
+            settle("cancelled", "Sign-in cancelled.")
         except (TimeoutError, LoginTimeoutError):
             # ``LoginTimeoutError`` is the FLOW's own timeout (no callback within
             # 300 s, or a device code that expired). It subclasses ``LoginError``,
             # not ``TimeoutError``, so it used to fall through to the generic
             # branch below and read "Sign-in failed. Check the provider" -- the
             # wrong remedy for a user who simply took too long.
-            op.state, op.message = "expired", "Sign-in expired. Start again when you are ready."
+            settle("expired", "Sign-in expired. Start again when you are ready.")
         except Exception:
-            op.state, op.message = "failed", "Sign-in failed. Check the provider and try again."
+            settle("failed", "Sign-in failed. Check the provider and try again.")
         finally:
             op.auth_url = op.instructions = op.launch_url = op.user_code = None
             op.ready.set()
             controller.close()
 
     async def cancel(self, op: LoginOperation) -> None:
-        if op.task and not op.task.done():
-            task = op.task
-            task.cancel()
-            # Bounded: see ``CANCEL_TEARDOWN_TIMEOUT_S``. ``asyncio.wait`` neither
-            # raises on the timeout nor cancels again, so a slow teardown simply
-            # keeps running unobserved while this caller moves on.
-            await asyncio.wait({task}, timeout=CANCEL_TEARDOWN_TIMEOUT_S)
-            if not task.done():
-                logger.warning(
-                    "sign-in %s for %s did not finish tearing down within %.1fs",
-                    op.id,
-                    op.provider,
-                    CANCEL_TEARDOWN_TIMEOUT_S,
-                )
-                self._lingering.add(task)
-                task.add_done_callback(self._lingering.discard)
-            # Cancellation before a coroutine's first step skips its finally.
-            op.state, op.message = "cancelled", "Sign-in cancelled."
-            op.auth_url = op.instructions = op.launch_url = op.user_code = None
-            op.ready.set()
+        # A second cancel of an op already abandoned returns at once: the first
+        # already paid the teardown bound, and a lingering flow cannot be stopped
+        # by asking again -- ``DELETE`` on one used to wait the full bound every
+        # time (review round 3, MINOR 2).
+        if op.abandoned or op.task is None or op.task.done():
+            return
+        task = op.task
+        # Abandon FIRST, then publish the terminal state, then wait: from here on
+        # the flow's own writes are no-ops, so ``cancelled`` is final the moment
+        # it is written and nothing the flow does later can undo it. Written here
+        # rather than left to the task because a cancel before a coroutine's
+        # first step skips its ``finally`` entirely.
+        op.signal.abort("Sign-in cancelled.")
+        op.state, op.message = "cancelled", "Sign-in cancelled."
+        op.auth_url = op.instructions = op.launch_url = op.user_code = None
+        op.ready.set()
+        task.cancel()
+        # Bounded: see ``CANCEL_TEARDOWN_TIMEOUT_S``. ``asyncio.wait`` neither
+        # raises on the timeout nor cancels again, so a slow teardown simply
+        # keeps running unobserved while this caller moves on.
+        await asyncio.wait({task}, timeout=CANCEL_TEARDOWN_TIMEOUT_S)
+        if not task.done():
+            logger.warning(
+                "sign-in %s for %s did not finish tearing down within %.1fs",
+                op.id,
+                op.provider,
+                CANCEL_TEARDOWN_TIMEOUT_S,
+            )
+            self._lingering.add(task)
+            task.add_done_callback(self._lingering.discard)
 
     async def close(self) -> None:
         # Under the start lock (review round 2, MINOR 3): without it a start
