@@ -252,13 +252,43 @@ async def test_a_flag_form_on_a_viewer_that_cannot_route_says_where_the_act_live
         await _boot(pilot, app)
         notices = await _local(pilot, app, "/goal --clear")
 
+    # All FOUR flag forms are named, because the refusal guards all four —
+    # `--history` included (agent review round 2, NIT-1).
     assert notices == [
         "the goal record belongs to the session's owner — "
-        "/goal --clear, --done and --dismiss run there"
+        "/goal --clear, --done, --dismiss and --history run there"
     ]
     assert session.goal == GOAL, "a refused act changes nothing"
     assert session.goal_status == "active"
     assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_the_routed_handler_says_the_same_sentence_for_a_record_it_lacks() -> None:
+    """Agent review round 2, MINOR-7: one condition, one sentence, both handlers.
+
+    ``_goal_slash_result`` (the routed/authoritative producer) answered a host
+    with no record of its own "session is still starting…" — the misleading
+    sentence ``_cmd_goal``'s refusal was written to delete — while the local
+    handler named where the act lives. The bare form is a READ, so it is answered
+    from the wire rather than refused.
+    """
+    from local_operator.session.goal import GOAL_RECORD_OWNER_REFUSAL
+
+    session = _armed()
+    session.runtime_locality = "this-machine"
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        for flag in ("--clear", "--done", "--dismiss", "--history"):
+            refused = await app.run_slash_authoritative("goal", flag)
+            assert refused["text"] == GOAL_RECORD_OWNER_REFUSAL, flag
+            assert refused["style"] == "warning"
+        bare = await app.run_slash_authoritative("goal", "")
+    assert bare["text"] == f"goal: {GOAL} — active"
+    assert "still starting" not in bare["text"]
+    assert session.goal == GOAL, "a refused act changes nothing"
+    assert session.goal_status == "active"
 
 
 @pytest.mark.asyncio

@@ -33939,6 +33939,7 @@ class OperatorApp(App[None]):
         never be stored as the literal goal ``--clear`` and never starts a turn.
         """
         from local_operator.session.goal import (
+            GOAL_RECORD_OWNER_REFUSAL,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
             goal_dismissed_receipt,
@@ -33974,8 +33975,7 @@ class OperatorApp(App[None]):
             # did not perform. ``form`` is "" for an OBJECTIVE (`goal_flag_form`),
             # which is why the test is truthiness and not ``is not None``.
             self._system_notice(
-                "the goal record belongs to the session's owner — "
-                "/goal --clear, --done and --dismiss run there",
+                GOAL_RECORD_OWNER_REFUSAL,
                 "warning",
             )
             return
@@ -34168,11 +34168,21 @@ class OperatorApp(App[None]):
         # this the flag had no consumer anywhere under ``local_operator/tui/``
         # (design D1 / UX U1).
         state = getattr(session, "frontend_state", None)
+        # The OWNER reads its own record; anything else reads the WIRE. A
+        # viewer's `record` is None by design (`_goal_record_for`: the four acts
+        # that write the record are the owner's), but the record's READ half —
+        # status, judge, settled history — rides every frame, so a viewer that
+        # read it off `record` painted `judge: —` and `settled none yet` beside a
+        # record its own frame held (agent review round 2, MINOR-6). The wire is
+        # also where the truncation flag above comes from, so a viewer's card is
+        # now drawn from ONE source rather than three fields from nothing and a
+        # fourth from the frame.
+        source = record if record is not None else state
         panel.show(
             goal=getattr(session, "goal", "") or "",
-            status=getattr(record, "goal_status", "") or "",
-            judge=getattr(record, "goal_judge", None),
-            history=list(getattr(record, "goal_history", []) or []),
+            status=getattr(source, "goal_status", "") or "",
+            judge=getattr(source, "goal_judge", None),
+            history=list(getattr(source, "goal_history", []) or []),
             cap=MAX_GOAL_CONTINUATIONS,
             actions=owns_the_session(session),
             history_truncated=bool(getattr(state, "goal_history_truncated", False)),
@@ -39901,6 +39911,7 @@ class OperatorApp(App[None]):
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
+            GOAL_RECORD_OWNER_REFUSAL,
             MAX_GOAL_CHARS,
             cleared_goal_receipt,
             goal_dismissed_receipt,
@@ -39914,8 +39925,25 @@ class OperatorApp(App[None]):
         arg = arg.strip()
         session = self._session
         record = self._goal_record()
-        if session is None or record is None:
+        if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if record is None and not arg:
+            # The bare form is a READ, and the record's read half rides the wire
+            # (`_refresh_goal_panel` sources a viewer's card the same way), so
+            # it is answered rather than refused.
+            state = getattr(session, "frontend_state", None)
+            return SlashResult(
+                kind="notice",
+                text=goal_report(session.goal, getattr(state, "goal_status", "") or ""),
+                style="info",
+            )
+        if record is None:
+            # A session that EXISTS but whose record is not this host's: the
+            # same condition `_cmd_goal` refuses, so the same sentence — telling
+            # a started session it is "still starting" was the misleading answer
+            # the local handler's refusal was written to delete (agent review
+            # round 2, MINOR-7).
+            return SlashResult(kind="notice", text=GOAL_RECORD_OWNER_REFUSAL, style="warning")
         if not arg:
             return SlashResult(
                 kind="notice",
