@@ -1041,6 +1041,11 @@ class _Body:
 
 
 _SHELL_OPERATORS = (
+    # `&>` / `&>>` before `&`: bash reads them as ONE redirection of stdout and
+    # stderr, so splitting them into a background `&` plus `>` put the target
+    # on a stage of its own and the discard decision never saw it (round 6).
+    "&>>",
+    "&>",
     "<<<",
     "<<-",
     ">>",
@@ -1070,7 +1075,9 @@ _SHELL_OPERATORS = (
 _STAGE_ENDS = frozenset({"\n", ";", "&", "&&", "||", ";;", "(", ")"})
 
 #: Redirection operators whose next word is a path (or a delimiter, for here-docs).
-_REDIRECTS = frozenset({">", ">>", ">|", "<", "<>", "<<", "<<-", "<<<", ">&", "<&"})
+_REDIRECTS = frozenset(
+    {">", ">>", ">|", "<", "<>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>"}
+)
 #: `{name}` touching a redirection: bash allocates a fresh descriptor into
 #: `name`, so the word is the redirection's, not the command's.
 _FD_VARIABLE_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -1560,6 +1567,11 @@ _PATH_MOVERS = frozenset({"cp", "mv", "ln", "install"})
 
 #: Redirect targets that are not a file: the value still reaches this result.
 _STDOUT_DEVICES = frozenset({"/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"})
+
+#: Redirect targets that are this process's STDERR: the value still reaches this
+#: result, in its `--- stderr ---` section. Read as ordinary files they made
+#: `lop secret get X >/dev/stderr` a contained write (round 6).
+_STDERR_DEVICES = frozenset({"/dev/stderr", "/dev/fd/2", "/proc/self/fd/2"})
 
 #: Redirect targets that drop the value entirely.
 _DISCARD_DEVICES = frozenset({"/dev/null"})
@@ -2174,6 +2186,60 @@ class _ShellAnalyzer:
                 fd = cls._word_text(previous).strip()
             found.append((fd, operator, item))
         return found
+
+    @classmethod
+    def _stdout_destination(cls, stage: _Stage) -> tuple[str, str]:
+        """Where this stage's STDOUT finally points: ``(kind, path)``.
+
+        ``kind`` is ``result`` (this tool result's stdout), ``stderr`` (its
+        `--- stderr ---` section, which the operator and the model read just the
+        same), ``null`` (dropped) or ``path`` (a file, named by ``path``).
+
+        The redirections are applied IN ORDER, the way the shell applies them,
+        because each one rebinds a descriptor to wherever its target points AT
+        THAT MOMENT. Deciding per redirect with sticky flags (round 6) let an
+        earlier `>/dev/null` win over a later `1>&2`, so `get X >/dev/null 1>&2`
+        read as discarded while the value landed on stderr — and it let
+        `2>&1 >/dev/null` and `>/dev/null 2>&1` read the same only by accident.
+        `/dev/stderr`, `/dev/fd/2` and `/proc/self/fd/2` are descriptor 2, not
+        files: read as paths they made `get X >/dev/stderr` a contained write.
+
+        Only descriptors 1 and 2 are modelled, since the value is written to
+        stdout and only 1 and 2 are captured; a `{fd}>` opens a fresh descriptor
+        and touches neither. `&>` / `>&WORD` rebind both. A target that is not
+        a number after `>&` or `<&` is a path, and `>&-` closes the descriptor.
+        """
+        fds: dict[str, tuple[str, str]] = {"1": ("result", ""), "2": ("stderr", "")}
+
+        def resolve(text: str) -> tuple[str, str]:
+            if text in _DISCARD_DEVICES:
+                return ("null", "")
+            if text in _STDOUT_DEVICES:
+                return fds["1"]
+            if text in _STDERR_DEVICES:
+                return fds["2"]
+            return ("path", text)
+
+        for fd, op, target in cls._fd_redirections(stage):
+            text = cls._word_text(target).strip().strip("'\"")
+            if op in ("&>", "&>>"):
+                fds["1"] = fds["2"] = resolve(text)
+            elif op in (">", ">>", ">|"):
+                if fd in fds:
+                    fds[fd] = resolve(text)
+            elif op in (">&", "<&"):
+                if text == "-":
+                    if fd in fds:
+                        fds[fd] = ("null", "")
+                elif text.isdigit():
+                    if fd in fds:
+                        # An unmodelled source descriptor (3, 9…) is unknown
+                        # territory; reading it as this result is the safe side.
+                        fds[fd] = fds.get(text, ("result", ""))
+                elif op == ">&" and fd == "1":
+                    # `>&FILE` is bash's older spelling of `&>FILE`.
+                    fds["1"] = fds["2"] = resolve(text)
+        return fds["1"]
 
     @staticmethod
     def _redirections(stage: list[_Word | _Op | _Body]) -> list[tuple[str, _Word]]:
@@ -3045,27 +3111,10 @@ class _ShellAnalyzer:
         # whether an emitted value is PRINTED: `>/dev/null` drops it, a real
         # path contains it, a pipe hands it on, and anything else IS this tool
         # result.
-        stdout_path: str | None = None
-        discarded = False
-        to_stderr = False
-        for fd, op, target in self._fd_redirections(stage):
-            text = self._word_text(target).strip().strip("'\"")
-            if op in (">", ">>", ">|"):
-                if fd != "1":
-                    # `2>/dev/null` drops STDERR: it says nothing about where
-                    # this value went, so it must not mark the stage discarded
-                    # (which is how it was read upstream, and how
-                    # `get X >/dev/stdout 2>/dev/null` came back unrefused —
-                    # R3-2's `nohup` row) nor read as stderr output.
-                    continue
-                if text in _DISCARD_DEVICES:
-                    discarded = True
-                elif text in _STDOUT_DEVICES:
-                    stdout_path = None
-                else:
-                    stdout_path = text
-            elif op in (">&", "1>&", "&>") and text.lstrip("&") == "2":
-                to_stderr = True
+        stdout_kind, stdout_target = self._stdout_destination(stage)
+        stdout_path = stdout_target if stdout_kind == "path" else None
+        discarded = stdout_kind == "null"
+        to_stderr = stdout_kind == "stderr"
         for word in all_words:
             for piece in word.pieces:
                 if piece.kind == "expand" and re.search(r"1?>&\s*2\b", piece.text):
