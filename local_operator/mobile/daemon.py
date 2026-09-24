@@ -536,11 +536,16 @@ class SessionTable:
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self._attention_states: dict[str, dict[str, Any]] = {}
         self._creation_dates: dict[str, float] = {}
-        #: The sidebar's durable pinned session ids, newest pin first, refreshed
-        #: off-loop with the listing and read by ``_merge_summaries``. Kept as
-        #: table state rather than read per row so a pin change made in the
-        #: terminal reaches the phone through exactly one read, and so the
-        #: merge itself stays pure in-memory.
+        #: The sidebar's durable pinned session ids, newest pin first, read by
+        #: ``_merge_summaries``. Kept as table state rather than read per row so
+        #: a pin change made in the terminal reaches the phone through exactly
+        #: one read, and so the merge itself stays pure in-memory. WRITTEN ONLY
+        #: BY THE TWO PIN PATHS that wake the list stream as they publish it --
+        #: ``MobileDaemon._refresh_pins_if_changed`` (the periodic pass, which
+        #: owns pins written by another surface) and :meth:`set_pins` (this
+        #: daemon's own route). A reader that republished this without waking
+        #: would swallow the wake; see the invariant in
+        #: ``_refresh_pins_if_changed``.
         self.pins: tuple[str, ...] = ()
 
     def invalidate_summaries_cache(self) -> None:
@@ -618,17 +623,20 @@ class SessionTable:
             for session_id in live_ids - rows.keys():
                 if session_id not in ("", ".", "..") and Path(session_id).name == session_id:
                     dates[session_id] = session_created_at(directory / "sessions" / session_id)
-            # THE PINS, read on this same off-loop hop. The pin file lives in the
-            # config root beside the store, so reading it costs one small JSON
-            # read here rather than a filesystem call inside the merge (which
-            # must stay pure in-memory — it runs per repaint). Read
-            # unconditionally rather than only when pins exist: a pin UN-set in
-            # the terminal has to reach the phone too, and this is the only
-            # refresh path the listing has.
-            return rows, dates, tuple(read_pins(directory))
+            # THE PINS ARE DELIBERATELY *NOT* READ HERE. This load runs off the
+            # loop and unannounced whenever something wants a listing — a second
+            # client's first frame is enough — so a pins read here landed on
+            # ``self.pins`` twice over: it made the pass's own comparison ("is
+            # the set I just read the one the phone already has?") read true and
+            # swallowed the wake for a list that was ALREADY open, and an
+            # in-flight read finishing after a pass republished its older value
+            # over the newer one the pass had just announced (review round 7,
+            # F1/F2). See ``MobileDaemon._refresh_pins_if_changed``: the pin file
+            # has exactly one reader that may publish ``SessionTable.pins``.
+            return rows, dates
 
         async def _load() -> dict[str, Any]:
-            rows, self._creation_dates, self.pins = await asyncio.to_thread(load)
+            rows, self._creation_dates = await asyncio.to_thread(load)
             return rows
 
         task = asyncio.ensure_future(_load())
@@ -2355,6 +2363,26 @@ class MobileDaemon:
         by the merge, so re-walking a hundred session directories for it would
         be waste. The first tick always reads, which also seeds the table's
         pins for a daemon no one has listed yet.
+
+        THE INVARIANT: this pass and the pin route (``SessionTable.set_pins``,
+        reached only through ``api_session_pin``) are the only writers of
+        ``self.table.pins``, and each wakes the stream in the same breath as it
+        publishes -- so the set compared below can never be moved by a path that
+        would not also have repainted the list for it. No other reader may
+        republish the pins, however cheap it looks: a publisher that does not
+        wake either swallows the wake for a list that is already open (the set
+        it just read then LOOKS current -- review round 7, F1) or, being a read
+        that started before the write and lands after it, rolls the phone back
+        to a set this pass has already replaced (F2). ``_refresh_durable_rows``
+        is exactly that kind of reader, which is why it no longer touches the
+        file.
+
+        WHAT THAT COSTS, stated: a listing built in the window between an
+        out-of-band write and the next pass reports the pins this pass last
+        published, so it can lag the file by up to one pass. The pass that
+        follows it drops the merged cache and repaints every subscriber
+        (``notify_list_changed``), so the phone converges inside
+        ``SCAN_INTERVAL_S`` -- the bound the list already promises.
         """
         from local_operator.paths import config_dir
 
@@ -2375,9 +2403,11 @@ class MobileDaemon:
         self._pins_fingerprint = current
         pins = tuple(await asyncio.to_thread(read_pins, directory))
         if pins == self.table.pins:
-            # The file moved but the pinned SET did not (our own route's write,
-            # which already woke the stream, or a rewrite of the same list):
-            # nothing on the phone would change, so no repaint is owed.
+            # The file moved but the pinned SET did not (a rewrite of the same
+            # list, or this daemon's own route, which published and woke in the
+            # same breath): nothing on the phone would change, so no repaint is
+            # owed. Sound to compare against the table BECAUSE of the invariant
+            # above -- every writer of it wakes the stream itself.
             return
         self.table.pins = pins
         self.table._summaries_cache = None

@@ -1431,6 +1431,145 @@ async def test_an_unchanged_pin_file_does_not_repaint_the_list(tmp_path, monkeyp
     assert daemon.table.pins == ()
 
 
+@pytest.mark.asyncio
+async def test_a_second_clients_listing_load_cannot_swallow_the_wake(tmp_path, monkeypatch) -> None:
+    """A listing load between the terminal's write and the next pass must not eat
+    the wake for a list that is ALREADY open (review round 7, F1).
+
+    The durable load runs unannounced whenever something wants a listing, and a
+    second client's first frame is enough. It used to re-read the pin file and
+    publish the result as the table's own pins, so the pass that followed
+    compared its read against a copy that already held the new set, saw no
+    difference, and woke nobody -- the phone that had the list open stayed on
+    its stale rows until some unrelated repaint. The load still runs here (spied
+    against the real scanner, so a load that never happened cannot make this
+    pass), it simply no longer owns the state the pass compares against.
+
+    The listing the load itself built is deliberately NOT asserted to be fresh:
+    with one owner of the pins, a frame built before the pass can lag the file by
+    up to one pass, and the pass then repaints every subscriber. What is
+    asserted is that convergence -- the wake AND the frame the phone is sent
+    after it.
+    """
+    from local_operator import resume as resume_module
+    from local_operator.tui.sidebar_pins import toggle_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+
+    calls = {"n": 0}
+    real_rows = resume_module.recent_session_rows
+
+    def counting_rows(config_dir, limit=None, *, strict=False):
+        calls["n"] += 1
+        return real_rows(config_dir, limit, strict=strict)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    # Written OUT OF BAND, by the terminal's own verb.
+    assert toggle_pin(cfg, "durable-1") is True
+    # A second client opens the list: this is what its first frame does.
+    daemon.table.invalidate_summaries_cache()
+    before = calls["n"]
+    await daemon.table.summaries()
+    assert calls["n"] > before, "the listing load under test must actually run"
+
+    # The list that was already open must still be woken by the pass that follows,
+    # and the frame it is then sent must carry the pin.
+    await daemon._scan_once()
+    assert not queue.empty(), "a listing load must not swallow the wake for an open list"
+    assert daemon.table.pins == ("durable-1",)
+    woken = await daemon.table.summaries()
+    assert next(r["pinned"] for r in woken if r["session_id"] == "durable-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_listing_load_in_flight_cannot_overwrite_newer_pins(tmp_path, monkeypatch) -> None:
+    """A durable load already in flight must not land its older read on top of the
+    set the pass announced while it was away (review round 7, F2).
+
+    Nothing re-wakes the list after this: the fingerprint has not moved again, so
+    a phone that was woken by the pass and then read these rows would sit on
+    ``pinned: False`` until the file changed for some other reason -- the very
+    stale-list symptom the pass exists to remove. The ordering is made
+    deterministic rather than raced: the load is held at its first step, so the
+    write and the pass both land while it is genuinely in flight, and its own
+    pins read is answered from what it saw when it started.
+    """
+    import threading
+
+    from local_operator import resume as resume_module
+    from local_operator.mobile import daemon as daemon_module
+    from local_operator.tui.sidebar_pins import read_pins as real_read_pins
+    from local_operator.tui.sidebar_pins import set_pin
+
+    cfg = tmp_path / "config"
+    session_dir = cfg / "sessions" / "durable-1"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+    await _write_turns_async(session_dir, 1)
+
+    daemon = MobileDaemon(port=0, password="pw123", dial_registrants=False)
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+    queue: asyncio.Queue[None] = asyncio.Queue()
+    daemon.table.list_subscribers.add(queue)
+
+    # The load's own thread, and the pins it saw when it looked -- which is what
+    # a read that started before the write hands back after it.
+    load_thread: list[int] = []
+    seen_by_the_load: dict[str, list[str]] = {}
+    load_started = threading.Event()
+    load_may_finish = threading.Event()
+    real_rows = resume_module.recent_session_rows
+
+    def held_rows(config_dir, limit=None, *, strict=False):
+        load_thread.append(threading.get_ident())
+        seen_by_the_load["pins"] = real_read_pins(config_dir)
+        load_started.set()
+        # A failure ceiling, not the sync: the test itself releases this below.
+        assert load_may_finish.wait(30), "the in-flight load was never released"
+        return real_rows(config_dir, limit, strict=strict)
+
+    def read_pins_during_the_load(directory):
+        # Only the load's own read is answered from the earlier look; the pass and
+        # the route run on other threads and read the file as they always did.
+        if threading.get_ident() in load_thread:
+            return list(seen_by_the_load["pins"])
+        return real_read_pins(directory)
+
+    monkeypatch.setattr(resume_module, "recent_session_rows", held_rows)
+    monkeypatch.setattr(daemon_module, "read_pins", read_pins_during_the_load)
+
+    task = asyncio.create_task(daemon.table.summaries())
+    assert await asyncio.to_thread(load_started.wait, 30), "the load never started"
+    try:
+        # OUT OF BAND, while the load is away.
+        assert set_pin(cfg, "durable-1", True) is True
+        # The pass announces the new set -- and the phone is woken for it.
+        await daemon._scan_once()
+        assert not queue.empty(), "the pass must wake the list for the pin it read"
+        assert daemon.table.pins == ("durable-1",)
+    finally:
+        load_may_finish.set()
+
+    rows = await task
+    # The announced set must survive the load it was announced alongside.
+    assert daemon.table.pins == ("durable-1",), "an in-flight load overwrote newer pins"
+    assert next(r["pinned"] for r in rows if r["session_id"] == "durable-1") is True
+
+
 def test_pin_route_refuses_a_live_session_with_no_folder_yet(tmp_path, monkeypatch) -> None:
     """A pin the list cannot show is refused, not answered 200 (QA Q2).
 
