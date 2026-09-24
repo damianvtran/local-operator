@@ -249,6 +249,25 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     runs on) and only the WAITING is bounded — with ``asyncio.wait``, not with a
     shielded ``wait_for`` (see the comment at the call for the measured reason).
 
+    WHAT THAT GUARANTEE HINGES ON, stated exactly (agent review round 1, R1): the
+    exchange survives THIS caller walking away **for as long as the loop it runs on
+    lives**. A long-lived caller — the desktop runtime, the connector, any process
+    that keeps serving — is where it pays in full: the exchange lands its rotation,
+    clears the marker, and the bound only cost the caller its own answer. A
+    SHORT-LIVED caller (``lop tunnel status`` under ``asyncio.run``, which tears the
+    loop down when the command returns) cancels the still-pending exchange at
+    process exit, so its request dies mid-wire and the marker stays armed as
+    ``unknown`` — an accepted, bounded consequence rather than a bug: nothing can
+    complete a POST whose process is gone, and design §6.1 rules out draining the
+    task here, since draining would put the measured 30.9 s poll latency back. The
+    cost is the derived :data:`UNCONFIRMED_SEND_TTL_S` window instead of the hour
+    it used to be, and it is bounded on the other side too: an invocation after the
+    marker lapses can arm a FRESH window, so a repeatedly-invoked CLI against a
+    stalling endpoint can renew the deferral — which is why the long-lived callers
+    are the recovery mechanism, and why the marker is never held beyond its bound.
+    ``tests/unit/test_tunnels.py`` pins this path's outcome (marker armed and
+    complete, ≤ bound, lease released, row consistent, no closed-database error).
+
     THE LEASE STAYS WITH THE EXCHANGE, and the reason the caller cannot help with
     it is worth stating: the lease is taken on the supervisor's store and
     ``_release_refresh_lease`` is holder-scoped, so a release from this store would
@@ -308,11 +327,17 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
         # else. Measured: shield ⇒ 1 loop-level error; asyncio.wait ⇒ 0.
         done, _pending = await asyncio.wait({task}, timeout=REFRESH_WAIT_S)
         if not done:
-            # The caller stops WAITING; the exchange does not stop. It is still
-            # running on its own store and its own lease, and it — not this
-            # caller — owns resolving the marker: a landed rotation, a pre-send
-            # failure and an answered refusal all resolve it there, and an answer
-            # that never arrives leaves it armed until it expires.
+            # The caller stops WAITING. While the process's loop lives, the exchange
+            # does not stop: it is still running on its own store and its own lease,
+            # and it — not this caller — owns resolving the marker (a landed
+            # rotation, a pre-send failure and an answered refusal all resolve it
+            # there, and an answer that never arrives leaves it armed until it
+            # expires). When the LOOP does not outlive the call — `lop tunnel status`
+            # under `asyncio.run` — the pending exchange is cancelled at process
+            # exit: the marker stays armed `unknown` for the derived bound and the
+            # next long-lived caller resolves it. Both halves are pinned by tests;
+            # the docstring above states why the second is accepted rather than
+            # engineered around.
             #
             # The `store._release_refresh_lease(selected)` call that used to sit
             # here is DELETED, and the precise reason matters because the obvious

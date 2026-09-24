@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from local_operator import launchd
+from local_operator.providers.auth_store import self_clearing_window
 from local_operator.tunnels import config, gateway, report, state
 from local_operator.tunnels.api import RadientTunnels, credential_id
 from local_operator.tunnels.service import (
@@ -181,7 +182,36 @@ def _status_text(
         # returns `None` for it) and neither phrase above may appear here. This
         # case used to print "could not be checked", which was wrong twice: the
         # check did run, and no network had anything to do with it.
-        lines.append("Login: refresh deferred — it clears by itself within about two minutes.")
+        #
+        # The WINDOW is deliberately not on this line (UX round 1, U2): the
+        # connector's own sentence, two rows up, carries it — that sentence is the
+        # only one the desktop callout and the park file get (see
+        # `TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]`) — so repeating it here printed
+        # the same fact twice and pushed the fact a reader needs onto the second
+        # line of the screen. What stays here is the state, that it is retried
+        # without anyone acting, and the escalation: the window re-arms on a
+        # repeating stall (one deferral, not the state), so "nothing else is
+        # needed" is a claim this line must not make.
+        # The WINDOW and the escalation are stated once on the screen (UX round 1,
+        # U2), and this line takes them only when nothing above already carries them:
+        # the connector's own sentence — which travels to the desktop callout and the
+        # park file, so it has to hold the number (see
+        # `TERMINAL_DETAIL[AUTHORIZATION_DEFERRED]`) — is printed as the indented
+        # detail whenever a gateway answered, and a second copy here printed one fact
+        # twice and pushed it to the bottom. It is NOT printed for a STOPPED tunnel
+        # (the state word says everything) or when no gateway was reachable, and there
+        # this line is the only carrier left, so it names the window — derived from
+        # the store's own bound rather than typed (agent review round 1, R2) — and the
+        # escalation (UX round 1, U1: the window re-arms, so a deferral that keeps
+        # returning is where a sign-in becomes the remedy).
+        window = f"about {self_clearing_window()}"
+        if window in connector["detail"]:
+            lines.append("Login: refresh deferred — retried automatically.")
+        else:
+            lines.append(
+                f"Login: refresh deferred — it clears by itself within {window}; "
+                "sign in again only if it persists."
+            )
     elif login["state"] == "unknown":
         # Never "sign-in expired": this state means the check itself could not run,
         # and naming it anything else sends an operator whose network is down to a
