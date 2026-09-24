@@ -474,7 +474,11 @@ def _remote_status_label(row: Any) -> str:
 
 
 def create_on_peer(
-    root: Path | None, peer: str, *, model: dict[str, Any] | None = None
+    root: Path | None,
+    peer: str,
+    *,
+    model: dict[str, Any] | None = None,
+    target: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Mint a conversation ON ``peer``, through this device's relay.
 
@@ -489,14 +493,35 @@ def create_on_peer(
     share, and the renderer's ``cwd`` always names one HERE. No first prompt is sent
     either: the desktop's ``/new`` opens a conversation, and a prompt from this device
     would be work the user has not asked for yet.
+
+    ``target`` IS forwarded now, and that is the change this signature exists for.
+    A chosen agent or team is exactly the kind of context the user expects to
+    survive the device boundary, and the peer can resolve the name because the
+    relay reconciles the definition on the way (``definitions.push_to_peer``) —
+    including when the peer is a CLEAN install that has never seen it. Refusing the
+    pick here, as this route did while definitions could not travel, is the
+    behaviour that left the user to "pick the target after moving it home".
+
+    The desktop's ``kind`` is the PROFILE vocabulary (``agent`` names a role, a
+    specialist or a packaged seed — ``server/utils/desktop_profiles.py``), so it maps
+    to the frame's ``profile`` rather than to the legacy ``agent_name`` slot. Those are
+    two different things on the wire and only one of them is what the picker offers.
     """
+    fields: dict[str, Any] = {"peer": peer}
+    if model is not None:
+        fields["model"] = model
+    if target is not None:
+        name = str(target.get("name") or "")
+        if str(target.get("kind") or "") == "team":
+            fields["team"] = name
+        else:
+            fields["profile"] = name
     return _call(
         root,
         "peer_session_create",
         # A spawn plus its first admission, the CLI's own budget for this verb.
         timeout=120.0,
-        peer=peer,
-        model=model,
+        **fields,
     )
 
 

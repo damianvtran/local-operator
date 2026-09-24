@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import credentials, mobility, relay, sync, types
+from local_operator.network import credentials, definitions, mobility, relay, sync, types
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
     devices,
@@ -314,8 +314,13 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             "net_sync",
             "net_broker",
             "net_session_lifecycle",
+            # The definitions slice's one op. SLOW because it is a whole-bundle apply:
+            # bounded per bundle, and it writes durable rows, so it must not run on a
+            # link's reader (see ``definitions.DEFINITIONS_OP_DEADLINE_S``).
+            "net_definitions",
         }
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_lifecycle") == mobility.LIFECYCLE_OP_DEADLINE_S

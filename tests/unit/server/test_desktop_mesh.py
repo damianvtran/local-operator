@@ -693,12 +693,37 @@ async def test_create_on_a_peer_with_no_relay_is_unconfirmed_and_replayable(
 
 
 @pytest.mark.asyncio
-async def test_create_on_a_peer_refuses_a_target_rather_than_dropping_it(
+async def test_create_on_a_peer_forwards_the_target_and_answers_the_peers_binding(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The picked agent TRAVELS, and the answer names what the peer recorded.
+
+    This cell used to assert a 422 with "pick the target after moving it home" —
+    the honest refusal for a build in which a definition could not cross the mesh.
+    It now has to assert the opposite, and the two things that make the opposite
+    safe: the frame carries the pick as a PROFILE (the picker's own vocabulary —
+    a role/specialist/seed; the legacy ``agent_name`` slot is a different thing),
+    and the binding that comes back is the PEER's answer rather than a local
+    resolution against a registry that does not hold the session.
+    """
     client, root = mesh_api
     (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
-    relay = FakeRelay({})
+    relay = FakeRelay(
+        {
+            "peer_session_create": {
+                "session_id": "9f3ac1e0b7d2",
+                "agent": {
+                    "name": "reviewer",
+                    "id": "a_1",
+                    "kind": "role",
+                    "instructions_applied": True,
+                    "detail": "",
+                },
+                "team": None,
+                "model": {"applied": True, "detail": ""},
+            }
+        }
+    )
     _join(monkeypatch, relay)
     response = await client.post(
         "/v1/desktop/sessions",
@@ -706,11 +731,25 @@ async def test_create_on_a_peer_refuses_a_target_rather_than_dropping_it(
             "request_id": REQUEST_ID,
             "cwd": str(root),
             "peer": PEER,
-            "target": {"kind": "agent", "name": "nobody"},
+            "target": {"kind": "agent", "name": "reviewer"},
         },
     )
-    assert response.status_code == 422, response.text
-    assert relay.ops() == [], "the peer must not be asked for a session whose agent is local"
+    assert response.status_code == 200, response.text
+    # The create route answers through ``CRUDResponse``, so the payload is under
+    # ``result`` (the sibling cells read refusals off ``detail`` instead).
+    body = response.json()["result"]
+    assert body["session_id"] == "9f3ac1e0b7d2"
+    assert body["binding"] == {"agent": "reviewer", "team": None}
+    assert body["identity"]["agent"]["instructions_applied"] is True
+    op, fields = relay.calls[0]
+    assert op == "peer_session_create"
+    assert fields["profile"] == "reviewer", "the pick travels in the profile slot"
+    assert "agent_name" not in fields, "the legacy slot is a different identity"
+    assert fields["peer"] == PEER
+    # The peer is asked, and this device does NOT validate the name against its own
+    # registry first: the store the session will live in is the only authority for
+    # whether the name resolves there.
+    assert relay.ops() == ["peer_session_create"]
 
 
 @pytest.mark.asyncio

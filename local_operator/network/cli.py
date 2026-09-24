@@ -247,7 +247,81 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
     net_sessions.add_argument("--prompt", default="", help="with --create: its first turn")
+    # WHO THE SESSION IS (definitions.py). Three flags, each naming a DISTINCT
+    # thing the local product can put on a session, because collapsing them would
+    # make one word mean two and the frame already has to say which it got:
+    #
+    # * ``--profile`` — an attachable persona (a role, a specialist or a packaged
+    #   seed). This is ``exec --profile``'s word and ``/agent``'s behaviour.
+    # * ``--agent-id`` / the global ``--agent NAME`` — a LEGACY named agent row,
+    #   which selects its own hosting/model/prompt (``--agent``'s word, and the
+    #   flag is the global one rather than a second spelling declared here:
+    #   ``parent_parser`` already defines it and a duplicate option string on a
+    #   child parser is an argparse conflict, so the name is reused rather than
+    #   shadowed). Documented in the help text below.
+    # * ``--team`` — a team whose roster and briefs this session manages.
+    net_sessions.add_argument(
+        "--profile",
+        default="",
+        help="with --create: the role/specialist/seed the session runs as (see --agent for "
+        "a legacy named agent)",
+    )
+    # ``--agent`` IS DECLARED HERE rather than inherited. The ``network``
+    # subcommands are built with ``parents=[parent_parser]`` only when a caller
+    # supplies one, and ``sessions`` is created without it — so the product's
+    # global ``--agent NAME`` was not a flag this verb accepted at all, and a user
+    # typing the spelling they use everywhere else got "unrecognized arguments".
+    # The name and the dest match the global flag exactly (``agent_name``), so the
+    # two spellings cannot come to mean different things when both are accepted.
+    net_sessions.add_argument(
+        "--agent",
+        "--agent-name",
+        dest="agent_name",
+        default="",
+        help="with --create: a legacy named agent to run the session as",
+    )
+    net_sessions.add_argument(
+        "--agent-id",
+        default="",
+        dest="create_agent_id",
+        help="with --create: a legacy agent by ID (the global --agent NAME selects one by name)",
+    )
+    net_sessions.add_argument(
+        "--team", default="", help="with --create: the team whose roster the session manages"
+    )
+    net_sessions.add_argument(
+        "--effort",
+        default="",
+        help="with --create: the reasoning level the session is born on",
+    )
     net_sessions.add_argument("--json", action="store_true")
+
+    # `lop network definitions`: what makes an agent or a team resolvable on the
+    # OTHER device. Two verbs — `push` (reconcile this device's definitions onto a
+    # peer or every peer) and `state` (what this device holds and what it last
+    # received). Read-only by default, like `sessions`.
+    definitions = actions.add_parser(
+        "definitions",
+        help="Sync agent and team definitions so a peer can resolve a name",
+        description=(
+            "A session created on another device can name an agent profile or a team, "
+            "and that device needs the definition to resolve the name. `push` sends "
+            "this device's definitions; a create that names one pushes it first, so "
+            "this verb is for doing it deliberately — a cleaned-up peer, or a new "
+            "machine you have just paired."
+        ),
+    )
+    definitions_actions = definitions.add_subparsers(dest="definitions_command")
+    definitions_push = definitions_actions.add_parser(
+        "push", help="Send this device's agent and team definitions to a peer"
+    )
+    definitions_push.add_argument("--peer", default="", help="the device to send them to")
+    definitions_push.add_argument("--all-peers", action="store_true", help="every linked peer")
+    definitions_push.add_argument("--json", action="store_true")
+    definitions_state = definitions_actions.add_parser(
+        "state", help="What this device holds, and what it mirrored from a peer"
+    )
+    definitions_state.add_argument("--json", action="store_true")
 
     serve = actions.add_parser("serve", help="Run the relay in the foreground")
     serve.add_argument("--port", type=int, default=0)
@@ -1846,12 +1920,56 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--create needs --peer: the peer mints the session id"
             )
+        # ``--yolo`` IS REFUSED HERE, BEFORE THE RELAY IS ASKED, and the sentence is
+        # the relay's own (literally — the two guards are spelled once each and kept
+        # in step by a test). A flag this verb inherits from the global set must not
+        # be silently dropped: ``lop network sessions --create --yolo`` looks
+        # exactly like ``lop exec --yolo`` at the call site, and accepting it while
+        # the far end ran gated would have been the worse answer of the two.
+        if getattr(args, "yolo", False):
+            raise MeshRefusal(
+                "not_permitted",
+                "a session created on another device cannot start unattended (yolo): that "
+                "would make that machine run tools with nobody there to see them. Create "
+                "it here, or start it on your own device with yolo.",
+            )
+        profile = str(getattr(args, "profile", "") or "")
+        agent_name = str(getattr(args, "agent_name", "") or "")
+        agent_id = str(getattr(args, "create_agent_id", "") or "")
+        team = str(getattr(args, "team", "") or "")
+        effort = str(getattr(args, "effort", "") or "")
+        if agent_name and agent_id:
+            # ``--agent`` and ``--agent-id`` select the same slot (the exec verb's
+            # own rule), so naming both is a usage error rather than a silent
+            # preference for one.
+            print("--agent/--agent-id select the same agent; name one", file=sys.stderr)
+            return 2
+        if profile and (agent_name or agent_id):
+            # Deliberately NOT a usage error: they are different things (an
+            # attachable persona and a legacy agent row) and the frame carries
+            # both, so a caller that names both gets both — the profile's
+            # instructions and the agent's routing. Nothing here silently drops
+            # one of them, which is what the old behaviour did to both.
+            pass
         detail = _relay_answer(
             "peer_session_create",
             peer=peer,
             cwd=str(getattr(args, "cwd", "") or ""),
             name=str(getattr(args, "name", "") or ""),
             prompt=str(getattr(args, "prompt", "") or ""),
+            model=(
+                {
+                    "provider": str(getattr(args, "hosting", "") or ""),
+                    "model_id": str(getattr(args, "model", "") or ""),
+                }
+                if (getattr(args, "hosting", None) or getattr(args, "model", None))
+                else None
+            ),
+            profile=profile,
+            agent_name=agent_name,
+            agent_id=agent_id,
+            team=team,
+            effort=effort,
             timeout=120.0,  # a spawn plus its first turn's admission
         )
         minted = str(_reported(detail, "session_id", verb="create") or "")
@@ -1868,6 +1986,29 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        # WHO IT RUNS AS, SAID IN THE RECEIPT. The identity half of this verb is new,
+        # and a receipt that named the device but not the agent would leave the one
+        # fact the user just chose unreported — they cannot re-read it from the
+        # session, because the session is on another machine. Both halves are printed
+        # from the PEER's own reply (never from this device's registries, which is a
+        # claim about a store that does not hold this session), and the honest half is
+        # printed too: an agent whose instructions are not attachable ran its own
+        # instructions on that agent's model, and the user is told which of the two
+        # happened.
+        agent_info = detail.get("agent") if isinstance(detail.get("agent"), dict) else None
+        team_info = detail.get("team") if isinstance(detail.get("team"), dict) else None
+        if agent_info:
+            applied = bool(agent_info.get("instructions_applied"))
+            lines.append(
+                f"agent: {agent_info.get('name')}"
+                + ("" if applied else " (routing only — its instructions are not attachable)")
+            )
+        if team_info:
+            lines.append(f"team: {team_info.get('name')}")
+        if profile or agent_name or agent_id:
+            model_detail = detail.get("model")
+            if isinstance(model_detail, dict) and model_detail.get("detail"):
+                lines.append(str(model_detail["detail"]))
         if prompt:
             # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
             # ``first prompt admitted: True`` AND the relay's own sentence for the
@@ -2885,6 +3026,89 @@ def _guard_identity_subcommand(args: argparse.Namespace) -> int:
 #: that referred to a function defined below it would be a NameError at import — on
 #: the CLI's startup path, which is the one place a typo here would be paid by every
 #: ``lop`` invocation.
+def _cmd_definitions(args: argparse.Namespace) -> int:
+    """``lop network definitions push|state`` — agent and team definitions.
+
+    WHY THIS VERB EXISTS WHEN THE CREATE ALREADY PUSHES. The create path reconciles
+    only the names its own frame mentions, on the way to one session — which is the
+    right scope for a create and the wrong scope for the two cases a person actually
+    has in front of them: a peer that has just been cleaned out and should be brought
+    back to a known state, and a freshly paired machine that should be able to resolve
+    every name BEFORE the first create is attempted. Without this verb both of those
+    are "name it in a create and hope the push succeeds", which is a diagnostic
+    surface with no way to see the answer.
+
+    ``state`` is deliberately local and relay-free: it reports what THIS device holds
+    and what it has mirrored from elsewhere (the provenance index), so it answers
+    "why does the peer resolve this name to the wrong thing" without a peer being up.
+    """
+    from local_operator.network import definitions
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    verb = str(getattr(args, "definitions_command", None) or "state")
+    root = config_dir()
+    if verb == "push":
+        peer = str(getattr(args, "peer", "") or "")
+        # ``--all-peers`` and an empty ``--peer`` are ONE request ("every member"):
+        # the relaying handler already treats an absent peer as "every paired
+        # member", so passing a flag through would only create a second spelling of
+        # the same instruction for the two ends to disagree about.
+        if not peer and not bool(getattr(args, "all_peers", False)):
+            raise MeshRefusal(
+                "peer_required",
+                "name a device with --peer, or ask every device with --all-peers",
+            )
+        detail = _relay_answer("definitions_sync", peer=peer, timeout=90.0)
+        rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
+        lines = [str(detail.get("message") or "")] if detail.get("message") else []
+        for item in rows:
+            label = str(item.get("device_id") or "?")
+            # The per-peer sentence is the PUSH's own (it is the only party that saw
+            # the state round trip), so it is printed rather than re-derived here.
+            lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            for conflict in item.get("conflicts") or []:
+                if isinstance(conflict, dict):
+                    lines.append(
+                        f"  {conflict.get('kind') or 'row'} {conflict.get('name')!r}: "
+                        f"{conflict.get('reason') or 'refused'}"
+                    )
+        return _emit(
+            args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
+        )
+
+    # ``state``: this device's own definitions, plus what was mirrored here.
+    index = definitions.read_index(root)
+    state = definitions.definition_state(root)
+    mirrored = {
+        kind: {
+            str(name): str(row.get("origin") or "")
+            for name, row in (index.get(kind) or {}).items()
+            if isinstance(row, dict)
+        }
+        for kind in ("agents", "teams")
+    }
+    lines = []
+    for kind in ("agents", "teams"):
+        for name in sorted(state.get(kind) or {}):
+            origin = mirrored[kind].get(name) or ""
+            lines.append(
+                f"{kind[:-1]}: {name}" + (f" (mirrored from {origin})" if origin else " (yours)")
+            )
+    if not lines:
+        lines = ["no agent or team definitions on this device"]
+    return _emit(
+        args,
+        {
+            "ok": True,
+            "agents": state.get("agents") or {},
+            "teams": state.get("teams") or {},
+            "mirrored": mirrored,
+        },
+        lines,
+    )
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "init": _cmd_init,
     "invite": _cmd_invite,
@@ -2896,6 +3120,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "member": _guard_member_subcommand,
     "peers": _cmd_peers,
     "sessions": _cmd_sessions,
+    "definitions": _cmd_definitions,
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),

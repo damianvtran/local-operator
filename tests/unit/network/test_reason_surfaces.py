@@ -66,7 +66,24 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
-    ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (3, "the relay's own sentence"),
+    ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (
+        4,
+        "the relay's own sentence — the 4th read is the model receipt's detail, which "
+        "says why a requested model was not applied",
+    ),
+    # The push's per-peer report: ``reason`` here is the CONFLICT's own sentence (the
+    # peer composed it), printed verbatim so a person learns why a row was refused.
+    # The refusal/conflict SENTENCES this module composes around the peer's own
+    # reports (``_describe_rows`` builds ``kind 'name' (reason)`` for a person), and
+    # ``_apply_agent``/``_apply_team`` read the recorded row's origin to name it.
+    ("local_operator/network/definitions.py", "_describe_rows", "reason"): (
+        1,
+        "the peer's own reason word, rendered for a person",
+    ),
+    ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
+        1,
+        "the peer's own conflict sentence, printed verbatim",
+    ),
     # The mobility slice's wire transport reads the ACK'S ``detail`` key - the
     # envelope field itself, never rendered to anyone: what a surface renders is the
     # ``message`` INSIDE it, and the codes beside it are what a front end branches on.
