@@ -380,6 +380,79 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "unwatch": "view",
     # list — liveness only
     "ping": "list",
+    # THE OPS A REAL VIEWER SENDS THAT ARE NOT IN ``ControlOp`` (mesh slice V).
+    # The totality test above keys on the ``ControlOp`` literal, but the runtime's
+    # dispatch serves more than that literal names — the payload ops an
+    # ``AttachedSession`` issues on every bind and every routed slash. Without a
+    # row here the relay refused each one ("has no capability decision"), so a
+    # remote viewer could prompt but could not page history, sync its canonical
+    # state, or run one routed slash command (`/rename`, `/model`, `/goal` all
+    # travel as ``slash_result``). Measured over two real relays with a real peer
+    # Session. Each is the NARROWEST capability already covering its effect, and
+    # an op NOT listed here is still refused — ``_accept_stream_frame`` answers
+    # ``unknown_op`` for a missing row (relay.py, "has no capability decision").
+    #
+    # Every op here acts on the session the STREAM is bound to: the frame carries
+    # no session id of its own, and the peer relay's dial is to that one runtime's
+    # socket (``_session_scope`` authorised the id at ``stream_open``).
+    #
+    # view — reads, and presence hints; none mutates the conversation.
+    "frontend_sync": "view",  # the canonical state the welcome already carries
+    "history_page": "view",  # older transcript pages; `view` already streams them live
+    "job_trajectory": "view",  # a background job's own transcript page, read-only
+    "watch_job": "view",  # subscribe to a job's events; no effect on the job
+    "unwatch_job": "view",  # the matching unsubscribe
+    "viewer_watch": "view",  # "someone is displaying this" — residency hint only
+    "desktop_watch": "view",  # the desktop's presence lease — same hint, other surface
+    "event_mute": "view",  # stop sending THIS connection deltas; affects nobody else
+    "acknowledge_attention": "view",  # clear an unread-completion mark this viewer rendered
+    # slash — the authoritative slash seam. The owner's own dispatch decides what
+    # each command does and refuses the terminal-only ones
+    # (serving.py ``run_slash_authoritative`` / ``slash``: "terminal-only here").
+    "slash_result": "slash",
+    # prompt — session-scoped WRITES. The threshold is design §3.3: a member that
+    # may prompt can already make the agent (which has a shell) do each of these.
+    #
+    # fork_snapshot copies THE STREAM'S OWN session into a new id on the OWNER's
+    # store and returns only ``{fork_id, parent_id, busy, incomplete}``
+    # (session.py:6012 ``Session.fork_snapshot``; server.py:5917 refuses any frame
+    # field but ``message``, so no other session or path can be named). It exposes
+    # no content the stream's `view` does not already carry, and the fork stays on
+    # the owner, readable only through that owner's own authorisation.
+    "fork_snapshot": "prompt",
+    # credential / mcp_credentials are WRITE-ONLY toward the owner: they carry a
+    # value IN and return only names and outcomes, never material. Proof:
+    # session/credential_ops.py:59/:66 (``list``/``names`` → key names and a
+    # source label), :81 (``persist`` → key + outcome sentence), the ``store`` arm
+    # (→ key + replaced); mcp/credentials.py:129-130 (``store_credentials`` →
+    # ``saved_ids``/``failed_ids``/``code``); serving.py ``credential_op``'s
+    # docstring ("The value is never logged, never journalled, and never
+    # returned"). Borrowing a token FROM the owner is a different act and needs
+    # ``broker_credential`` (the credentials slice); nothing here reads one out.
+    "credential": "prompt",
+    "mcp_credentials": "prompt",
+    # record_shell appends a `! cmd` receipt row to the transcript (a turn-shaped
+    # write); adopt_aside adds an aside's turns to the conversation.
+    "record_shell": "prompt",
+    "adopt_aside": "prompt",
+    # register_secret_redaction accepts ONE value and adds it to the owner's
+    # redaction set — it only makes the owner scrub more; it returns ``True`` and
+    # nothing is read back (serving.py:1205 ``register_secret_redaction``: "never a
+    # credential, never an announcement, never a log line").
+    "register_secret_redaction": "prompt",
+    # stop — ends work or ends the runtime.
+    "cancel_subagents": "stop",  # the second-Esc path: cancels this session's children
+    # retire_now / refresh_if_idle CANNOT INTERRUPT WORK IN FLIGHT: both go
+    # through ``RuntimeServer._retire_for`` (server.py:5540), which asks the
+    # handle's own idle predicate (``may_refresh``) first and answers
+    # ``kept: <reason>`` for a busy runtime (server.py:5569) — a wrong "retire"
+    # costs a cold start, never a turn. ``retire_now {exclusive}`` additionally
+    # refuses while another viewer is attached.
+    "retire_now": "stop",
+    "refresh_if_idle": "stop",
+    # DELIBERATELY ABSENT, and therefore refused: ``operator_challenge``. It
+    # produces material a surface uses to SIGN as the operator, and no capability
+    # in the transport's set grants a peer that authority.
 }
 
 
