@@ -3300,13 +3300,15 @@ def test_the_progress_leg_spares_a_manager_whose_lane_holds_a_step(tmp_path: Pat
 
     Same child, same real runtime, same real probe, same CPU-burning loop and the
     same static footprint; the WITH-LANE run has one lane mid-batch and the
-    WITHOUT-LANE run is ``_SPINNING_CHILD``. The first must survive (its lane holds
-    an open step) and the second must still be cut and dumped, which is what keeps
-    the widening from being "stop firing at all".
+    WITHOUT-LANE run is ``_SPINNING_CHILD``. The first must be SPARED -- no fire at
+    all, because its lane holds an open step -- and the second must still FIRE and be
+    dumped, which is what keeps the widening from being "stop firing at all". Both
+    children outlive their run either way: every fire is dump-only, so the FIRE, not
+    the exit status, is what the pair separates.
 
     Cannot pass on the committed head: the lane's open batch is not in flight by
     any measure that build had, so the with-lane child fires exactly like the
-    control and this cell reads rc 1.
+    control and the spared arm finds the fired markers it forbids.
     """
     with_lane = _run_lane_child(tmp_path / "with-lane", "open_step")
     _assert_spared(with_lane, tmp_path / "with-lane", "open_step")
@@ -3319,9 +3321,19 @@ def test_the_progress_leg_spares_a_manager_whose_lane_holds_a_step(tmp_path: Pat
         args=(str(CHILD_BOUND_S), str(control_root), str(REPO)),
         timeout=120.0,
     )
-    assert control.returncode == 1, (
-        f"the control (no lane at all) was not cut, so this cell cannot tell the "
-        f"widening from a leg that stopped working: {control.stdout!r} {control.stderr!r}"
+    # DUMP-ONLY: a fire never ends the runtime, so rc 0 is what BOTH arms read and
+    # it no longer separates them -- the markers below do. What rc 0 must still buy
+    # is the policy's own claim, that the child outlives its fire; a non-zero rc here
+    # would mean something ended it. "spin-finished" is the companion fact, and the
+    # same one the sibling cell asserts: the child reached its own bounded exit
+    # AFTER the fire, rather than having been gone before the timer came due.
+    assert control.returncode == 0, (
+        f"the control (no lane at all) did not outlive its own fire, and every fire "
+        f"is dump-only: {control.stdout!r} {control.stderr!r}"
+    )
+    assert "spin-finished" in control.stdout, (
+        f"the control never reached its own bounded exit, so this arm says nothing "
+        f"about a runtime that survived a fire: {control.stdout!r}"
     )
     pid = int(control.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(control_root, pid).read_text(encoding="utf-8")
