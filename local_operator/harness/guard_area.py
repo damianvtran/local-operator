@@ -7,7 +7,7 @@ an agent or a reviewer inspects the guard, and the notice it produced was about 
 test fixture — which is exactly the noise that teaches an operator to skip the
 notice that is real.
 
-Three limits are the whole of this module, and each one is load-bearing:
+Four limits are the whole of this module, and each one is load-bearing:
 
 * **Masking is NOT exempt.** :func:`reads_exempt_source` is consulted only where
   a shape hit is turned into a notice. The mask, the containment registration and
@@ -28,10 +28,23 @@ Three limits are the whole of this module, and each one is load-bearing:
   argument *summary* string instead — or the result text — would hand any caller
   the exemption for echoing a filename, which is why it does not, and the arms in
   ``tests/unit/secrets/test_guard_area_exemption.py`` drive both directions.
+* **The resolution is the READER's own, not a parallel one.** A relative
+  ``path`` argument is handed to ``local_operator.tools.builtin._resolve_workspace_path``
+  — the exact function ``read``/``grep`` resolve their arguments with — against
+  the SESSION's cwd (``ToolContext.cwd``). This is load-bearing, not tidiness:
+  the first cut of this module resolved a relative spelling against the process
+  CWD *and* the repo root and accepted either, which handed the exemption to a
+  file the reader never opened whenever those two roots disagreed — the default
+  shape of an installed ``lop`` run outside the repo. Agreeing with the reader by
+  CONSTRUCTION (one resolver, one root) is what removes that class rather than
+  patching one instance of it.
 
-A resolution that misses (an unusual relative root) falls back to today's
-behaviour, a loud escalation, because the exemption is a courtesy to the operator
-and escalation is the direction that fails safe.
+A resolution that misses — a nonexistent path, an unresolvable ``~user``, an
+embedded NUL, a lone surrogate — falls back to today's behaviour, a loud
+escalation, because the exemption is a courtesy to the operator and escalation is
+the direction that fails safe. The reader tolerates those same inputs so the turn
+survives; this module must not be the one place that raises out of a result,
+which is why the resolve is wrapped as well as delegated.
 """
 
 from __future__ import annotations
@@ -41,6 +54,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
+
+from local_operator.tools.builtin import _resolve_workspace_path
 
 #: ``local_operator/`` in the tree this module was imported from — derived from
 #: this file rather than from the CWD, so the answer does not depend on where the
@@ -97,28 +112,27 @@ EXEMPT_SOURCES: frozenset[Path] = _exempt_sources()
 #: would make this decision steerable by writing a filename into a shell command.
 READING_TOOLS: frozenset[str] = frozenset({"read", "grep"})
 
-#: Roots a RELATIVE path argument is resolved against: the process CWD, and the
-#: repo root. The CWD is what the resolver uses in the common case; the repo root
-#: is here because a session's own working directory is not required to be the
-#: process's, and both resolve the repo-relative spellings above.
-
-
-def _roots() -> tuple[Path, ...]:
-    try:
-        cwd = Path.cwd()
-    except OSError:  # a deleted CWD: the process has bigger problems than this
-        return (_REPO_ROOT,)
-    return (cwd, _REPO_ROOT)
-
-
-def reads_exempt_source(tool_name: str, arguments: Mapping[str, Any] | None) -> bool:
+def reads_exempt_source(
+    tool_name: str,
+    arguments: Mapping[str, Any] | None,
+    session_cwd: str | None = None,
+) -> bool:
     """Did THIS call ask a reading tool to read one of the exempt files?
 
     True only for a file-reading tool carrying a ``path`` argument that resolves
     to exactly one of :data:`EXEMPT_SOURCES`. Everything else — an unrelated
     tool, a missing or non-string path, an internal URL scheme, a path that only
-    resembles the exempt one — answers False, which is the ESCALATING reading and
-    therefore the pre-existing behaviour.
+    resembles the exempt one, a path that cannot be resolved at all — answers
+    False, which is the ESCALATING reading and therefore the pre-existing
+    behaviour.
+
+    ``session_cwd`` is the root the READER will use (``ToolContext.cwd``), and
+    resolution goes through the reader's own resolver rather than through a
+    second rule written to agree with it. When it is omitted the process CWD is
+    used, which is what a bare ``Path.resolve`` would do and what the callers
+    that have no session (unit calls, introspection) want; the loop always
+    threads it. See the module docstring for the bypass that made this
+    load-bearing.
     """
     if tool_name not in READING_TOOLS or not arguments:
         return False
@@ -131,10 +145,18 @@ def reads_exempt_source(tool_name: str, arguments: Mapping[str, Any] | None) -> 
     # them can name an exempt file.
     if not target or "://" in target:
         return False
-    candidate = Path(target).expanduser()
-    if candidate.is_absolute():
-        return candidate.resolve() in EXEMPT_SOURCES
-    return any((root / candidate).resolve() in EXEMPT_SOURCES for root in _roots())
+    # The reader's resolver, so the exemption cannot disagree with the file the
+    # reader opens. It already returns ``resolvable=False`` (never raises) for
+    # the inputs that make a resolution impossible — an unresolvable ``~user``, an
+    # embedded NUL, a lone surrogate — and an unresolvable path is not an exempt
+    # one. The wrap is belt-and-braces for a malformed input the resolver has not
+    # met yet: this runs for EVERY ``read``/``grep`` result, so raising here is
+    # the one outcome that costs the whole turn, and False is the fail-safe side.
+    try:
+        resolved, _inside, resolvable = _resolve_workspace_path(target, session_cwd or ".")
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return resolvable and resolved in EXEMPT_SOURCES
 
 
 #: Whether the call whose bytes are being redacted is itself a read of the guard's
@@ -146,10 +168,17 @@ _EXEMPT_SOURCE: ContextVar[bool] = ContextVar("guard_area_exempt_source", defaul
 
 @contextmanager
 def exempt_from_escalation(
-    tool_name: str, arguments: Mapping[str, Any] | None = None
+    tool_name: str,
+    arguments: Mapping[str, Any] | None = None,
+    session_cwd: str | None = None,
 ) -> Iterator[bool]:
-    """Publish whether this call reads the guard's area, for its duration."""
-    token = _EXEMPT_SOURCE.set(reads_exempt_source(tool_name, arguments))
+    """Publish whether this call reads the guard's area, for its duration.
+
+    ``session_cwd`` is forwarded verbatim: the verdict is decided when the CALL
+    is published, and the caller publishing it is the only one that knows the
+    root the reader is about to use.
+    """
+    token = _EXEMPT_SOURCE.set(reads_exempt_source(tool_name, arguments, session_cwd))
     try:
         yield _EXEMPT_SOURCE.get()
     finally:
