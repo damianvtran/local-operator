@@ -22,6 +22,7 @@ import pytest
 
 import local_operator
 from local_operator.harness.types import AbortSignal, ToolContext
+from local_operator.redaction_shapes import REDACTION_MARKER
 from local_operator.secrets.promote import promote_session_credential
 from local_operator.secrets.protocol import PROTOCOL_VERSION
 from local_operator.secrets.runtime import SecretsMapping, SecretValue
@@ -1077,6 +1078,123 @@ def test_worker_scrub_fails_closed_when_the_filter_breaks(
     out = eval_worker._scrub_secrets("would-be-secret")
     assert "would-be-secret" not in out
     assert "withheld" in out
+
+
+def test_streamed_frames_mask_a_value_split_across_two_writes(isolated: Path) -> None:
+    """The CHUNK BOUNDARY, on the one streamed surface that had no window.
+
+    The sink emitted one frame per ``write``, masked on its own, and a value
+    split across two of them is present in NEITHER half — so no ``replace``
+    fired in either and both halves were published. That is a leak rather than a
+    technicality because of what reads the frames: the parent appends each one to
+    a background job's tail and ``jobs(op='peek')`` JOINS them back into a single
+    string the model reads, so two clean halves make one dirty whole.
+
+    Asserted on the JOINED frames, which is the reading that has to be clean.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.runtime import SecretsMapping
+    from local_operator.tools import eval_worker
+
+    open_store(create=True).set("K", b"frame-value-7712")
+    assert SecretsMapping()["K"] == "frame-value-7712"
+
+    frames: list[str] = []
+    sink = eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append)
+    sink.write("out: frame-va")
+    sink.write("lue-7712\n")
+
+    # Read the JOINED frames and no further: this is the reading the model gets
+    # from `jobs(op='peek')` while the cell is still running, and it is the one
+    # that has to be clean. Deliberately no end-of-cell flush here — a value that
+    # only survived because a later call tidied up is still a value the live view
+    # published.
+    joined = "".join(frames)
+    assert "frame-value-7712" not in joined
+    assert "frame-va" not in joined and "lue-7712" not in joined, "not even in halves"
+
+
+def test_streamed_frames_release_the_held_tail_when_the_cell_ends(isolated: Path) -> None:
+    """Delayed, never dropped: the window's hold is released at the end.
+
+    The window is the price of the guarantee above, and the failure mode it can
+    introduce is its own defect: a cell whose LAST characters sit inside the hold
+    would lose them from the live view. ``release_held`` is what keeps the tail —
+    and the final response carries the whole text either way, so this is about
+    liveliness rather than about coverage.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.runtime import SecretsMapping
+    from local_operator.tools import eval_worker
+
+    open_store(create=True).set("K", b"tail-value-9031")
+    assert SecretsMapping()["K"] == "tail-value-9031"
+
+    frames: list[str] = []
+    sink = eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append)
+    sink.write("first line\nlast line")
+    assert "last line" not in "".join(frames), "the tail should still be held open"
+    sink.release_held()
+    joined = "".join(frames)
+    assert "last line" in joined, "the held tail was dropped, not delayed"
+    assert REDACTION_MARKER not in joined, "nothing here needed masking"
+
+    # And the value case in the same shape: the tail is released MASKED rather
+    # than dropped, which is the whole reason the window is safe to use.
+    frames = []
+    sink = eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append)
+    sink.write("before tail-value-9031")
+    sink.release_held()
+    joined = "".join(frames)
+    assert "tail-value-9031" not in joined
+    assert REDACTION_MARKER in joined
+
+
+def test_streamed_frames_are_not_delayed_without_a_registered_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that never touched a secret streams exactly as it always did.
+
+    The hold window is sized from the values the ledger knows, so with none it is
+    zero — a per-write mask with no latency, which is the property that keeps
+    this off the path of every ordinary cell.
+    """
+    from local_operator.tools import eval_worker
+
+    monkeypatch.delitem(sys.modules, "local_operator.secrets.runtime", raising=False)
+    frames: list[str] = []
+    sink = eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append)
+    sink.write("no newline, mid-line, short")
+    assert "".join(frames) == "no newline, mid-line, short"
+
+
+def test_streamed_frames_fail_closed_when_the_ledger_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable ledger withholds the frame rather than publishing it.
+
+    An empty value set means "nothing to mask", which is the one reading that
+    would publish a secret the session is holding, so a fault has to be
+    distinguishable from emptiness — the same shape as the settled response's
+    fail-closed path, and sticky for the same reason the bash pipe filter's is.
+    """
+    from local_operator.tools import eval_worker
+
+    class Exploding:
+        @staticmethod
+        def registered_values() -> list[str]:
+            raise RuntimeError("ledger down")
+
+    monkeypatch.setitem(sys.modules, "local_operator.secrets.runtime", Exploding)
+    frames: list[str] = []
+    sink = eval_worker._StreamingTextIO(eval_worker.STREAM_CHAR_LIMIT, frames.append)
+    sink.write("would-be-secret")
+    sink.write("a later write too")
+    sink.release_held()
+    joined = "".join(frames)
+    assert "would-be-secret" not in joined
+    assert "a later write too" not in joined, "the withhold must be sticky"
+    assert "withheld" in joined, "and it must say so rather than look empty"
 
 
 def test_worker_response_scrubs_every_model_visible_channel(isolated: Path) -> None:
