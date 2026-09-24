@@ -106,11 +106,13 @@ from local_operator.network.invite import (
     MintedInvite,
     claim_or_consume,
     consume,
+    failures_exhausted,
     invite_credential_for,
     inviter_prompt_for,
     mark_redeemed,
 )
 from local_operator.network.invite import mint as mint_invite
+from local_operator.network.invite import release
 from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
@@ -3064,7 +3066,17 @@ class RelayServer:
         # and the age bound are registered settings (settings_io.SETTINGS, section
         # `network`), and an explicit `audit=` argument still wins for a test.
         self.audit = audit or AuditLog.from_config(self.root)
-        self.store_view = StoreView(root, sessions=lambda: local_session_ids(root))
+        # ``self.root``, NEVER the raw ``root`` argument — the same rule as the block
+        # above, and the second place it bit. ``lop network serve`` passes no root, so
+        # the raw argument is ``None`` and ``StoreView(None).replica_owner`` answers
+        # ``""`` for every id: the holder's authoriser then refused the OWNER's
+        # ``net_sync available`` push (``capability_denied``) and no replica ever
+        # advanced by itself across real hosts, while every in-process test passed
+        # an explicit root and stayed green (cross-host QA, Q-XH-1). The tombstone
+        # and ownership reads resolve ``None`` per call, so they happened to work;
+        # binding all three to the resolved root keeps them from depending on that.
+        store_root = self.root
+        self.store_view = StoreView(store_root, sessions=lambda: local_session_ids(store_root))
         #: Forwarded viewer streams, keyed by an unpredictable id (os.urandom).
         #: On the device the viewer sits at these are streams it OPENED; on the
         #: owning device they are streams it ACCEPTED. One table for both roles,
@@ -5636,7 +5648,10 @@ class RelayServer:
             # exists on this device.
             if self._stream_for(link, stream_id) is None:
                 raise MeshRefusal("unknown_stream", "that stream is not open on this device")
-            self._close_stream(stream_id)
+            # NO ECHO. The peer asked for this close, so it already knows; answering
+            # with a close of our own would be a request it has no stream left to
+            # match, i.e. a refusal per viewer close.
+            self._close_stream(stream_id, notify_peer=False, cause="peer-requested")
             return {"stream": stream_id, "closed": True}
         raise MeshRefusal("protocol_error", f"{action!r} is not a stream action")
 
@@ -5695,7 +5710,7 @@ class RelayServer:
                 outcome="ok",
                 network_id=link.network_id,
                 epoch=link.epoch,
-                detail={"stream": stream_id},
+                detail={"stream": stream_id, "peer": link.device_id, "role": "owner"},
             )
         )
         return {"stream": stream_id, "session_id": session_id, "opened": True}
@@ -5736,7 +5751,7 @@ class RelayServer:
         try:
             stream.dial.send(inner)
         except OSError as exc:
-            self._close_stream(stream_id)
+            self._close_stream(stream_id, cause="owner-socket-gone")
             raise MeshRefusal(
                 "session_unreachable", f"the owner's socket went away: {exc}"
             ) from exc
@@ -5767,7 +5782,7 @@ class RelayServer:
                     "reason": "owner-gone",
                 }
             )
-        self._drop_stream(stream.stream_id)
+        self._drop_stream(stream.stream_id, cause="owner-gone")
 
     # -- the opening relay's half of a stream --------------------------------
 
@@ -5941,7 +5956,7 @@ class RelayServer:
                 outcome="ok",
                 network_id=link.network_id,
                 epoch=link.epoch,
-                detail={"stream": stream_id, "peer": peer},
+                detail={"stream": stream_id, "peer": peer, "role": "viewer"},
             )
         )
         return {
@@ -5953,7 +5968,7 @@ class RelayServer:
     def _forward_stream_frame(self, stream: _Stream, frame: dict[str, Any]) -> None:
         """One viewer frame down the pipe; a refusal is written back to it."""
         if stream.link is None:
-            self._close_stream(stream.stream_id)
+            self._close_stream(stream.stream_id, cause="no-peer-link")
             return
         reply = stream.link.request(
             {
@@ -5970,7 +5985,7 @@ class RelayServer:
                 (reply or {}).get("message") or "the device holding that session stopped answering"
             )
             stream.write_to_viewer({"op": "error", "req": frame.get("req"), "message": message})
-            self._close_stream(stream.stream_id)
+            self._close_stream(stream.stream_id, cause="peer-stopped-answering")
 
     def _stream_for(self, link: PeerLink, stream_id: str) -> "_Stream | None":
         """The stream ``stream_id`` names, IF this link is the one that owns it.
@@ -6013,15 +6028,48 @@ class RelayServer:
         stream_id = str(frame.get("stream") or "")
         if self._stream_for(link, stream_id) is None:
             return False
-        self._close_stream(stream_id, notify_peer=False)
+        self._close_stream(stream_id, notify_peer=False, cause="peer-closed")
         return True
 
-    def _drop_stream(self, stream_id: str) -> None:
+    def _drop_stream(self, stream_id: str, *, cause: str = "") -> None:
         """Forget a stream without touching either socket."""
         with self._streams_lock:
-            self._streams.pop(stream_id, None)
+            stream = self._streams.pop(stream_id, None)
+        if stream is not None:
+            self._report_stream_closed(stream, cause)
 
-    def _close_stream(self, stream_id: str, *, notify_peer: bool = True) -> None:
+    def _report_stream_closed(self, stream: "_Stream", cause: str) -> None:
+        """The close half of ``session_stream_opened``, once per stream.
+
+        THE POP IS THE GATE: ``_close_stream`` and ``_drop_stream`` both remove the
+        stream from the table, and only the call that actually removed it reports,
+        so a stream's open and close counts balance without a "reported" flag to
+        keep in step. ``role`` distinguishes the two halves, because the leak this
+        answers was diagnosed by counting exactly one side of it (the OWNER held 5
+        opens and 0 closes while the viewer's own table was clean — cross-host QA,
+        Q-XH-2). No guard around the write: ``AuditLog.record`` never raises by its
+        own contract, so there is nothing for a teardown path to catch.
+        """
+        link = stream.link
+        self.audit.record(
+            AuditEvent(
+                event="session_stream_closed",
+                actor=(link.device_id if link is not None else ""),
+                subject=stream.session_id,
+                outcome="ok",
+                network_id=(link.network_id if link is not None else ""),
+                epoch=(link.epoch if link is not None else None),
+                cause=cause or "closed",
+                detail={
+                    "stream": stream.stream_id,
+                    "peer": stream.peer_device_id,
+                    "role": "owner" if stream.dial is not None else "viewer",
+                    "cause": cause or "closed",
+                },
+            )
+        )
+
+    def _close_stream(self, stream_id: str, *, notify_peer: bool = True, cause: str = "") -> None:
         """End one stream: close what this device opened, and only that.
 
         QUIT SAFETY LIVES HERE. Closing the viewer's stream closes the peer
@@ -6030,6 +6078,19 @@ class RelayServer:
         its TUI cannot stop a session on another device. The op that would look
         like it is `retire_if_pristine`, and the peer relay never sends it on a
         remote viewer's behalf (§3.3).
+
+        THE PEER IS TOLD WHENEVER THERE IS A PEER TO TELL, which used to be
+        ``stream.dial is not None`` — true of the OWNER's half only. On the viewer
+        side ``dial`` is never set (``_open_viewer_stream`` builds
+        ``_Stream(link=link)``), so closing a viewer sent NOTHING and the owner's
+        dial to its runtime stayed open for the life of the relay: 5
+        ``session_stream_opened`` and 0 closes on the peer, one more ESTABLISHED
+        relay→runtime socket per open, the runtime pinned resident for 47 minutes
+        and never idle-exiting — which means the final flush could never fire
+        (cross-host QA, Q-XH-2). The peer's half is what has to be released, and
+        only this device knows the stream ended, so the notification is the
+        close's job on BOTH sides; the receiving side answers without echoing
+        (``_op_stream``'s close branch and ``route_stream_closed``).
         """
         with self._streams_lock:
             stream = self._streams.pop(stream_id, None)
@@ -6043,7 +6104,8 @@ class RelayServer:
                 _close_quietly(stream.viewer_sock)
             except OSError:
                 pass
-        if notify_peer and stream.dial is not None and stream.link is not None:
+        self._report_stream_closed(stream, cause)
+        if notify_peer and stream.link is not None:
             stream.link.send({"op": "net_stream", "action": "close", "stream": stream_id})
 
     # -- the pair ceremony, listener side -----------------------------------
@@ -6218,12 +6280,30 @@ class RelayServer:
         joiner_name = str(handshake.join_block.get("joiner_name") or "")
         codec = handshake.codec()
         reader = wire.FrameReader(sock)
-        deadline = wire.deadline_in(
-            min(self.settings.handshake_timeout_s, _ttl_of(record, invite_id))
-        )
+        # THE HUMAN'S WINDOW, NOT THE HANDSHAKE TIMEOUT (Q-XH-6). The frame awaited
+        # here is `net_pair_ready`, which reports the code a PERSON read off the other
+        # device's screen — so the wait is a person's reading time, and
+        # `handshake_timeout_s` (10 s) is the budget for a machine's round trip. A
+        # joiner who took ~15 s lost the pairing AND the invite with it, on both real
+        # attempts in the cross-host round; the joiner's own side already waited the
+        # confirm budget for the same reason (cli.py `_join_one`), so the two ends of
+        # one ceremony disagreed about how long a human has. `pair_timeout_seconds`
+        # is the one owner of that number, and `invite.joiner_prompt` prints the same
+        # number to the person, so the promise and the wait cannot drift again.
+        deadline = wire.deadline_in(pair_timeout_seconds(_ttl_of(record, invite_id)))
         member_row: MemberRecord | None = None
         try:
-            ready = codec.open(reader.read_record_payload(deadline))
+            try:
+                ready = codec.open(reader.read_record_payload(deadline))
+            except TimeoutError as exc:
+                # A READ THAT RAN OUT IS A DELAY, not an unknown failure: without this
+                # it arrived as a bare ``OSError`` subclass with no ``code``, so the
+                # refusal was audited as ``cause=error``/``policy`` — a word that told
+                # the operator nothing about a person being slow, which is exactly how
+                # the cross-host round read it.
+                raise PairingRefusal(
+                    "timeout", "the code was not typed on both screens in time"
+                ) from exc
             if ready.get("op") != "net_pair_ready":
                 raise PairingRefusal("protocol_error", "the joining device did not confirm a code")
             typed = str(ready.get("sas") or "")
@@ -6389,7 +6469,19 @@ class RelayServer:
                 try:
                     with store.mutate(result.network_id, self.root) as current:
                         if acquire_invite(current, invite_id):
-                            consume(current, invite_id, outcome=reason)
+                            # RETRYABLE FAILURES DO NOT BURN THE TOKEN (Q-XH-6). A
+                            # delay and a forgivable mistype are about the HUMANS, not
+                            # about the token: the token was still inside its TTL, no
+                            # device was admitted, and the cost of burning it fell on
+                            # the person who was not even at that keyboard (they must
+                            # ask for a fresh invite on the other device). Everything
+                            # else — a decline, a device-id conflict, a protocol error,
+                            # and a mistype past the forgiving budget — still consumes,
+                            # which is what keeps the design's anti-grind property.
+                            if _pairing_retryable(reason, current, invite_id):
+                                release(current, invite_id, outcome=reason)
+                            else:
+                                consume(current, invite_id, outcome=reason)
                             store.save(current, self.root)
                 except FileNotFoundError:
                     pass
@@ -6807,10 +6899,12 @@ class RelayServer:
             return
         finally:
             if stream is not None:
-                # The viewer went away (a TUI quitting, a laptop closing). This
-                # closes OUR stream and the relay's own dial on the far side —
-                # never the runtime, which is the whole quit-safety guarantee.
-                self._close_stream(stream.stream_id)
+                # The viewer went away (a TUI quitting, a laptop closing, a
+                # desktop client disconnecting, a viewer process dying — on the
+                # wire all four are this socket's reader ending). This closes OUR
+                # stream AND tells the peer to release its half — never the
+                # runtime, which is the whole quit-safety guarantee.
+                self._close_stream(stream.stream_id, cause="viewer-gone")
             _close_quietly(sock)
 
     def control_dispatch(self, op: str, frame: dict[str, Any]) -> dict[str, Any]:
@@ -7359,7 +7453,9 @@ class RelayServer:
     def _ctl_stream_close(self, frame: dict[str, Any]) -> dict[str, Any]:
         stream_id = str(frame.get("stream") or "")
         existed = stream_id in self._streams
-        self._close_stream(stream_id)
+        # A LOCAL close op (the multiplexed form, §2.5): this device's own viewer
+        # asked, so the peer must be told — ``notify_peer`` stays at its default.
+        self._close_stream(stream_id, cause="viewer-requested")
         return {"stream": stream_id, "closed": existed}
 
     def _fan_out_catalog(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -7998,6 +8094,27 @@ def _invite_role(record: NetworkRecord, invite_id: str) -> str:
 def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
     invite = record.invite(invite_id)
     return set(invite.capabilities) if invite else set()
+
+
+#: The refusals that are about TIME or about a motion a human can correct, and which
+#: therefore leave the invite standing for the rest of its life (Q-XH-6).
+#:
+#: ``sas_mismatch`` is the one with a bound: it is forgiven up to
+#: ``invite.PAIRING_MAX_FORGIVEN_FAILURES``, because a wrong digit is the ordinary
+#: typo but an unbounded retry would be the ~2^20 grind ``consume`` documents.
+_RETRYABLE_PAIRING_REASONS: frozenset[str] = frozenset({"timeout", "sas_mismatch"})
+
+
+def _pairing_retryable(reason: str, record: NetworkRecord, invite_id: str) -> bool:
+    """Whether a pairing refusal may leave its invite usable. See the table above."""
+    if reason not in _RETRYABLE_PAIRING_REASONS:
+        return False
+    if reason == "timeout":
+        # A delay is bounded by the invite's OWN life, which the join path checks
+        # locally before it dials anything: leaving the token standing cannot extend
+        # it past that, so there is nothing to cap here.
+        return True
+    return not failures_exhausted(record, invite_id)
 
 
 def acquire_invite(record: NetworkRecord, invite_id: str) -> bool:

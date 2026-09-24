@@ -105,6 +105,8 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "handshake_refused",
         "authorisation_refused",
         "link_opened",
+        "session_stream_opened",
+        "session_stream_closed",
         "link_closed",
         "link_idle",
         "link_replaced",
@@ -188,6 +190,13 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "handshake_refused": frozenset({"cause", "their_epoch", "their_device", "mode"}),
     "authorisation_refused": frozenset({"op", "capability", "phase", "link_epoch"}),
     "link_opened": frozenset({"role", "epoch", "phase"}),
+    # A VIEWER'S PIPE, BOTH HALVES. `session_stream_opened` is emitted by whichever
+    # relay opened the stream and by the one that accepted it, so a leak is visible
+    # as a count that does not balance (the cross-host round read "5 opened, 0
+    # closed" on the owner, which is how the unreleased dial was found — Q-XH-2).
+    # The close's `cause` is what tells the four ways a viewer goes away apart.
+    "session_stream_opened": frozenset({"stream", "peer", "role"}),
+    "session_stream_closed": frozenset({"stream", "peer", "role", "cause"}),
     "link_closed": frozenset({"cause", "frames_in", "frames_out"}),
     "link_idle": frozenset({"last_seen_at", "missed_beats"}),
     "link_replaced": frozenset({"instance_id", "age_s"}),

@@ -710,6 +710,11 @@ class InviteRecord:
     redeemed_by: str = ""
     redeemed_at: float | None = None
     outcome: str = ""
+    #: How many times this invite has been presented to a human and did not end in an
+    #: admission — a mistyped code, a delay, a decline. Kept on the record so a relay
+    #: restart cannot hand the same token a fresh mistype budget (invite.py's
+    #: ``PAIRING_MAX_CODE_ATTEMPTS``).
+    attempts: int = 0
 
     @property
     def expires_at(self) -> float:

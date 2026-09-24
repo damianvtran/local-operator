@@ -65,8 +65,9 @@ floats. A field shown as `"b64url(N)"` is schema, not a literal.
    (single-use, TTL'd, bound to the inviting device) → joiner redeems over a
    `join`-mode handshake proving possession of the invite → both sides show a
    6-digit SAS over an out-of-band code entry → inviter admits → link upgrades
-   in place to a member link. A mismatch burns the invite and refuses the join
-   (§5).
+   in place to a member link. A mismatch refuses the join; a *delay* and a
+   *mistyped digit inside a bounded budget* leave the invite usable, and repeated
+   failures spend it (§5.4).
 6. **The wire carries the existing vocabulary.** `hello`/`challenge`/`auth`/
    `welcome` is a *transport* handshake; after it, frames are the control-socket
    vocabulary (`ControlOp`/`EventOp` from `local_operator/mobile/types.py:279`
@@ -902,8 +903,17 @@ contain, and the cost of burning it is one more `lop network invite`.
 
 **Single-use** is enforced by `invite_id` in the record's `invites[]` with
 `state ∈ {minted, redeemed, consumed}`: `redeemed` is written the instant a valid
-redemption arrives (before any human sees anything), `consumed` when the pairing
-ends in *either* outcome (admitted, aborted, SAS mismatch, timeout). A second
+redemption arrives (before any human sees anything), and `consumed` when the
+pairing ends in a way the humans cannot correct — admitted, declined, a
+device-id conflict, a protocol error, or a mistyped code past the forgiving
+budget. Two outcomes are **not** terminal, because both are about the people
+rather than about the token: a timeout (nobody had typed the code yet) and a
+mistyped code inside a bounded budget return the invite to `minted` through
+`invite.release`, counting the failure on the invite row so a relay restart
+cannot hand the same token a fresh budget. `invite.PAIRING_MAX_FORGIVEN_FAILURES`
+is the bound: the design's anti-grind property is `≤ 3 × 2²⁰`, which is hopeless
+online beside the token's own TTL, and the alternative cost a person sitting at
+the *other* device a fresh `lop network invite` for one mistyped digit. A second
 redemption against `redeemed` → `invite_in_use`; against `consumed` →
 `invite_already_used`. Entries older than 24 h are pruned. The state is on disk,
 so a relay restart mid-pairing cannot be used to replay an invite.
@@ -929,9 +939,12 @@ so a relay restart mid-pairing cannot be used to replay an invite.
 
 Roles: **A** = inviter/joiner's peer (listener), **B** = joiner (dialer).
 `T` is the transcript defined in §6.2. All frames are JSON-lines, one per line,
-≤ 16 KiB, each with a `network.handshake_timeout_s` (10 s) deadline. Before the
-`auth` frame validates, a failure closes the socket **without a reply** and
-writes a local audit record.
+≤ 16 KiB, each with a `network.handshake_timeout_s` (10 s) deadline — **except
+`net_pair_ready`, whose deadline is the human's window** (§5.4): that frame
+carries a code a person read off another screen, so a machine's round-trip budget
+is the wrong clock for it, and using one refused every honest pairing that took
+longer than ten seconds to read six digits. Before the `auth` frame validates, a
+failure closes the socket **without a reply** and writes a local audit record.
 
 **Step 0 — dial.** B connects to `hosts[0]` (or `--host`), falling through the
 list on failure with the per-attempt reason reported (`connect_timeout`,
@@ -1036,15 +1049,26 @@ than a check. Each side computes its own from its own transcript and displays
 - **Mismatch, either side:** B typed something that disagrees with A's value →
   A refuses; A's human answers `n` → A refuses. Either way A sends
   `{"op":"net_pair_abort","reason":"sas_mismatch"}` and closes, and B prints
-  `the codes did not match — the other device did not admit this machine. Do not
-  retry: ask for a new invite.` The invite is marked `consumed` in both cases, so
-  the attacker's next attempt needs a fresh invite, i.e. another human action.
+  `the codes did not match — the other device did not admit this machine. Run the
+  join again with the same token and compare the codes on both screens before
+  typing: repeated failures are what spend an invite, so if it is refused as
+  already used, ask for a new one.` A *transcription* mismatch is forgiven up to
+  `PAIRING_MAX_FORGIVEN_FAILURES` and then marked `consumed`; A's human answering
+  `n` is a decision rather than a mistake and consumes immediately. Either way
+  the attacker's next attempt past the budget needs a fresh invite, i.e. another
+  human action.
 - **B declines locally** (its human rejects): B sends
   `{"op":"net_pair_abort","reason":"declined_local"}` and closes; A's prompt is
   cancelled with `the other device declined`.
-- **Timeout:** A's prompt is bounded by `ttl_s` from the invite and by
-  `PAIR_CONFIRM_TIMEOUT_S = 180`; when it fires A sends
-  `{"op":"net_pair_abort","reason":"timeout"}` and consumes the invite.
+- **Timeout:** every wait in this step is the HUMAN's window, not a machine's:
+  `invite.pair_timeout_seconds(ttl_s)` = `min(ttl_s, PAIR_CONFIRM_TIMEOUT_S = 180)`.
+  It bounds A's wait for B's transcription, A's prompt, and B's wait for A's
+  answer — one number, printed to both people by `invite.joiner_prompt`, so the
+  window a person is promised is the window they get. When it fires A sends
+  `{"op":"net_pair_abort","reason":"timeout"}` and the invite is **returned to
+  `minted`**, not consumed: nobody typed anything, nothing was admitted, and the
+  invite's own TTL remains the real bound — so a slow human retries with the same
+  token instead of asking the other device for a new one.
 
 **Step 6 — admission (A → B), and the upgrade.**
 
@@ -1110,7 +1134,9 @@ statement is:
 - the six-digit SAS is a **detector worth ~20 bits per human interaction**, in
   the same class as Bluetooth's numeric comparison. Its strength comes from
   everything around the digits: a successful grind still needs *two* humans to
-  confirm, a failed comparison burns the invite, and a fresh invite is a fresh
+  confirm, repeated failed comparisons spend the invite (up to
+  `PAIRING_MAX_FORGIVEN_FAILURES` of them, see §5.4 — so a grind costs the
+  attacker that many detections rather than one), and a fresh invite is a fresh
   human action on the inviter. It is not a proof;
 - because it is not a proof, the CLI **also prints the full transcript
   fingerprint** — the leading 20 bytes of `sha256(T)` as 32 Crockford base32

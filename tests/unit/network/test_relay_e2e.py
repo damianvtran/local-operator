@@ -251,17 +251,24 @@ def test_pairing_admits_the_joiner_after_both_people_confirm(
     assert "member_admitted" in events
 
 
-def test_a_wrong_transcription_burns_the_invite_and_admits_nothing(
+def test_a_wrong_transcription_admits_nothing_and_the_same_token_still_works(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The negative half of the joiner's step: the codes disagreed, so the join is
-    refused AND the token is consumed, which is what makes an attacker's next
-    attempt need a fresh invite (i.e. another human action).
+    """The negative half of the joiner's step, and the reason it is no longer terminal.
 
-    The inviter's human is never asked — the wrong transcription is refused before
-    the pairing is parked, which is the ordering that keeps a bad code from
-    becoming a question somebody can answer yes to.
+    The codes disagreed, so the join is refused and no member row appears. What CHANGED
+    (cross-host QA, Q-XH-6) is what happens to the token: a mistyped digit used to
+    consume it, so the ordinary typo cost a fresh invite minted on the device the
+    person is NOT sitting at. It is now forgiven — counted on the invite row, so a
+    relay restart cannot reset the budget — and this test drives the whole ceremony
+    again with the SAME token to prove the forgiveness is real rather than a comment.
+    The burn past the budget is pinned by its own cell below, because that is the half
+    that keeps the ~2^20 grind the design refused.
+
+    The inviter's human is never asked on the mistyped attempt — the wrong
+    transcription is refused before the pairing is parked, which is the ordering that
+    keeps a bad code from becoming a question somebody can answer yes to.
     """
     server_a, server_b, host, port = devices
     record = _init_network(server_a)
@@ -282,20 +289,172 @@ def test_a_wrong_transcription_burns_the_invite_and_admits_nothing(
 
     refreshed = store.load(record.network_id, server_a.root)
     assert refreshed.member(server_b.identity.device_id) is None
-    assert refreshed.invites[0].state == "consumed"
+    # FORGIVEN, NOT BURNED: still ``minted``, one failure counted against it, and its
+    # last outcome recorded for the listing that explains what happened.
+    assert refreshed.invites[0].state == "minted"
     assert refreshed.invites[0].outcome == "sas_mismatch"
-    # WAITED FOR, NOT READ ONCE. This row is written by the relay's own accept-loop
-    # thread AFTER it has already flushed the abort frame to the joiner, so the
-    # joiner learns it was refused while the inviter's durable row is still one
-    # flush away. `_await_event` has the measurement: the gap is ~90 us in the
-    # tightest run on this host, which is inside a single scheduler quantum, and it
-    # inverted on CI (two heads, two shards) as `'pairing_refused' in []`. The
-    # invite-state assertions above are unaffected: the inviter saves those BEFORE
-    # it answers the joiner, which is why only this line could see the window.
+    assert refreshed.invites[0].attempts == 1
     events = _await_event(server_a, "pairing_refused")
     assert "pairing_refused" in events
     assert "pairing_awaiting_confirmation" not in events
     assert not store.record_path(record.network_id, server_b.root).exists()
+
+    # THE SAME TOKEN, A CORRECT CODE, NO NEW INVITE: this is the property the fix is
+    # for, and it fails on the tree that consumed the invite above.
+    _type_the_code(monkeypatch)
+    answered: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def _answer_and_record() -> None:
+        try:
+            row = _answer_confirmation(server_a)
+            if row:
+                answered.update(row)
+        except BaseException as exc:  # noqa: BLE001 — reported below, not swallowed
+            failures.append(exc)
+
+    thread = threading.Thread(target=_answer_and_record, daemon=True)
+    thread.start()
+    try:
+        joined = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    finally:
+        thread.join(30)
+    assert not failures, f"the inviter's human step raised: {failures[0]!r}"
+    assert joined is not None, "the same token was refused after one forgiven mistype"
+
+    after = store.load(record.network_id, server_a.root)
+    assert after.member(server_b.identity.device_id) is not None
+    assert after.invites[0].state == "consumed", "an admitted invite must be spent"
+    assert store.load(record.network_id, server_b.root).epoch == 1
+
+
+def test_a_mistype_burns_the_invite_once_the_forgiving_budget_is_spent(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that keeps the grind refused: repeated failures still spend the token.
+
+    ``invite.PAIRING_MAX_FORGIVEN_FAILURES`` is the budget, and it is asserted from the
+    constant rather than from a literal here so the test and the rule cannot drift. The
+    last failure must leave ``consumed`` behind, and the next attempt with the same
+    token must then be refused as already used — otherwise "forgiven" would have become
+    "unlimited", which is the ~2^20 online grind ``consume`` exists to prevent.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    _type_the_code(monkeypatch, code="999999")
+
+    for attempt in range(invite_mod.PAIRING_MAX_FORGIVEN_FAILURES):
+        with pytest.raises(types.PairingRefusal):
+            _join(server_b, host=host, port=port, token=token, envelope=envelope)
+        row = store.load(record.network_id, server_a.root).invites[0]
+        assert row.state == "minted", f"failure {attempt + 1} burned the token early"
+
+    with pytest.raises(types.PairingRefusal):
+        _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    spent = store.load(record.network_id, server_a.root)
+    assert spent.invites[0].state == "consumed"
+    assert spent.invites[0].attempts == invite_mod.PAIRING_MAX_FORGIVEN_FAILURES
+
+    # …and the spent token is dead for everyone, including a correct code. It is
+    # refused DURING the handshake — before any code is compared — and the listener
+    # then closes without explaining itself (an open port that explains is an oracle
+    # for token validity), so what arrives is `_join_one`'s own sentence rather than a
+    # raised refusal. Asserted as a sentence because that is the honest shape of it.
+    _type_the_code(monkeypatch)
+    dead = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    assert isinstance(dead, str) and dead, dead
+    assert "stopped" in dead, dead
+    assert not store.record_path(record.network_id, server_b.root).exists()
+
+
+def test_a_joiner_slower_than_the_handshake_timeout_still_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q-XH-6's real defect: the LISTENER's wait was a machine's budget, not a human's.
+
+    The frame the inviter waits for carries the code a person read off the other
+    device's screen, and the wait was ``min(handshake_timeout_s, ttl)`` — ten seconds
+    for a machine's round trip. Both real attempts in the cross-host round took ~15 s
+    to read six digits off another screen and lost the pairing AND the invite with it.
+
+    The inviter's budget is SHRUNK here rather than making the test sleep ten seconds:
+    the property under test is the RELATION between the two numbers (the human's delay
+    outlasting the machine's budget), so the budget is what moves. Pre-fix this times
+    out at the budget and no pairing is ever parked; post-fix the human's delay is
+    inside the window and the ceremony completes.
+    """
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    identity_a = identity.mint(root_a, name="inviter-a")
+    identity_b = identity.mint(root_b, name="joiner-b")
+    #: The machine's budget, deliberately far below a human's reading time.
+    machine_budget_s = 4.0
+    server_a = relay.RelayServer(
+        root=root_a,
+        settings=relay.NetworkSettings(
+            port=0, listen_address="127.0.0.1", handshake_timeout_s=machine_budget_s
+        ),
+        identity=identity_a,
+        audit=audit_mod.AuditLog(root_a),
+    )
+    server_b = relay.RelayServer(
+        root=root_b,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        identity=identity_b,
+        audit=audit_mod.AuditLog(root_b),
+    )
+    host, port = server_a.bind()
+    server_a.bind_control()
+    server_a.start()
+    # The joining half resolves the config dir from the AMBIENT environment (that is
+    # how a user runs it), so the ambient dir has to be B's.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root_b))
+    human_delay_s = machine_budget_s * 1.5
+
+    def _slow_human(args: Any, derived: str, fingerprint: str) -> str:
+        del args, fingerprint
+        time.sleep(human_delay_s)
+        return derived
+
+    monkeypatch.setattr(net_cli, "_read_code", _slow_human)
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+    answered: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def _answer_and_record() -> None:
+        try:
+            row = _answer_confirmation(server_a, timeout=human_delay_s + 20.0)
+            if row:
+                answered.update(row)
+        except BaseException as exc:  # noqa: BLE001 — reported below, not swallowed
+            failures.append(exc)
+
+    thread = threading.Thread(target=_answer_and_record, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    try:
+        joined = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    finally:
+        thread.join(human_delay_s + 25.0)
+        server_a.stop()
+        server_b.stop()
+    elapsed = time.monotonic() - started
+
+    assert not failures, f"the inviter's human step raised: {failures[0]!r}"
+    assert elapsed >= human_delay_s, (
+        f"the joiner's human was not slow ({elapsed:.2f}s < {human_delay_s:.2f}s), so this "
+        "cell did not exercise a delay at all"
+    )
+    assert joined is not None, (
+        f"a {human_delay_s:.1f}s human was refused where the machine's own budget is "
+        f"{machine_budget_s:.1f}s: the listener is still timing out on the person"
+    )
+    after = store.load(record.network_id, server_a.root)
+    assert after.member(server_b.identity.device_id) is not None
+    assert after.invites[0].state == "consumed"
 
 
 def test_a_declined_confirmation_admits_nobody_and_burns_the_invite(
@@ -355,14 +514,24 @@ def test_an_unanswered_confirmation_times_out_and_admits_nobody(
     ), "an unanswered confirmation admitted a device"
     assert not isinstance(joined, tuple), f"the join reported success with no answer: {joined!r}"
     # The inviter finishes its own window a moment after the joiner's read gives up
-    # (both are the invite's remaining life), and the consume is what must land.
+    # (both are the invite's remaining life), and the state change that must land is
+    # the inviter's. WHAT THAT STATE IS changed with Q-XH-6: silence is a DELAY, so the
+    # invite goes back to ``minted`` with the failure counted rather than being consumed
+    # — the person who was too slow retries with the same token instead of asking the
+    # other device for a new one. What this cell has always guarded is unchanged and is
+    # asserted directly: an unanswered question admits nobody, and the token is not left
+    # stuck in ``redeemed`` (the state that is neither usable nor spent).
     deadline = time.time() + 5.0
     while time.time() < deadline:
         refreshed = store.load(record.network_id, server_a.root)
-        if refreshed.invites[0].state == "consumed":
+        if refreshed.invites[0].state != "redeemed":
             break
         time.sleep(0.1)
-    assert refreshed.invites[0].state == "consumed", "an abandoned pairing left the token redeemed"
+    assert refreshed.invites[0].state == "minted", (
+        f"an abandoned pairing left the token {refreshed.invites[0].state!r}"
+    )
+    assert refreshed.invites[0].attempts == 1, refreshed.invites[0]
+    assert refreshed.invites[0].outcome == "timeout", refreshed.invites[0]
     assert "pairing_refused" in _events(server_a)
     # And the parked question was cleaned up rather than left behind holding a code.
     assert store.pending_pairings(server_a.root) == []

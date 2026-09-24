@@ -642,6 +642,104 @@ def test_a_push_makes_the_holder_pull_the_last_message_over_a_real_link(
     assert replica.read_bytes() == (source / "transcript.jsonl").read_bytes()
 
 
+def test_a_relay_built_the_way_network_serve_builds_it_admits_the_owner_s_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SAME property, on the construction the product actually uses (Q-XH-1).
+
+    WHY THIS TEST EXISTS. Every other push test in this package builds its relay as
+    ``RelayServer(root=…)``, and ``lop network serve`` builds ``RelayServer(settings=…)``
+    with NO root (``network/cli.py::_cmd_serve``). That difference was the whole bug:
+    ``__init__`` handed the raw ``root`` argument to the authoriser's ``StoreView``, so
+    on the real path ``_root`` was ``None``, ``replica_owner`` answered ``""`` for every
+    id, ``Authorizer._replica_scope`` never admitted the owner's ``net_sync available``
+    push, and every replica across a REAL host boundary stayed frozen for 150 s beyond
+    the debounce — refused ``authorisation_refused … capability_denied`` at every push —
+    while a manual ``lop sessions sync`` worked (cross-host QA, Q-XH-1). Passing an
+    explicit root is not coverage for the shape the product supplies, so this cell builds
+    BOTH relays the way ``serve`` does, with the ambient config dir naming each one's
+    root, and drives the push over a real link with the holder's own refresher pulling.
+    """
+    from local_operator.network import identity
+
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    identity_a = identity.mint(root_a, name="serve-a")
+    identity_b = identity.mint(root_b, name="serve-b")
+
+    def _serve_shaped(root: Path, device_identity: Any) -> relay.RelayServer:
+        # EXACTLY `lop network serve`'s call: no ``root``, settings only. The env tells
+        # this relay whose install it is, which is why it is set per server.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+        server = relay.RelayServer(
+            settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+            identity=device_identity,
+        )
+        assert server.root == root, "a serve-shaped relay did not resolve the ambient root"
+        return server
+
+    server_a = _serve_shaped(root_a, identity_a)
+    server_b = _serve_shaped(root_b, identity_b)
+    host, port = server_a.bind()
+    server_a.bind_control()
+    server_a.start()
+    # Named `serve_pair`, not `pair`: this module imports a FIXTURE called `pair` and a
+    # local of that name shadows it (flake8 F811), which pytest would then hand to any
+    # test that asked for it.
+    serve_pair: Devices = (server_a, server_b, host, port)
+    _pair(serve_pair, monkeypatch, role="admin")
+    # B HAS TO ANSWER ITS OWN CONTROL SOCKET for the enrolment below, which is what
+    # `lop sessions sync` does on the holder — the same reason test_mobility's `pair`
+    # fixture starts B rather than leaving it dial-only.
+    server_b.bind_control()
+    server_b.start()
+    source = _owned_session(server_a)
+
+    # The holder enrols by CONTACT (the CLI's `sessions sync`), as the real holder does.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+    first = sync.request_sync(SESSION, root=server_b.root)
+    assert first["ok"] is True, first
+    # THE AUTHORISER'S OWN QUESTION, answered off the store the relay built. Pre-fix this
+    # was "" on a serve-shaped relay, which is the refusal that hid the bug.
+    assert (
+        server_b.store_view.replica_owner(SESSION) == server_a.identity.device_id
+    ), "the holder's store does not know which device its replica came from"
+
+    # Now the owner pushes over the REAL link, and the reply is the assertion: a refusal
+    # here is `authorisation_refused … capability_denied`, the exact record both real
+    # peers' audits carried across the internet.
+    link = server_a._ensure_link(server_b.identity.device_id)  # noqa: SLF001 — the dial seam
+    assert link is not None, "the owner could not reach the holder"
+    with (source / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"id": "e77", "type": "assistant", "content": "xh1"}) + "\n")
+    pushed = link.request(
+        {
+            "op": "net_sync",
+            "req": 9001,
+            "phase": "available",
+            "session_id": SESSION,
+            "reason": "test",
+        }
+    )
+    assert pushed is not None and pushed.get("op") == "ack", pushed
+
+    # …and the pull follows with NO manual command: the ack marked the holder's OWN
+    # refresher, and a tick of it brings the owner's new bytes across.
+    refresher = sync.ensure_refresher(server_b)
+    assert refresher.mark, "the admitted push did not mark the holder's refresher"
+    replica = sync.replica_dir(server_b.root, SESSION) / "transcript.jsonl"
+    deadline = time.monotonic() + 20
+    while (
+        replica.read_bytes() != (source / "transcript.jsonl").read_bytes()
+        and time.monotonic() < deadline
+    ):
+        refresher.tick()
+        time.sleep(0.05)
+    assert (
+        replica.read_bytes() == (source / "transcript.jsonl").read_bytes()
+    ), "the replica did not advance by itself after the push"
+
+
 # ---------------------------------------------------------------------------
 # MINOR 1: a refused move leaves the source alone
 # ---------------------------------------------------------------------------
