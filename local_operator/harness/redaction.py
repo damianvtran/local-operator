@@ -36,6 +36,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from local_operator.harness.guard_area import exempt_from_escalation
 from local_operator.redaction_shapes import scrub_shapes
 
 #: ``(tool name, one-line argument summary)`` for the call whose result is being
@@ -184,10 +185,20 @@ def current_tool_source() -> tuple[str, str]:
 
 @contextmanager
 def tool_source(tool_name: str, arguments: Mapping[str, Any] | None = None) -> Iterator[None]:
-    """Publish which call the bytes being redacted came from, for its duration."""
+    """Publish which call the bytes being redacted came from, for its duration.
+
+    The GUARD-AREA verdict rides along, from these same two inputs — and this is
+    the only place that can produce it. A caller standing here holds the call's
+    name and its ARGUMENTS, which is what "was this tool asked to read the
+    guard's own source or corpus" is a question about; the redaction hook itself
+    is handed text alone, and text cannot answer it without letting a filename
+    echoed into a command or a result confer the exemption. See
+    :mod:`local_operator.harness.guard_area`.
+    """
     token = _SOURCE.set((tool_name or "", summarize_arguments(arguments)))
     try:
-        yield
+        with exempt_from_escalation(tool_name, arguments):
+            yield
     finally:
         _SOURCE.reset(token)
 
