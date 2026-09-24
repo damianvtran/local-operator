@@ -807,10 +807,7 @@ class OAuthCallbackFlow(ABC):
         cancel_attempted = False
         for attempt in range(attempts):
             try:
-                self._server = await asyncio.start_server(
-                    self._handle_connection, "127.0.0.1", port
-                )
-                self._bound_port = self._socket_port()
+                await self._listen(port)
                 return True
             except OSError:
                 if not required:
@@ -849,10 +846,35 @@ class OAuthCallbackFlow(ABC):
             raise ConfigurationError(self._port_unavailable_message(candidates, holders))
 
         try:
-            self._server = await asyncio.start_server(self._handle_connection, "127.0.0.1", 0)
+            await self._listen(0)
         except OSError as exc:
             raise ConfigurationError(f"Could not bind a loopback callback server: {exc}") from exc
+
+    async def _listen(self, port: int) -> None:
+        """Bind ``port`` and serve on it, recording the server BEFORE any yield.
+
+        Why not ``self._server = await asyncio.start_server(...)``: that call
+        binds and listens, then yields once (``create_server``'s trailing
+        ``sleep(0)``) BEFORE it returns the server. A cancellation landing on
+        that yield -- a desktop sign-in superseded inside its first steps, which
+        a burst of starts produces -- raises out of the ``await`` with the
+        socket already listening and no reference to it anywhere, so ``run``'s
+        ``_stop_server`` had nothing to close. The listener then held the fixed
+        callback port for the life of the process, and every later sign-in
+        silently advertised an ephemeral redirect port instead (QA round 2, Q1;
+        reproduced deterministically by cancelling at each yield in turn).
+
+        ``start_serving=False`` makes ``create_server`` return with no await
+        between the bind and the return, so the server is on ``self._server``
+        before anything can cancel us; ``start_serving`` then accepts
+        connections, and a cancel on ITS yield leaves a recorded server that
+        ``_stop_server`` closes.
+        """
+        self._server = await asyncio.start_server(
+            self._handle_connection, "127.0.0.1", port, start_serving=False
+        )
         self._bound_port = self._socket_port()
+        await self._server.start_serving()
 
     def _port_unavailable_message(self, candidates: tuple[int, ...], holders: str = "") -> str:
         """Explain a failed bind in terms the user can act on.

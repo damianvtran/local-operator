@@ -126,6 +126,11 @@ class TestTheSpecCarriesIt:
         # Its neighbours keep `high`: the arm is exact, not a 5.x widening.
         assert default_effort("claude-opus-5") == "high"
         assert default_effort("claude-opus-5-55") != "medium"
+        # Review round 2, NIT 3, decided: a punctuated suffix after 5.5 is the
+        # same model generation (a snapshot, a point release), so it inherits
+        # 5.5's documented default rather than falling through to the 5+ arm.
+        assert default_effort("claude-opus-5-5-1") == "medium"
+        assert default_effort("claude-opus-5.5-20260901") == "medium"
 
     def test_openai_boots_with_no_level_claimed(self) -> None:
         """OpenAI's default is per snapshot — `none` on gpt-5.4, `medium` on

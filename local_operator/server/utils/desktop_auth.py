@@ -54,6 +54,20 @@ MAX_OPERATIONS = 32
 #: the URL up, which is the old behaviour rather than a failure.
 LOGIN_READY_TIMEOUT_S = 3.0
 
+#: How long cancelling a sign-in waits for its flow to finish tearing down.
+#:
+#: WHY a bound: ``start`` holds its lock across the cancel of the operation it
+#: supersedes (so the old flow's loopback port is free before the new one binds),
+#: which makes teardown time ADDITIVE -- every queued start waits out the one
+#: ahead of it. A real flow tears down in ~50 ms (it closes a loopback server),
+#: but nothing in a provider flow promises that, and an unbounded wait meant one
+#: teardown that never returned wedged every later sign-in AND ``close`` (review
+#: round 2, MINOR 2). Past the bound the old task keeps unwinding on its own and
+#: the op already reads ``cancelled``; the new flow's bind ladder then pokes
+#: ``/cancel`` at a port it still holds and retries, which is the path a stale
+#: sibling login always took.
+CANCEL_TEARDOWN_TIMEOUT_S = 2.0
+
 #: The message for a sign-in whose browser path is primary and whose paste prompt
 #: is only a fallback (Anthropic, Z.AI). It leads with the browser, because that
 #: is what almost everyone does; the old copy led with "Paste the key...", which
@@ -198,9 +212,37 @@ class DesktopAuth:
         # that interleave (a double-click, two windows, a retry fired inside the
         # route's ready wait) both cancel the same old op and both create a flow
         # -- two live flows on one fixed port, the exact state ``start`` exists
-        # to prevent. Constructing it outside a running loop is safe: an
-        # ``asyncio.Lock`` binds to a loop on first contended use, not at init.
-        self._start_lock = asyncio.Lock()
+        # to prevent. ``close`` takes it too, so a shutdown cannot interleave a
+        # start and leave an operation running past ``store.close()``.
+        #
+        # Created lazily per event loop (see ``_lock``): an ``asyncio.Lock``
+        # binds to the loop of its first CONTENDED use and raises on any other,
+        # so one built here would break a host driven from a second loop.
+        self._start_lock: asyncio.Lock | None = None
+        self._start_lock_loop: asyncio.AbstractEventLoop | None = None
+        #: Set by ``close``; a start queued behind it must not create a flow on
+        #: a store that is already closed.
+        self._closed = False
+        #: Flows whose teardown outlived ``CANCEL_TEARDOWN_TIMEOUT_S``. Held so
+        #: the still-unwinding task is not garbage-collected mid-teardown once
+        #: its operation is evicted from ``operations``.
+        self._lingering: set[asyncio.Task[None]] = set()
+
+    def _lock(self) -> asyncio.Lock:
+        """The start/close lock for the RUNNING loop.
+
+        Production has one loop per app, so this is one lock. The guard is for a
+        host exercised from a second loop (a test reusing an app, a second
+        client), where a lock bound to the first loop would raise on contention
+        (review round 2, NIT 4). Mutual exclusion across loops is meaningless --
+        a task on one loop cannot await a lock owned by another -- so a fresh
+        lock per loop loses nothing.
+        """
+        loop = asyncio.get_running_loop()
+        if self._start_lock is None or self._start_lock_loop is not loop:
+            self._start_lock = asyncio.Lock()
+            self._start_lock_loop = loop
+        return self._start_lock
 
     def controller(self) -> ProviderController:
         from local_operator.providers.controller import ProviderController
@@ -224,8 +266,19 @@ class DesktopAuth:
         # the new flow binds) and reads ``cancelled`` / "Replaced by a new
         # sign-in." to anyone still polling it. Nothing depended on the 409: the
         # renderer surfaced it as an error string and offered no other path.
-        async with self._start_lock:
-            for active in [op for op in self.operations.values() if op.task and not op.task.done()]:
+        async with self._lock():
+            if self._closed:
+                # A start queued behind ``close``: its store is gone.
+                raise ValueError("Sign-in is unavailable while the server shuts down.")
+            # A flow already cancelled and left unwinding past the bound
+            # (``_lingering``) is not re-cancelled: it reads ``cancelled``
+            # already, and waiting on it again would charge every later start
+            # the full bound for a flow nobody can stop.
+            for active in [
+                op
+                for op in self.operations.values()
+                if op.task and not op.task.done() and op.task not in self._lingering
+            ]:
                 await self.cancel(active)
                 active.message = "Replaced by a new sign-in."
             while len(self.operations) >= MAX_OPERATIONS:
@@ -350,15 +403,34 @@ class DesktopAuth:
 
     async def cancel(self, op: LoginOperation) -> None:
         if op.task and not op.task.done():
-            op.task.cancel()
-            await asyncio.gather(op.task, return_exceptions=True)
+            task = op.task
+            task.cancel()
+            # Bounded: see ``CANCEL_TEARDOWN_TIMEOUT_S``. ``asyncio.wait`` neither
+            # raises on the timeout nor cancels again, so a slow teardown simply
+            # keeps running unobserved while this caller moves on.
+            await asyncio.wait({task}, timeout=CANCEL_TEARDOWN_TIMEOUT_S)
+            if not task.done():
+                logger.warning(
+                    "sign-in %s for %s did not finish tearing down within %.1fs",
+                    op.id,
+                    op.provider,
+                    CANCEL_TEARDOWN_TIMEOUT_S,
+                )
+                self._lingering.add(task)
+                task.add_done_callback(self._lingering.discard)
             # Cancellation before a coroutine's first step skips its finally.
             op.state, op.message = "cancelled", "Sign-in cancelled."
             op.auth_url = op.instructions = op.launch_url = op.user_code = None
             op.ready.set()
 
     async def close(self) -> None:
-        for op in list(self.operations.values()):
-            await self.cancel(op)
-        self.operations.clear()
-        self.store.close()
+        # Under the start lock (review round 2, MINOR 3): without it a start
+        # could create its op between this iteration and the ``clear()``, and
+        # that flow kept running past ``store.close()``. ``_closed`` covers the
+        # start already queued on the lock, which runs after this releases it.
+        async with self._lock():
+            self._closed = True
+            # Concurrently, so shutdown costs ONE teardown bound, not one per op.
+            await asyncio.gather(*(self.cancel(op) for op in list(self.operations.values())))
+            self.operations.clear()
+            self.store.close()

@@ -311,8 +311,8 @@ async def operation_input(
 ):
     """Answer an operation's open prompt.
 
-    For a paste-an-API-key login (``login_kind == "api_key"``) the answer IS the
-    key, and this is the second route that stores one -- so it runs the same
+    For a login whose prompt reads an API key (``paste_is_api_key``) the answer
+    IS the key, and this is the second route that stores one -- so it runs the same
     ``key_check`` as ``PUT /v1/auth/providers/{id}/key`` before the flow sees it
     (QA round 1, Q2). Validating here was chosen over refusing
     ``POST /v1/auth/login`` for these providers: that start-then-paste shape is
@@ -321,6 +321,12 @@ async def operation_input(
     A definite rejection answers 422 with the reason and leaves the prompt OPEN,
     so the user re-pastes into the same flow; "could not check" lets the key
     through, exactly as the PUT does.
+
+    Gated on what the PROMPT reads, not on the login flavour: the flavour gate
+    (``login_kind == "api_key"``) skipped ``alibaba-token-plan-oauth``, a device
+    login whose first prompt reads the ``sk-sp-`` inference key it then stores
+    (review round 2, MAJOR 1). An authorization code pasted into Anthropic's
+    fallback box is not a key and is never sent to a provider as one.
     """
     op = _operation(host, operation_id)
     pending = op.pending_input
@@ -328,7 +334,7 @@ async def operation_input(
         raise HTTPException(409, "This sign-in is not waiting for input.")
     value = _secret(body)
     definition = get_provider_definition(op.provider)
-    if definition is not None and definition.login_kind == "api_key":
+    if definition is not None and definition.paste_is_api_key:
         verdict = await key_check.check_api_key(op.provider, value)
         if verdict.valid is False:
             raise HTTPException(422, verdict.reason or "The provider rejected this API key.")

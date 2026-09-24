@@ -114,6 +114,16 @@ _PERMISSION_MARKERS = ("insufficient permissions", "missing scope", "insufficien
 #: What a 403 must say to count as a verdict on the key itself. Deliberately not
 #: the bare ``auth`` stem: "not authorized to access this model" and "unauthorized
 #: region" are entitlement/region blocks, which say nothing about the key.
+#:
+#: A DECIDED trade, pinned in the status table (review round 2, MINOR 1): a 403
+#: whose whole body is a bare ``Unauthorized``, ``Forbidden`` or ``authorization
+#: failed`` saves UNVERIFIED rather than being refused. Those words are what an
+#: entitlement or region block says too, so no substring separates them from a
+#: bad key, and the two errors are not symmetric -- refusing a good key strands
+#: the user, while an unverified bad key still fails with the provider's own
+#: message on the first turn. It costs nothing measured: every key-accepting
+#: provider in the registry answered a fabricated key with 401 or 400
+#: (2026-09-24), never a bare 403.
 _AUTHENTICATION_MARKERS = ("authentication", "unauthenticated", "invalid api key", "credential")
 
 #: A key is printable ASCII: every provider issues base64/hex-ish tokens, and an

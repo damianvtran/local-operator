@@ -196,7 +196,9 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
     # `output_config: {"effort": "high"}` on every request. Three digits is
     # generous for a generation number and cannot swallow a date.
     (re.compile(r"claude-[a-z]+-4[.-](?:[7-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
-    # Ahead of the 5+ arm, which would otherwise claim it with `high`.
+    # Ahead of the 5+ arm, which would otherwise claim it with `high`. `(?!\d)`
+    # stops `5-55` and deliberately lets a punctuated suffix through
+    # (`claude-opus-5-5-1`, a dated snapshot): same generation, same default.
     (re.compile(r"claude-opus-5[.-]5(?!\d)"), _ANTHROPIC_OPUS_5_5),
     (re.compile(r"claude-[a-z]+-(?:[5-9]|\d{2,3})(?!\d)"), _ANTHROPIC_FULL),
     (re.compile(r"gpt-5(?!\d)"), _OPENAI_GPT5),

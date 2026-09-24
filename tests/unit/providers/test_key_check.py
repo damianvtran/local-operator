@@ -62,6 +62,15 @@ def _run(provider: str, handler, **kwargs) -> tuple[key_check.KeyCheck, list[htt
         # ...while a 403 that names the key or authentication still refuses.
         (403, '{"error": "Invalid API key"}', False),
         (403, '{"error": "unauthenticated: bad credentials"}', False),
+        # Review round 2, MINOR 1: a BARE 403 word is not a key verdict -- a
+        # region or entitlement block says the same thing -- so it saves
+        # unverified by decision (see ``_AUTHENTICATION_MARKERS``). A 401 with
+        # the same words is still a rejection: 401 is the status for a bad key.
+        (403, '{"error": "Unauthorized"}', None),
+        (403, '{"error": "Forbidden"}', None),
+        (403, '{"error": "authorization failed"}', None),
+        (401, '{"error": "Unauthorized"}', False),
+        (401, '{"error": "authorization failed"}', False),
     ],
 )
 def test_the_status_table(status: int, body: str, valid: bool | None) -> None:
