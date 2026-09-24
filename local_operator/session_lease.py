@@ -284,6 +284,46 @@ class SessionLease:
             pass
 
 
+def lease_holder(session_dir: Path) -> tuple[int | None, Literal["none", "live", "uncertain"]]:
+    """Who holds ``session_dir``'s transcript lease, WITHOUT taking it.
+
+    Returns ``(pid, verdict)``: ``(None, "none")`` when there is no claim, or the
+    claim's holder is PROVEN dead; ``(pid, "live")`` for a live writer; and
+    ``(pid_or_None, "uncertain")`` when a claim exists that this platform cannot
+    settle (an unparseable claim, an unprovable pid).
+
+    WHY IT MUST NOT ACQUIRE. The callers are guards that decide whether a
+    session may be moved or deleted — the mesh move's source-side retire is the
+    one this was written for. Probing by acquiring would take the very lease the
+    guard is protecting: a live holder would be refused (fine), but a holder that
+    had just released would find the GUARD holding the transcript, and the
+    runtime the move is waiting on — or the successor it will engage — would then
+    fail to start against a lease held by the process asking whether anyone
+    holds it. A read of the claim file answers the question and changes nothing.
+
+    "uncertain" is reported separately rather than folded into either answer so
+    a guard can fail CLOSED on it: the claim-writer's contract here is that
+    uncertainty never permits theft, and deleting a directory is the strongest
+    form of theft there is.
+    """
+    path = session_dir / LEASE_NAME
+    if not path.exists():
+        mirror = session_dir / MIRROR_NAME
+        # The legacy mirror alone, exactly as ``acquire_session_lease`` reads it:
+        # an older build that writes only ``.session.pid`` is still a writer.
+        try:
+            legacy_pid = int(mirror.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None, "none"
+        state = _pid_state(legacy_pid)
+        return (None, "none") if state == "dead" else (legacy_pid, state)
+    claim = _read_claim(path)
+    if claim.pid is None:
+        return None, "uncertain"
+    state = _pid_state(claim.pid, expected_birth=claim.birth)
+    return (None, "none") if state == "dead" else (claim.pid, state)
+
+
 def reap_proven_dead_session_claim(session_dir: Path, owner_pid: int) -> bool:
     """Remove only the exact dead owner's lease and compatibility mirror.
 

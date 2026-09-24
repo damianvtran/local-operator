@@ -389,8 +389,20 @@ def _retire_local_runtime(
 
     from local_operator.mobile.attach_client import AttachClient, find_runtime_record
 
-    record, _pid = find_runtime_record(root, session_id)
+    record, pid = find_runtime_record(root, session_id)
     if record is None:
+        # "NO RECORD" IS NOT "NOBODY IS WRITING". ``find_runtime_record`` returns
+        # ``(None, pid)`` when a live process holds the transcript lease but has
+        # published no discovery record: ``lop exec``, the headless REPL, the
+        # server, or a runtime still booting. Reading that as ``cold`` let the
+        # commit delete the directory out from under a live writer. The lease
+        # claim is the authority here, read WITHOUT acquiring (see
+        # ``session_lease.lease_holder``), and anything but a proven-absent
+        # holder refuses — a runtime mid-boot is exactly when a delete does the
+        # most damage, so "probably harmless" is not an answer this may give.
+        refusal = _lease_refusal(root, session_id, pid)
+        if refusal:
+            return {"result": "viewed", "sentence": refusal}
         return {"result": "cold", "sentence": ""}
     if not getattr(record, "capabilities", None) or (
         _EXCLUSIVE_MOVE_CAPABILITY not in tuple(record.capabilities)
@@ -443,6 +455,32 @@ def _retire_local_runtime(
 
 
 _EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
+
+
+def _lease_refusal(root: Path, session_id: str, record_pid: int | None) -> str:
+    """The sentence refusing a move of a session whose lease is held, or ``""``.
+
+    Two readings, and EITHER one refuses: the pid ``find_runtime_record`` already
+    reported, and the lease claim itself. The second is what closes the case the
+    first cannot see — a claim whose writer has not (yet) written the compatibility
+    mirror that discovery reads.
+    """
+    from local_operator.session_lease import lease_holder
+
+    holder, verdict = lease_holder(Path(root) / "sessions" / session_id)
+    if verdict == "none" and record_pid is None:
+        return ""
+    who = holder or record_pid
+    if verdict == "uncertain" and who is None:
+        return (
+            "this session's transcript lease could not be read, so it was not moved; "
+            "nothing was changed"
+        )
+    return (
+        f"this session is open in another Local Operator process (pid {who}) that "
+        "published no runtime record, so it was not moved; close that process "
+        "(or let it finish) and try again"
+    )
 
 
 def _await_record_gone(root: Path, session_id: str, *, deadline_s: float) -> bool:
