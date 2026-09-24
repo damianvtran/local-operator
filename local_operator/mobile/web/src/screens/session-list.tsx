@@ -472,6 +472,9 @@ export function SessionListScreen() {
 	/* FLIP settle state: card DOM by session id, plus each card's content
 	   coordinate from the previous commit. */
 	const mainRef = useRef<HTMLElement>(null);
+	/* The refusal band's track, observed below so its height change can be
+	   handed to the scroller instead of to the rows. */
+	const pinErrorRef = useRef<HTMLDivElement>(null);
 	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 	const prevTops = useRef(new Map<string, number>());
 	const visible = sessions.filter((session) =>
@@ -595,6 +598,51 @@ export function SessionListScreen() {
 		}
 		prevTops.current = nextTops;
 	});
+	/* THE ROWS DO NOT MOVE WHEN THE REFUSAL OPENS, if the list is scrolled (QA
+	   round 3, Q4; design round 6, D14). The band sits above the scroller, so
+	   every pixel it grows moves `<main>`'s top down, and every visible row with
+	   it. That measured +42.8px at 100% root font and +120.4px at 200%: the
+	   pressed row slid out from under the reader's finger while they read the
+	   reason. CSS scroll anchoring cannot absorb this, because it corrects
+	   content that moves INSIDE a scroller, not a scroller that moves. So each
+	   frame of the band's `0fr`/`1fr` track is paid out of `scrollTop` instead:
+	   the list scrolls by exactly what the band took, and the rows hold still
+	   while the list's top edge slides under the band. The same applies in
+	   reverse when the band collapses.
+
+	   At `scrollTop` 0 there is nothing above the rows to spend, so they ride the
+	   band's animated track down, which is the accepted D8 shape: animated, and
+	   the reason is on screen in the same frame. A ResizeObserver rather than a
+	   hook on `pinError`, because the track animates over 200ms, and one
+	   correction at the change would leave the rows to drift for the rest of it.
+	   `transcript.tsx` uses the same guard for the same observer. */
+	useEffect(() => {
+		const band = pinErrorRef.current;
+		if (!band || typeof ResizeObserver === "undefined") return;
+		let last = band.getBoundingClientRect().height;
+		/* The track reports fractional heights and `scrollTop` keeps whole pixels,
+		   so a plain `+= delta` drops the fraction on every frame. Measured, that
+		   lost 6.8 of 42.8px over one expand, and the rows crept down by the
+		   difference. The remainder is carried and paid in whole pixels. */
+		let owed = 0;
+		const ro = new ResizeObserver((entries) => {
+			const height = entries[entries.length - 1]?.contentRect.height ?? last;
+			const main = mainRef.current;
+			owed += height - last;
+			last = height;
+			if (!main || main.scrollTop <= 0) {
+				owed = 0;
+				return;
+			}
+			const step = Math.trunc(owed);
+			if (step !== 0) {
+				main.scrollTop += step;
+				owed -= step;
+			}
+		});
+		ro.observe(band);
+		return () => ro.disconnect();
+	}, []);
 	useEffect(() => {
 		getDirectories()
 			.then((d) => setHome(d.home))
@@ -633,8 +681,10 @@ export function SessionListScreen() {
 			    and for the caption's D8 reason: opening it takes height from `<main>`,
 			    so every visible row moves down by the band's height, and an unanimated
 			    insert would snap the list at the moment the reader is watching the row
-			    they pressed. On the track the rows travel with the band's own curve,
-			    and the text that explains the move appears in that same frame. The
+			    they pressed. On a scrolled list the observer on `pinErrorRef` pays that
+			    height out of `scrollTop`, so the rows do not move at all; at the top of
+			    the list they travel with the band's own curve, and the text that
+			    explains the move appears in that same frame. The
 			    list's FLIP settle measures from `<main>`'s own top, so moving `<main>`
 			    does not read to it as a reorder. The `<p>` stays mounted with empty
 			    text for the same reason a conditional child would not: the track would
@@ -649,6 +699,7 @@ export function SessionListScreen() {
 			    with the header and the search field (`<main>`'s `px-1` plus the field's
 			    `mx-2`). */}
 			<div
+				ref={pinErrorRef}
 				className={cn(
 					"grid shrink-0 transition-[grid-template-rows] duration-200 ease-out",
 					showPinError ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
@@ -660,9 +711,20 @@ export function SessionListScreen() {
 					</p>
 				</div>
 			</div>
+			{/* NO BROWSER SCROLL ANCHORING on the list: the list moves itself. The
+			    FLIP settle animates every reorder in content coordinates, and the
+			    refusal band's observer pays the band's height out of `scrollTop`. Chrome's
+			    anchoring (and Safari's from 27) adjusts that same offset on its own
+			    schedule, so two mechanisms were correcting one position. Measured at
+			    200% root font on a scrolled 41-row list, with anchoring on: the
+			    optimistic ★ lift shifted every visible row by 142px in one frame, and a
+			    refused pin left the pressed row 127.6px above where it had been held.
+			    With anchoring off, the same press ended 0.4px from where it started.
+			    Off is also what a phone on Safari before 27 already gets, so this
+			    makes every browser behave like the one most readers have. */}
 			<main
 				ref={mainRef}
-				className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
+				className="flex flex-1 flex-col overflow-y-auto [overflow-anchor:none] px-1 pb-2"
 			>
 				<input
 					value={query}
