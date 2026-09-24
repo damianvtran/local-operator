@@ -6535,6 +6535,38 @@ def test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands
             ), (command, response.text)
 
 
+@pytest.mark.asyncio
+async def test_the_session_copy_flag_is_refused_by_name_and_bare_session_still_opens_the_view(
+    move_api,
+) -> None:
+    """`/session --copy` is a terminal gesture; the desktop names that (decision D3).
+
+    Forwarding it would open the view and silently drop `--copy` — `native_action`
+    has no `session` branch — which is the `/compact hello` class. The refusal is
+    the route's own sentence, and the bare command keeps its native action.
+    """
+    client, app, root = move_api
+    sid = await app.state.desktop_sessions.create(str(root))
+
+    refused = await client.post(
+        f"/v1/desktop/sessions/{sid}/commands",
+        json={"request_id": str(uuid.uuid4()), "command": "session", "args": "--copy"},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == (
+        "/session --copy works in the terminal; the /session view shows the ID"
+    )
+
+    bare = await client.post(
+        f"/v1/desktop/sessions/{sid}/commands",
+        json={"request_id": str(uuid.uuid4()), "command": "session", "args": ""},
+    )
+    assert bare.status_code == 200, bare.text
+    action = bare.json()["result"]["result"]
+    assert action["kind"] == "native_action"
+    assert action["destination"] == "session.diagnostics"
+
+
 def test_the_route_forwards_a_selector_the_admission_rule_calls_prose() -> None:
     """The two questions differ ON PURPOSE for a selector, and that is pinned.
 
