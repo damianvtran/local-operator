@@ -4860,16 +4860,18 @@ class ServingSessionHandle(SessionHandle):
         session = self._session
         if command == "desktop_mcp":
             from local_operator.mcp.config import MCPConfigWriteError
-            from local_operator.mcp.desktop import MCPControl, MCPDesktop
+            from local_operator.mcp.desktop import MCPControl, MCPDesktop, refusal_code
 
             if self._desktop_mcp is None:
                 self._desktop_mcp = MCPDesktop(session, self._mcp_grant_tasks, self._desktop_cwd)
             try:
                 data = await self._desktop_mcp.execute(MCPControl.model_validate_json(args))
-            except (ValueError, MCPConfigWriteError):
+            except (ValueError, MCPConfigWriteError) as exc:
                 # Refusals are protocol data, not socket outages. Config errors
-                # can quote credentials, so only a bounded code crosses back.
-                return SlashResult(kind="error", data={"code": "mcp_control_refused"})
+                # can quote credentials, so only a bounded CODE crosses back —
+                # never the text. The code used to be one constant for every
+                # refusal, which left the desktop unable to say why.
+                return SlashResult(kind="error", data={"code": refusal_code(exc)})
             return SlashResult(kind="block", data=data)
         if command == "fork":
             from local_operator.fork import fork_session

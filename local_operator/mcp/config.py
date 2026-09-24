@@ -24,6 +24,7 @@ import re
 import tomllib
 from collections.abc import Callable
 from contextlib import suppress
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Literal
 
@@ -391,6 +392,24 @@ def validate_server_config(name: str, cfg: MCPServerConfig | dict[str, Any] | No
     return errors
 
 
+def tool_enabled_by_config(cfg: Any, tool_name: str) -> bool:
+    """Whether ``cfg``'s allow/deny lists expose ``tool_name``.
+
+    ``disabledTools`` wins; a non-empty ``enabledTools`` is an allowlist; both
+    accept exact names or glob patterns. Lives here, beside the config models it
+    reads, so the manager (live tools) and the desktop catalog (last-seen counts
+    from the tool cache) apply ONE filter: a count that ignored the deny list
+    would advertise tools the session can never call.
+    """
+    if cfg is None:
+        return True
+    denied = getattr(cfg, "disabled_tools", []) or []
+    if any(fnmatchcase(tool_name, pattern) for pattern in denied):
+        return False
+    allowed = getattr(cfg, "enabled_tools", []) or []
+    return not allowed or any(fnmatchcase(tool_name, pattern) for pattern in allowed)
+
+
 def load_all_mcp_configs(
     cwd: str | os.PathLike[str],
 ) -> tuple[dict[str, MCPServerConfig], dict[str, str]]:
@@ -572,6 +591,28 @@ def _scope_path(cwd: str | os.PathLike[str] | None, scope: str) -> Path:
     return config_dir() / "mcp.json"
 
 
+def project_scope_available(cwd: str | os.PathLike[str] | None) -> bool:
+    """Whether ``cwd`` has a project scope DISTINCT from the global one.
+
+    False when ``<cwd>/.local-operator/mcp.json`` is the very file
+    ``config_dir()/mcp.json`` names — which is the DEFAULT case, not an exotic
+    one: the desktop app's default conversation folder is ``~``, and
+    ``~/.local-operator/mcp.json`` is both. Before this existed the settings
+    page offered "This project" there, wrote the global file under that
+    label, and then listed every global server as a project one.
+
+    Compared on resolved paths for the reasons :func:`owned_scope_for_source`
+    gives (symlinked homes, ``/private/var``). An unresolvable path answers
+    ``False``: "no separate project scope" is the answer that cannot write a
+    file the user did not mean.
+    """
+    try:
+        project = _scope_path(cwd, "project").expanduser().resolve()
+        return project != _scope_path(cwd, "global").expanduser().resolve()
+    except OSError:
+        return False
+
+
 class MCPConfigWriteError(Exception):
     """One refused config write, carrying every reason it was refused.
 
@@ -588,9 +629,15 @@ class MCPConfigWriteError(Exception):
     read. ``str(exc)`` joins them for callers (the TUI) that render one line.
     """
 
-    def __init__(self, errors: list[str]) -> None:
+    def __init__(self, errors: list[str], code: str = "write_failed") -> None:
         super().__init__("; ".join(errors))
         self.errors = list(errors)
+        #: A bounded refusal category for machine callers (the desktop routes).
+        #: The ``errors`` text can quote paths and config values, so a caller
+        #: that crosses a process or HTTP boundary sends THIS, never the text.
+        #: One of ``write_failed`` | ``exists`` | ``invalid_config`` |
+        #: ``unknown_server`` | ``project_scope_unavailable``.
+        self.code = code
 
 
 def owned_scope_for_source(
@@ -616,7 +663,12 @@ def owned_scope_for_source(
         return None
     try:
         resolved = Path(source).expanduser().resolve()
-        for scope in ("project", "global"):
+        # When the two scopes name ONE file (cwd == home, the desktop default),
+        # that file is the global one: asking "project" first there reported
+        # every global server as a project server and routed a remove through
+        # the wrong label. See :func:`project_scope_available`.
+        order = ("project", "global") if project_scope_available(cwd) else ("global",)
+        for scope in order:
             if _scope_path(cwd, scope).expanduser().resolve() == resolved:
                 return scope
     except OSError:
@@ -624,6 +676,23 @@ def owned_scope_for_source(
         # safe answer for a question that gates a delete.
         return None
     return None
+
+
+def _refuse_collapsed_project_scope(scope: str, cwd: str | os.PathLike[str] | None) -> None:
+    """Refuse a PROJECT write where the project file is the global file.
+
+    Silently writing the global file under a "project" label is how a user
+    who chose "only this folder" got a server in every conversation. The
+    refusal names the fact; the caller decides whether to offer global.
+    """
+    if scope == "project" and not project_scope_available(cwd):
+        raise MCPConfigWriteError(
+            [
+                f"{cwd} has no separate project scope: its project mcp.json is the "
+                "global one; use the global scope"
+            ],
+            "project_scope_unavailable",
+        )
 
 
 def add_server(
@@ -673,7 +742,8 @@ def add_server(
     cfg = _coerce_server_config(raw)
     errors = validate_server_config(name, cfg)
     if errors:
-        raise MCPConfigWriteError(errors)
+        raise MCPConfigWriteError(errors, "invalid_config")
+    _refuse_collapsed_project_scope(scope, cwd)
 
     path = _scope_path(cwd, scope)
     doc = _read_json(path) or {}
@@ -682,7 +752,7 @@ def add_server(
         servers = {}
         doc["mcpServers"] = servers
     if name in servers:
-        raise MCPConfigWriteError([f"server {name!r} already exists in {path}"])
+        raise MCPConfigWriteError([f"server {name!r} already exists in {path}"], "exists")
     servers[name] = raw
     try:
         _write_json_atomic(path, doc)
@@ -746,11 +816,12 @@ def remove_server(
     define the same name). Raises :class:`MCPConfigWriteError` when the name is
     not present in that scope, or when the write fails.
     """
+    _refuse_collapsed_project_scope(scope, cwd)
     path = _scope_path(cwd, scope)
     doc = _read_json(path)
     servers = doc.get("mcpServers") if doc is not None else None
     if doc is None or not isinstance(servers, dict) or name not in servers:
-        raise MCPConfigWriteError([f"server {name!r} not found in {path}"])
+        raise MCPConfigWriteError([f"server {name!r} not found in {path}"], "unknown_server")
     del servers[name]
     try:
         _write_json_atomic(path, doc)

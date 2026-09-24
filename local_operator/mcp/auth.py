@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -79,6 +80,21 @@ if TYPE_CHECKING:
     from local_operator.providers.auth_store import StoredCredential
 
 logger = logging.getLogger(__name__)
+
+#: Who, if anyone, is watching the interactive grant this task started.
+#:
+#: The desktop's sessionless sign-in runs the grant in a server task with no
+#: terminal: the authorization URL and "did a browser actually open" were only
+#: ever PRINTED (``LoopbackAuthFlow._notify``), which under a daemon lands in a
+#: log nobody reads. A settings page that cannot say "we opened your browser" or
+#: offer the link when no browser opened leaves the user staring at a spinner.
+#: A context variable rather than a constructor argument because the flow is
+#: built deep inside the manager's connect path; the operation task sets it and
+#: every task the SDK spawns beneath it inherits the value. Called with
+#: ``(authorization_url, browser_opened)``; it must not raise.
+AUTHORIZATION_OBSERVER: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "mcp_authorization_observer", default=None
+)
 
 # Logical credential id prefix for managed MCP OAuth credentials (URL-keyed).
 MCP_OAUTH_CREDENTIAL_PREFIX = "mcp_oauth:"
@@ -2469,8 +2485,15 @@ class LoopbackAuthFlow:
             "\nMCP OAuth authorization required. Open this URL in a browser:",
             f"  <{authorization_url}>",
         ]
-        if await open_browser_quietly(authorization_url):
+        opened = await open_browser_quietly(authorization_url)
+        if opened:
             lines.append("(opened in your default browser)")
+        observer = AUTHORIZATION_OBSERVER.get()
+        if observer is not None:
+            try:
+                observer(authorization_url, opened)
+            except Exception:  # noqa: BLE001 — an observer must never break a grant
+                logger.debug("MCP authorization observer raised", exc_info=True)
         if self._server is not None:
             lines.append(f"Waiting for the redirect to {self.redirect_uri} …")
         self._notify(*lines)

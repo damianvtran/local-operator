@@ -497,6 +497,71 @@ when downstream account authorization is server-specific. It is an offer for the
 user to submit normally with ordinary gates, not an automatic setup-tool call.
 Legacy Google token values are deliberately retained for user scripts.
 
+### Settings without a conversation: `GET|POST /v1/desktop/mcp`
+
+Everything above needs a session, and a session needs a configured model — so on a
+fresh install the Settings page could not list a single server, and on a configured
+one, editing a JSON file started a runtime and spawned every server in it. The
+sessionless surface answers the same questions from the files on disk, gated on
+`features.mcp_catalog`:
+
+| Route | Body / query | Answer |
+| --- | --- | --- |
+| `GET /v1/desktop/mcp` | `cwd?` (absolute existing dir, default the user's home), `session_id?` | `CRUDResponse{result:{data:<catalog>, replayed:false}}` |
+| `POST /v1/desktop/mcp` | `MCPControl` plus `cwd?` | the FULL catalog again, plus `operation: <McpOperation>\|null` — the op this request started or named |
+| `POST /v1/desktop/mcp/credentials` | `MCPCredentials` plus `cwd?` | `{name, saved_ids, failed_ids, code, catalog:<catalog>}` |
+
+`add`, `remove`, `test`, `login`, `reauth`, `logout`, `status` and `cancel` are the
+sessionless actions. `connect`, `disconnect` and `reload` stay on the session route:
+they are about ONE runtime's live connections, which a sessionless request has none
+of. An invalid `cwd` is `422`; a refusal is `409 {code, message}` with a bounded
+`code` and fixed copy per code, never exception text (a config error can quote a
+credential). The codes are `exists`, `not_owned`, `project_scope_unavailable`,
+`unknown_server`, `oauth_unsupported`, `grant_running`, `too_many_operations`,
+`write_failed`, `mcp_starting`, plus `invalid_config` (the config layer refused the
+SHAPE of a definition) and `operation_unavailable` (a stale `operation_id`, or a
+live-only action on this route). An owner from before this change answers the single
+code `mcp_control_refused`, which renders the same generic sentence it always did.
+
+**The catalog document** is one payload: `cwd`, `project_scope_available`,
+`global_path`, `project_path` (null when the folder has no separate project file),
+`status_source` (`config` or `live`), `session_id`, `servers[]` and `operations[]`.
+A row carries the server's identity and where it came from (`source.kind`,
+`source.path`, `editable`, `owned_scope` — `remove` is offered only when it is ours),
+its `scope` (`global`/`project`, where it APPLIES) with `project_path` set iff
+`project` and to the DIRECTORY (the catalog-level field is the FILE), a
+`transport`/`endpoint` pair with a redacted URL when the URL carried user-info, a
+query or a fragment, `status`/`status_reason`/`status_observed_at`/`status_basis`,
+an `auth` block (`kind`, `signed_in`, and the state of each `secret_refs` id), a
+`tool_count` with its basis, and the closed `actions` list. It is generated in
+`mcp/catalog.py` so no client derives any of it; `docs/fixtures/mcp-catalog.json` is
+a pinned sample of the shape (with one row per status, one project row, one
+foreign-import row and a running operation) for the UI's own parity tests, and a
+unit test fails if the builder's fields and the fixture's drift apart.
+
+Status is `connected`, `needs_sign_in`, `not_started`, `connecting` or `error`, and
+`status_basis` says how it is known: `live` (a warm runtime), `probe` (an explicit
+Test or sign-in), or `stored` (config, the grant store, the encrypted store).
+**A stored fact never claims `connected`** — a grant revoked upstream still reads as
+signed in, so stored state is shown as "Ready". Precedence, first match wins: a
+config that fails validation is `error`; a running operation on that server is
+`connecting`; a live overlay; a probe within its 300 s TTL that still matches the
+server's config digest; then the stored facts. A `test` is an OPERATION, never a
+synchronous answer: it spawns one short-lived manager, connects NON-interactively
+(a Test never opens a browser), records `tool_count`, and settles to `connected`,
+`needs_sign_in` or `error`. One operation runs at a time (a second loopback OAuth
+listener would fight for the callback port), each is bounded and cancellable, and
+every spawned child is torn down inside the operation's own task — including on
+server shutdown, which cancels and JOINS the operation so no child outlives the
+process that spawned it.
+
+The list never starts anything. `session_id` overlays a runtime's live statuses
+ONLY when that runtime is already bound and its folder is the requested one, inside
+a 2 s bound; a cold, silent or foreign session degrades to the config answer with
+`status_source: "config"` and `session_id: null` rather than a 503. That is why the
+Settings page passes the active conversation's id when it has one (the run panel and
+the list must agree) and nothing when it does not.
+
 ## Radient: narrow proxy, not another authentication authority
 
 POST `/v1/desktop/radient` selects one of 25 closed operations: account/prices,

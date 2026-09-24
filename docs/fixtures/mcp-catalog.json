@@ -1,0 +1,233 @@
+{
+  "cwd": "/Users/you/projects/acme",
+  "project_scope_available": true,
+  "global_path": "/Users/you/.local-operator/mcp.json",
+  "project_path": "/Users/you/projects/acme/.local-operator/mcp.json",
+  "status_source": "config",
+  "session_id": null,
+  "servers": [
+    {
+      "id": "linear",
+      "name": "linear",
+      "scope": "global",
+      "project_path": null,
+      "source": {
+        "kind": "local-operator",
+        "path": "/Users/you/.local-operator/mcp.json",
+        "editable": true,
+        "owned_scope": "global"
+      },
+      "transport": "remote_url",
+      "endpoint": {
+        "command": null,
+        "url": "https://mcp.linear.app/sse",
+        "endpoint_redacted": false
+      },
+      "status": "connecting",
+      "status_reason": null,
+      "status_observed_at": null,
+      "status_basis": "probe",
+      "auth": {
+        "kind": "unknown",
+        "signed_in": null,
+        "secret_refs": []
+      },
+      "tool_count": null,
+      "tool_count_basis": null,
+      "actions": [
+        "test",
+        "sign_in",
+        "remove"
+      ]
+    },
+    {
+      "id": "github",
+      "name": "github",
+      "scope": "global",
+      "project_path": null,
+      "source": {
+        "kind": "local-operator",
+        "path": "/Users/you/.local-operator/mcp.json",
+        "editable": true,
+        "owned_scope": "global"
+      },
+      "transport": "remote_url",
+      "endpoint": {
+        "command": null,
+        "url": "https://api.githubcopilot.com/mcp/",
+        "endpoint_redacted": false
+      },
+      "status": "connected",
+      "status_reason": null,
+      "status_observed_at": 1790241257,
+      "status_basis": "probe",
+      "auth": {
+        "kind": "oauth",
+        "signed_in": true,
+        "secret_refs": []
+      },
+      "tool_count": 12,
+      "tool_count_basis": "probe",
+      "actions": [
+        "test",
+        "reauth",
+        "sign_out",
+        "remove"
+      ]
+    },
+    {
+      "id": "postgres-prod",
+      "name": "postgres-prod",
+      "scope": "project",
+      "project_path": "/Users/you/projects/acme",
+      "source": {
+        "kind": "local-operator",
+        "path": "/Users/you/projects/acme/.local-operator/mcp.json",
+        "editable": true,
+        "owned_scope": "project"
+      },
+      "transport": "local_command",
+      "endpoint": {
+        "command": "npx",
+        "url": null,
+        "endpoint_redacted": false
+      },
+      "status": "needs_sign_in",
+      "status_reason": null,
+      "status_observed_at": null,
+      "status_basis": "stored",
+      "auth": {
+        "kind": "api_key",
+        "signed_in": false,
+        "secret_refs": [
+          {
+            "id": "POSTGRES_URL",
+            "state": "encrypted"
+          },
+          {
+            "id": "POSTGRES_CA",
+            "state": "missing"
+          }
+        ]
+      },
+      "tool_count": 4,
+      "tool_count_basis": "last_seen",
+      "actions": [
+        "test",
+        "set_key",
+        "remove"
+      ]
+    },
+    {
+      "id": "filesystem",
+      "name": "filesystem",
+      "scope": "global",
+      "project_path": null,
+      "source": {
+        "kind": "local-operator",
+        "path": "/Users/you/.local-operator/mcp.json",
+        "editable": true,
+        "owned_scope": "global"
+      },
+      "transport": "local_command",
+      "endpoint": {
+        "command": "npx",
+        "url": null,
+        "endpoint_redacted": false
+      },
+      "status": "not_started",
+      "status_reason": null,
+      "status_observed_at": null,
+      "status_basis": "stored",
+      "auth": {
+        "kind": "none",
+        "signed_in": null,
+        "secret_refs": []
+      },
+      "tool_count": 5,
+      "tool_count_basis": "last_seen",
+      "actions": [
+        "test",
+        "remove"
+      ]
+    },
+    {
+      "id": "acme-broken",
+      "name": "acme-broken",
+      "scope": "global",
+      "project_path": null,
+      "source": {
+        "kind": "codex",
+        "path": "/Users/you/.codex/config.toml",
+        "editable": false,
+        "owned_scope": null
+      },
+      "transport": "local_command",
+      "endpoint": {
+        "command": "uvx",
+        "url": null,
+        "endpoint_redacted": false
+      },
+      "status": "error",
+      "status_reason": "the server exited with code 1 before completing a handshake",
+      "status_observed_at": 1790241245,
+      "status_basis": "probe",
+      "auth": {
+        "kind": "none",
+        "signed_in": null,
+        "secret_refs": []
+      },
+      "tool_count": null,
+      "tool_count_basis": null,
+      "actions": [
+        "test"
+      ]
+    },
+    {
+      "id": "borrowed-github",
+      "name": "borrowed-github",
+      "scope": "global",
+      "project_path": null,
+      "source": {
+        "kind": "cursor",
+        "path": "/Users/you/.cursor/mcp.json",
+        "editable": false,
+        "owned_scope": null
+      },
+      "transport": "remote_url",
+      "endpoint": {
+        "command": null,
+        "url": null,
+        "endpoint_redacted": true
+      },
+      "status": "not_started",
+      "status_reason": null,
+      "status_observed_at": null,
+      "status_basis": "stored",
+      "auth": {
+        "kind": "unknown",
+        "signed_in": null,
+        "secret_refs": []
+      },
+      "tool_count": null,
+      "tool_count_basis": null,
+      "actions": [
+        "test",
+        "sign_in"
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "id": "9f3c1a77b04e4d2f8c5a6b1d2e3f4a50",
+      "name": "linear",
+      "action": "login",
+      "status": "running",
+      "created_at": 1790241249,
+      "credential_removed": false,
+      "browser_opened": true,
+      "authorization_url": "https://mcp.linear.app/authorize?client_id=fixture&code_challenge=fixture&state=fixture",
+      "message": null
+    }
+  ]
+}

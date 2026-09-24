@@ -822,6 +822,16 @@ that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
 
+`GET /v1/desktop/mcp` is outside that list because it is outside the session: it
+answers the MCP catalog from the config files and the grant store for a folder, so
+there is no owner to wait for at all. Its optional `session_id` is an ENRICHMENT, not
+a dependency — an already-bound runtime in that same folder may overlay live
+statuses inside a 2 s bound, and a cold, silent or foreign one degrades to the
+config answer rather than to a refusal. That is the whole reason the key exists
+(`features.mcp_catalog`): the Settings page must be able to list servers on an
+install with no model configured, which is the install that could not start a
+session to ask.
+
 `POST .../{id}/watch` is the one route whose envelope is WIDER than that budget,
 and it says so rather than leaving it to be discovered: after the attach it
 re-states the viewer's presence lease to the owner, bounded by
@@ -1630,6 +1640,7 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
