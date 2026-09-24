@@ -4904,8 +4904,10 @@ def test_the_exposure_claim_has_a_floor_and_a_substance_test() -> None:
 
     Both halves are pinned here because either one alone lets the defect back:
     the WIDTH floor (:data:`rs._EXPOSURE_MIN_VALUE_LEN`) and the SUBSTANCE consult
-    (:func:`rs._value_is_not_a_credential`), which is the predicate the masking and
-    registration floors already made.
+    (:func:`rs._value_is_not_a_credential`), which the masking floor already made
+    and this site did not. The registration floor is not a second caller of the
+    whole predicate — it consults only its placeholder half plus its own length
+    floor — so this site is that predicate's SECOND caller.
     """
     import local_operator.redaction_shapes as rs
 
@@ -4938,12 +4940,18 @@ def test_a_marker_carrying_value_is_judged_by_survival_not_by_substance() -> Non
     """The one carve-out the substance consult needs, pinned so it is not mistaken
     for a loophole.
 
-    A value that literally contains the harness's own marker is text a MASK wrote, so
-    the predicate's expression/reference clauses (``[`` and ``]`` land in
-    :data:`rs._EXPRESSION_CHARS`) would refuse a claim for a reason that has nothing to
-    do with the value's own spelling. Such a value is handed to the survival question
-    instead — the documented limit on :func:`rs._credential_fragments_survive` — so the
-    WHOLLY surviving copy still escalates and only the partial survivor is given up.
+    The failure it exists for came from a PLAIN WORD, not a placeholder: a second rule
+    matched the marker the first rule had just inserted, so the exposed hit's own value
+    WAS ``[redacted]`` — and the old region-search read its own marker back as readable
+    material and filed a rotation demand for the two ``.npmrc`` ``_authToken`` cases
+    and a cookie header (pinned in ``test_a_marker_valued_hit_no_longer_escalates``
+    just below). Adding the substance consult for that defect would re-break it here,
+    one layer up: a value carrying the marker has ``[`` and ``]``, which are
+    :data:`rs._EXPRESSION_CHARS`, so the predicate would refuse a claim for a value
+    that is text a MASK wrote rather than code the agent reads. The carve-out hands
+    such a value back to the survival question instead — the documented limit on
+    :func:`rs._credential_fragments_survive` — so the WHOLLY surviving copy still
+    escalates and only the partial survivor is given up.
     """
     import local_operator.redaction_shapes as rs
 
@@ -5084,10 +5092,10 @@ def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
     ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
     the fragment test found that survivor under the hit's own value and read it as
     a partial mask — the loud ``rotate it`` notice for a value that never was
-    credential material. The exposed decision site is now the third place the
-    predicate is consulted (the masking floor and the registration floor are the
-    others), which is the whole of the fix: no word-list change reaches it, because
-    the value is correctly a placeholder already.
+    credential material. The exposed decision site is now the second place the
+    predicate is consulted (the masking floor is the other; the registration floor
+    consults only its placeholder half), which is the whole of the fix: no word-list
+    change reaches it, because the value is correctly a placeholder already.
 
     Every literal is built by concatenation on purpose — a credential-shaped
     literal written into a source file is exactly what the scrubber is for.
@@ -6166,6 +6174,80 @@ def test_a_short_but_real_credential_keeps_its_escalation() -> None:
     masked7, hits7 = scrub_shapes_with_hits(repeated)
     assert REDACTION_MARKER in masked7, "a short ``-p`` value stopped being masked"
     assert rs.shape_report(hits7).reached_model, "a 7-character ``-p`` value stopped escalating"
+
+
+def test_a_sub_floor_partial_survivor_is_given_up_deliberately() -> None:
+    """The ONE severity cost this floor accepts, asserted so it is a decision, not a slip.
+
+    Measured, both revisions: a four-character DSN password that is masked inside the
+    URL and printed a SECOND time in the clear is a genuine partial survivor — the
+    fragment test finds its own characters in the model-visible text. At base that
+    graded ``exposed`` and filed a rotation demand (``rotate it``); at head the width
+    floor refuses the claim, so the same input is announced as CONTAINED ("nothing
+    entered your context") and no rotation is demanded. A four-character value cannot
+    be told from prose anywhere in the text, which is the whole of the reason, and the
+    trade is deliberate: a spurious-but-recoverable rotation is surrendered textually
+    for the 1,493 unnamed false rotations the fix removes. The MASK is untouched — only
+    the severity claim is withheld.
+
+    The at-floor control is the same shape one character wider and must keep demanding
+    the rotation, so a floor raised past five fails here rather than passing quietly.
+    This is the mirror of ``test_a_short_but_real_credential_keeps_its_escalation``
+    directly above: that pins the values the floor must NOT give up, and this pins the
+    one it does.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    sub_floor = "abcd"
+    sub_text = f"{scheme}://u:{sub_floor}@host/db\n# and again {sub_floor}"
+    sub_masked, sub_hits = scrub_shapes_with_hits(sub_text)
+    assert REDACTION_MARKER in sub_masked, "the sub-floor DSN password stopped being masked"
+    assert (
+        rs.shape_report(sub_hits).reached_model is False
+    ), f"a sub-floor partial survivor files a rotation demand again: {sub_masked!r}"
+    assert rs.shape_report(sub_hits).labels == (
+        "dsn-password-plain",
+    ), "the withheld claim must still be NAMED, not silently unnamed"
+
+    # The at-floor control: one character wider, and the survivor is still real.
+    at_floor = "abcdz"
+    at_text = f"{scheme}://u:{at_floor}@host/db\n# and again {at_floor}"
+    _at_masked, at_hits = scrub_shapes_with_hits(at_text)
+    assert rs.shape_report(
+        at_hits
+    ).reached_model, "a five-character partial survivor stopped escalating: the floor rose"
+
+
+def test_a_below_floor_escalation_now_names_its_label_and_reads_contained() -> None:
+    """The notice-path flip the fix produces, pinned so it cannot be broken silently.
+
+    The user-visible half of this change is not only "fewer escalations" but "the
+    previously-UNNAMED escalation now names its shape and reads as contained": at
+    base, a sub-floor match whose own characters reappear in the text escalated with
+    ``labels=()`` and ``reached_model=True`` — the state the formatter renders as "a
+    credential the shape table could not name", which is what the loop.py false
+    positive wore. The label class here is the SAME rule (``client-inline-password``,
+    a four-character ``-p`` value) as that loop.py hit, so this is the same class of
+    input driven synthetically rather than read off a harness file.
+
+    The gate can stay correct while the notice path breaks — re-deriving ``labels``
+    from ``exposed``, or keeping ``complete=False`` for a refused hit — so the two
+    halves are asserted together: the claim is withheld (``reached_model is False``)
+    AND the hit is still named.
+    """
+    import local_operator.redaction_shapes as rs
+
+    flag = "-p"
+    value = "abcd"
+    repeated = f"mysql -u root {flag}{value} dump then {flag}{value} again"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    report = rs.shape_report(hits)
+    assert REDACTION_MARKER in masked, "a sub-floor ``-p`` value stopped being masked"
+    assert report.reached_model is False, "the below-floor claim is back: it escalates again"
+    assert report.labels == (
+        "client-inline-password",
+    ), f"the notice path lost the label: {report.labels}"
 
 
 def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:
