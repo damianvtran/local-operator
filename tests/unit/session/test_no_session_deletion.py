@@ -1752,9 +1752,44 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "marker exempts one, because those bytes may be the last copy alive); never "
         "a path under sessions/",
     ),
+    # THE MOVE'S OWN BOOT MARKER, removed from a session directory a promote already
+    # adopted. This is the one call in the move that touches a file INSIDE
+    # ``sessions/``, and it removes exactly one name — ``ready.json``, which
+    # ``sync.EXCLUDED_ENTRIES`` classifies as the move's own bookkeeping rather than
+    # content. It exists because a promote that reached ``os.replace`` and then died
+    # leaves the marker behind, and carrying it forward would put a file every reader
+    # has to learn to ignore into a conversation the user opens.
+    (
+        "local_operator/network/mobility.py::_reconcile_destination",
+        "<path>.unlink",
+        "Removes the move's own ready.json boot marker from an already-promoted "
+        "session: a bookkeeping FILE the move wrote, never session content",
+    ),
     # A replica lives at network/replicas/<id>/ — outside the session store, so it
     # can never be a second directory for an id the owner holds (INV-1). Its cursor
     # is written through a temp in that same directory.
+    # THE FETCH THAT STAGES, THEN REPLACES (review round 1, M-5). ``_fetch_item``
+    # writes every file into ``.<name>.<pid>.fetch`` beside its target and adopts it
+    # with ONE ``os.replace``, so a killed append can never leave a truncated
+    # conversation where a complete one was. The target is ``dest_dir / name``, where
+    # ``dest_dir`` is the move's STAGING directory or a replica directory — both
+    # outside ``sessions/`` — plus the shared attachment store; the only path into a
+    # session directory is ``_promote`` above, which is allow-listed by name. The two
+    # unlinks are that attempt's own staging file (before the attempt, and on the way
+    # out of a failed one), and the replace is the adoption itself.
+    (
+        "local_operator/network/sync.py::_fetch_item",
+        "os.replace",
+        "Adopts a fully VERIFIED staged file into its destination (staging dir, "
+        "replica dir or the attachment store); never renames a session directory",
+    ),
+    (
+        "local_operator/network/sync.py::_fetch_item",
+        "<path>.unlink",
+        "Removes this attempt's own .<name>.<pid>.fetch staging file, beside its "
+        "target rather than inside a session",
+        2,
+    ),
     (
         "local_operator/network/sync.py::write_replica_cursor",
         "os.replace",

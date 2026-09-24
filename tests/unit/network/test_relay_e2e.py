@@ -9,6 +9,7 @@ human-confirmed pairing), R4 (zero trust: an unauthorised frame is refused) and 
 
 from __future__ import annotations
 
+import ast
 import threading
 import time
 from argparse import Namespace
@@ -30,6 +31,7 @@ from local_operator.network.handshake import (
     pair_timeout_seconds,
     sas_matches,
 )
+from local_operator.session.retention import SESSIONS_DIRNAME
 
 NETWORK_NAME = "home-net"
 
@@ -1054,44 +1056,270 @@ def test_the_relay_never_becomes_a_session_owner() -> None:
     assert offenders == [], f"the relay imports a session owner: {offenders}"
 
 
-#: The modules the MOVE owns, exempt from the scan below BY NAME.
-#:
-#: Moving a session is the one thing the relay does that writes session state, and
-#: that is the design rather than a leak: the destination writes verified bytes into
-#: ``network/staging/`` (outside ``sessions/``) and adopts them with ONE
-#: ``os.replace``; a replica is recovered into a NEW session directory. So the guard
-#: that matters for these two files is a PER-CALL one, and it exists and is
-#: stronger than this scan: ``tests/unit/session/test_no_session_deletion.py``
-#: allow-lists every rename, replace and rmtree in them at the call site with a
-#: reason, and ``tests/unit/network/test_mobility.py`` pins that the only path into
-#: ``sessions/`` is a promote of a copy whose every byte was verified against the
-#: owner's manifest.
+#: The modules the MOVE owns, exempt from the PROXIMITY heuristic below but NOT
+#: from the per-call rule (see ``_write_sites_in_text``): moving a session is the one
+#: thing the relay does that writes session state, and it does it in staging (outside
+#: ``sessions/``) followed by one ``os.replace``, or by recovering a replica into a
+#: NEW session directory. ``tests/unit/network/test_mobility.py`` pins that, and
+#: ``tests/unit/session/test_no_session_deletion.py`` allow-lists every rename and
+#: rmtree in them at the call site.
 _MOVE_WRITERS: frozenset[str] = frozenset({"mobility.py", "sync.py"})
+
+#: The ONE module exempt from the bare-name rule below, and the reason: the copy
+#: module IS the thing that names a transcript, because naming it is its job. Every
+#: other module in the package must not even mention the word.
+#:
+#: THIS EXEMPTION USED TO COVER ``mobility.py`` TOO, and that is what review round 1
+#: found (T3): a ``transcript.jsonl`` truncation added to ``mobility.py`` passed both
+#: this guard and ``test_no_session_deletion``, so the two together read as coverage
+#: without being it. The scope is now the exact file that needs it.
+_CONTENT_NAME_EXEMPT: frozenset[str] = frozenset({"sync.py"})
+
+#: Write shapes that put bytes into a file, keyed to the label the scan reports.
+_WRITE_ATTRS: frozenset[str] = frozenset({"write_text", "write_bytes"})
+
+
+def _open_mode(node: ast.Call) -> str:
+    """The mode argument of an ``open`` call, or ``""`` when it is not a literal."""
+    mode = ""
+    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+        mode = str(node.args[1].value)
+    for keyword in node.keywords:
+        if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+            mode = str(keyword.value.value)
+    return mode
+
+
+def _write_shape(node: ast.Call) -> str | None:
+    """``"write_text"`` / ``"write_bytes"`` / ``"open(w)"`` / ``"open(a)"``, or None.
+
+    BOTH spellings of ``open``: the builtin (``open(path, "w")``) and the bound
+    method (``handle.open``), because a scan that only saw one of them would be the
+    same blind spot in a different place.
+    """
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        if func.attr in _WRITE_ATTRS:
+            return func.attr
+        if func.attr == "open":
+            mode = _open_mode(node)
+            return f"open({mode})" if mode[:1] in ("w", "a", "x") else None
+        return None
+    if isinstance(func, ast.Name) and func.id in _WRITE_ATTRS:
+        return func.id
+    if isinstance(func, ast.Name) and func.id == "open":
+        mode = _open_mode(node)
+        return f"open({mode})" if mode[:1] in ("w", "a", "x") else None
+    return None
+
+
+def _receiver_literals(node: ast.Call) -> set[str]:
+    """The string literals in the path a write call targets.
+
+    ``(root / "sessions" / sid / "transcript.jsonl").write_text("")`` yields both
+    ``sessions`` and ``transcript.jsonl``; ``dest_path.open("ab")`` yields nothing,
+    which is the honest limit of this scan (see the test's docstring).
+    """
+    target: ast.AST | None = None
+    # Narrowed on the attribute itself rather than through a local alias: pyright
+    # keeps the narrowing here, and the alias form is the shape that reads as a
+    # union member long after the ``isinstance`` that proved otherwise.
+    if isinstance(node.func, ast.Attribute):
+        target = node.func.value
+        if node.func.attr == "open" and node.args:
+            target = node.args[0]
+    elif isinstance(node.func, ast.Name) and node.func.id == "open" and node.args:
+        target = node.args[0]
+    if target is None:
+        return set()
+    return {
+        leaf.value
+        for leaf in ast.walk(target)
+        if isinstance(leaf, ast.Constant) and isinstance(leaf.value, str)
+    }
+
+
+def _receiver_state_name(literals: set[str]) -> str:
+    """The session-state name a write receiver's literals name, or ``""``.
+
+    SEGMENTS, not whole strings: the reviewed mutation builds its path out of parts
+    (``root / "sessions" / sid / "transcript.jsonl"``) while a shell-shaped one is a
+    single literal (``"/tmp/sessions/x/title.json"``), and both have to classify the
+    same way. A session-state FILE is preferred over the directory name, because the
+    file is the fact a reviewer needs.
+    """
+    hits: set[str] = set()
+    for literal in literals:
+        for segment in literal.replace("\\", "/").split("/"):
+            if segment in _SESSION_STATE_NAMES or segment == SESSIONS_DIRNAME:
+                hits.add(segment)
+    named = sorted(name for name in hits if name in _SESSION_STATE_NAMES)
+    return named[0] if named else (SESSIONS_DIRNAME if hits else "")
+
+
+def _write_sites_in_text(text: str, *, module: str) -> list[tuple[str, str]]:
+    """``(owner, label)`` for every write whose RECEIVER names session state.
+
+    THE TEETH THIS TEST WAS MISSING. A per-module exception cannot see a new write
+    added to an exempt module, which is exactly how a transcript truncation in
+    ``mobility.py`` stayed green; this scan is per CALL, so a write that names a
+    session directory or a session-state file is reported wherever it appears, in
+    whichever function.
+    """
+    tree = ast.parse(text, filename=module)
+    found: list[tuple[str, str]] = []
+    stack: list[str] = []
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stack.append(node.name)
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+            stack.pop()
+            return
+        if isinstance(node, ast.Call):
+            shape = _write_shape(node)
+            if shape is not None:
+                offending = _receiver_state_name(_receiver_literals(node))
+                if offending:
+                    found.append((".".join(stack) or "<module>", f"{shape}:{offending}"))
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(tree)
+    return found
+
+
+def _session_state_names() -> frozenset[str]:
+    """Every name the copy set calls session state, plus the directory itself.
+
+    DERIVED, not spelled: a name added to the copy set is a name this scan then
+    treats as session state, which is the same spec the copy set itself is
+    (§7.2, and see ``test_sync_copy_set.py``).
+    """
+    from local_operator.network import sync
+
+    return frozenset(set(sync.COPY_SET_NAMES) | set(sync.COPY_SET_TREES) | set(sync.NEVER_COPIED))
+
+
+#: Computed once at import: the scan is a module-level rule, not a per-test one.
+_SESSION_STATE_NAMES: frozenset[str] = _session_state_names()
+
+
+#: Every write site in ``local_operator/network`` whose receiver names session
+#: state, keyed ``module.py::function::label``, with the reason it cannot be a
+#: write into a session the relay does not own. EMPTY IS THE STATEMENT: the move's
+#: own modules write only into staging, the replica store and files they built
+#: themselves, so a row appearing here is a review, not a formality.
+_ALLOWED_WRITE_SITES: dict[str, str] = {
+    # The move's own boot marker, written into its STAGING directory
+    # (``network/staging/<id>/ready.json``, outside ``sessions/``) so a crash before
+    # the promote can be settled. It is named in ``sync.EXCLUDED_ENTRIES``, which is
+    # why it is in view here at all: the adopt path deletes it on the way in, and
+    # recovery removes a stray one left inside a promoted session, so this write can
+    # never put it into a session the relay does not own.
+    "mobility.py::_destination_move::write_text:ready.json": (
+        "writes the move's boot marker into its own staging directory, outside sessions/"
+    ),
+}
 
 
 def test_the_relay_writes_no_session_state() -> None:
-    """R1's second structural half, stated as a rule a reviewer can check.
+    """R2's second structural half, stated as a rule a reviewer can check.
 
-    The relay READS the session plane (``registry.scan`` — a read-through cache) and
-    must never write it: no transcript, no lease, no session record. The imports are
-    guarded by ``test_the_relay_never_becomes_a_session_owner``; this asserts the
-    write side, which an import guard cannot see.
+    WHAT IT CATCHES: any write call in ``local_operator/network`` whose RECEIVER
+    names a session directory or a file the copy set calls session state — a
+    truncation of ``transcript.jsonl``, an overwrite of ``title.json``, anything
+    added to whichever module. It also keeps the older rule that a module other than
+    the copy module must not so much as mention a transcript.
+
+    WHAT IT DOES NOT CATCH, stated rather than implied: a write through an ALIASED
+    receiver (``path = root / "sessions" / sid / "transcript.jsonl"`` one function
+    away, then ``path.write_text("")``). There is no name in the call to classify, so
+    the honest covering guard for that shape is the per-call allow-list in
+    ``tests/unit/session/test_no_session_deletion.py`` (whose rows are keyed by
+    ``path::function::call``) plus the deletion half of this same rule, and a
+    reviewer reading a diff in these two modules should expect to check the writes
+    by hand — which is the cost the per-module exemption used to hide.
     """
     offenders: list[str] = []
     for path in sorted(
         Path(__file__).resolve().parents[3].joinpath("local_operator/network").glob("*.py")
     ):
-        if path.name in _MOVE_WRITERS:
-            continue
         text = path.read_text(encoding="utf-8")
-        if "transcript.jsonl" in text:
+        if path.name in _MOVE_WRITERS:
+            pass
+        elif "transcript.jsonl" in text:
             offenders.append(f"{path.name}: names a transcript")
-        for write_call in ('open("w', "open('w", "write_text(", "write_bytes("):
-            for chunk in text.split(write_call)[:-1]:
-                tail = chunk[-400:]
-                if "sessions" in tail and "run" not in tail.rsplit("sessions", 1)[1][:8]:
-                    offenders.append(f"{path.name}: writes near a sessions/ path")
-    assert offenders == [], offenders
+        for owner, label in _write_sites_in_text(text, module=path.name):
+            if f"{path.name}::{owner}::{label}" not in _ALLOWED_WRITE_SITES:
+                offenders.append(f"{path.name}: {owner} writes session state ({label})")
+    assert offenders == [], (
+        f"{offenders} — a relay write into session state. Reads of the session plane\n"
+        "are fine; a WRITE is the leak this rule exists for. If the write is\n"
+        "legitimate, add it to _ALLOWED_WRITE_SITES with the reason it cannot touch a\n"
+        "session the relay does not own."
+    )
+
+
+def test_the_write_scan_flags_an_exempt_module_and_a_renamed_function() -> None:
+    """The scan's own teeth, on the shape review round 1 used to defeat it.
+
+    PROVE THE TEST CAN STILL FAIL. The mutation that stayed green at
+    ``ff04d03f1`` is this line inside ``mobility.py``; it is fed to the classifier
+    directly, so this cell fails if the classifier ever stops being per-call (which
+    is what a per-module exemption amounts to).
+    """
+    mutation = (
+        "def _lifecycle_on_owner(server, link, frame):\n"
+        "    root = server.root\n"
+        '    sid = "9f3ac1e0b7d2"\n'
+        '    (root / "sessions" / sid / "transcript.jsonl").write_text("")\n'
+        "    return {}\n"
+    )
+    assert _write_sites_in_text(mutation, module="mobility.py") == [
+        ("_lifecycle_on_owner", "write_text:transcript.jsonl")
+    ]
+    # An append through open(), a session directory named literally, and an
+    # overwrite of another copy-set name are all the same finding.
+    assert _write_sites_in_text(
+        'def f():\n    open("/tmp/sessions/x/title.json", "w")\n', module="cli.py"
+    ) == [("f", "open(w):title.json")]
+    assert (
+        _write_sites_in_text('def f():\n    open("/tmp/scratch/x.txt", "w")\n', module="cli.py")
+        == []
+    )
+    assert (
+        _write_sites_in_text('def f(sessions):\n    sessions.write_bytes(b"")\n', module="cli.py")
+        == []
+    )
+    # And the shapes this scan is honest about NOT catching: an aliased receiver.
+    assert (
+        _write_sites_in_text(
+            'def f(root, sid):\n    path = root / "sessions" / sid / "transcript.jsonl"\n'
+            '    path.write_text("")\n',
+            module="mobility.py",
+        )
+        == []
+    )
+
+
+def test_every_allowed_write_site_has_a_reason_and_a_live_call() -> None:
+    """The allow-list cannot rot: each row states why and still matches a call."""
+    for key, reason in _ALLOWED_WRITE_SITES.items():
+        assert reason.strip(), key
+    live: set[str] = set()
+    for path in sorted(
+        Path(__file__).resolve().parents[3].joinpath("local_operator/network").glob("*.py")
+    ):
+        for owner, label in _write_sites_in_text(
+            path.read_text(encoding="utf-8"), module=path.name
+        ):
+            live.add(f"{path.name}::{owner}::{label}")
+    assert set(_ALLOWED_WRITE_SITES) == live, (
+        f"stale rows: {sorted(set(_ALLOWED_WRITE_SITES) - live)}; unlisted live sites: "
+        f"{sorted(live - set(_ALLOWED_WRITE_SITES))}"
+    )
 
 
 def _events(server: relay.RelayServer) -> list[str]:

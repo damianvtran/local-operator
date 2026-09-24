@@ -522,6 +522,130 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
 
 
 @pytest.mark.asyncio
+async def test_the_factory_refuses_a_session_whose_move_is_in_flight(
+    tmp_config_dir: Path,
+) -> None:
+    """B-M1's OTHER HALF, ON THE PRODUCT PATH: the opener refuses before the lease.
+
+    Every way the product opens a session — ``lop -r``, ``lop exec``, the TUI's
+    in-process open, a booting runtime — takes the transcript lease through this
+    factory, NOT through the relay's engage guard. So an opener arriving between a
+    move's ``prepare`` and its ``commit`` used to take the lease, and the commit
+    (which only re-read the state ``prepare`` had left) deleted the directory out
+    from under it: a live writer holding a lease on an id the tombstone had just
+    given to another device.
+
+    TWO THINGS ARE ASSERTED, and the second is what made the bug worse than it read:
+    no refusal may leave a lease claim behind. A guard that takes the lease and then
+    refuses leaves a claim naming a process that holds no transcript, which is what
+    the move's own retire reads as "open in another process" — one refused resume was
+    enough to block the move that had refused it.
+    """
+    import json
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.placement import write_handoff_entry
+    from local_operator.session.runtime.launch import RuntimeStartupError
+    from local_operator.session_lease import LEASE_NAME, MIRROR_NAME
+
+    session_id = "9f3ac1e0b7d2"
+    directory = tmp_config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    # A transcript, because ``--resume`` resolves a session by its ACTIVITY file: the
+    # id has to name a conversation the picker would offer, or the factory never gets
+    # as far as the lease — and the guard lives immediately before it.
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "hello"}) + "\n", encoding="utf-8"
+    )
+    # A DESTINATION entry WITH VERIFIED BYTES STAGED: recovery must leave it alone,
+    # because the owner may already have deleted its own copy — the staged bytes are
+    # the only ones left, so nothing may clear the entry that protects them.
+    staging = tmp_config_dir / "network" / "staging" / session_id
+    staging.mkdir(parents=True)
+    (staging / "ready.json").write_text(
+        json.dumps({"version": 1, "content_digest": "sha256:" + "a" * 64}), encoding="utf-8"
+    )
+    write_handoff_entry(
+        tmp_config_dir,
+        session_id,
+        {
+            "role": "destination",
+            "phase": "handing-off",
+            "from_device": "d_" + "a" * 32,
+            "from_name": "build-box",
+            "to_device": "d_" + "b" * 32,
+            "instance_id": "i_live",
+            "at": 1.0,
+        },
+    )
+
+    with pytest.raises(RuntimeStartupError) as refusal:
+        await create_session(
+            _args(hosting="test", model="test", resume=session_id),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        )
+
+    # THE SOURCE DEVICE IS NAMED, not this one: an entry carries both ends, and the
+    # sentence used to name the destination (us) as the device it was being received
+    # from (review round 1, M-3 / NIT 5).
+    assert "being received from build-box" in str(refusal.value)
+    assert not (directory / LEASE_NAME).exists(), "the refusal left a lease claim behind"
+    assert not (directory / MIRROR_NAME).exists(), "the refusal left a liveness marker behind"
+
+
+@pytest.mark.asyncio
+async def test_the_factory_opens_a_session_a_dead_relay_left_mid_handoff(
+    tmp_config_dir: Path,
+) -> None:
+    """RECOVERY BEFORE THE GUARD, or a crash bricks the owner's own conversation.
+
+    A ``prepared`` entry left by a relay that is gone is not a live handoff, and the
+    launch guard cannot tell the two apart. Before this, that entry blocked the
+    session until somebody happened to run another move of the same id (review round
+    1, M-3, measured as ``p6a``). With no relay on this root, recovery rolls the
+    entry back and the conversation opens.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.placement import (
+        read_handoff_journal,
+        write_handoff_entry,
+    )
+
+    session_id = "9f3ac1e0b7d2"
+    directory = tmp_config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        '{"id": "e1", "type": "user", "content": "hello"}\n', encoding="utf-8"
+    )
+    write_handoff_entry(
+        tmp_config_dir,
+        session_id,
+        {
+            "role": "source",
+            "phase": "prepared",
+            "to_device": "d_" + "c" * 32,
+            "to_name": "pixel",
+            "instance_id": "i_dead",
+            "at": 1.0,
+        },
+    )
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=session_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert session_id not in read_handoff_journal(tmp_config_dir)
+        assert directory.is_dir()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Path) -> None:
     """The chosen level is CONSTRUCTED into the spec, not applied afterwards.
 
