@@ -4889,6 +4889,68 @@ def test_the_grading_separates_contained_from_exposed() -> None:
     assert not any(h.exposed for h in pem_hits), "a masked truncated key is not an exposure"
 
 
+def test_the_exposure_claim_has_a_floor_and_a_substance_test() -> None:
+    """The unnamed-escalation defect, at the site that produced it.
+
+    ``exposed`` is the whole severity classification — it is what raises the rotation
+    notice — and it used to fire for a match of ANY length. A two-to-four character
+    ordinary word's characters reappear in the same text for innocent reasons, so the
+    fragment test answered YES and the session escalated with ``labels=()``, filing
+    "a credential the shape table could not name" for a Python keyword: a census of
+    this machine's transcripts found 2,133 ``rotate it`` incidents across 1,080
+    sessions, of which 1,493 (70%) were that unnamed state, firing on ordinary
+    results — a ``read`` of a file path, a ``grep`` of a directory, a ``web_search``
+    for a village mayor.
+
+    Both halves are pinned here because either one alone lets the defect back:
+    the WIDTH floor (:data:`rs._EXPOSURE_MIN_VALUE_LEN`) and the SUBSTANCE consult
+    (:func:`rs._value_is_not_a_credential`), which is the predicate the masking and
+    registration floors already made.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # WIDTH. A four-character value is refused whatever the text says — including the
+    # case that motivated it, a value whose characters are all over the text it was
+    # read out of.
+    assert not rs._value_may_be_claimed_exposed("pass")
+    assert not rs._value_may_be_claimed_exposed("abcd")
+    assert rs._value_may_be_claimed_exposed("grace")  # five: the floor's edge
+
+    # SUBSTANCE. A value that is code, a reference, a type or a path is not credential
+    # material at any length above the floor — the clause the exposed path lacked.
+    for not_a_credential in (
+        "_node_order",
+        'started["token"]',
+        "_tokens(query)",
+        "providers.anthropic.cache_ttl_1h_min_context_tokens",
+        "/Users/example/project",
+        "${CI_JOB_TOKEN}",
+    ):
+        assert not rs._value_may_be_claimed_exposed(not_a_credential), not_a_credential
+
+    # ...and a value that IS credential material keeps the claim, which is the
+    # direction the whole control exists for.
+    for credential in ("correct-horse-battery", "hunter2hunter2", "S3cr3t/val+ue"):
+        assert rs._value_may_be_claimed_exposed(credential), credential
+
+
+def test_a_marker_carrying_value_is_judged_by_survival_not_by_substance() -> None:
+    """The one carve-out the substance consult needs, pinned so it is not mistaken
+    for a loophole.
+
+    A value that literally contains the harness's own marker is text a MASK wrote, so
+    the predicate's expression/reference clauses (``[`` and ``]`` land in
+    :data:`rs._EXPRESSION_CHARS`) would refuse a claim for a reason that has nothing to
+    do with the value's own spelling. Such a value is handed to the survival question
+    instead — the documented limit on :func:`rs._credential_fragments_survive` — so the
+    WHOLLY surviving copy still escalates and only the partial survivor is given up.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = f"tok{rs.REDACTION_MARKER}tail"
+    assert rs._value_may_be_claimed_exposed(value), "the marker carve-out stopped applying"
+
+
 #: The positives that ESCALATE, named by the case's own reason string.
 #:
 #: An EXACT set, in both directions, like the partial-mask ratchet further down: a
@@ -6070,6 +6132,40 @@ def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> N
     assert masked.count(REDACTION_MARKER) == 2, masked
     report = redaction_shapes.shape_report(hits)
     assert not report.reached_model, report
+
+
+def test_a_short_but_real_credential_keeps_its_escalation() -> None:
+    """The direction the floor must NOT trade away, measured on the real specimens.
+
+    The module's own notes name a five-character DSN password and a seven-character
+    ``-pass`` value as real, and the corpus's one escalating case is the ``amqp`` DSN
+    whose username is its password. A floor that swallowed any of them would be a
+    silent missed leak, which is the unrecoverable direction — a spurious rotation
+    demand is recoverable, a missed one is not — so both are pinned here, in the
+    half the fix could have broken.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # The corpus's escalating case, derived from it so this file spells no
+    # credential-shaped literal of its own: five characters, username == password,
+    # still ``labels=()`` with ``reached_model`` — an escalation the table cannot
+    # name, which is the state the notice must keep describing truthfully.
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    masked, hits = scrub_shapes_with_hits(case.text)
+    report = rs.shape_report(hits)
+    assert report.reached_model, "the amqp username==password DSN stopped escalating"
+    assert report.labels == (), "the unnamed escalation gained an invented label"
+    assert any(
+        h.exposed and len(h.value) == 5 for h in hits
+    ), "the five-character survivor is no longer graded exposed: the floor is too high"
+
+    # The seven-character ``-pass`` value, printed twice in the clear.
+    flag = "-p"
+    value = "S3cr3t7"
+    repeated = f"mysql -u root {flag}{value} dump then {flag}{value} again"
+    masked7, hits7 = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked7, "a short ``-p`` value stopped being masked"
+    assert rs.shape_report(hits7).reached_model, "a 7-character ``-p`` value stopped escalating"
 
 
 def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:
