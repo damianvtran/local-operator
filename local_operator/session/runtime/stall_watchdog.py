@@ -333,13 +333,17 @@ than ~0.46 ms. What is walked in the incident shape IS the ``CustomMessage`` cla
 that is what a hub message, a job result, a compaction marker and an incident all
 are.
 
-WHAT A REAL TAIL IS, COUNTED RATHER THAN ASSUMED: over the 10,475 saved
+WHAT A REAL TAIL IS, COUNTED RATHER THAN ASSUMED: over the 10,482 saved
 transcripts under ``~/.local-operator/sessions``, the walk — rows from the end to
 the first assistant row carrying calls, or to the last ``user`` row — is a MEDIAN
-OF 5 ROWS, p99.9 = 16, and the widest is 25. Of the 43,161 rows those walks step
-over, 21,831 (50.6%) carry no role, i.e. the ``CustomMessage`` class, and 21,330
-(49.4%) are ``Message`` rows. A real tail is short, and about half of it is the
-cheap class.
+OF 5 ROWS, p95 7, p99 9, p99.9 16, and the widest is 25. Of the 43,194 rows those
+walks step over, 21,809 (50.5%) are ``CustomMessage``-class entries and 21,341
+(49.4%) are ``Message`` rows (44 are journal rows that never enter a live context).
+A real tail is short, and about half of it is the cheap class. A WHOLE-TRANSCRIPT
+COUNT IS NOT THIS NUMBER, and the gap is the reason the paragraph this one replaces
+was wrong to divide by the lane count alone: the same corpus's transcripts hold a
+MEDIAN OF 63 ``custom`` entries, p99 612, up to 3057 — they accumulate over the
+whole conversation, while the walk stops at the last ``user`` boundary.
 
 AT A REAL WIDTH THE READ IS CHEAP AND THE FLOOR IS UNDER NO PRESSURE. The widest
 walk those transcripts show, on a 256-lane roster, is 11.7-13.5 ms of CPU per
