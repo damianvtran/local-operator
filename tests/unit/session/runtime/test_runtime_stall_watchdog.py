@@ -65,7 +65,7 @@ from typing import Any
 
 import pytest
 
-from local_operator import incidents
+from local_operator import incidents, paths
 from local_operator.harness.types import (
     AgentTool,
     StreamEndEvent,
@@ -6182,3 +6182,56 @@ def test_the_executing_extension_takes_the_exit_leg_from_the_arm(
     armed.held = False
     stall_watchdog._extend_for_execution(armed, 501.0, (stall_watchdog.WORKLOAD,))
     assert captured[-1] is True, "an IDLE arm must still be a fatal one"
+
+
+def test_every_reader_finds_a_dump_in_the_store_the_writer_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DUMP IS LOOKED FOR, NOT COMPUTED, because the writer is another process.
+
+    ``dump_path`` resolves one directory from ``paths.log_dir()``, and that honours
+    ``LOCAL_OPERATOR_CONFIG_DIR`` PER PROCESS. Measured on this fleet (2026-09-22):
+    the runtimes carry the override, the ``lop serve`` daemon that supervises them
+    does not, so a fired dump written under ``$CONFIG_DIR/logs`` was invisible to the
+    daemon's readers — which is how a death that had dumped every thread still
+    reached the next session's card as ``unattributed`` (pid 96510; the narration
+    half is pinned in ``test_turn_journal``).
+
+    EVERY READER IS DRIVEN HERE, not just the one the card uses, because the four
+    question-readers and the two listing scans each resolved a directory on their
+    own: fixing one would leave ``lop sessions`` reporting a fleet of fired runtimes
+    as never fired.
+    """
+    # The daemon's environment: HOME points at the scratch root, no override set.
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    assert paths.log_dir() != Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+
+    store = Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+    store.mkdir(parents=True, exist_ok=True)
+    pid = 424242
+
+    fired = stall_watchdog.dump_path(pid, store)
+    fired.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f"{stall_watchdog.HELD_MARKER}work in flight\n",
+        encoding="utf-8",
+    )
+    fired_leg_expected = stall_watchdog.LEG_SILENCE
+
+    assert stall_watchdog.fired_dump(pid) == fired
+    assert stall_watchdog.fired_leg(pid) == fired_leg_expected
+    assert stall_watchdog.held_fire(pid) is True
+    assert pid in stall_watchdog.fired_pids()
+    assert pid in stall_watchdog.held_pids()
+
+    # THE EXPLICIT DIRECTORY IS THE ISOLATION SEAM: handing a reader one store must
+    # not licence it to open this host's other log directories.
+    assert stall_watchdog.fired_dump(pid, Path.home() / "nowhere") is None
+    assert stall_watchdog.fired_leg(pid, Path.home() / "nowhere") is None
+    assert pid not in stall_watchdog.fired_pids(Path.home() / "nowhere")
+
+    # ...and a pid whose dump is in NO store still reads as no evidence, so the
+    # search cannot turn "nothing on disk" into a bound that fired.
+    assert stall_watchdog.fired_dump(pid + 1) is None
+    assert stall_watchdog.fired_leg(pid + 1) is None
+    assert pid + 1 not in stall_watchdog.fired_pids()

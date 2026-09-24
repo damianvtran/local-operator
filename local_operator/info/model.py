@@ -179,6 +179,16 @@ class SessionLine:
     #: ``lop stop`` (design review round 1, D1 — before this the fact reached the JSON
     #: row and no screen).
     stall_held: bool = False
+    #: The runtime's OWN STALL DUMP: the path the search found for this life, or
+    #: ``None``. Fenced like :attr:`stall_held`, and published as the FILE rather than
+    #: as a path composed from the reader's own log directory — for a fire in another
+    #: store the composed path names a file that does not exist (review round 1,
+    #: MAJOR-1 / QA round 1, Q-1).
+    stall_dump: str | None = None
+    #: When this runtime's life began (``SessionRecord.started_at``), carried so a
+    #: reader can fence a leftover artifact against it without holding the record.
+    #: ``0.0`` on a ``stored`` row, which has no runtime at all.
+    started_at: float = 0.0
 
     #: A window that FAILED — the pair it could not move to (``SessionRecord.update_failed``),
     #: or ``""``. Its own field rather than a value of the one above, because the two

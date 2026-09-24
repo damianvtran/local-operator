@@ -692,11 +692,13 @@ def test_a_held_runtime_is_named_in_the_fleet_table(monkeypatch: Any, capsys: An
     import argparse
 
     from local_operator import cli
-    from local_operator.session.runtime import stall_watchdog
 
     _install_fixture(monkeypatch, HELD_SESSION)
     held_pid = HELD_SESSION[0][0].pid
-    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {held_pid})
+    # A REAL artifact in the real store rather than a patched pid set: the fields below
+    # publish a PATH now, so a cell asserting what the listing says about a held dump
+    # needs one on disk (review round 1, MAJOR-1).
+    _dump_file(held_pid, mtime=NOW, held=True)
 
     rows = session_rows()
     assert rows[0]["stall_held"] is True
@@ -717,20 +719,20 @@ def test_a_held_runtime_is_named_in_the_fleet_table(monkeypatch: Any, capsys: An
 def test_a_stale_pid_with_a_leftover_dump_is_not_held(monkeypatch: Any) -> None:
     """D8 (round 2): a held dump outlives the runtime, and the phrase must not.
 
-    ``held_pids`` is a scan of the dump files and knows nothing about the process, so a
-    held runtime that a person later stopped kept ``bound held`` — the phrase this round
+    The held scan reads the dump files and knows nothing about the process, so a held
+    runtime that a person later stopped kept ``bound held`` — the phrase this round
     exists to make mean "still running, needs you" — beside a state word saying its pid
     is gone. The fence is here rather than in the panel, because this is the layer that
     has the state, and both surfaces read what this publishes.
     """
-    from local_operator.session.runtime import stall_watchdog
-
     stale = [
         (record, "stale" if index == 0 else state) for index, (record, state) in enumerate(FIXTURE)
     ]
     _install_fixture(monkeypatch, stale)
-    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {stale[0][0].pid})
-    monkeypatch.setattr(stall_watchdog, "fired_pids", lambda *a, **k: {stale[0][0].pid})
+    # The dump is THIS life's (its mtime is after the record's own start), so the
+    # artifact is still published and only the held phrase is refused: that is the
+    # distinction this cell exists to pin, and it is why the file is not hand-patched.
+    _dump_file(stale[0][0].pid, mtime=NOW, held=True)
 
     rows = session_rows()
     assert rows[0]["stall_dump"], "the artifact is still published: the dump is the evidence"
@@ -759,9 +761,7 @@ def test_the_stalled_and_updating_cells_sit_under_their_own_headers(
         for index, (record, state) in enumerate(FIXTURE)
     ]
     _install_fixture(monkeypatch, both)
-    from local_operator.session.runtime import stall_watchdog
-
-    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {both[0][0].pid})
+    _dump_file(both[0][0].pid, mtime=NOW, held=True)
     rows = session_rows()
     assert rows[0]["stall_held"] is True and rows[0]["update_failed"] == UPDATE_PAIR
 
@@ -1919,3 +1919,87 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
 
     for gated in (selection, family):
         assert _cells_span(gated, why_at, cli.WHY_COLUMN_WIDTH).strip() == "", repr(gated)
+
+
+def _dump_file(pid: int, *, mtime: float, held: bool = False, directory: Any = None) -> Any:
+    """A real dump file for ``pid``, carrying the mtime the fence reads.
+
+    A FILE rather than a patched pid set, because the two fields below publish a
+    PATH: a cell that asserts what a listing says about a fleet's dumps needs one on
+    disk for the publication to be checkable at all (review round 1, MAJOR-1).
+    """
+    import os
+
+    from local_operator.session.runtime import stall_watchdog
+
+    path = stall_watchdog.dump_path(pid, directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n"
+    if held:
+        body += f"{stall_watchdog.HELD_MARKER}work in flight\n"
+    path.write_text(body, encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_a_dump_in_the_other_store_publishes_a_path_that_exists(monkeypatch: Any) -> None:
+    """MAJOR-1 / Q-1: ``stall_dump`` must name the FILE the store search found.
+
+    The search made a fired dump visible that lives in ANOTHER log directory from the
+    reader's, and the publish site was still answering with ``dump_path(line.pid)`` —
+    a path composed from THIS process's own ``log_dir()``. For exactly the rows the
+    search makes visible that names a file that does not exist, which is worse than
+    ``None``: a reader opening it gets ENOENT rather than "no dump".
+
+    The two stores here are the two this host really uses: the platform default, where
+    a reader without the override looks, and the default config directory's logs,
+    where a runtime started with the override set to that default writes.
+    """
+    from pathlib import Path
+
+    from local_operator import paths
+    from local_operator.session.runtime import stall_watchdog
+
+    _install_fixture(monkeypatch)
+    pid = FIXTURE[0][0].pid
+    other_store = Path.home() / paths.DEFAULT_CONFIG_DIRNAME / paths.LOG_DIRNAME
+    written = _dump_file(pid, mtime=NOW, directory=other_store)
+    assert paths.log_dir() != other_store, "this cell is meaningless when both agree"
+
+    row = session_rows()[0]
+    assert row["stall_dump"] == str(written), row["stall_dump"]
+    assert Path(row["stall_dump"]).exists(), "the published path does not exist"
+    # ...and the answer this replaces, so the cell cannot pass by accident when the two
+    # stores coincide:
+    assert not stall_watchdog.dump_path(
+        pid
+    ).exists(), "the composed path existing would mean this cell cannot tell the two apart"
+
+
+def test_a_leftover_dump_from_an_earlier_life_is_not_this_records_evidence(
+    monkeypatch: Any,
+) -> None:
+    """Q-2: a recycled pid's leftover dump must not mark a live session held.
+
+    With the store search widened, a held dump left by a PREVIOUS holder of the pid
+    marked a live, healthy session — 6 s uptime, 1 s heartbeat — as ``bound held; lop
+    stop`` on the real CLI table, which is the phrase whose whole meaning is "still
+    running, needs you". The fence is the artifact's mtime against the record's own
+    start, the boundary this layer is the one holding the record to apply.
+    """
+    import os
+
+    _install_fixture(monkeypatch)
+    record = FIXTURE[0][0]
+    leftover = _dump_file(record.pid, mtime=record.started_at - 1.0, held=True)
+
+    row = session_rows()[0]
+    assert row["stall_held"] is False, "a predecessor's held dump marked a live session"
+    assert row["stall_dump"] is None, "and its FIRE is not this row's evidence either"
+
+    # ...and the boundary is a boundary rather than a refusal: the same artifact,
+    # written during THIS life, is published as both.
+    os.utime(leftover, (record.started_at + 1.0, record.started_at + 1.0))
+    row = session_rows()[0]
+    assert row["stall_held"] is True, row
+    assert row["stall_dump"] == str(leftover), row
