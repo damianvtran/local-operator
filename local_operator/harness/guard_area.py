@@ -53,12 +53,18 @@ _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _PACKAGE_ROOT.parent
 
 #: The guard's own source and its corpus, as repo-relative paths — the two the
-#: operator named, and nothing else. A third entry is added only against a
-#: measured escalation (see ``READING_TOOLS`` and the module docstring); a
-#: speculative one would widen the exemption past what was authorised.
+#: operator named — plus that corpus's OWN TEST MODULE, which is included because
+#: it was MEASURED to escalate rather than because it looked similar. Reading all
+#: three through the real shape pass on 2026-09-23 (hits / escalating hits):
+#: ``redaction_shapes.py`` 44 / 41, ``credential_shape_corpus.py`` 200 / 162,
+#: ``test_credential_shapes.py`` 21 / 18 — each with ``reached_model`` true, so
+#: each of the three filed a rotation demand for the guard's own fixtures. A
+#: fourth entry needs the same measurement; a speculative one would widen the
+#: exemption past what was authorised.
 _EXEMPT_RELATIVE_PATHS: tuple[str, ...] = (
     "local_operator/redaction_shapes.py",
     "tests/unit/secrets/credential_shape_corpus.py",
+    "tests/unit/secrets/test_credential_shapes.py",
 )
 
 #: Resolved once at import: the exemption is compared by REAL path, so a symlink
