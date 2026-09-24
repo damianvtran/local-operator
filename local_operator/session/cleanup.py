@@ -394,6 +394,16 @@ def remove_session_dir(
 #: log, which is the only durable record either of them leaves.
 EXPLICIT_DELETE_POLICY = "explicit-delete"
 
+#: The record ``policy`` string for a directory this device handed to another
+#: device over the mesh (``network/mobility.py``, the move's commit). It gets its
+#: own value rather than reusing ``EXPLICIT_DELETE_POLICY`` because the two answer
+#: different questions in an incident: an explicit delete is a person destroying
+#: their own copy, while this one means **the conversation was not destroyed at
+#: all** — it is now on the device the tombstone names. A shared policy string
+#: would make the cleanup log unable to tell "deleted" from "moved", which is the
+#: one distinction an operator recovering a lost session needs from that file.
+MESH_MOVE_POLICY = "mesh-move"
+
 #: The user-facing sentence for each hard guard an explicit delete can be
 #: refused by, keyed by the reason :func:`_guard` returns.
 #:

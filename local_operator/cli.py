@@ -837,6 +837,83 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
+    # `lop sessions move`: hand a conversation to another device, or bring one
+    # home. A sub-subcommand rather than a flag on `sessions` because it is an
+    # ACTION on one conversation, and because the mesh's own question ("where does
+    # this live?") is answered by the listing it is reached through.
+    #
+    # THE DIRECTION IS THE PROTOCOL (mesh-session-mobility.md §6.7): the device
+    # that will HOLD the conversation issues the move, so `--to local` is this
+    # device pulling and `--to <peer>` is it asking the peer to pull. There is no
+    # push verb, and adding one would be a second copy path with its own bugs.
+    move_parser = sessions_subparsers.add_parser(
+        "move",
+        help="Move a conversation to another device, or bring one home",
+        description=(
+            "Hand a conversation to another device (`--to build-box`), or bring one "
+            "that lives elsewhere back here (`--to local`). The conversation keeps "
+            "its id and the copy on the device it left is deleted, unless `--keep` "
+            "is given, which leaves the original running and mints a NEW id for the "
+            "copy. A session with a turn in flight is refused, not interrupted."
+        ),
+        parents=[parent_parser],
+    )
+    move_parser.add_argument("session", help="the conversation id to move")
+    move_parser.add_argument(
+        "--to",
+        required=True,
+        metavar="DEVICE",
+        help="a peer device (id or name), or `local` to bring the conversation here",
+    )
+    move_parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="copy and leave the original running; the copy gets a new id and a fork marker",
+    )
+    move_parser.add_argument(
+        "--wait",
+        type=_non_negative_int,
+        nargs="?",
+        # A BARE `--wait` MEANS "AS LONG AS THE SESSION COULD PLAUSIBLY BE BUSY",
+        # capped at the design's 30 minutes (§6.4). `-1` is the sentinel the
+        # dispatch turns into `mobility.MOVE_MAX_WAIT_S`; spelling the number here
+        # would make this module import the mesh at parser-build time, which is
+        # paid by `lop --version`.
+        const=-1,
+        default=0,
+        metavar="SECONDS",
+        help="re-check a busy conversation every 5s, up to SECONDS (bare: up to 30 min)",
+    )
+    move_parser.add_argument(
+        "--from-replica",
+        action="store_true",
+        help=(
+            "recover the last copy this device synced as a NEW session, for when the "
+            "device that held it is gone"
+        ),
+    )
+    move_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions sync`: pull the latest cut of a conversation another device
+    # owns into this device's replica store. Explicit because the automatic cadence
+    # (debounced pushes, a pull on attach) is not something a person can wait for.
+    sync_parser = sessions_subparsers.add_parser(
+        "sync",
+        help="Pull a copy of a conversation another device owns",
+        description=(
+            "Bring this device's copy of a conversation it does not own up to date. "
+            "The copy is stored outside the session store and is never opened as a "
+            "session; `lop sessions move <id> --to local --from-replica` recovers it "
+            "as a new one."
+        ),
+        parents=[parent_parser],
+    )
+    sync_parser.add_argument("session", help="the conversation id to pull")
+    sync_parser.add_argument(
+        "--owner", default="", metavar="DEVICE", help="the peer that holds it (default: ask)"
+    )
+    sync_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
     # running / talk to it / end it" — and deliberately NOT the
@@ -4023,6 +4100,100 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
         return _local_relay_refusal()
 
 
+def _sessions_move_words(result: dict[str, Any], *, session_id: str, to: str) -> list[str]:
+    """The human lines for a move, from the contract's own fields.
+
+    THE SENTENCE NAMES BOTH DEVICES, because a move is the one command where being
+    wrong about which end is which loses a conversation
+    (``mesh-session-mobility.md`` §6.8). The refusal's message is the owner's own
+    words — the busy sentence includes the reason ONLY the owning machine can see —
+    and the ``--keep`` case says out loud that the original is still running, since
+    that is the flag's whole point.
+    """
+    if not result.get("ok"):
+        lines = [str(result.get("message") or "the move was refused")]
+        if result.get("changed"):
+            lines.append(
+                "That handoff may already have been committed, so run this again rather "
+                "than retrying from scratch."
+            )
+        return lines
+    to_block = result.get("to_device") or {}
+    from_block = result.get("from_device") or {}
+    target = str(to_block.get("name") or to_block.get("device_id") or to)
+    source = str(from_block.get("name") or from_block.get("device_id") or "another device")
+    new_id = str(result.get("new_session_id") or session_id)
+    if result.get("mode") == "keep":
+        return [
+            f"Copied {session_id} to {target} as {new_id}.",
+            f"The original is still running on {source} and the two are separate now.",
+        ]
+    if result.get("recovered"):
+        return [
+            f"Recovered {session_id} as {new_id} from the copy last synced here.",
+            "It is a new conversation: work done on the device that held it since that "
+            "copy is not in it.",
+        ]
+    return [f"Moved {session_id} to {target} ({result.get('phase')})."]
+
+
+def sessions_move_command(args: argparse.Namespace) -> int:
+    """``lop sessions move`` — the CLI face of the mesh's move protocol.
+
+    Runs THROUGH THIS DEVICE'S RELAY (``network/mobility.py``): the relay holds the
+    peer links and is the only process that speaks the mesh, so a CLI that dialled
+    a peer itself would be a second implementation of the protocol. A device with
+    no relay gets a refusal naming that, never a silent no-op.
+    """
+    import json as _json
+
+    from local_operator.network import mobility
+
+    session_id = str(args.session)
+    wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
+    result = mobility.request_move(
+        session_id,
+        to=str(args.to),
+        keep=bool(args.keep),
+        wait_s=wait_s,
+        from_replica=bool(args.from_replica),
+    )
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0 if result.get("ok") else 1
+    lines = _sessions_move_words(dict(result), session_id=session_id, to=str(args.to))
+    if result.get("ok"):
+        for line in lines:
+            print(line)
+        return 0
+    for line in lines:
+        print(line, file=sys.stderr)
+    return 1
+
+
+def sessions_sync_command(args: argparse.Namespace) -> int:
+    """``lop sessions sync`` — pull this device's replica of a peer's session."""
+    import json as _json
+
+    from local_operator.network import sync as sync_mod
+
+    result = sync_mod.request_sync(
+        str(args.session), owner=str(getattr(args, "owner", "") or "") or None
+    )
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0 if result.get("ok") else 1
+    if not result.get("ok"):
+        print(str(result.get("message") or "the sync was refused"), file=sys.stderr)
+        return 1
+    print(
+        f"Synced {result.get('session_id')} from "
+        f"{result.get('owner_device') or 'its owner'} "
+        f"({result.get('bytes')} bytes, {result.get('mode')} of the transcript)."
+    )
+    return 0
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -4037,6 +4208,15 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "reclaim":
         return sessions_reclaim_command(args)
+
+    # The two mesh verbs. Both reach the relay, so both are refusals rather than
+    # no-ops on a device with no relay running — which is the state of every
+    # install that has never joined a network.
+    if getattr(args, "sessions_command", None) == "move":
+        return sessions_move_command(args)
+
+    if getattr(args, "sessions_command", None) == "sync":
+        return sessions_sync_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer

@@ -218,6 +218,27 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
+    # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
+    # verb rather than a new subcommand because they are the same question as
+    # `--stop` ("do a thing to a conversation that lives elsewhere") and they take
+    # the same `--peer`.
+    net_sessions.add_argument(
+        "--archive", metavar="SESSION", default="", help="hide that session on its device"
+    )
+    net_sessions.add_argument(
+        "--unarchive", metavar="SESSION", default="", help="restore that session on its device"
+    )
+    net_sessions.add_argument(
+        "--delete",
+        metavar="SESSION",
+        default="",
+        help="delete that session on its device (a dry run until --yes)",
+    )
+    net_sessions.add_argument(
+        "--yes",
+        action="store_true",
+        help="with --delete: actually delete it (without this the owner only rehearses)",
+    )
     net_sessions.add_argument(
         "--force",
         action="store_true",
@@ -1727,6 +1748,40 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # a sentence naming a flag that does not exist (Q-R5-2).
         print("--force applies to --stop only", file=sys.stderr)
         return 2
+
+    # ARCHIVE, RESTORE AND DELETE: routed to the OWNER, never replicated (§8.1).
+    # The guards, the confirmation semantics and the retention interaction stay in
+    # one place, on the device that owns the disk — so this side's whole job is to
+    # carry the request and render the owner's words verbatim.
+    for flag, action in (
+        ("archive", "archive"),
+        ("unarchive", "unarchive"),
+        ("delete", "delete"),
+    ):
+        target = str(getattr(args, flag, "") or "")
+        if not target:
+            continue
+        if not peer:
+            raise MeshRefusal(
+                "peer_required",
+                f"--{flag} needs --peer: the conversation lives on one device, and only "
+                "its owner may change it",
+            )
+        from local_operator.network import mobility
+
+        detail = mobility.lifecycle(
+            target,
+            action=action,  # type: ignore[arg-type]
+            peer=peer,
+            # A DELETE WITHOUT A CONFIRMATION IS THE OWNER'S DRY RUN: it runs every
+            # guard and removes nothing, which is what makes the destructive form a
+            # deliberate second invocation rather than the default.
+            confirmed=bool(getattr(args, "yes", False)),
+        )
+        lines = [str(detail.get("message") or "")]
+        if flag == "delete" and detail.get("ok") and not getattr(args, "yes", False):
+            lines.append(f"Nothing was deleted. Run it again with --yes to delete it on {peer}.")
+        return _emit(args, {"ok": bool(detail.get("ok")), **detail}, lines)
 
     if session_id:
         if not peer:
