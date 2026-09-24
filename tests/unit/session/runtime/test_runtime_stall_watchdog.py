@@ -388,8 +388,15 @@ def _fired_seconds(text: str) -> float:
 
 
 def _deadline_record(directory: Path, pid: int) -> tuple[float, str]:
-    """The sibling as a reader of it gets it: ``(epoch deadline, leg that pinned it)``."""
-    epoch, leg = stall_watchdog.deadline_path(pid, directory).read_text(encoding="utf-8").split()
+    """The sibling as a reader of it gets it: ``(epoch deadline, leg that pinned it)``.
+
+    The FIRST TWO tokens, which is the sibling's contract for this reader: the third is
+    the same deadline on the writer's monotonic clock, appended for the held predicate
+    (``stall_watchdog._rearmed_since``) and checked by its own cells.
+    """
+    epoch, leg = (
+        stall_watchdog.deadline_path(pid, directory).read_text(encoding="utf-8").split()[:2]
+    )
     return float(epoch), leg
 
 
@@ -1023,7 +1030,8 @@ def test_a_reader_concurrent_with_a_beat_never_sees_a_partial_sibling(
                 # Not there YET is the first write's window, not a partial read.
                 continue
             seen["reads"] += 1
-            if len(text.split()) != 2 or not text.endswith("\n"):
+            # ``<epoch> <leg> <monotonic>``: three tokens is the whole record.
+            if len(text.split()) != 3 or not text.endswith("\n"):
                 seen["partial"] += 1
 
     reader = threading.Thread(target=read_forever, daemon=True)
@@ -1639,7 +1647,7 @@ print(
 )
 # Capture the live deadline before intentionally waiting for its diagnostic fire;
 # after survival is proved, the bound is expected to be in the past.
-epoch, leg = stall_watchdog.deadline_path().read_text(encoding="utf-8").split()
+epoch, leg = stall_watchdog.deadline_path().read_text(encoding="utf-8").split()[:2]
 sentinel.with_name("deadline-capture.txt").write_text(
     f"{epoch} {leg} {time.time():.6f}", encoding="utf-8"
 )
@@ -5714,7 +5722,7 @@ def test_an_executing_loop_with_a_step_in_flight_is_not_cut(tmp_path: Path) -> N
     dump = _dump_for(tmp_path, pid)
     text = dump.read_text(encoding="utf-8")
     before_epoch_text, before_leg = (
-        (tmp_path / "deadline-before.txt").read_text(encoding="utf-8").split()
+        (tmp_path / "deadline-before.txt").read_text(encoding="utf-8").split()[:2]
     )
     before_epoch = float(before_epoch_text)
     after_epoch, after_leg = _deadline_record(tmp_path / "logs", pid)
@@ -6381,7 +6389,13 @@ def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path)
     assert (
         text.count(stall_watchdog.FIRED_MARKER) >= 2
     ), f"no later dump was recorded after work cleared: {text[:600]!r}"
-    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
+    # ...AND THE LIVE STATE FOLLOWS THE LATER FIRE, not the first one (2026-09-24). This
+    # cell used to assert ``True`` here, which pinned the sticky reading: the held
+    # marker was never withdrawn, so a runtime whose most recent fire found nothing in
+    # flight still read ``bound held; lop stop`` for the rest of its life. Both markers
+    # stay in the artifact above; only the "stalled with work, needs a person" reading
+    # is superseded by the observation that followed it.
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is False
 
 
 def test_a_caller_with_no_busy_probe_keeps_dump_only_policy(

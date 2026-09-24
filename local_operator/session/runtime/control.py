@@ -1307,7 +1307,35 @@ async def stop_session(
     # that it never raises, and a record-shaped double handed in by a caller (or
     # one written by a runtime that predates the field) may simply lack it.
     leaving = getattr(record, "leaving", "") or ""
-    if leaving and not force and registry.pid_alive(record.pid):
+    # ...AND GATED ON PROGRESS, because the skip's whole premise is that the turn
+    # boundary the latch waits on will ARRIVE. For a runtime that has stopped
+    # reporting it will not: on 2026-09-24 two runtimes carried "leaving for the build
+    # on disk when its turn ends" with heartbeats 5.6 h and 5.9 h stale, `lop sessions`
+    # listed both ``wedged``, and a plain `lop stop` answered "it leaves by itself,
+    # nothing to do" — a promise no evidence supported. ``stalled`` is the reason the
+    # drain can no longer be trusted to finish, and a stalled drain falls through to
+    # the ordinary ladder instead of being skipped.
+    # OFF THE LOOP (agent review round 2, m-B): ``classify`` can fork ``ps`` for a quiet
+    # record and ``held_now`` reads dump text across every log store, and the TUI runs
+    # this ladder on its event loop — the same reason the identity probes below hop.
+    stalled = await asyncio.to_thread(_drain_stalled, record) if leaving and not force else ""
+    if stalled and on_wait is not None:
+        # Said BEFORE the ladder runs, because the ladder that follows can take the
+        # whole signal grace, and the reader has just been told by every other
+        # surface that this runtime is leaving by itself: the line is why this
+        # stop did not believe that.
+        #
+        # IT NAMES THE DECISION, NEVER THE RESULT (QA round 1, Q-2). The rungs below can
+        # still REFUSE — a recycled pid, a socket that is silent while the beat is fresh
+        # — and a line promising "stopping it" followed by "refused …" read as a
+        # contradiction. It is said here rather than after the identity gate because
+        # rung 1 can end the runtime before that gate runs, and that stop needs its
+        # reason too.
+        on_wait(
+            f'"{name}" (pid {record.pid}) {_drain_phrase(record)}, but {stalled}, so it is '
+            "not left to drain; trying the ordinary stop"
+        )
+    if leaving and not force and not stalled and registry.pid_alive(record.pid):
         # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
         # asked: ``--force`` is a flag of ``lop stop`` and the TUI's ``/stop``
         # takes no flags at all (U7). Named in the reader's own vocabulary —
@@ -1416,7 +1444,11 @@ async def stop_session(
     # not answer. Someone who types it has accepted that the turn goes too. A
     # plain stop refuses rather than surprising them, and the refusal names both
     # ways forward.
-    if record.busy and not force:
+    # A STALLED DRAIN IS NOT SKIPPED HERE EITHER. The busy bit on such a record is the
+    # turn the drain is waiting on, published by a runtime that has since stopped
+    # reporting, so it is exactly as stale as the drain above — and the target has
+    # already committed to leaving, so a signal asks it to do what it decided to do.
+    if record.busy and not force and not stalled:
         method = "busy"
         return StopOutcome(
             pid=record.pid,
@@ -1554,6 +1586,59 @@ async def stop_session(
         line=_stopped_line(record, method, wakes, forced=forced),
         wakes_dormant=wakes,
     )
+
+
+def _drain_stalled(record: SessionRecord) -> str:
+    """Why a LEAVING runtime cannot be trusted to reach its turn boundary, or ``""``.
+
+    TWO FACTS, EACH OWNED ELSEWHERE, and no threshold invented here:
+
+    * ``registry.classify`` says ``wedged`` AND the beat is older than the stall
+      watchdog's own steady bound (``stall_watchdog.bound_seconds()``, 300 s unless
+      configured). ``wedged`` alone is the listing's 45 s "not answering", and that is
+      NOT enough to cut a drain (agent review round 1, M2): ``classify``'s own docstring
+      records beats 105.8 s and 205.8 s late on runtimes whose CPU was advancing, and
+      the stall bound is the number this codebase sized ABOVE those measurements to
+      mean "stopped, not slow". A drain in the 45 s-to-bound band is still skipped,
+      exactly as before; the incident runtimes were 5.6 h and 5.9 h stale.
+    * ``stall_watchdog.held_now(..., proven=True)`` — its own bound fired with work in
+      flight and it has not re-armed since, on COMPLETE new-format evidence. The same
+      predicate behind the listing's ``bound held`` cell, and the arm that covers a
+      parked workload loop behind a fresh serving beat. The listing also paints "held"
+      when the evidence cannot tell (an old-format marker from a pre-fix build); this
+      arm does not act on that (agent review round 2, M-A), so such a runtime is judged
+      on its heartbeat alone, against the stall bound above.
+
+    THE BOUND IS READ IN THIS PROCESS, which is a stated limit rather than a proof: the
+    knob is an environment variable and the runtime may have been started with another
+    value. A switched-off or unreadable knob here falls back to ``DEFAULT_STALL_S``
+    rather than to the 45 s arm, so the uncertain direction is the one that skips.
+
+    DEGRADED EVIDENCE, NOT A DIAGNOSIS (``classify``'s own caveat). That is why this
+    does not SIGNAL anything by itself — it only withdraws the promise that the runtime
+    leaves on its own, and hands the target to the ordinary ladder, whose socket rung
+    stops a runtime that does answer and whose signal rungs still require confirmed
+    identity.
+
+    NEVER RAISES, like every probe on this path: a record-shaped double without the
+    fields, or an unreadable dump, answers ``""`` — the pre-existing skip.
+    """
+    try:
+        from local_operator.session.runtime import stall_watchdog
+
+        verdict = registry.classify(record)
+        bound = stall_watchdog.bound_seconds() or stall_watchdog.DEFAULT_STALL_S
+        if verdict.state == "wedged" and verdict.heartbeat_age_s >= bound:
+            # One unit ladder with `lop sessions`' HB_AGE column (45s/12m/3h/2d), so the
+            # number in this line is the number beside the row the operator just read.
+            from local_operator.wakes.display import format_age
+
+            return f"it has not reported for {format_age(verdict.heartbeat_age_s)}"
+        if stall_watchdog.held_now(record.pid, record.started_at, proven=True):
+            return "its stall bound fired with work in flight and it has not re-armed since"
+    except Exception:  # noqa: BLE001 — the ladder never raises over a probe
+        return ""
+    return ""
 
 
 def _stop_targets(root: Path, own_pid: int | None = None) -> list[SessionRecord]:
