@@ -182,11 +182,14 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
             # provider, config.yml ONCE (only when a local provider is in the
             # registry), and -- only when a cached listing contributed a model the
             # shipped registry does not carry -- one keyless price document.
-            # Measured on this host against an isolated populated cache: 1.48 ms
-            # median cold, 1.76 ms with a listing-only row and no price document
-            # on disk, 4.0 ms with a 139 KiB models.dev projection to read. It
-            # stays on the loop thread: milliseconds, and the hop is what broke
-            # the credential store.
+            #
+            # Sized on 2026-09-24 on the fleet host, isolated HOME/config, 25-call
+            # median after a warm-up, three runs: 1.3-2.0 ms empty-cached, 1.3-1.6
+            # ms with a listing-only row and no price document on disk, 2.5-4.4 ms
+            # with a 138 KiB models.dev projection to read. Ranges, not a
+            # constant: the magnitude is this rig's and moves with the fleet.
+            # It stays on the loop thread: single-digit milliseconds, and the hop
+            # is what broke the credential store.
             entries = controller.initial_catalogue()
         # `CatalogueEntry.connected` is True both when a provider IS usable and
         # when the credential store could not be read at all -- the deliberate

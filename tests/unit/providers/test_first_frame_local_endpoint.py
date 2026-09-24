@@ -5,11 +5,13 @@ made this frame reach ``providers.local.resolve_base_url`` for the five
 ``local_setup`` providers -- a call that was UNREACHABLE from here before that
 change. ``resolve_base_url`` normalises whatever the config holds, and the
 settings editor validates through ``validate_endpoint_setting`` while the FILE
-does not, so ``providers.lmstudio.base_url: http://localhost:notaport`` is a
-reachable configuration. Measured against the shipped app, the exception emptied
-the whole catalogue: 409 with 0 rows on the composer's ``command-entities``, 500
-on the models route, 502 on the phone, where the previous head answered 200 with
-120 rows on all three.
+does not, so ``providers.lmstudio.base_url: http://localhost:notaport`` is a reachable
+configuration. Agent review round 2 measured what that did to the shipped app --
+the exception emptied the whole catalogue: 409 with 0 rows on the composer's
+``command-entities``, 500 on the models route, 502 on the phone, where the
+previous head answered 200 with 120 rows on all three. Reproduced at the route
+level here on 2026-09-24 as ``assert 409 == 200``
+(``tests/unit/server/test_desktop_first_frame_catalogue.py``).
 
 Two cases, because they arrive at the same answer through different paths: an
 endpoint the normaliser REJECTS, and no endpoint at all (the generic gateway's
@@ -118,18 +120,21 @@ def test_an_unconfigured_gateway_does_not_take_the_frame_down(
     assert _row_keys(frame) == _row_keys(controller.static_catalogue())
 
 
-def test_the_frame_reads_the_config_at_most_once(
+def test_the_frame_reads_the_config_exactly_once(
     isolated: Path, controller: ProviderController, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A structural bound on the cost, not a wall-clock one (review R2-2).
+    """A structural bound on the cost, not a wall-clock one (review R2-2, R3-1).
 
     Every ``local_setup`` provider resolves its endpoint through
     ``provider_settings``, and a call with no values mapping of its own
     constructs a ``ConfigManager`` and parses config.yml. Five providers doing
-    that on a route the composer calls per keystroke turned a 0.24 ms frame into
-    14.51 ms (measured, A/B interleaved). The frame hands one snapshot down, so
-    the count is 1 at most -- and this asserts the COUNT rather than a duration,
-    which is the property that cannot drift with the host's load.
+    that on a route the composer calls per keystroke took a 0.24 ms frame to
+    14.51 ms on the reviewer's rig (measured there, A/B interleaved); on this
+    host it is ~8-13 ms with five reads against 1.3-2.0 ms with one (measured
+    2026-09-24, isolated HOME/config, 25-call median after a warm-up). The frame
+    hands one snapshot down, so the count is EXACTLY 1 -- and this asserts the
+    COUNT rather than a duration, which is the property that cannot drift with
+    the host's load.
     """
     import local_operator.config as config_module
     from local_operator.config import ConfigManager
@@ -144,7 +149,14 @@ def test_the_frame_reads_the_config_at_most_once(
     monkeypatch.setattr(config_module, "ConfigManager", _Counting)
     controller.initial_catalogue(cache_dir=tmp_path / "cache")
 
-    assert constructions["n"] <= 1, (
-        "the frame read the config once per local provider: "
-        f"{constructions['n']} loads for one call"
+    # EXACTLY one, not "at most" one (agent review round 3, R3-1). A bound of
+    # `<= 1` also passes at ZERO, and zero is a real failure this frame must not
+    # silently acquire: it would mean the local endpoint is no longer resolved
+    # from the config at all, so a user who configured a server would be keyed to
+    # the preset's document instead. One is the reading; zero and two-or-more are
+    # each a different defect, so the assertion names both.
+    assert constructions["n"] == 1, (
+        "the frame must read the config exactly once: 0 means the local endpoint "
+        "is no longer resolved from the config, and more than that means it is "
+        f"reading once per local provider again -- got {constructions['n']}"
     )

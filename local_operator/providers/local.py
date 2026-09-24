@@ -72,12 +72,20 @@ def config_values() -> Mapping[str, Any]:
 
     Public because a caller that resolves SEVERAL local providers in one pass has
     to read the config ONCE: every read constructs a ``ConfigManager`` and parses
-    config.yml (measured ~2 ms), and the catalogue's first frame is painted on
-    the keystroke that opens a picker and, on the desktop, on the keystroke that
-    types a ``/model `` argument. Five providers reading the file themselves
-    turned that frame from 0.24 ms into 14.5 ms (agent review round 2, R2-2); the
-    frame hands its snapshot down instead, and a caller with no snapshot to hand
-    over keeps the per-call read this function still performs.
+    config.yml, and the catalogue's first frame is painted on the keystroke that
+    opens a picker and, on the desktop, on the keystroke that types a ``/model ``
+    argument -- so one read per provider is one read per provider per keystroke.
+
+    The size of that, MEASURED RATHER THAN ASSUMED, and re-derivable: on the
+    fleet host on 2026-09-24, isolated ``HOME``/config, 25-call median after a
+    warm-up, one read is 0.6-1.0 ms and the whole frame with one read is
+    1.3-2.0 ms -- against ~8-13 ms with the five reads a frame left to itself
+    pays. Agent review round 2 measured the same shape on its own rig (14.51 ms
+    with five reads against 0.24 ms with none). The MAGNITUDE is rig-dependent;
+    the read COUNT is not, which is why that is what the accompanying test pins.
+
+    The frame hands its snapshot down instead, and a caller with no snapshot to
+    hand over keeps the per-call read this function still performs.
     """
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
