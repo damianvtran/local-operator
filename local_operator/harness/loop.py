@@ -36,7 +36,10 @@ from pydantic import TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness.approval import ask_approval
-from local_operator.harness.guard_area import exempt_from_escalation, reads_exempt_source
+from local_operator.harness.guard_area import (
+    exempt_from_escalation,
+    reads_exempt_source,
+)
 from local_operator.harness.intent import (
     INTENT_FIELD,
     INTENT_SCAN_LIMIT,
