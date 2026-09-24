@@ -130,6 +130,7 @@ RULES: tuple[Rule, ...] = (
             # `read` binds through a builtin, not an `=` (R1-3).
             'read -r l < <(lop secret get GITHUB_TOKEN); echo "$l"',
             'cat "$(lop secret get GITHUB_TOKEN)"',
+            "v=$(lop secret get NAME); echo TOKEN=$v",
         ),
         counterexamples=(
             # (i) the sanctioned form: bound to a variable, then consumed.
@@ -146,6 +147,8 @@ RULES: tuple[Rule, ...] = (
             'cat > /tmp/probe.sh <<EOF\nADMIN_API_KEY="$(lop secret get MINERVA_API_KEY_DEV)"\nEOF',
             # A search for the pattern is not a use of a secret.
             "grep -rn 'lop secret get' docs/",
+            "V=1 echo TOKEN=literal",
+            'v=$(lop secret get NAME); printf "%s\\n" X=$v > /tmp/contained',
         ),
     ),
     Rule(
@@ -173,6 +176,15 @@ RULES: tuple[Rule, ...] = (
             "cd /tmp && lop secret get GITHUB_TOKEN",
             "lop secret get GITHUB_TOKEN; echo done",
             'if [ -n "$X" ]; then lop secret get GITHUB_TOKEN; fi',
+            "local-operator secret get NAME",
+            "command lop secret get NAME",
+            "exec lop secret get NAME",
+            "timeout 30 lop secret get NAME",
+            "env lop secret get NAME",
+            "l=lop; $l secret get NAME",
+            "v=$(lop secret get NAME); $v",
+            "nohup lop secret get NAME >/dev/stdout 2>/dev/null",
+            "lop secret get NAME 2>/dev/null",
         ),
         counterexamples=(
             "v=$(lop secret get GITHUB_TOKEN)",
@@ -180,6 +192,10 @@ RULES: tuple[Rule, ...] = (
             "lop secret get GITHUB_TOKEN > /tmp/token",
             'curl -H "Authorization: Bearer $(lop secret get GITHUB_TOKEN)" https://x',
             "lop secret get --help",
+            "command -v lop",
+            "timeout 5 sleep 0.1",
+            "env | grep -c lop",
+            "lop secret get NAME > /tmp/contained 2>/dev/null; echo contained",
         ),
     ),
     Rule(
@@ -211,6 +227,7 @@ RULES: tuple[Rule, ...] = (
             "lop secret get GITHUB_TOKEN | cat",
             "v=$(lop secret get GITHUB_TOKEN); printf '%s' \"$v\" | sed 's/./& /g'",
             "lop secret get GITHUB_TOKEN | xxd",
+            'v=$(lop secret get NAME); echo "TOKEN=$v" | rev',
         ),
         counterexamples=(
             "lop secret get GITHUB_TOKEN | wc -c",
@@ -309,11 +326,27 @@ RULES: tuple[Rule, ...] = (
             "lop secret file GCP_SA_JSON -- cat",
             "lop secret file GCP_SA_JSON -- tee /tmp/out.json",
             "lop secret file GCP_SA_JSON -- sh -c 'cat'",
+            # R3-1: `run` always carries a `--secret` BEFORE the separator, and
+            # the consumer check used to stop at that word, so none of these four
+            # was ever examined. The verb's stdout is this result either way.
+            "lop secret run --secret NAME -- printenv NAME",
+            "lop secret run --secret NAME=TOKEN -- env",
+            "lop secret run --secret NAME=TOKEN -- sh -c 'echo \"$TOKEN\"'",
+            "lop secret run --secret NAME=TOKEN -- python3 -c "
+            "'import os; print(os.environ[\"TOKEN\"])'",
         ),
         counterexamples=(
             "lop secret file GCP_SA_JSON -- gcloud auth activate-service-account "
             '--key-file "$GOOGLE_APPLICATION_CREDENTIALS"',
             "lop secret file GCP_SA_JSON -- /bin/true",
+            # The consumer that NEEDS the value is the whole point of the verb:
+            # a client, an uploader, a request — and an attribute-setting builtin.
+            "lop secret run --secret NAME=TOKEN -- python3 client.py",
+            "lop secret run --secret NAME -- curl -sS -H 'Authorization: Bearer $NAME' https://x",
+            "lop secret run --secret NAME -- sed -n 1p /etc/hosts",
+            "lop secret run --secret NAME=TOKEN -- declare -x TOKEN",
+            "lop secret file GCP_SA_JSON -- env V=1 /bin/true",
+            "lop secret run --secret NAME -- echo",
         ),
     ),
     Rule(
@@ -466,6 +499,10 @@ RULES: tuple[Rule, ...] = (
             'curl -H "Authorization: Bearer $(lop secret get GITHUB_TOKEN)" https://x',
             'v=$(lop secret get GITHUB_TOKEN); docker login --username u --password-stdin <<< "$v"',
             "lop secret get GITHUB_TOKEN | wc -c",
+            "lop secret run --secret NAME=TOKEN -- python3 client.py",
+            "lop secret run --secret NAME -- sed -n 1p /etc/hosts",
+            'lop secret run --secret NAME -- curl -sS -H "Authorization: Bearer $NAME" https://x',
+            'v=$(lop secret get NAME); echo "${#v}"',
         ),
         counterexamples=(
             'echo "$(lop secret get GITHUB_TOKEN)"',
@@ -514,6 +551,7 @@ RULES: tuple[Rule, ...] = (
             "V=$(lop secret get GITHUB_TOKEN) printenv V",
             "set -a; V=$(lop secret get GITHUB_TOKEN); printenv V",
             "readonly V=$(lop secret get GITHUB_TOKEN); readonly",
+            "export V; V=$(lop secret get NAME); printenv V",
         ),
         counterexamples=(
             'v=$(lop secret get GITHUB_TOKEN); env V="$v" some-client --flag',
@@ -529,6 +567,7 @@ RULES: tuple[Rule, ...] = (
             "export V=$(lop secret get GITHUB_TOKEN); export -n V; printenv V",
             "v=$(lop secret get GITHUB_TOKEN); declare -f",
             "export V=$(lop secret get GITHUB_TOKEN); env -i some-client",
+            "export V; printenv V",
         ),
     ),
     Rule(
@@ -729,6 +768,39 @@ RULES: tuple[Rule, ...] = (
             'import os\ntoken = secrets["GITHUB_TOKEN"]\n'
             "os.system(f\"curl -H 'Bearer {token}' https://x\")",
             "import os\nos.system('echo hello')",
+        ),
+    ),
+    Rule(
+        label="python.exception-of-source",
+        verdict="printing",
+        lang="python",
+        question="Does the cell raise an exception whose message IS the value?",
+        why=(
+            "An exception's text is not a side channel — it is the output: the "
+            "eval tool returns the traceback, so `raise ValueError(token)` and "
+            "`assert False, token` both put the value in this result with no "
+            "print anywhere in the cell (R3-4). Refused at the same "
+            "pre-execution point as the print rule, because the traceback is "
+            "written after the value already exists. A bare `raise` re-raises and "
+            "carries nothing, and `assert token` fails with no message, so both "
+            "stay allowed."
+        ),
+        rewrite=(
+            "Do not carry the value out in an exception. Check a derived "
+            "property (`len(token)`, `token is None`) and raise on that, and keep "
+            "the value in the call that consumes it."
+        ),
+        examples=(
+            'token = secrets["NAME"]\nraise ValueError(token)',
+            'token = secrets["NAME"]\nraise ValueError(token[::-1])',
+            'token = secrets["NAME"]\nassert False, token',
+            'token = secrets["NAME"]\nraise RuntimeError(f"token={token}")',
+        ),
+        counterexamples=(
+            "raise ValueError('plain')",
+            'token = secrets["NAME"]\nassert token',
+            'assert len(secrets["NAME"]) > 0',
+            'token = secrets["NAME"]\nassert token is not None',
         ),
     ),
     Rule(
@@ -1215,6 +1287,32 @@ def _tokenize_shell(text: str) -> list[_Word | _Op | _Body]:
             items.append(_Word((_Piece(text[i:end], "literal", (i, end)),), (i, end)))
             i = end
             continue
+        if (
+            ch == "("
+            and items
+            and isinstance(items[-1], _Word)
+            and items[-1].span[1] == i
+            and (
+                items[-1].pieces
+                and items[-1].pieces[0].kind != "subst"
+                and _ASSIGNMENT_RE.match(items[-1].pieces[0].text)
+            )
+        ):
+            # `a=("$v" "$w")` — a compound assignment. The element list belongs
+            # to the ASSIGNMENT, not to the shell's grammar: reading `(` as
+            # punctuation here split the word into `a=` plus a separate stage,
+            # so the elements' taint never reached `a` and `echo "${a[@]}"`
+            # printed the value (R3-3). Folded into one word, the elements are
+            # exactly what `_value_flow` already reads.
+            inner, end = _read_parens(text, i)
+            previous = items[-1]
+            items[-1] = _Word(
+                previous.pieces + (_Piece(text[i:end], "expand", (i, end)),),
+                (previous.span[0], end),
+            )
+            i = end
+            at_word_start = False
+            continue
         if text.startswith("<(", i) or text.startswith(">(", i):
             # A process substitution is CAPTURED into a path exactly as `$( )`
             # is captured into text, so its body is analysed contained and its
@@ -1394,7 +1492,60 @@ _STDOUT_DEVICES = frozenset({"/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"})
 #: Redirect targets that drop the value entirely.
 _DISCARD_DEVICES = frozenset({"/dev/null"})
 
-_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+#: `NAME=`, `NAME+=` and `NAME[i]=` all bind a value to NAME (R3-3). The append
+#: and element spellings used to fail this match, so `v+=$(lop secret get X)` and
+#: `a[0]="$v"` were read as COMMANDS and their names never carried the taint.
+_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\+?=")
+
+#: The console scripts that run the `lop` CLI. `pyproject.toml` registers
+#: `local-operator` for the same entry point as `lop` (R3-2), and a source rule
+#: that knows one spelling of the program has a documented way around it.
+_PROGRAM_NAMES = frozenset({"lop", "lop.exe", "local-operator", "local-operator.exe"})
+
+#: Precommand wrappers that run their operand as THE command, with the same
+#: stdout and environment (R3-2): `command lop secret get X`, `timeout 30 lop
+#: …` and `env lop …` are `lop secret get X`. Each entry is
+#: ``(options that take the next word, positional words the wrapper consumes)``,
+#: so `timeout -s KILL 30 lop …` steps over `-s KILL` and the duration.
+#:
+#: **Why the bound is here.** Every wrapper in this table has a fixed, published
+#: option grammar, so stepping over it is exact rather than a guess. A wrapper
+#: outside the table (`sudo`, `caffeinate`, a function or alias the call
+#: defines, a copy of the binary under a new name) is read as the command
+#: itself. That residual is the same one a script invoked by name has, and the
+#: PR names it rather than implying a reach this table does not have.
+#: Ways an inline program hands an environment value back without a printer
+#: word: `printenv`, `os.environ[...]`/`getenv`, a bare `declare`/`set`. Used
+#: only for the `run` consumer position, where the value is in the environment.
+_ENV_READ_RE = re.compile(r"\b(?:printenv|getenv|environ|declare|typeset|export|set)\b")
+#: How a Python program reaches an environment variable it was given. Only
+#: the two documented spellings: an unknown one (`dict(os.environ)["TOKEN"]`)
+#: is the residual, stated in the rule rather than silently covered.
+_PY_ENV_READ_RE = re.compile(r"\b(?:os\.environ|environ|getenv)\b")
+
+_PRECOMMANDS: dict[str, tuple[frozenset[str], int]] = {
+    "command": (frozenset(), 0),
+    "builtin": (frozenset(), 0),
+    "exec": (frozenset({"-a"}), 0),
+    "nohup": (frozenset(), 0),
+    "nice": (frozenset({"-n"}), 0),
+    "timeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
+    "gtimeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
+    "stdbuf": (frozenset({"-i", "-o", "-e"}), 0),
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-P"}), 0),
+}
+
+#: `env` options after which the rest of the line is a STRING, not words: the
+#: wrapper cannot be stepped over exactly, so `env` stays the command.
+_ENV_SPLIT = frozenset({"-S", "--split-string"})
+
+#: `$l`, `${l}` or `"$l"` — a word that is one variable and nothing else, which
+#: is how `l=lop; $l secret get X` spells the program (R3-2).
+_BARE_REF_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+
+#: Builtins that bind their operands from stdin or a redirected file: the
+#: `read` of R1-3, plus the array readers R3-3 found unfollowed.
+_READ_BUILTINS = frozenset({"read", "mapfile", "readarray"})
 #: Shell reserved words are not commands. Without this, `if …; then lop secret
 #: get NAME; fi` reads `then` as the command and the source is never seen — the
 #: keyword is a word to the tokenizer, and the command word is what the source
@@ -1440,12 +1591,17 @@ _INLINE_PRINT_RE = re.compile(
 )
 #: A raw-text source spelling, used ONLY to decide the fail-closed question
 #: when the tokenizer faults: is there something here that could be a source?
-_RAW_SOURCE_RE = re.compile(r"\blop\b[^\n]{0,80}?\bsecret\b")
+_RAW_SOURCE_RE = re.compile(r"\b(?:lop|local-operator)\b[^\n]{0,80}?\bsecret\b")
 
 #: Bound on nested inline programs and substitutions. A refusal is for one
 #: call; nothing legitimate nests six programs deep, and the bound keeps a
 #: pathological input from being a stack exercise.
 _MAX_DEPTH = 6
+
+
+#: One stage's token list. Named because the helpers that take it are as long
+#: as the annotation and get read far more often than the type is changed.
+_Stage = list[_Word | _Op | _Body]
 
 
 @dataclass(frozen=True)
@@ -1470,6 +1626,18 @@ class _ShellAnalyzer:
         self.file_vars: dict[str, str] = {}
         #: Paths a value was written into during THIS command text.
         self.tainted_paths: dict[str, tuple[int, int]] = {}
+        #: The secret behind each of those paths, so a read of one can name it.
+        self.path_secrets: dict[str, str] = {}
+        #: The secret behind this command list's `< PATH` redirect, if any: a
+        #: compound's redirect sits on its LAST stage (`…; done < f`), after the
+        #: body that reads it, so it is recorded for the whole list (R3-3).
+        self._stdin_taint: str = ""
+        #: Names an `export NAME` (no `=`) declared before their assignment, so
+        #: the later binding is exported too (R3-3).
+        self._pending_exports: set[str] = set()
+        #: Names bound to a program name (`l=lop`), so `$l secret get X` still
+        #: names the source (R3-2).
+        self.program_vars: dict[str, str] = {}
         #: Names this command put into the exported namespace (R1-2), whose
         #: values an environment dump can print without naming the secret.
         #: Only a real export lands here (R2-4): `export`, a `-x` attribute, or
@@ -1528,7 +1696,129 @@ class _ShellAnalyzer:
 
     @staticmethod
     def _assignment_name(word: _Word) -> str:
-        return word.pieces[0].text.split("=", 1)[0]
+        """`v` for `v=`, `v+=` and `v[0]=` alike: the variable the value lands in."""
+        match = _ASSIGNMENT_RE.match(word.pieces[0].text)
+        return match.group(1) if match else word.pieces[0].text.split("=", 1)[0]
+
+    @staticmethod
+    def _redirect_targets(stage: Sequence[_Word | _Op | _Body]) -> set[int]:
+        """Indices of the words that are a redirection's target, not an argument."""
+        targets: set[int] = set()
+        pending = False
+        for index, item in enumerate(stage):
+            if isinstance(item, _Op):
+                pending = item.text in _REDIRECTS
+            elif isinstance(item, _Word) and pending:
+                targets.add(index)
+                pending = False
+        return targets
+
+    @classmethod
+    def _unwrap(cls, stage: list[_Word | _Op | _Body]) -> list[_Word | _Op | _Body]:
+        """The stage with its precommand wrappers dropped (R3-2).
+
+        `timeout 30 lop secret get X | rev` is, for every rule in the table,
+        `lop secret get X | rev`: the wrapper runs its operand with the same
+        stdout and environment. Dropping the wrapper words here, once, is what
+        lets every rule below see the real command rather than each rule
+        learning its own list of wrappers.
+
+        `env`'s own `NAME=value` words are KEPT: once the wrapper is gone they
+        sit before the command, which is exactly what they are to the child —
+        a `V=… command` prefix (so `env V="$(…)" printenv V` reaches the dump
+        rule). A wrapper with nothing after it IS the command (`env` alone
+        dumps, `nice` alone prints a number), and `command -v`/`-V` looks a name
+        up rather than running it, so none of those is unwrapped.
+        """
+        targets = cls._redirect_targets(stage)
+        sequence = [
+            index
+            for index, item in enumerate(stage)
+            if isinstance(item, _Word) and index not in targets
+        ]
+
+        def text_at(position: int) -> str:
+            item = stage[sequence[position]]
+            assert isinstance(item, _Word)
+            return cls._word_text(item).strip()
+
+        cursor = 0
+        while cursor < len(sequence):
+            item = stage[sequence[cursor]]
+            text = text_at(cursor)
+            if (
+                text
+                and text not in _SHELL_KEYWORDS
+                and not (isinstance(item, _Word) and cls._is_assignment(item))
+            ):
+                break
+            cursor += 1
+        drop: set[int] = set()
+        while cursor < len(sequence):
+            word = stage[sequence[cursor]]
+            assert isinstance(word, _Word)
+            if any(piece.kind == "subst" for piece in word.pieces):
+                break
+            wrapper = text_at(cursor).rsplit("/", 1)[-1]
+            spec = _PRECOMMANDS.get(wrapper)
+            if spec is None:
+                break
+            takes_argument, positionals = spec
+            probe = cursor + 1
+            lookup_only = False
+            while probe < len(sequence):
+                option = text_at(probe)
+                if option == "--":
+                    probe += 1
+                    break
+                if wrapper == "command" and option[:1] == "-" and set(option[1:]) & {"v", "V"}:
+                    lookup_only = True
+                    break
+                if wrapper == "env" and (
+                    option in _ENV_SPLIT or option.startswith("--split-string")
+                ):
+                    lookup_only = True
+                    break
+                if option in takes_argument:
+                    probe += 2
+                    continue
+                if option[:1] == "-":
+                    probe += 1  # `-oL`, `-5`, `--signal=KILL`, env's `-i`/`-`
+                    continue
+                break
+            if lookup_only:
+                break
+            kept: set[int] = set()
+            if wrapper == "env":
+                while probe < len(sequence):
+                    candidate = stage[sequence[probe]]
+                    if not (isinstance(candidate, _Word) and cls._is_assignment(candidate)):
+                        break
+                    kept.add(sequence[probe])
+                    probe += 1
+            probe += positionals
+            if probe >= len(sequence):
+                break  # nothing left to run: the wrapper is the command
+            drop.update(index for index in sequence[cursor:probe] if index not in kept)
+            cursor = probe
+        if not drop:
+            return stage
+        return [item for index, item in enumerate(stage) if index not in drop]
+
+    def _resolve_program(self, text: str) -> str:
+        """A bare reference standing for a program name resolves to it (R3-2).
+
+        `l=lop; $l secret get X` names the source without the literal word `lop`
+        in command position. The variable's value is followed rather than the
+        text searched, so an arbitrary re-speller (`f() { lop "$@"; }`, an alias,
+        a copy of the binary under a new name) is the residual: this closes the
+        spelling the review measured and states the bound instead of implying
+        the guard tracks any indirection at all.
+        """
+        match = _BARE_REF_RE.match(text)
+        if match:
+            return self.program_vars.get(match.group(1), text)
+        return text
 
     @classmethod
     def _command_word(cls, stage: list[_Word | _Op | _Body]) -> str:
@@ -1543,6 +1833,38 @@ class _ShellAnalyzer:
                 continue
             return text.rsplit("/", 1)[-1]
         return ""
+
+    @classmethod
+    def _fd_redirections(cls, stage: _Stage) -> list[tuple[str, str, _Word]]:
+        """``(fd, operator, target)`` for every redirection in the stage.
+
+        The fd matters: `2>/dev/null` drops STDERR and leaves stdout in this
+        result, so reading it as an stdout redirect discarded the whole stage and
+        `lop secret get X >/dev/stdout 2>/dev/null` came back as a consumer with
+        the raw value in the result (R3-2's `nohup` row). The number is its own
+        WORD to the tokenizer (`2` `>` `/dev/null`), so the fd is recognised by a
+        bare-digit word that ENDS exactly where the operator begins.
+        """
+        found: list[tuple[str, str, _Word]] = []
+        pending: tuple[str, int] | None = None
+        for index, item in enumerate(stage):
+            if isinstance(item, _Op):
+                pending = (item.text, index) if item.text in _REDIRECTS else None
+                continue
+            if not isinstance(item, _Word) or pending is None:
+                continue
+            operator, op_index = pending
+            pending = None
+            fd = "0" if operator.startswith("<") else "1"
+            previous = stage[op_index - 1] if op_index else None
+            if (
+                isinstance(previous, _Word)
+                and previous.span[1] == stage[op_index].span[0]
+                and cls._word_text(previous).strip().isdigit()
+            ):
+                fd = cls._word_text(previous).strip()
+            found.append((fd, operator, item))
+        return found
 
     @staticmethod
     def _redirections(stage: list[_Word | _Op | _Body]) -> list[tuple[str, _Word]]:
@@ -1609,9 +1931,22 @@ class _ShellAnalyzer:
 
     def _argv_flow(self, stage: list[_Word | _Op | _Body], *, depth: int) -> _Flow:
         flow = _Flow()
+        # The assignment skip is POSITIONAL, not stage-wide. Only a word BEFORE
+        # the command word is an assignment to the shell (`V=… cmd` binds V in
+        # the child's environment and hands cmd nothing in argv). After the
+        # command word the same shape is an ordinary argument, and skipping it
+        # stage-wide let `echo TOKEN=$v` and `echo "TOKEN=$v" | rev` through as
+        # consumers: the incident's own `KEY = value` print, with its `=`
+        # moved into the word.
+        in_prefix = True
         for item in stage:
-            if not isinstance(item, _Word) or self._is_assignment(item):
+            if not isinstance(item, _Word):
                 continue
+            if in_prefix and (
+                self._is_assignment(item) or self._word_text(item).strip() in _SHELL_KEYWORDS
+            ):
+                continue
+            in_prefix = False
             piece = self._value_flow(item, depth=depth)
             flow = _Flow(
                 value=flow.value or piece.value,
@@ -1804,10 +2139,90 @@ class _ShellAnalyzer:
                     return True, span
         return False, (0, 0)
 
-    def _register_path(self, path: str, span: tuple[int, int]) -> None:
+    def _register_path(self, path: str, span: tuple[int, int], name: str = "") -> None:
         path = path.strip().strip("'\"")
         if path and path not in _DISCARD_DEVICES:
             self.tainted_paths.setdefault(path, span)
+            if name:
+                self.path_secrets.setdefault(path, name)
+
+    @classmethod
+    def _redirect_only_read(cls, stage: list[_Word | _Op | _Body]) -> bool:
+        """Is this stage bare `$(<PATH)` — a redirect with no command at all?
+
+        Bash's shorthand for reading a file: the bytes come back as the
+        substitution's text, so a tainted path here IS the value (R3-3). Without
+        this, the redirect's target is the only word, it reads as the command
+        NAME, and the stage falls through to the consumer branch.
+        """
+        operands = 0
+        for index, item in enumerate(stage):
+            if not isinstance(item, _Word):
+                continue
+            if index in cls._redirect_targets(stage):
+                continue
+            if cls._is_assignment(item) or cls._word_text(item).strip() in _SHELL_KEYWORDS:
+                continue
+            operands += 1
+        return operands == 0
+
+    def _note_stdin_redirects(self, stages: list[list[_Word | _Op | _Body]]) -> None:
+        """Flag a `< PATH` whose path a secret was written into in this list."""
+        for stage in stages:
+            for fd, op, target in self._fd_redirections(stage):
+                if op not in ("<", "<>"):
+                    continue
+                text = self._word_text(target).strip().strip("'\"")
+                name = self.path_secrets.get(text)
+                if name:
+                    self._stdin_taint = self._stdin_taint or name
+
+    def _prescan_written_paths(self, stages: list[list[_Word | _Op | _Body]]) -> None:
+        """Register the files a source verb writes to BEFORE the walk reaches them.
+
+        The same registration the source branch does, hoisted: a read on a LATER
+        stage (`l=$(cat f)` after `… > f`) would otherwise be classified before
+        the write is known. Only a source verb's own redirect qualifies, so this
+        adds no reach the walk did not already have — it fixes the order.
+        """
+        for stage in stages:
+            source = self._source_verb(stage)
+            if source is None:
+                continue
+            for fd, op, target in self._fd_redirections(stage):
+                if op in (">", ">>", ">|") and fd == "1":
+                    self._register_path(self._word_text(target), target.span, source[1])
+
+    def _bind_loop_targets(self, stage: list[_Word | _Op | _Body], *, depth: int) -> None:
+        """A `for NAME… in WORDS` binds each name to the taint of those words.
+
+        `for x in $(lop secret get NAME); do echo $x; done` printed the value
+        with `x` untainted (R3-3): the substitution is the loop's LIST and the
+        shell binds its targets before the body runs, so a rule that follows
+        only `NAME=$(…)` never sees it. `select` is the same shape.
+        """
+        words = [item for item in stage if isinstance(item, _Word)]
+        texts = [self._word_text(word).strip() for word in words]
+        if not words or texts[0] not in ("for", "select") or "in" not in texts:
+            return
+        stop = texts.index("in")
+        names = [text for text in texts[1:stop] if text and not text.startswith("-")]
+        flow = _Flow()
+        for word in words[stop + 1 :]:
+            piece = self._value_flow(word, depth=depth)
+            flow = _Flow(
+                value=flow.value or piece.value,
+                path=flow.path or piece.path,
+                name=flow.name or piece.name,
+                span=flow.span if flow.span != (0, 0) else piece.span,
+            )
+        if not (flow.value or flow.path):
+            return
+        for name in names:
+            if flow.value:
+                self.value_vars[name] = flow.name
+            else:
+                self.file_vars[name] = flow.name
 
     # -- sources ------------------------------------------------------------
 
@@ -1840,8 +2255,8 @@ class _ShellAnalyzer:
         index = self._command_index(words)
         if index is None:
             return None
-        first = self._word_text(words[index]).strip().rsplit("/", 1)[-1]
-        if first not in ("lop", "lop.exe"):
+        first = self._resolve_program(self._word_text(words[index]).strip()).rsplit("/", 1)[-1]
+        if first not in _PROGRAM_NAMES:
             return None
         args = [self._word_text(word).strip() for word in words[index + 1 :]]
         if len(args) < 2 or args[0] != "secret":
@@ -1864,24 +2279,188 @@ class _ShellAnalyzer:
                 return verb, name
         return None
 
-    def _emitting_consumer(self, stage: list[_Word | _Op | _Body], name: str) -> None:
-        """``lop secret file NAME -- cat``: the verb's consumer prints the value."""
+    def _emitting_consumer(
+        self, stage: list[_Word | _Op | _Body], name: str, *, verb: str, depth: int
+    ) -> None:
+        """``lop secret file NAME -- cat``: the verb's consumer prints the value.
+
+        The two verbs put the value in DIFFERENT places, so they need different
+        consumer tests, and one test for both is how R3-1 happened:
+
+        * ``file`` materialises the value at a path handed over in an environment
+          variable, so a consumer that prints its arguments or its input prints
+          the file's bytes — ``cat``, ``tee``, ``sed``, an inline ``sh -c 'cat'``.
+          Any ``_EMITTERS`` name is therefore a leak, which is what this rule
+          always said for this verb (``lop secret file F -- cat`` has been refused
+          since the first commit).
+        * ``run`` puts the value in the child's ENVIRONMENT and nowhere else. So
+          the leak is a consumer that READS THE ENVIRONMENT (``printenv``, a
+          command-less ``env``, a bare ``declare``), or an inline program that
+          prints or references it (``sh -c 'echo "$TOKEN"'``, ``python -c
+          'print(os.environ["TOKEN"])'``). A consumer that prints only its own
+          arguments does not reach it: the outer shell expanded ``$TOKEN`` before
+          ``lop`` ever ran, so the child's argv holds no value — measured, not
+          assumed, in the round-3 remediation comment. Reading an emitter as a
+          leak for ``run`` as well would refuse ``-- sed -n 1p /etc/hosts`` and
+          ``-- cat``, which are the verb's ordinary consumers.
+
+        Both arms are the same shape: find the consumer after the ``--``
+        separator, skipping each ``--secret NAME[=VAR]`` pair that precedes it.
+        Stopping at the first ``--secret`` word — which this did — meant the
+        ``run`` branch could never fire at all (R3-1), because ``run`` always
+        carries one.
+        """
         words = [self._word_text(item).strip() for item in stage if isinstance(item, _Word)]
         rest: list[str] = []
-        for index, word in enumerate(words):
+        names: list[str] = []
+        after_options: int | None = None
+        index = 0
+        while index < len(words):
+            word = words[index]
             if word in ("--", "-"):
                 rest = words[index + 1 :]
                 break
             if word.startswith("--secret"):
-                break
+                # `--secret=NAME` carries its operand in the same word; the
+                # spaced form takes the NEXT word as the name. Either way the
+                # separator is still ahead.
+                if word.startswith("--secret="):
+                    # `--secret=NAME` carries its operand in the same word, and the
+                    # `NAME=VAR` form is the VARIABLE the value is exported as — which is
+                    # what an inline program reads.
+                    names.append(word.split("=", 1)[1])
+                    index += 1
+                    continue
+                if index + 1 < len(words):
+                    names.append(words[index + 1])
+                index += 2
+                after_options = index
+                continue
+            index += 1
         if not rest:
-            return
-        consumer = rest[0].rsplit("/", 1)[-1]
-        if consumer in _EMITTERS or (
-            consumer in _INTERPRETERS and _INLINE_PRINT_RE.search(" ".join(rest[1:]))
-        ):
+            # No `--` in the TEXT at all: argparse consumed it (or none was
+            # written), so the child command is what remains after our OWN
+            # words — the `--secret` pairs for `run`, the secret's NAME and any
+            # `--env-var VAR` for `file`. The separator-less spelling is real and
+            # it leaked while this arm required a literal `--`.
+            start = after_options if after_options is not None else words.index(verb) + 1
+            if after_options is None and verb == "file":
+                while start < len(words) and words[start].startswith("-"):
+                    start += 2 if start + 1 < len(words) else 1
+                start += 1  # the secret's NAME
+            rest = [word for word in words[start:] if not word.startswith("-")]
+            if not rest:
+                return
+        consumer = self._resolve_program(rest[0]).rsplit("/", 1)[-1]
+        arguments = rest[1:]
+        if verb == "run":
+            variables = [name.split("=", 1)[-1] for name in names]
+            leaked = self._run_consumer_dumps(consumer, arguments) or self._inline_program_reads(
+                consumer, arguments, variables, name, depth=depth
+            )
+        else:
+            # `file` hands over a PATH in an environment variable, so an
+            # argument-printing consumer reaches the bytes. Unchanged from what
+            # this rule always did for this verb.
+            leaked = consumer in _EMITTERS or (
+                consumer in _INTERPRETERS and _INLINE_PRINT_RE.search(" ".join(arguments))
+            )
+        if leaked:
             span = next((item.span for item in stage if isinstance(item, _Word)), (0, 0))
             self._add("shell.secret-verb-emitting-consumer", span, name)
+
+    def _inline_program_reads(
+        self,
+        consumer: str,
+        arguments: list[str],
+        variables: list[str],
+        secret: str,
+        *,
+        depth: int,
+    ) -> bool:
+        """Does this inline program reach a variable ``run`` exported the value as?
+
+        The precision is what keeps the verb's own sanctioned form working:
+        ``run --secret [redacted] -- sh -c 'curl -H "Authorization: Bearer $TOKEN"
+        http://…; echo done'`` is an approved CONSUMER, so a bare "an inline
+        program that prints" test refused it the moment the program also wrote a
+        `done` marker. What leaks is a program whose PRINTER reaches the value.
+
+        For a shell program that question is already answered by this module's own
+        walk, so it is asked with it rather than with a second, coarser rule: the
+        program is analysed with the exported variables pre-bound as values in the
+        child's environment, and any finding means the value came back. ``sh -c
+        'echo "$TOKEN" | base64'`` finds `shell.pipe-of-source`; ``sh -c
+        'printenv TOKEN'`` finds the dump rule; ``sh -c 'curl -H … $TOKEN; echo
+        done'`` finds nothing, which is the point.
+
+        A Python program is not this walk's language, so it keeps the coarser
+        test: the variable must be NAMED and the text must print or read an
+        environment. Deliberately fail-closed in this module's usual direction.
+        """
+        if not variables:
+            return False
+        if consumer in _INLINE_PYTHON:
+            text = " ".join(arguments)
+            names = "|".join(re.escape(name) for name in variables)
+            # A boundary written out rather than a `\b` escape: the name is
+            # spliced into the pattern, and `$TOKEN`/`TOKEN=` must both count.
+            if not re.search(rf"(?:^|[^A-Za-z0-9_]){names}(?:$|[^A-Za-z0-9_])", text):
+                return False
+            # BOTH halves are required for a Python program: naming the variable
+            # and reading the environment is not a leak on its own (an agent may
+            # check it is set, or hand it to a request), and a printer that never
+            # reads the environment cannot print the value. `print(len(...))` is
+            # still refused with the rest — a Python program is not this walk's
+            # language, so this arm is deliberately the coarse one.
+            return bool(_INLINE_PRINT_RE.search(text) and _PY_ENV_READ_RE.search(text))
+        if consumer not in _INTERPRETERS:
+            return False
+        program = ""
+        for index, argument in enumerate(arguments):
+            if argument in ("-c", "--eval") and index + 1 < len(arguments):
+                program = arguments[index + 1]
+                break
+        if not program:
+            return False
+        inner = _ShellAnalyzer()
+        for variable in variables:
+            inner.value_vars[variable] = secret
+            inner.exported_vars.add(variable)
+        try:
+            inner._analyze(program, contained=False, depth=depth + 1)
+            inner._after_walk()
+        except _LexFault:
+            # A program that does not lex is not evidence of a leak, and the
+            # fail-closed asymmetry belongs to a SOURCE in the text — a `run`
+            # consumer's program cannot carry one (its quotes make the text
+            # literal to the outer lexer).
+            return False
+        return bool(inner.findings)
+
+    @staticmethod
+    def _run_consumer_dumps(consumer: str, arguments: list[str]) -> bool:
+        """Does this ``run`` consumer read the environment the value is in?
+
+        The reach mirrors the dump rule's: ``printenv`` (bare or naming a
+        variable), ``env``/``set`` with no command after them, and a bare
+        ``declare``/``typeset``/``export``/``readonly``/``local`` list the
+        namespace. ``env V=1 client`` RUNS something and is a consumer, and
+        ``declare -x TOKEN`` only sets an attribute.
+        """
+        if consumer not in _ENV_DUMPERS:
+            return False
+        plain = [word for word in arguments if word and not word.startswith("-")]
+        if consumer == "printenv":
+            return True
+        if consumer == "env":
+            # `env V=1 client` runs something (a consumer); a command-less `env`
+            # prints the namespace the value was exported into.
+            return not [word for word in plain if "=" not in word]
+        if consumer == "set":
+            # Bare `set` lists everything; `set -e`/`set -x` print nothing.
+            return not arguments
+        return not plain
 
     # -- the walk -----------------------------------------------------------
 
@@ -1894,6 +2473,12 @@ class _ShellAnalyzer:
         is what makes ``v=$(echo $(lop secret get X)); echo "$v"`` refuse.
         """
         stages, piped = self._group(_tokenize_shell(text))
+        # Order fix and list-wide context, both BEFORE the left-to-right walk:
+        # what a source writes, and whether this list's stdin is one of those
+        # files. Neither adds reach; both keep a later read from being judged
+        # against a world where the write has not happened yet.
+        self._prescan_written_paths(stages)
+        self._note_stdin_redirects(stages)
         stdin = _Flow()
         out = _Flow()
         for index, stage in enumerate(stages):
@@ -1958,6 +2543,10 @@ class _ShellAnalyzer:
         contained: bool,
         depth: int,
     ) -> _Flow:
+        # Wrappers first: `timeout 30 lop secret get X | rev` IS `lop secret get
+        # X | rev`, so every rule below sees the real command instead of each
+        # rule carrying its own list of wrappers (R3-2).
+        stage = self._unwrap(stage)
         # Reserved words are structure, not operands: dropping them here is what
         # lets `for …; do v=$(…); done` and `if …; then lop secret get X; fi`
         # read as the stages a person sees rather than as keyword soup.
@@ -1967,8 +2556,10 @@ class _ShellAnalyzer:
             if isinstance(item, _Word) and self._word_text(item).strip() not in _SHELL_KEYWORDS
         ]
         bodies = [item.piece for item in stage if isinstance(item, _Body)]
-        redirections = self._redirections(stage)
         command = self._command_word(stage)
+        # `for x in $(lop secret get X)` binds the value to `x` (R3-3), and the
+        # body that reads it is a LATER stage.
+        self._bind_loop_targets(stage, depth=depth)
 
         # Where this stage's stdout goes. This is the whole basis for deciding
         # whether an emitted value is PRINTED: `>/dev/null` drops it, a real
@@ -1977,9 +2568,16 @@ class _ShellAnalyzer:
         stdout_path: str | None = None
         discarded = False
         to_stderr = False
-        for op, target in redirections:
+        for fd, op, target in self._fd_redirections(stage):
             text = self._word_text(target).strip().strip("'\"")
             if op in (">", ">>", ">|"):
+                if fd != "1":
+                    # `2>/dev/null` drops STDERR: it says nothing about where
+                    # this value went, so it must not mark the stage discarded
+                    # (which is how it was read upstream, and how
+                    # `get X >/dev/stdout 2>/dev/null` came back unrefused —
+                    # R3-2's `nohup` row) nor read as stderr output.
+                    continue
                 if text in _DISCARD_DEVICES:
                     discarded = True
                 elif text in _STDOUT_DEVICES:
@@ -2048,6 +2646,11 @@ class _ShellAnalyzer:
                     elif flow.path:
                         self.file_vars[name] = flow.name
                 if name not in self.value_vars and name not in self.file_vars:
+                    # `export V` BEFORE the assignment: the export is declared
+                    # first and applies to the binding that follows (R3-3), so
+                    # the name is remembered rather than dropped.
+                    if exports:
+                        self._pending_exports.add(name)
                     continue
                 if exports:
                     self.exported_vars.add(name)
@@ -2066,8 +2669,18 @@ class _ShellAnalyzer:
                     self.value_vars[name] = flow.name
                 elif flow.path:
                     self.file_vars[name] = flow.name
-                if self._allexport and (flow.value or flow.path):
+                if (flow.value or flow.path) and (self._allexport or name in self._pending_exports):
                     self.exported_vars.add(name)
+                # `l=lop; $l secret get X`: a name bound to the PROGRAM is how
+                # the call can spell a source without the word `lop` in command
+                # position (R3-2). Only a value that IS a program name records.
+                bound = word.pieces[0].text.split("=", 1)[-1].strip()
+                bound = " ".join(
+                    [bound] + [piece.text for piece in word.pieces[1:] if piece.kind == "literal"]
+                ).strip()
+                program = self._resolve_program(bound).rsplit("/", 1)[-1]
+                if not flow.value and not flow.path and program in _PROGRAM_NAMES:
+                    self.program_vars[name] = program
             # A pure assignment's stdout carries nothing; the value is in the
             # variable, which is exactly the sanctioned first half.
             return _Flow()
@@ -2093,21 +2706,71 @@ class _ShellAnalyzer:
         span = flow_in.span if flow_in.span != (0, 0) else (stage[0].span if stage else (0, 0))
         name = flow_in.name
         path_hit, path_span = self._literal_path_hit(stage)
+        # Which path the hit is, so a read of one can name the secret it holds.
+        _path_text = next(
+            (
+                self._word_text(item).strip()
+                for item in stage
+                if isinstance(item, _Word) and self._word_text(item).strip() in self.tainted_paths
+            ),
+            "",
+        )
+
+        # -- `$(<PATH)` : a redirect with no command at all -------------------
+        # The bytes come back as the substitution's text, so a tainted path here
+        # IS the value (R3-3). Checked before the emitter branch because there is
+        # no command word for that branch to key on.
+        if path_hit and self._redirect_only_read(stage):
+            return _Flow(
+                value=True,
+                name=self.path_secrets.get(_path_text, ""),
+                span=path_span or (stage[0].span if stage else (0, 0)),
+            )
 
         # -- `read` binds through a builtin, not an `=` -----------------------
         # `read -r l < <(lop secret get X)` puts the value in `l` with no
         # assignment word anywhere, so `echo "$l"` looked like an ordinary
         # consumer (R1-3).
-        if command == "read" and (flow_in.value or flow_in.path or path_hit):
+        # -- `read`/`mapfile` bind through a builtin, not an `=` ---------------
+        # `read -r l < <(lop secret get X)` puts the value in `l` with no
+        # assignment word anywhere, so `echo "$l"` looked like an ordinary
+        # consumer (R1-3). `mapfile`/`readarray` read the same bytes into an
+        # array, and a `< PATH` on the READ's own stage or on the compound it
+        # sits in (`while read …; done < f`) is a file a source wrote (R3-3).
+        if command in _READ_BUILTINS and (
+            flow_in.value or flow_in.path or path_hit or self._stdin_taint
+        ):
+            value_tainted = flow_in.value or path_hit or bool(self._stdin_taint)
+            name = flow_in.name or self.path_secrets.get(_path_text, "") or self._stdin_taint
             for word in words[1:]:
                 text = self._word_text(word).strip()
                 if not text or text.startswith("-"):
                     continue
-                if flow_in.value:
-                    self.value_vars[text] = flow_in.name
+                if value_tainted:
+                    self.value_vars[text] = name
                 elif flow_in.path:
-                    self.file_vars[text] = flow_in.name
+                    self.file_vars[text] = name
             return _Flow()
+
+        # -- a variable holding the value, in command position ---------------
+        # `v=$(lop secret get X); $v` does not RUN anything: bash fails the
+        # lookup and prints `v's value: command not found` — the value itself,
+        # in this result. That is the same leak the `$( )` spelling below is
+        # refused for, spelled through a variable.
+        command_is_ref = bool(
+            _BARE_REF_RE.match(self._word_text(words[0]).strip() if words else "")
+        )
+        if command_is_ref and (argv_flow.value or argv_flow.path) and not contained:
+            self._add(
+                "shell.bare-source-in-command-position",
+                argv_flow.span or words[0].span,
+                argv_flow.name,
+                reason=(
+                    "the variable holds the value and is run as a command name, "
+                    "and the failure prints it back"
+                ),
+            )
+            return argv_flow
 
         # -- a dump of the shell's own variables or environment ---------------
         # A value bound to a name is not out of reach just because no printer
@@ -2162,24 +2825,28 @@ class _ShellAnalyzer:
             self.sources.append(secret)
             src_span = next((item.span for item in stage if isinstance(item, _Word)), (0, 0))
             if verb == "file":
-                self._emitting_consumer(stage, secret)
+                self._emitting_consumer(stage, secret, verb=verb, depth=depth)
                 if to_stderr:
                     self._add("shell.source-to-stderr", src_span, secret)
-                for op, target in redirections:
-                    if op in (">", ">>", ">|"):
-                        self._register_path(self._word_text(target), target.span)
+                for fd, op, target in self._fd_redirections(stage):
+                    if op in (">", ">>", ">|") and fd == "1":
+                        self._register_path(self._word_text(target), target.span, secret)
                 # The verb hands out a PATH; the value stays in the file until
                 # something reads it, which the read rules above then refuse.
                 return _Flow(path=True, name=secret, span=src_span)
             if verb == "run":
-                self._emitting_consumer(stage, secret)
+                self._emitting_consumer(stage, secret, verb=verb, depth=depth)
                 return _Flow()
-            if to_stderr:
-                self._add("shell.source-to-stderr", src_span, secret)
+            if stdout_path is not None:
+                # Checked BEFORE the stderr flag: a `2>` beside a redirect changes
+                # where STDERR goes, not where this value went, so
+                # `… > /tmp/o 2>/dev/null` is contained and was refused as
+                # stderr output until this order was fixed.
+                self._register_path(stdout_path, src_span)
             elif discarded:
                 pass
-            elif stdout_path is not None:
-                self._register_path(stdout_path, src_span)
+            elif to_stderr:
+                self._add("shell.source-to-stderr", src_span, secret)
             elif reaches_result:
                 self._add("shell.bare-source-in-command-position", src_span, secret)
             if discarded:
@@ -2190,12 +2857,14 @@ class _ShellAnalyzer:
         if command in _EMITTERS:
             emits = flow_in.value or flow_in.path or path_hit
             if emits:
-                if to_stderr:
-                    self._add("shell.source-to-stderr", span, name)
+                # Same order as the source branch: where stdout goes decides,
+                # and the stderr flag is read only when stdout is this result.
+                if stdout_path is not None:
+                    self._register_path(stdout_path, span)
                 elif discarded:
                     pass
-                elif stdout_path is not None:
-                    self._register_path(stdout_path, span)
+                elif to_stderr:
+                    self._add("shell.source-to-stderr", span, name)
                 elif reaches_result:
                     if path_hit and not flow_in.value:
                         self._add("shell.read-of-secret-file-path", path_span or span, name)
@@ -2217,7 +2886,17 @@ class _ShellAnalyzer:
             if stdout_path is not None:
                 return _Flow()
             # The value is on stdout: captured, piped on, or printed above.
-            return _Flow(value=flow_in.value, path=flow_in.path, name=name, span=span)
+            # A READ of a file a secret was written into is the value when its
+            # output is captured or piped rather than printed (R3-3): then the
+            # rule above did not fire, and dropping the flow here is what let
+            # `l=$(cat f); echo "$l"` through.
+            captured_read = path_hit and (contained or writes_stdout)
+            return _Flow(
+                value=flow_in.value or captured_read,
+                path=flow_in.path,
+                name=name or (self.path_secrets.get(_path_text, "") if captured_read else ""),
+                span=span,
+            )
 
         # -- the stage runs an inline program ---------------------------------
         if command in _INTERPRETERS or command in _INLINE_PYTHON or command == "xargs":
@@ -2442,7 +3121,13 @@ class _ShellAnalyzer:
 # the shell tokenizer has to do by hand, so the rules here are about call shapes
 # instead of quoting: what retrieves a value, what prints, what writes and reads.
 
-_PY_SOURCE_RE = re.compile(r"\bsecrets\s*(?:\[|\.get\s*\(|\.__getitem__\s*\()")
+_PY_SOURCE_RE = re.compile(r"\bsecrets\b")
+#: `warnings.warn`, `pprint.pprint` and the stdlib's other printing helpers: the
+#: same stdout/stderr channels as `print`, so the same rule (R3-4). `display` is
+#: still deliberately absent, for the opposite reason (it reaches the OPERATOR's
+#: pane, not this result).
+_PY_WARN_METHODS = frozenset({"warn", "warn_explicit", "showwarning"})
+_PY_PPRINT_CALLS = frozenset({"pprint", "pp", "pformat", "saferepr"})
 #: `display` is deliberately absent: it carries output to the OPERATOR, not to
 #: the model's context (the eval tool excludes it), so refusing it would break
 #: a legitimate "show the user" without closing a transcript path.
@@ -2493,6 +3178,9 @@ class _PyAnalyzer:
         self.secret_paths: dict[str, tuple[int, int]] = {}
         #: `p = Path("/tmp/t")` — a name standing for a literal path.
         self.path_handles: dict[str, str] = {}
+        #: Names bound to the `secrets` mapping itself (`s = secrets`), so
+        #: `s["NAME"]` is still a source (R3-4).
+        self.store_aliases: set[str] = set()
         self._seen: set[tuple[str, tuple[int, int]]] = set()
 
     def _add(self, label: str, node: ast.AST, secret_name: str, reason: str = "") -> None:
@@ -2514,17 +3202,27 @@ class _PyAnalyzer:
     # -- taint --------------------------------------------------------------
 
     def _source_name(self, node: ast.AST) -> str | None:
-        """``secrets["NAME"]`` / ``secrets.get("NAME")`` → ``NAME``."""
+        """``secrets["NAME"]`` / ``secrets.get("NAME")`` → ``NAME``.
+
+        A name the cell bound to the mapping counts as the mapping (R3-4):
+        `s = secrets; print(s["NAME"][::-1])` is the same read, and treating the
+        alias as an ordinary name made the whole cell a consumer.
+        """
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-            if node.value.id == "secrets" and isinstance(node.slice, ast.Constant):
+            if self._is_store_name(node.value.id) and isinstance(node.slice, ast.Constant):
                 if isinstance(node.slice.value, str):
                     return node.slice.value
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if isinstance(node.func.value, ast.Name) and node.func.value.id == "secrets":
+            value = node.func.value
+            if isinstance(value, ast.Name) and self._is_store_name(value.id):
                 if node.func.attr == "get" and node.args and isinstance(node.args[0], ast.Constant):
                     if isinstance(node.args[0].value, str):
                         return node.args[0].value
         return None
+
+    def _is_store_name(self, name: str) -> bool:
+        """Is this name the store mapping, under its own name or an alias?"""
+        return name == "secrets" or name in self.store_aliases
 
     def _collect_paths(self, tree: ast.Module) -> None:
         """`p = Path("/tmp/t")` — remember the literal a handle stands for."""
@@ -2653,21 +3351,62 @@ class _PyAnalyzer:
         cost nothing.
         """
         for _ in range(5):
-            before = len(self.tainted)
+            before = len(self.tainted) + len(self.store_aliases)
             for node in ast.walk(tree):
                 if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                     continue
                 if node.value is None:
                     continue
+                # `s = secrets` binds the MAPPING, not a value out of it: that is
+                # an alias a later read resolves through, tracked apart from the
+                # value taint (R3-4).
+                if isinstance(node.value, ast.Name) and self._is_store_name(node.value.id):
+                    for target in self._assign_targets(node):
+                        if isinstance(target, ast.Name):
+                            self.store_aliases.add(target.id)
+                    continue
                 found, _ = self._value_taint(node.value)
                 if not found:
                     continue
-                targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
+                for target in self._assign_targets(node):
                     if isinstance(target, ast.Name):
                         self.tainted.add(target.id)
-            if len(self.tainted) == before:
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.For, ast.AsyncFor)):
+                    # A loop's target is bound by the ITERATION, not by `=`: (R3-4)
+                    # `for c in token: print(c)` printed the value one character
+                    # per line, which the output scrub does not catch. Inside the
+                    # fixed point, because the iterable is usually a name tainted
+                    # on the pass before. `enumerate(token)` and a tuple target
+                    # (`for i, c in …`) are the same binding read twice.
+                    # `_is_tainted`, not `_value_taint`: `enumerate(token)` and
+                    # `zip(token, x)` carry the value without BEING it, and a
+                    # call's value was read as untainted, so the loop target went
+                    # unbound. Conservative in this module's usual direction.
+                    if self._is_tainted(node.iter)[0]:
+                        self.tainted.update(self._bound_names(node.target))
+            if len(self.tainted) + len(self.store_aliases) == before:
                 break
+
+    @classmethod
+    def _bound_names(cls, target: ast.AST) -> set[str]:
+        """Every NAME a binding target binds, unpacking tuple/list targets."""
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            names: set[str] = set()
+            for element in target.elts:
+                names |= cls._bound_names(element)
+            return names
+        return set()
+
+    @staticmethod
+    def _assign_targets(node: ast.AST) -> list[ast.expr]:
+        """The bound name(s) of one binding node, whatever its spelling."""
+        if isinstance(node, ast.Assign):
+            return list(node.targets)
+        target = getattr(node, "target", None)
+        return [target] if target is not None else []
 
     # -- static paths -------------------------------------------------------
 
@@ -2756,6 +3495,10 @@ class _PyAnalyzer:
                 return "python.print-of-source"
             if attr in ("format", "format_map") and isinstance(base, ast.JoinedStr):
                 return "python.print-of-source"
+            if base_name == "warnings" and attr in _PY_WARN_METHODS:
+                return "python.print-of-source"
+            if dotted in ("pprint", "pprint.pprint") and attr in _PY_PPRINT_CALLS:
+                return "python.print-of-source"
             if attr in _PY_SHELL_CALLS and shell_string:
                 return "python.source-into-shell-string"
         return None
@@ -2786,6 +3529,22 @@ class _PyAnalyzer:
         return " ".join(chunks)
 
     @staticmethod
+    def _exception_text(node: ast.AST) -> list[ast.expr]:
+        """The expressions a raised exception would print into this result (R3-4).
+
+        `raise ValueError(token)` and `assert False, token` both end the cell
+        with the value in the traceback text the tool returns, so the sink is
+        the exception itself. A `Message` on a bare `raise` re-raises and carries
+        nothing of its own.
+        """
+        found: list[ast.expr] = []
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            found.append(node.exc)
+        elif isinstance(node, ast.Assert) and node.msg is not None:
+            found.append(node.msg)
+        return found
+
+    @staticmethod
     def _dotted(node: ast.AST) -> str:
         """`sys.stdout` for an attribute chain, or "" when it is not one."""
         if isinstance(node, ast.Name):
@@ -2813,6 +3572,19 @@ class _PyAnalyzer:
                             name,
                             reason=(
                                 "eval returns the trailing expression's repr, " "which is the value"
+                            ),
+                        )
+            for node in ast.walk(statement):
+                for carried in self._exception_text(node):
+                    found, name = self._is_tainted(carried)
+                    if found:
+                        self._add(
+                            "python.exception-of-source",
+                            node,
+                            name,
+                            reason=(
+                                "an uncaught exception is rendered into this result, "
+                                "message and all"
                             ),
                         )
             for node in ast.walk(statement):
