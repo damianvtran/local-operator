@@ -145,6 +145,22 @@ async def capabilities():
                 # serve a child transcript", not "this renderer cannot show a
                 # roster".
                 "subagent_transcript": 1,
+                # The child reader's LIVE half, and a NEW KEY rather than a bump
+                # of `subagent_transcript` above (design § 1, D3.4).
+                #
+                # The reader's admission gate asks for `subagent_transcript` with
+                # no minimum version, so bumping it would leave an older backend
+                # still passing that gate — the gate could not tell "the reader
+                # may open" apart from "the live part exists" without asking a
+                # second question of a key that already answered one. A separate
+                # key keeps the reader's floor exactly where it is and makes the
+                # live question its own: absent ⇒ the reader is today's pager,
+                # issues no watch, and looks exactly as it does now. That is the
+                # POST/DELETE pair on
+                # `/v1/desktop/sessions/{id}/children/{job}/trajectory` plus the
+                # `job_trajectory_appends`/`job_trajectory_replacements` field
+                # pair those ops turn on for that job.
+                "subagent_trajectory": 1,
                 # Moving a live session's working directory
                 # (POST /v1/desktop/sessions/{id}/working-directory).
                 #

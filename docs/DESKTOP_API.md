@@ -834,6 +834,90 @@ Set `/goal <text>` while a turn is running therefore behaves as it does on one
 Enter in the terminal: the text is steered into the turn in flight rather than
 parked, and the reply is never withheld for the running turn's duration.
 
+### Following a running child's own trajectory (`.../children/{job_id}/trajectory`)
+
+A child's conversation can be read without a runtime (the child transcript
+route), and while the child RUNS its events are retained in memory on the job
+that launched it — the serialized child events the runtime is already relaying
+to its parent, each stamped with a monotonic `_lo_seq`.
+`POST /v1/desktop/sessions/{session_id}/children/{job_id}/trajectory` hands that
+retained window over **and subscribes this connection to its appends, in one
+call**; `DELETE` of the same path releases the subscription.
+
+`{job_id}` is the **job id** the session's roster publishes (`/snapshot`'s
+`jobs[].id`), not the child's session id. The retained window lives on the job,
+every lookup beneath this route is job-keyed, and a child that ran more than one
+attempt has several job ids over one session directory — a reader holding one of
+them must be shown that one. A job id that is not one of this conversation's own
+child jobs is refused `404 {"code": "child_not_found"}`, the same refusal on the
+same terms as the child transcript route.
+
+**The reply is the seed, not an acknowledgement:**
+
+```json
+{"rows": [{"type": "message_update", "delta": "\u2026", "_lo_seq": 41}],
+ "base_seq": 7, "total": 63, "trajectory_length": 63,
+ "available": true, "reason": null}
+```
+
+`rows` are the events the runtime retains for that job — what its own
+`job_trajectory` op pages and what the live append stream extends — neither
+re-stamped nor re-ordered, so a reader folds them through the SAME reducer it
+uses for the parent's live events. `base_seq` is the `_lo_seq` of `rows[0]`;
+`trajectory_length` is how many events the runtime retains for the job and
+`total` is how many this reply carries (equal after a successful load).
+
+**A reader may rely on identity, never on order.** The seed arrives over HTTP
+while appends arrive on the session's event stream, and either may overtake the
+other — the runtime subscribes BEFORE it pages the window, so an append can land
+before the seed does. A reader applies an append **iff its `_lo_seq` is greater
+than the highest stamp it has already applied**. That one rule makes the
+interleave safe in both directions: a seed that arrives after an append discards
+nothing (the appends it already holds are at or below the seed's maximum, so the
+seed contains them), and one that arrives first cannot lose rows (later stamps
+only add). Rows carrying no stamp — an older runtime, a restored roster row —
+fall back to position.
+
+**The appends ride the session's existing stream; no second subscription is
+opened.** They arrive as `job_trajectory_appends: {job_id: [row, …]}` on
+`frontend.update`, beside `changes`, with `job_trajectory_replacements: [job_id]`
+naming any job whose rows were dropped to keep the frame inside its byte budget:
+the marker means the window is a REPLACEMENT rather than a suffix, so a reader
+resets that job's local rows to exactly what the frame carried. **Both fields are
+per-job and opt-in.** A connection that has not loaded a job receives `{}` and
+`[]` for it — byte-identical to the frame an older backend sends — and a
+connection with several loaded jobs receives each of them. The rows are scoped to
+the connection and byte-bounded by the runtime (newest kept, oldest dropped), so
+a client must not trim them again: what it is given is what the socket could
+carry, and a job that lost a row is the one named in the replacements list.
+
+**Releasing.** `DELETE` is a RELEASE, not an unconditional unsubscribe: several
+windows can watch one child through the same session bridge, and the count is per
+job, so closing one window leaves the others' stream live. The reply states what
+is left (`{"watching": bool, "watchers": int}`). It never BUILDS a bridge — a
+cleanup must not be the request that attaches a session — so a session with no
+resident bridge answers `{"watching": false, "watchers": 0}` rather than being
+refused. Send it on unmount: until the last reference is released the runtime
+keeps relaying a window nobody is reading. Nothing about the CHILD changes on a
+release — a reader is never load-bearing on a child's execution — and the rows
+stay cached on both sides, so reopening re-seeds cheaply.
+
+**When there is nothing to follow**, the answer is a `200` with `available:
+false` and a `reason` TOKEN, never an error:
+
+| `reason` | means | the reader's move |
+|---|---|---|
+| `no-owner` | no owner is attached, the owner is too old for the subscription op, or the connection dropped mid-fetch | retry on the next pulse |
+| `unsupported` | this job type records no trajectory at all (`bash` rather than `task`) | stop asking |
+
+`available: true` with `rows: []` is a third state and the opposite of both: the
+job DOES record a trajectory and none has been relayed yet, so the reader keeps
+polling. A settled child answers like a running one — its retained window is
+there until the job is swept — so a reader opened after the child finished still
+sees its final events.
+
+Capability: `features.subagent_trajectory` (see the keys table).
+
 ### A read never needs an answering owner
 
 Every route in the endpoint table marked **read envelope** answers from the
@@ -1718,6 +1802,7 @@ absent.
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
 | `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
+| `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and receives the empty pair it has always received |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
@@ -1726,3 +1811,8 @@ both skew directions the new behaviour is a no-op: a new backend with an old UI
 never sees a presence file (so rung 4 raises the banner), and an old backend
 with a new UI advertises no keys (so the UI keeps the poll and the per-session
 path).
+
+`subagent_trajectory` bumps nothing either — no existing key's version moves, and
+it is deliberately a NEW key rather than a bump of `subagent_transcript`, whose
+reader gate asks with no minimum version: a bump would leave an older backend
+passing that gate while the live half does not exist.

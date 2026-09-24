@@ -307,6 +307,68 @@ class ChildTranscriptPage(HistoryPage):
     state: ChildTranscriptState
 
 
+#: Why a child job's live window could not be handed over, when its absence
+#: needs naming. A TOKEN, not a sentence: the copy belongs to the surface.
+#:
+#: ``no-owner`` is the runtime half — no owner is attached, the owner is too old
+#: for the subscription op, or the connection dropped while the window was being
+#: fetched. It is RETRYABLE: the reader re-asks on its next pulse. ``unsupported``
+#: is the job half — this job type records no trajectory at all, so there is
+#: nothing to follow and the reader must stop asking. The two must not be folded
+#: into one: a reader cannot tell them apart from the rows alone (both are empty),
+#: and polling forever on ``unsupported`` is the same defect as giving up on
+#: ``no-owner``.
+ChildTrajectoryUnavailable = Literal["no-owner", "unsupported"]
+
+
+class ChildTrajectoryWindow(BaseModel):
+    """One child job's retained trajectory window, seeded by a subscribe.
+
+    The desktop reader's live path (design § 1, D1.1): ``POST``ing this route
+    both loads the window and subscribes the connection to its appends, so the
+    reply IS the seed rather than an acknowledgement of one. A client that had
+    to fetch and then subscribe would lose whatever landed between the two calls.
+
+    The fields are the runtime's own fetch op's (``job_trajectory``) plus the two
+    that only a failed load needs, and the identity rule is why ``base_seq`` is
+    here at all: the rows rotate out of the front of a bounded window, so list
+    position is not identity — ``base_seq`` is the ``_lo_seq`` stamp of
+    ``rows[0]``, and a reader applies an append iff its stamp is greater than the
+    watermark this seed established. That is what makes the seed/append
+    interleave safe without the reader having to care which arrived first.
+
+    ``total`` and ``trajectory_length`` are both published because they answer
+    different questions and can legitimately disagree: ``trajectory_length`` is
+    how many events the RUNTIME retains for this job (the roster row's own
+    count, which is the only honest answer for a window this reply did not carry
+    in full), while ``total`` is the length of the window THIS reply carries.
+    They are equal after a successful load; a reader that sees them differ is
+    holding a partial seed.
+    """
+
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    base_seq: int | None = None
+    total: int = 0
+    trajectory_length: int = 0
+    available: bool
+    reason: ChildTrajectoryUnavailable | None = None
+
+
+class ChildTrajectoryRelease(BaseModel):
+    """What one reader's release left behind for a child job's window.
+
+    ``watchers`` is the count still held on the session's shared bridge, and
+    ``watching`` is its nonzero form for a client that only wants the boolean.
+    Both are published because the count is the fact and the boolean is the
+    convenience: a client that had assumed its release was the last one can see
+    that another window is still reading the same child, which is the one case
+    where nothing about its own close is observable on screen.
+    """
+
+    watching: bool
+    watchers: int
+
+
 class SnapshotPayload(BaseModel):
     """The snapshot frame's body: canonical state, the durable page, and WHY.
 
