@@ -23,20 +23,25 @@ Discovery contract:
     loaded it.
   - A git root that IS home: stop at home, inclusive.
   - A git root under home behind a dot-prefixed folder (``~/.codex/…``, an
-    in-repo ``.worktrees/`` folder): stop at the git root, inclusive. Those
-    folders hold a tool's user-scope file or another checkout's guidance.
+    in-repo ``.worktrees/`` folder), or itself dot-named: stop at the git
+    root, inclusive. Those folders hold a tool's user-scope file or another
+    checkout's guidance. Hidden means dot-named only: ``~/Library`` and
+    ``%APPDATA%`` are not excluded, and a repo under them walks up like any
+    other nested repo.
   - A git root outside home, or above it: stop at the git root or at home,
     whichever the walk reaches first, inclusive.
+  - Home is a filesystem, drive or share root (``HOME=/``, ``C:\\``): no repo
+    counts as nested under it, so the walk stops at the git root, inclusive.
   - No git root: stop at home (inclusive) or the filesystem root, whichever
     comes first. Home's own file IS included here, as it always was.
 
 - Keep at most :data:`MAX_CONTEXT_FILES` files, the NEAREST ones — a deep
   monorepo can nest more levels than the prompt should carry, and the
   nearest files are the most specific. In a chain deeper than the cap, the
-  file dropped first is the farthest one, which is the folder-below-home
-  file when the walk continued past a git root.
+  file dropped first is the farthest file found.
 - Prompt-identical bounded file contents collapse to one. Symlinks are never
-  followed: automatic guidance cannot cross the repository's trust boundary.
+  followed: automatic guidance cannot follow a link out of the walked
+  directories.
 
 Rendering contract: the files ride the byte-stable HEAD of the system prompt
 (read once at session start, exactly like the operator's own instructions),
@@ -346,6 +351,21 @@ def _git_root(start: Path) -> Path | None:
     return None
 
 
+def _resolved_home() -> Path:
+    """Home, resolved to match the resolved directories the walk visits.
+
+    Falls back to the unresolved home when resolving fails (a symlink-loop
+    ``HOME`` raises ``RuntimeError`` on CPython 3.12). The caller turns any
+    exception into no guidance at all, and the unresolved home keeps the
+    repo's own file loading as it did before home was resolved.
+    """
+    home = Path.home()
+    try:
+        return home.resolve()
+    except (OSError, RuntimeError):
+        return home
+
+
 def _walks_past_git_root(root: PurePath | None, home: PurePath) -> bool:
     """Whether the walk continues past ``root`` up to the folder below home.
 
@@ -355,10 +375,16 @@ def _walks_past_git_root(root: PurePath | None, home: PurePath) -> bool:
     ``C:\\Users\\Ben`` without a platform branch. A dot-prefixed
     component below home keeps the old stop, so a repo in ``~/.codex`` or an
     in-repo ``.worktrees/`` folder never picks up the tool's user-scope file or
-    the main checkout's guidance.
+    the main checkout's guidance. Only the name counts: ``~/Library`` and
+    ``%APPDATA%`` are not dot-named, so repos under them walk up like any
+    other.
     """
     return (
         root is not None
+        # A filesystem, drive or share root (HOME=/ under a Docker uid with no
+        # passwd entry, an empty HOME, USERPROFILE=C:\) groups nothing: were
+        # it home, every repo on the machine would count as nested.
+        and home.parent != home
         and root != home
         and root.is_relative_to(home)
         and not any(part.startswith(".") for part in root.relative_to(home).parts)
@@ -380,7 +406,7 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
     start = Path(cwd).resolve()
     # Resolved because the walk visits resolved directories: an unresolved
     # symlinked home never matched one, and a no-git walk ran on past it.
-    home = Path.home().resolve()
+    home = _resolved_home()
     root = _git_root(start)
     nested = _walks_past_git_root(root, home)
     # A repo nested under home walks on past its root, but home's own file is
