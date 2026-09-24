@@ -1019,8 +1019,7 @@ class DesktopSessionBridge:
         self.unsubscribers: list[Any] = []
         #: Per-JOB reference count of the trajectory subscriptions this bridge
         #: holds on its owner connection — the desktop child reader's live path
-        #: (see :meth:`watch_trajectory` and :meth:`DesktopSessions
-        #: .load_child_trajectory`).
+        #: (see :meth:`watch_trajectory` and :meth:`load_child_trajectory`).
         #:
         #: WHY REFCOUNTED, AND WHY IT LIVES HERE. One bridge is shared by every
         #: window, tab and feed watching this session (``self.subscribers``, all
