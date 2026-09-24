@@ -1321,9 +1321,16 @@ async def stop_session(
         # whole signal grace, and the reader has just been told by every other
         # surface that this runtime is leaving by itself: the line is why this
         # stop did not believe that.
+        #
+        # IT NAMES THE DECISION, NEVER THE RESULT (QA round 1, Q-2). The rungs below can
+        # still REFUSE — a recycled pid, a socket that is silent while the beat is fresh
+        # — and a line promising "stopping it" followed by "refused …" read as a
+        # contradiction. It is said here rather than after the identity gate because
+        # rung 1 can end the runtime before that gate runs, and that stop needs its
+        # reason too.
         on_wait(
-            f'"{name}" (pid {record.pid}) {_drain_phrase(record)}, but {stalled}; '
-            "stopping it rather than waiting for a boundary it will not reach"
+            f'"{name}" (pid {record.pid}) {_drain_phrase(record)}, but {stalled}, so it is '
+            "not left to drain; trying the ordinary stop"
         )
     if leaving and not force and not stalled and registry.pid_alive(record.pid):
         # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
@@ -1581,34 +1588,45 @@ async def stop_session(
 def _drain_stalled(record: SessionRecord) -> str:
     """Why a LEAVING runtime cannot be trusted to reach its turn boundary, or ``""``.
 
-    TWO FACTS, EACH OWNED ELSEWHERE, and neither re-derived here — a second threshold
-    for "stalled" would be one more place for the ladder and `lop sessions` to disagree
-    about the same runtime:
+    TWO FACTS, EACH OWNED ELSEWHERE, and no threshold invented here:
 
-    * ``registry.classify`` says ``wedged`` — the pid lives and has not beaten inside
-      ``HEARTBEAT_TIMEOUT_S``. The same verdict `lop sessions` prints in STATE.
+    * ``registry.classify`` says ``wedged`` AND the beat is older than the stall
+      watchdog's own steady bound (``stall_watchdog.bound_seconds()``, 300 s unless
+      configured). ``wedged`` alone is the listing's 45 s "not answering", and that is
+      NOT enough to cut a drain (agent review round 1, M2): ``classify``'s own docstring
+      records beats 105.8 s and 205.8 s late on runtimes whose CPU was advancing, and
+      the stall bound is the number this codebase sized ABOVE those measurements to
+      mean "stopped, not slow". A drain in the 45 s-to-bound band is still skipped,
+      exactly as before; the incident runtimes were 5.6 h and 5.9 h stale.
     * ``stall_watchdog.held_now`` — its own bound fired with work in flight and it has
-      not re-armed since. The same predicate behind the listing's ``bound held`` cell.
+      not re-armed since. The same predicate behind the listing's ``bound held`` cell,
+      and the arm that covers a parked workload loop behind a fresh serving beat.
 
-    DEGRADED EVIDENCE, NOT A DIAGNOSIS (``classify``'s own caveat): a long synchronous
-    step can read wedged and then recover. That is why this does not SIGNAL anything
-    by itself — it only withdraws the promise that the runtime leaves on its own, and
-    hands the target to the ordinary ladder, whose socket rung stops a runtime that
-    does answer and whose signal rungs still require confirmed identity.
+    THE BOUND IS READ IN THIS PROCESS, which is a stated limit rather than a proof: the
+    knob is an environment variable and the runtime may have been started with another
+    value. A switched-off or unreadable knob here falls back to ``DEFAULT_STALL_S``
+    rather than to the 45 s arm, so the uncertain direction is the one that skips.
+
+    DEGRADED EVIDENCE, NOT A DIAGNOSIS (``classify``'s own caveat). That is why this
+    does not SIGNAL anything by itself — it only withdraws the promise that the runtime
+    leaves on its own, and hands the target to the ordinary ladder, whose socket rung
+    stops a runtime that does answer and whose signal rungs still require confirmed
+    identity.
 
     NEVER RAISES, like every probe on this path: a record-shaped double without the
     fields, or an unreadable dump, answers ``""`` — the pre-existing skip.
     """
     try:
+        from local_operator.session.runtime import stall_watchdog
+
         verdict = registry.classify(record)
-        if verdict.state == "wedged":
+        bound = stall_watchdog.bound_seconds() or stall_watchdog.DEFAULT_STALL_S
+        if verdict.state == "wedged" and verdict.heartbeat_age_s >= bound:
             # One unit ladder with `lop sessions`' HB_AGE column (45s/12m/3h/2d), so the
             # number in this line is the number beside the row the operator just read.
             from local_operator.wakes.display import format_age
 
             return f"it has not reported for {format_age(verdict.heartbeat_age_s)}"
-        from local_operator.session.runtime import stall_watchdog
-
         if stall_watchdog.held_now(record.pid, record.started_at):
             return "its stall bound fired with work in flight and it has not re-armed since"
     except Exception:  # noqa: BLE001 — the ladder never raises over a probe

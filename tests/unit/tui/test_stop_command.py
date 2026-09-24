@@ -344,6 +344,49 @@ async def test_the_arm_listing_marks_a_target_the_press_will_decline(
 
 
 @pytest.mark.asyncio
+async def test_the_arm_listing_does_not_promise_to_leave_a_stalled_drain_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent review round 1, m2: a drain the ladder no longer believes is stopped.
+
+    The press asks ``control._drain_stalled`` for every leaving target, and a stalled
+    one falls through to the ordinary ladder. So the listing must not group it under
+    "asked again, then left alone": it gets its own qualifier, in the ladder's words,
+    and only the drains the press really declines keep the old one.
+    """
+    from dataclasses import replace as _replace
+
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD
+
+    targets = [
+        _replace(_record(101, "alpha"), leaving=LEAVING_FOR_BUILD),
+        _replace(_record(102, "beta"), leaving=LEAVING_FOR_BUILD),
+    ]
+    monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: targets)
+    monkeypatch.setattr(
+        control,
+        "_drain_stalled",
+        lambda rec: "it has not reported for 5h" if rec.pid == 102 else "",
+    )
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._run_slash_command("/stop all")
+        for _ in range(20):
+            await pilot.pause()
+            if any("will stop" in n for n in _notices(app)):
+                break
+        listing = [n for n in _notices(app) if "will stop" in n]
+        assert listing, _notices(app)
+        header = listing[0].splitlines()[0]
+        assert "1 already leaving — asked again, then left alone" in header, header
+        assert "1 leaving but stalled — not left to drain, stopped" in header, header
+        assert re.search(r"pid +101  alpha \(already leaving\)$", listing[0], re.M), listing[0]
+        assert re.search(r"pid +102  beta \(leaving, but stalled\)$", listing[0], re.M), listing[0]
+
+
+@pytest.mark.asyncio
 async def test_stop_all_arms_then_a_repeat_inside_the_window_executes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
