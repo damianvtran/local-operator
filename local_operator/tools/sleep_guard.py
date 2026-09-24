@@ -94,6 +94,22 @@ _OPENERS = frozenset({"{", "do", "then", "case"})
 _CLOSERS = frozenset({"}", "done", "fi", "esac"})
 
 
+def _without_comment(words: list[str]) -> list[str]:
+    """Drop a shell comment, so `sleep 121  # poll the suite` is still seen.
+
+    A comment is a word whose FIRST character is ``#`` (bash starts one at the
+    start of a word, not mid-word): everything from there on is not part of the
+    command, so leaving it in makes the operand list unparsable and the sleep
+    invisible. ``_words`` keeps quotes, so a ``#`` inside a quoted argument is
+    not the first character of its word and survives — ``sleep "1#2"`` is
+    still a literal the guard reads.
+    """
+    for index, word in enumerate(words):
+        if word.startswith("#"):
+            return words[:index]
+    return words
+
+
 def _duration_seconds(words: list[str]) -> float | None:
     """Total seconds of ``sleep``'s operands, or None when any is not a literal.
 
@@ -157,7 +173,7 @@ def check_long_sleep(command: str) -> str | None:
         stripped, assigns = search_guard._strip_env_assignments(segment)
         if search_guard._truthy(assigns.get(ALLOW_ENV)):
             continue
-        words = search_guard._words(stripped)
+        words = _without_comment(search_guard._words(stripped))
         if not words or os.path.basename(search_guard._unquote(words[0])) != "sleep":
             continue
         # A redirection (`2>/dev/null`, `>log`) changes nothing about how long
@@ -189,10 +205,12 @@ def _block_message(seconds: float) -> str:
         "and the session looks busy while it does nothing.\n"
         "Do one of:\n"
         "  - start the long work itself with `background: true`, then block on its "
-        "job id with `wait` (size wait_ms to the work) — it returns the moment the "
-        "job finishes, a message arrives, or you are steered;\n"
+        "job id with `wait` where this session offers that tool (size wait_ms to "
+        "the work) — it returns the moment the job finishes, a message arrives, or "
+        "you are steered;\n"
         "  - check progress in between with `jobs op='peek'` (job_id, since=<seq>) "
-        "instead of sleeping and tailing a log;\n"
+        "where this session offers that tool, instead of sleeping and tailing a "
+        "log;\n"
         "  - to check back much later, schedule it with `wake` where this session "
         "offers it;\n"
         f"  - to run it exactly as written, prefix the sleep with `{ALLOW_ENV}=1`."

@@ -4664,8 +4664,29 @@ def build_bash_tool() -> AgentTool:
         # commands, and exclusive would serialize the common case.
         concurrency="shared",
         interruptible=True,
+        # Plan-time refusal for the long-sleep shape, so an interactive operator
+        # is never asked to approve a call the tool then refuses (review Q-2 on
+        # #1546). The execute-time check below stays as the backstop for the
+        # direct ``execute`` callers no hook reaches.
+        refuse_args=_long_foreground_sleep_refusal,
         execute=execute_bash,
     )
+
+
+def _long_foreground_sleep_refusal(args: dict[str, Any]) -> str | None:
+    """The plan-time half of the long-sleep guard (see ``tools/sleep_guard``).
+
+    ``background: true`` is exempt: a sleep inside a background job holds no
+    turn. Reads the arguments defensively — this runs before the tool body and
+    must never raise, since a hook that raises is skipped by the loop and the
+    call would then reach the approval gate it exists to pre-empt.
+    """
+    if args.get("background"):
+        return None
+    command = args.get("command")
+    if not isinstance(command, str):
+        return None
+    return sleep_guard.check_long_sleep(command)
 
 
 # ---------------------------------------------------------------------------

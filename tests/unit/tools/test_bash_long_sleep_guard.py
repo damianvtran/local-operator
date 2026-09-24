@@ -11,13 +11,25 @@ read as a literal. The allow list is the contract, so each shape is a named case
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
 
 from local_operator.harness.jobs import AsyncJobManager
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import (
+    AbortSignal,
+    AgentTool,
+    ChatRequest,
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    ToolContext,
+)
 from local_operator.tools import builtin, sleep_guard
+
+_MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
 C = sleep_guard.check_long_sleep
 
@@ -76,6 +88,12 @@ BLOCKED = [
     "sleep 1500\ntail -c 250 log",
     "sleep 900 2>/dev/null; tail log",
     "sleep 900 | cat",  # the pipeline waits for its first stage
+    # M2: a trailing shell comment must not hide the sleep (it changes nothing
+    # about how long the call holds the session).
+    "sleep 121  # poll the suite",
+    "sleep 1500  # wait",
+    "cd x && sleep 900  # watch",
+    "sleep 900;# poll",
 ]
 
 
@@ -113,6 +131,10 @@ NEVER_BLOCKED = [
     'echo "sleep 900"',
     'git commit -m "sleep 900; tail"',
     "cat <<EOF\nsleep 900\nEOF",
+    # a `#` that is not the start of a word is data, not a comment
+    'sleep "1#2"',
+    "echo hi # sleep 900",
+    "printf '%s' '# sleep 900'",
     # the escape hatch, read per segment off the command itself
     f"{sleep_guard.ALLOW_ENV}=1 sleep 900; tail f",
 ]
@@ -143,6 +165,66 @@ def test_the_threshold_is_the_one_constant() -> None:
 # --- through the real bash tool --------------------------------------------
 
 
+class _ToolsThenText:
+    """Scripted provider: request one ``bash`` call, then answer in prose."""
+
+    def __init__(self, args: dict[str, object]) -> None:
+        self.args = args
+        self.requests: list[ChatRequest] = []
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        self.requests.append(request)
+        first = len(self.requests) == 1
+
+        async def gen():
+            if first:
+                yield StreamToolCallDelta(index=0, id="c", name="bash", argument_delta="")
+                yield StreamToolCallDelta(index=0, argument_delta=json.dumps(self.args))
+            else:
+                yield StreamTextDelta(delta="understood")
+            yield StreamEndEvent(stop_reason="toolUse" if first else "stop")
+
+        return gen()
+
+
+async def _run_loop(
+    tools: list[AgentTool], context: ToolContext, stream: _ToolsThenText
+) -> list[object]:
+    """Drive the real :class:`AgentLoop` for one turn over ``tools``."""
+    from local_operator.harness.loop import AgentLoop, LoopContext
+    from local_operator.harness.types import LoopConfig, Message
+
+    config = LoopConfig(
+        model=_MODEL,
+        # The loop hands the provider a rendered history; the filter is what the
+        # harness's own tests use to keep only real messages.
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=stream,
+    )
+    loop_context = LoopContext(
+        system_blocks=["stable"],
+        messages=[Message.user("go")],
+        tools=tools,
+        tool_context=context,
+    )
+    events: list[object] = []
+    async for event in AgentLoop().run(loop_context.messages, loop_context, config, None):
+        events.append(event)
+    return events
+
+
+def _call(name: str, args: dict[str, object]):
+    from local_operator.harness.types import ToolCall
+
+    return ToolCall(id="c", name=name, arguments=dict(args))
+
+
+def _loop_context(tools: dict[str, object], context: ToolContext):
+    from local_operator.harness.loop import LoopContext
+
+    return LoopContext(tool_context=context, tools=list(tools.values()))  # type: ignore[arg-type]
+
+
 async def _bash(args: dict[str, object], context: ToolContext):
     tool = builtin.build_bash_tool()
     return await tool.execute("c", args, None, None, context)  # type: ignore[operator]
@@ -159,6 +241,43 @@ async def test_the_bash_tool_refuses_before_spawning(tmp_path) -> None:
     assert result.is_error is True
     assert "sleeps 1500 s (25 min) in the foreground" in result.text
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_loop_never_prompts_approval_for_a_refused_long_sleep(tmp_path) -> None:
+    """The finding, driven through the REAL loop.
+
+    The approval gate runs inside the runner, BEFORE the tool body, so a refusal
+    that lived only in ``execute`` made an interactive operator approve a call
+    that was then refused (review Q-2). The plan-time hook is what closes it:
+    this asserts the gate's callback is never invoked for the long-sleep call,
+    and that the model still gets the refusal text telling it what to do.
+    """
+    from local_operator.tools.registry import create_tools
+
+    approvals: list[tuple[str, str]] = []
+
+    async def request_approval(tool_name: str, summary: str, **kwargs: object) -> bool:
+        approvals.append((tool_name, summary))
+        return True
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), session_id="sg-gate", jobs=manager)
+    context.request_approval = request_approval  # type: ignore[assignment]
+    tools = list(create_tools(context))
+    stream = _ToolsThenText(
+        {"command": 'sleep 1500; tail -c 250 "$LOCAL_OPERATOR_SCRATCHPAD/suite.log"'}
+    )
+    events = await _run_loop(tools, context, stream)
+    try:
+        assert approvals == [], f"the gate was asked about a refused call: {approvals}"
+        text = json.dumps([str(event) for event in events])
+        assert "sleeps 1500 s (25 min) in the foreground" in text
+        assert "background: true" in text
+        # One model turn, no second call: the model was told why and stopped.
+        assert len(stream.requests) == 2
+    finally:
+        await manager.dispose()
 
 
 @pytest.mark.asyncio
