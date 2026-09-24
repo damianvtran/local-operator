@@ -2995,6 +2995,31 @@ class AgentLoop:
                     details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
                 ),
             )
+        # A tool's OWN plan-time refusal, after the schema check: the ordering
+        # above states why the gate is not here, and this is the other half of
+        # it — a call the tool will not run must not reach the gate either, or
+        # the operator approves work that then refuses itself (review Q-2 on
+        # #1546). The message is the tool's own, verbatim: it is written to tell
+        # the model what to do instead, and a prefix added here would only
+        # lengthen every refusal. Guarded like the other host hooks — a hook
+        # that raises never refuses the call it was asked about.
+        refusal = None
+        if tool.refuse_args is not None:
+            try:
+                refusal = tool.refuse_args(args)
+            except Exception:
+                logger.warning("plan-time refusal check failed for %s", call.name, exc_info=True)
+            else:
+                if not isinstance(refusal, str) or not refusal.strip():
+                    refusal = None
+        if refusal is not None:
+            return _PlannedCall(
+                call=call,
+                tool=tool,
+                failure=self._synthetic_result(
+                    call, refusal, details={FAULT_KEY: FAULT_INVALID_ARGUMENTS}
+                ),
+            )
         resources: tuple[str, ...] | None = None
         if tool.resource_keys is not None:
             try:

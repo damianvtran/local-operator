@@ -2357,6 +2357,12 @@ async def _construct_child_session(
     # is scoped to THIS child's own job manager: an id that resolves through the
     # shared comms registry to a sibling is not in ``child.jobs`` and is refused
     # as ``unknown job`` (pinned in tests/unit/session/test_child_wait.py).
+    # Precisely what it promises about a note, because the two cases differ: a
+    # note arriving WHILE the wait is parked interrupts it at once (that is the
+    # wake above), while one already queued before the wait parks has been
+    # counted by the peer snapshot the wait takes before parking — it is
+    # delivered at the next boundary, not lost, but it does NOT shorten this
+    # park.
     # ``wake`` stays pruned: a child's session ends after one prompt, so a wake
     # it armed would be silently lost.
     if _can_background(tools):
