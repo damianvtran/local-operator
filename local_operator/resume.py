@@ -332,6 +332,12 @@ ORIGIN_SCAN_SENTINEL_NAME = "origin-scan.json"
 #: JSONL for would arrive too late to reach the first prompt's tail.
 ATTACHMENT_SIDECAR_NAME = "attachment.json"
 
+#: The judged-goal record's own sidecar, beside the attachment rather than
+#: inside it (see :func:`write_goal_record`). New in the judged-goal feature:
+#: older builds neither read nor write it, which is what lets a record survive a
+#: downgrade round trip.
+GOAL_SIDECAR_NAME = "goal.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:
@@ -814,6 +820,71 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
         sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
+        tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(sidecar)
+        if previous is not None:
+            os.utime(session_dir, (previous, previous))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def read_goal_record(session_dir: Path) -> dict[str, Any] | None:
+    """Parse ``goal.json``, or ``None`` when absent or unusable.
+
+    Tolerant on exactly the same terms as :func:`read_session_attachment`, and
+    for the same load-bearing reason: a process killed mid-write can cut the
+    file inside a multi-byte character, and a strict decode raises
+    ``UnicodeDecodeError`` — a ``ValueError`` that would sail past an
+    ``except OSError`` and take down the whole RESUME. An unreadable record must
+    cost the record, never the conversation.
+
+    The caller (``Session._restore_goal_record``) treats ``None`` as the
+    pre-lifecycle state, which is exactly what a session whose record was never
+    written is: a goal text and nothing else.
+    """
+    try:
+        raw = (session_dir / GOAL_SIDECAR_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def write_goal_record(session_dir: Path, payload: dict[str, Any]) -> None:
+    """Journal the goal record beside the transcript.
+
+    A SIBLING of ``attachment.json`` rather than a key inside it, and the reason
+    is the writer, not the reader: ``write_session_attachment`` REBUILDS its
+    whole payload from its three arguments and replaces the file atomically, so
+    the moment an older ``lop`` build (or a different install on this machine)
+    touches that session's attachment for any reason, anything this build had
+    added to it would be destroyed. ``goal.json`` is invisible to every existing
+    writer, so the record survives a downgrade round trip. The cost is a file.
+
+    Called on TRANSITION only — a status change, a history append, a judge state
+    change — never on a tick: the judge moves on every turn end, and journalling
+    that would be pure I/O for a value that did not move (the rule
+    ``_persist_attachment`` states for the attachment, which binds harder here).
+
+    Best-effort and ATOMIC by the same contract as its sibling: never raises into
+    a turn, pid-named temp + ``replace`` (two processes can hold the same session
+    directory), and **the directory mtime is preserved**, because journalling a
+    goal transition is bookkeeping ABOUT a session and never activity IN it — a
+    mark-done must not reorder the ``/resume`` picker.
+    """
+    try:
+        try:
+            previous = session_dir.stat().st_mtime
+        except OSError:
+            previous = None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = session_dir / GOAL_SIDECAR_NAME
         tmp = sidecar.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(sidecar)
