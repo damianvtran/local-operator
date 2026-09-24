@@ -1520,6 +1520,60 @@ class DesktopSessionBridge:
                 sub.queue.put_nowait((frame, size))
                 sub.queued_bytes += size
 
+    def publish_to_subscription(
+        self, kind: str, payload: dict[str, Any], *, subscription_id: str
+    ) -> bool:
+        """Put one LIVE-ONLY frame on ONE subscriber's FIFO, and on no other.
+
+        WHY THIS EXISTS BESIDE :meth:`publish`. The aside's ``aside_delta``
+        frames are the one family on this bridge that is PRIVATE TO THE VIEWER
+        THAT ASKED: the exchange they describe is off the record, and the
+        runtime seam already refuses to fan an aside out (``_aside_delta_sink``
+        — "the frame goes to the CONNECTION THAT ASKED"). Routing them through
+        :meth:`publish` undid that one hop later: every other window's stream on
+        the same session received another viewer's aside text, and paid for it
+        in its own queue and byte budget. A viewer is not a subscriber of an
+        aside it did not ask for, so the fan-out is not a wider delivery — it is
+        a leak. The frame is addressed by ``aside_id`` on top of that, so this
+        is a second lock rather than the only one.
+
+        NEVER REPLAYED, for the reason :meth:`publish` gives for its own
+        ``replay=False`` path (and the reason the aside is live-only end to
+        end): a delta replayed on reconnect repaints progress for a request the
+        client already has the settled answer to. The SEQUENCE still advances —
+        the cursor argument in :meth:`publish` applies unchanged, and ``events``
+        computes ``gap`` from retained frames only, so the skipped seq is simply
+        never ``first``. Immaterial for this family, since a caller that missed
+        a delta already has the whole answer in the POST's ``text``.
+
+        Returns whether the named subscription was live and took the frame. A
+        false answer is NOT an error to the caller — the aside is already being
+        answered for it by the POST — which is why this returns rather than
+        raising (see the asides route).
+        """
+        sub = self.subscribers.get(subscription_id)
+        if sub is None or sub.overflow:
+            return False
+        self.sequence += 1
+        frame = {
+            "session_id": self.session_id,
+            "epoch": self.epoch,
+            "seq": self.sequence,
+            "type": kind,
+            "payload": payload,
+        }
+        size = len(json.dumps(frame, separators=(",", ":")).encode())
+        if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
+            # The SAME relief valve every other publication in this file uses,
+            # on the same accounting: a subscriber that cannot take the frame is
+            # disconnected so its reconnect reconciles, rather than being fed a
+            # queue whose bytes this method stopped counting.
+            self._disconnect(sub)
+            return False
+        sub.queue.put_nowait((frame, size))
+        sub.queued_bytes += size
+        return True
+
     def publish_once(self, kind: str, payload: dict[str, Any], *, dedupe_key: str) -> bool:
         """Publish ``kind`` unless this bridge already announced ``dedupe_key``.
 

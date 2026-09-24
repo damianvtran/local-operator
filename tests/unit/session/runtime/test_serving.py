@@ -2486,3 +2486,181 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
 
     assert "serves decision-model calls, not chat completions" in str(refused.value)
     assert applied == [], "the session must not be switched onto a provider that cannot chat"
+
+
+# =============================================================================
+# The aside seam: the instruction and the stream, applied where every remote
+# caller converges
+# =============================================================================
+
+
+class _AsideSession:
+    """A session that only knows how to be asked off the record.
+
+    Deliberately NOT ``FakeSession``: the subject here is the SEAM — what the
+    handle hands the primitive and what it forwards back — so the primitive is a
+    recorder rather than a stand-in for the whole Session.
+    """
+
+    session_id = "aside-seam"
+    _frontend_state_store = None
+
+    def __init__(self, *, accepts_delta: bool = True) -> None:
+        self.turns: list[list[Any]] = []
+        self._accepts_delta = accepts_delta
+
+    async def complete_aside(
+        self, turns: list[Any], *, on_delta: Any = None, on_usage: Any = None
+    ) -> str:
+        # The REAL ``Session.complete_aside`` signature, spelled out rather than
+        # swallowed by ``**kwargs``: the handle probes these NAMES by signature,
+        # so a catch-all here would silently test the legacy path instead.
+        self.turns.append(list(turns))
+        if self._accepts_delta and on_delta is not None:
+            on_delta("part one. ")
+            on_delta("part two.")
+        return "part one. part two."
+
+
+class _LegacyAsideSession:
+    """A session built before the stream existed: it takes ``turns`` alone."""
+
+    session_id = "aside-seam-legacy"
+    _frontend_state_store = None
+
+    def __init__(self) -> None:
+        self.turns: list[list[Any]] = []
+        self.deltas: list[Any] = []
+
+    async def complete_aside(self, turns: list[Any]) -> str:
+        self.turns.append(list(turns))
+        return "answer."
+
+
+def _aside_handle(session: Any) -> ServingSessionHandle:
+    return ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd="/tmp", install_gates=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_wraps_the_turn_and_forwards_the_stream() -> None:
+    """ONE placement, both halves: the instruction at the seam and the chunks out.
+
+    The wrap lives here rather than in ``Session.complete_aside`` because the
+    goal-loop judge calls that in-process and must never receive an aside
+    instruction; the cost of getting this wrong was a desktop ``/asides`` route
+    that sent the raw question and no instruction at all, which is why the
+    desktop path showed tool calls and the TUI did not.
+    """
+    from local_operator.session.aside import ASIDE_PROMPT
+
+    session = _AsideSession()
+    deltas: list[str] = []
+
+    answer = await _aside_handle(session).complete_aside(
+        [{"role": "user", "content": [{"type": "text", "text": "why?"}]}],
+        on_delta=deltas.append,
+    )
+
+    assert answer == "part one. part two."
+    assert deltas == ["part one. ", "part two."]
+    (sent,) = session.turns
+    assert sent[-1].text == ASIDE_PROMPT.format(question="why?")
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_wraps_a_continuation_only_at_its_new_question() -> None:
+    """The earlier pairs are the aside's own exchanges and stay RAW.
+
+    Wrapping them would ask the model to answer a question it already answered;
+    leaving them raw is also what lets an adopted exchange contain the words the
+    user typed (``DesktopSessionBridge`` stores this same list).
+    """
+    from local_operator.session.aside import ASIDE_PROMPT
+
+    session = _AsideSession()
+
+    await _aside_handle(session).complete_aside(
+        [
+            {"role": "user", "content": [{"type": "text", "text": "first?"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "first."}]},
+            {"role": "user", "content": [{"type": "text", "text": "second?"}]},
+        ]
+    )
+
+    (sent,) = session.turns
+    assert [m.text for m in sent[:2]] == ["first?", "first."]
+    assert sent[2].text == ASIDE_PROMPT.format(question="second?")
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_with_the_flag_off_sends_the_turns_untouched() -> None:
+    """``aside_instruction=False`` is the caller's own instruction, honoured.
+
+    This is the TUI's ``/btw`` overlay (which formats ``ASIDE_PROMPT`` itself)
+    and its goal-loop judge (whose question is ``LOOP_JUDGE_PROMPT``). Both
+    reach this handle when the TUI is merely VIEWING another owner, and the
+    judge's case is the one that must never be wrapped: the model would be told
+    to answer a question about session state briefly and off the record, from a
+    request whose whole purpose is to report a verdict about a running goal.
+    """
+    from local_operator.session.goal_loop import LOOP_JUDGE_PROMPT
+
+    session = _AsideSession()
+    asked = LOOP_JUDGE_PROMPT.format(goal="finish the report")
+
+    await _aside_handle(session).complete_aside(
+        [{"role": "user", "content": [{"type": "text", "text": asked}]}],
+        aside_instruction=False,
+    )
+
+    (sent,) = session.turns
+    assert [m.text for m in sent] == [asked]
+    assert "<aside>" not in sent[0].text
+    assert "OFF\nTHE RECORD" not in sent[0].text
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_does_not_double_wrap_a_pre_wrapped_turn() -> None:
+    """The BELT, exercised through the seam: the default flag cannot double it.
+
+    A caller that supplies its own instruction and forgets the flag is the
+    regression this PR fixes on the TUI-attached-to-a-remote-owner path, where
+    the measured result was two ``<aside>`` blocks and two ``Question:`` lines in
+    one turn. ``wrap_aside_turns`` being idempotent is what makes that caller
+    harmless rather than merely unlikely.
+    """
+    from local_operator.session.aside import ASIDE_PROMPT
+
+    session = _AsideSession()
+    already = ASIDE_PROMPT.format(question="why?")
+
+    await _aside_handle(session).complete_aside(
+        [{"role": "user", "content": [{"type": "text", "text": already}]}]
+    )
+
+    (sent,) = session.turns
+    assert sent[0].text == already
+    assert sent[0].text.count("<aside>") == 1
+    assert sent[0].text.count("Question:") == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_aside_tolerates_a_primitive_without_on_delta() -> None:
+    """A session built before the stream must still answer, in one piece.
+
+    The capability is probed by signature, so an older session is handed turns
+    alone rather than a keyword it would raise on — the failure a caller would
+    see as "the aside is broken" against precisely the deployments that have
+    asked for nothing.
+    """
+    session = _LegacyAsideSession()
+
+    answer = await _aside_handle(session).complete_aside(
+        [{"role": "user", "content": [{"type": "text", "text": "why?"}]}],
+        on_delta=lambda _delta: None,
+    )
+
+    assert answer == "answer."
+    assert len(session.turns) == 1

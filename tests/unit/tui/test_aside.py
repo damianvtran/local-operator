@@ -55,6 +55,17 @@ class AsideSession(FakeSession):
         super().__init__()
         self.answer = answer
         self.aside_calls: list[list[Any]] = []
+        #: The ``aside_instruction`` the app passed on each ask. The overlay is a
+        #: WRAPPING caller (it formats ``ASIDE_PROMPT`` itself), so False is the
+        #: only correct value here: True would have the remote seam wrap a
+        #: question that already carries the instruction (see
+        #: ``test_the_aside_ask_declares_that_it_supplied_the_instruction``).
+        self.aside_instruction: list[bool] = []
+        #: When set, this fake behaves like an owner built BEFORE the flag
+        #: existed: it receives the caller's declaration and wraps the last user
+        #: turn anyway. That is the compatibility direction the seams must
+        #: survive, because an old owner ignores the body key and the keyword.
+        self.wraps_anyway = False
         #: What `^f` promoted into the conversation. NOT ``adopted`` — the base
         #: `FakeSession` already has one, typed as a list of message LISTS, and
         #: a mutable attribute cannot be narrowed in a subclass. The name is
@@ -72,8 +83,20 @@ class AsideSession(FakeSession):
     def is_streaming(self) -> bool:
         return self.streaming
 
-    async def complete_aside(self, turns, *, on_delta=None, on_usage=None) -> str:  # noqa: ANN001
+    async def complete_aside(  # noqa: ANN001
+        self,
+        turns,
+        *,
+        aside_instruction: bool = True,
+        on_delta=None,
+        on_usage=None,
+    ) -> str:
+        if self.wraps_anyway:
+            from local_operator.session.aside import wrap_aside_turns
+
+            turns = wrap_aside_turns(list(turns))
         self.aside_calls.append(list(turns))
+        self.aside_instruction.append(aside_instruction)
         if self.fail_with is not None:
             raise self.fail_with
         if self.fail is not None:
@@ -178,11 +201,45 @@ async def test_the_aside_answers_from_the_live_conversation() -> None:
         # `complete_aside` appends these to the live context itself, so what
         # the app must supply is the question — wrapped in the off-the-record
         # framing, which is what stops the model treating it as a new task.
+        # Wrapped EXACTLY ONCE, and the ask declares as much: the overlay's
+        # session may be an ``AttachedSession``, whose owner-side seam wraps a
+        # request that says it still needs an instruction — so the flag is what
+        # stops the two from both wrapping (measured as two ``<aside>`` blocks,
+        # two ``Question:`` lines in one turn).
         assert len(session.aside_calls) == 1
         sent = session.aside_calls[0][-1]
         assert sent.role == "user"
         assert "what did I ask you to do?" in sent.text
         assert "OFF" in sent.text and "RECORD" in sent.text
+        assert sent.text.count("<aside>") == 1
+        assert sent.text.count("Question:") == 1
+        assert session.aside_instruction == [False]
+
+
+@pytest.mark.asyncio
+async def test_a_pre_wrapped_ask_survives_an_owner_that_ignores_the_flag() -> None:
+    """The BELT, at the call site that had the bug: one wrapper either way.
+
+    The app's session is a fake that WRAPS ANYWAY — the shape of an owner built
+    before the flag existed, which receives the pre-wrapped turn and applies
+    ``wrap_aside_turns`` to it. The measured regression was two nested
+    instructions in one turn; ``wrap_aside_turns`` being idempotent is what
+    makes that unreachable, independent of which hop honours the flag.
+    """
+    from local_operator.session.aside import wrap_aside_turns
+
+    session = AsideSession()
+    session.wraps_anyway = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _open_with_question(pilot, app, "why sed and not edit?")
+
+        assert len(session.aside_calls) == 1
+        sent = session.aside_calls[0][-1]
+        assert sent.text.count("<aside>") == 1
+        assert sent.text.count("Question:") == 1
+        assert wrap_aside_turns([sent])[0].text == sent.text
 
 
 @pytest.mark.asyncio

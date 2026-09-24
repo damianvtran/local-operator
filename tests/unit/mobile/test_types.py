@@ -106,6 +106,22 @@ def test_peer_message_rejects_non_bool_wake() -> None:
         validate_control_frame({"op": "peer_message", "text": "hi", "wake": "yes"})
 
 
+def test_complete_aside_rejects_a_non_bool_instruction_flag() -> None:
+    """The flag is TYPED, because a coerced value flips the wrap silently.
+
+    The dispatch compares it against the boolean ``False``, so a string "false"
+    or a 0 would read as "the caller wrapped its own turns" and drop the
+    off-record instruction from a real question — the regression the field was
+    added to close, arriving as a wrong answer rather than as a refusal.
+    """
+    validate_control_frame({"op": "complete_aside", "turns": [], "aside_instruction": False})
+    validate_control_frame({"op": "complete_aside", "turns": []})
+    with pytest.raises(ValueError, match="aside_instruction must be a boolean"):
+        validate_control_frame({"op": "complete_aside", "turns": [], "aside_instruction": "false"})
+    with pytest.raises(ValueError, match="aside_instruction must be a boolean"):
+        validate_control_frame({"op": "complete_aside", "turns": [], "aside_instruction": 0})
+
+
 def test_peer_message_rejects_non_dict_sender() -> None:
     with pytest.raises(ValueError, match="sender must be an object"):
         validate_control_frame({"op": "peer_message", "text": "hi", "sender": ["nope"]})

@@ -974,6 +974,12 @@ class AttachClient:
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._pending: dict[Any, asyncio.Future[dict[str, Any]]] = {}
+        #: Per-request delta sinks, keyed by the SAME ``req`` id as ``_pending``.
+        #: A streaming op (``complete_aside``) registers one so the delta frames
+        #: it receives between the request and its receipt can be delivered AS
+        #: THEY ARRIVE rather than only as the settled answer; see
+        #: :meth:`_request_frame` and the ``aside_delta`` branch of the pump.
+        self._delta_sinks: dict[Any, Callable[[str], None]] = {}
         self._req_seq = 0
         self._session_id = ""
         self._attention_supported = False
@@ -1310,6 +1316,28 @@ class AttachClient:
                     # through to the pump's default and the person was told
                     # their session had died.
                     reason = BIND_FAILED_REASON
+                elif op == "aside_delta":
+                    # One chunk of an off-record aside's answer, streamed while the
+                    # request that asked for it is still in flight. LIVE ONLY by
+                    # contract: the owner never replays these and the receipt is
+                    # what the caller keeps, so this is progress, not result.
+                    #
+                    # The sink is keyed by ``req``, so a chunk this connection is
+                    # not waiting on (a lost race, a card the user already closed)
+                    # is DROPPED rather than treated as an error — the pump must
+                    # survive a stray frame. A sink that raises does not kill the
+                    # pump either: same contract as the event relay and the
+                    # ``retiring`` callback above.
+                    sink = self._delta_sinks.get(frame.get("req"))
+                    if sink is not None:
+                        chunk = (frame.get("data") or {}).get("delta")
+                        if isinstance(chunk, str) and chunk:
+                            try:
+                                sink(chunk)
+                            except Exception:  # noqa: BLE001 — never kill the pump
+                                logger.debug(
+                                    "attach client: aside delta callback failed", exc_info=True
+                                )
                 elif op in ("ack", "error", "result"):
                     req = frame.get("req")
                     future = self._pending.pop(req, None)
@@ -1619,9 +1647,23 @@ class AttachClient:
             )
         return out
 
-    async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
-        """Send one op and await its ack detail (or raise its error message)."""
-        reply = await self._request_frame(op, deadline_s=deadline_s, **fields)
+    async def _request(
+        self,
+        op: str,
+        *,
+        deadline_s: float = ACK_TIMEOUT_S,
+        on_delta: Callable[[str], None] | None = None,
+        **fields: Any,
+    ) -> str:
+        """Send one op and await its ack detail (or raise its error message).
+
+        ``on_delta`` is for a STREAMING op (``complete_aside``): the chunk sink
+        is registered for this request's ``req`` id and fed by the pump until the
+        receipt lands (success, error or timeout), which is what makes a
+        streamed chunk reachable while the request is still in flight. ``None``
+        — every other op — registers nothing and behaves exactly as before.
+        """
+        reply = await self._request_frame(op, deadline_s=deadline_s, on_delta=on_delta, **fields)
         self._raise_for_reply_error(reply)
         return str(reply.get("detail", ""))
 
@@ -1641,13 +1683,24 @@ class AttachClient:
         return str(reply.get("detail", "")), bool(reply.get("duplicate", False))
 
     async def _request_frame(
-        self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any
+        self,
+        op: str,
+        *,
+        deadline_s: float = ACK_TIMEOUT_S,
+        on_delta: Callable[[str], None] | None = None,
+        **fields: Any,
     ) -> dict[str, Any]:
         """Send one op and return its whole reply frame.
 
         The shared body of :meth:`_request` and
         :meth:`request_ack_with_duplicate`, which differ only in how much of
         the reply they keep.
+
+        ``on_delta`` registers a per-``req`` chunk sink for a streaming op, and
+        the ``finally`` below is what DEREGISTERS it — on the timeout and
+        connection-loss paths as well as the clean one, so a closed card cannot
+        leave a sink behind that the pump would keep feeding (the same discipline
+        ``_pending`` already follows).
         """
         if not self._connected or self._writer is None:
             raise ConnectionError("not attached")
@@ -1665,6 +1718,11 @@ class AttachClient:
         frame = await fit_request_frame(frame)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
+        # Registered BEFORE the write: a fast owner can stream its first chunk
+        # in the same read the receipt would arrive on, so a sink registered
+        # after the write can miss the head of the answer.
+        if on_delta is not None:
+            self._delta_sinks[req] = on_delta
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
@@ -1679,6 +1737,7 @@ class AttachClient:
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
             self._pending.pop(req, None)
+            self._delta_sinks.pop(req, None)
 
     async def _request_payload(
         self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any
@@ -2031,8 +2090,41 @@ class AttachClient:
         except (TypeError, ValueError):
             return -1
 
-    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
-        return await self._request("complete_aside", deadline_s=ASIDE_DEADLINE_S, turns=turns)
+    async def complete_aside(
+        self,
+        turns: list[dict[str, Any]],
+        *,
+        aside_instruction: bool = True,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
+        """Ask the owner for an off-record answer, streaming its chunks.
+
+        ``on_delta`` receives each ``aside_delta`` chunk AS IT ARRIVES; the
+        returned string is still the authoritative answer (the receipt's
+        ``detail``). The two are deliberately not the same thing to a caller: a
+        chunk the pump never delivered is cosmetic, a receipt the owner never
+        sent is a failure.
+
+        ``aside_instruction`` IS SENT ONLY WHEN IT IS FALSE, so the frame stays
+        byte-identical for the default the owner has always applied. An owner
+        that predates the field knows neither the parameter nor this body key,
+        and it does not wrap the turns either — the seam wrap and
+        ``session/aside.py`` arrive with the same change as this key — so it
+        answers the raw turns exactly as it always has, which is the compatible
+        direction. The idempotency belt (an already-wrapped turn is returned
+        unchanged) therefore covers only peers built from this change onward.
+        Sending ``True`` explicitly would put a value on the wire that means no
+        more than its absence, so the key is omitted instead of sent as
+        ``True``.
+        """
+        fields: dict[str, Any] = {"on_delta": on_delta, "turns": turns}
+        if aside_instruction is False:
+            fields["aside_instruction"] = False
+        return await self._request(
+            "complete_aside",
+            deadline_s=ASIDE_DEADLINE_S,
+            **fields,
+        )
 
     async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:
         """Select a model on the owner, at ``effort`` when one was chosen.

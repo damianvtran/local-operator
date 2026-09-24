@@ -125,6 +125,50 @@ def _retrieve_script(config_root: Path) -> str:
         """)
 
 
+def _reveal_script(config_root: Path) -> str:
+    """A CLI ``get --reveal`` driven through a pty the CALLER allocates.
+
+    Both halves of review round 1's pair are in this one script, which is why it
+    exists rather than a plainer call to ``client.retrieve``:
+
+    * the pty is allocated by the caller, so ``isatty()`` passes and nobody is
+      asked anything — R-1, the residual the guide now names instead of denying;
+    * it runs as a DESCENDANT of the registered session, which is the case where
+      the §6 announcement has somewhere to go — so if the reveal goes through
+      ``access.retrieve_secret`` (R-2's fix), the session is notified and the
+      value it prints is registered for redaction.
+    """
+    repo = str(Path(__file__).resolve().parents[3])
+    return textwrap.dedent(f"""
+        import os, pty, subprocess, sys
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            [sys.executable, "-m", "local_operator.cli", "secret", "get", "DEMO_TOKEN", "--reveal"],
+            stdin=slave,
+            stdout=slave,
+            stderr=subprocess.PIPE,
+            cwd={repo!r},
+            env={{**os.environ, "PYTHONPATH": {repo!r}}},
+        )
+        os.close(slave)
+        os.write(master, b"y\\n")
+        captured = b""
+        while True:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            captured += chunk
+        stderr = process.stderr.read()
+        process.wait(timeout=60)
+        print(f"RC {{process.returncode}}")
+        print(f"OUT {{captured.decode(errors='replace')!r}}")
+        print(f"ERR {{stderr.decode(errors='replace')!r}}")
+        """)
+
+
 # --- socket surface ---------------------------------------------------------
 
 
@@ -462,6 +506,88 @@ def test_a_session_that_never_acks_denies_the_child_within_the_timeout(
     finally:
         channel.close()
         instance.stop(timeout=5)
+
+
+# --- the reveal path (§6 + review round 1's pair) ----------------------------
+
+
+def test_a_caller_allocated_pty_reveal_is_still_announced(
+    broker: SecretBroker,
+    config_root: Path,
+    broker_store: SecretStore,
+    session: list[tuple[str, bytes]],
+    tmp_path: Path,
+) -> None:
+    """R-1 and R-2 together, end to end, with real processes.
+
+    The pair the review found is only dangerous when both halves hold at once: a
+    caller that allocates its own pty passes the reveal check (R-1 — the gate is
+    an accident net, and the guide now says so), AND the reveal fetched its value
+    without announcing it (R-2), so the bytes come back through a stream with no
+    sink that knows the value. This test holds both halves in view at once:
+
+    * the child REALLY prints the secret — a pty it allocated itself, no patched
+      ``isatty``, no faked terminal — so the residual is demonstrated, not
+      asserted away;
+    * the registered session is STILL notified with ``(name, value)`` before the
+      child is served, which is the property that makes the value scrubbable —
+      it can only hold if the reveal goes through ``access.retrieve_secret``;
+    * and the store carries the ``reveal`` row on top of the retrieval, so the
+      trail says both that the value was fetched and that it was printed.
+    """
+    script = tmp_path / "reveal.py"
+    script.write_text(_reveal_script(config_root))
+
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120
+    )
+
+    assert "RC 0" in result.stdout, f"{result.stdout}{result.stderr}"
+    assert SECRET_VALUE.decode() in result.stdout, (
+        "the caller-allocated pty did not receive the bytes; if this now holds, the "
+        "R-1 residual has been closed for real and this test should say so instead"
+    )
+    assert (
+        "DEMO_TOKEN",
+        SECRET_VALUE,
+    ) in session, "a revealed value reached a stream with no session notified of it"
+    rows = [(entry.event, entry.outcome) for entry in broker_store.audit_entries()]
+    assert ("reveal", "tty") in rows, rows
+    assert "get" in [event for event, _ in rows], "the reveal skipped the retrieval seam"
+
+
+def test_a_reveal_is_denied_when_the_session_will_not_ack(
+    config_root: Path, master_key: bytes, broker_store: SecretStore, tmp_path: Path
+) -> None:
+    """R-2's other half: the retrieval-tier gate applies to ``--reveal``.
+
+    Before this round the reveal took the key tier's authorization but not the
+    retrieve tier's, so the refusal whose whole meaning is "this value cannot be
+    kept out of the transcript" did not apply to a path that prints values. With
+    the seam used, a wedged session denies the reveal: no bytes, non-zero exit,
+    and the reason on stderr — driven through a real pty, because the refusal has
+    to hold where the pty check passes too.
+    """
+    instance = SecretBroker(
+        config_root, key_provider=lambda: master_key, idle_shutdown_s=0, notify_ack_timeout_s=0.5
+    )
+    instance.start()
+    channel = client.register_session(config_root, session_id="wedged")
+    assert channel is not None
+    # Never read from `channel`, so no ack is ever sent.
+    script = tmp_path / "reveal.py"
+    script.write_text(_reveal_script(config_root))
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, timeout=120
+        )
+    finally:
+        channel.close()
+        instance.stop(timeout=5)
+
+    assert "RC 0" not in result.stdout, f"an unscrubbable value was revealed: {result.stdout}"
+    assert SECRET_VALUE.decode() not in result.stdout, "a value was printed anyway"
+    assert "acknowledge" in result.stdout.lower(), result.stdout
 
 
 # --- failure modes (§13) ----------------------------------------------------

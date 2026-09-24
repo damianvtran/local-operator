@@ -326,10 +326,23 @@ class SessionProtocol(Protocol):
         self,
         turns: list[AgentMessage],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
         """Answer a side question against the live context WITHOUT joining it.
+
+        ``aside_instruction`` says whether ``turns`` still need the off-record
+        instruction applied. True (the default) is for a caller sending the RAW
+        question — the seams (``ServingSessionHandle``, ``TuiSessionHandle``)
+        wrap the last user turn, which is how every remote surface gets the
+        instruction. False is the caller's declaration that it supplied its OWN
+        instruction and the seam must not add a second: the TUI's ``/btw``
+        overlay wraps ``ASIDE_PROMPT`` itself, and its goal-loop judge sends
+        ``LOOP_JUDGE_PROMPT``, which is not an aside at all. IMPLEMENTATIONS
+        THAT DO NOT WRAP accept the flag and ignore it (``Session.complete_aside``
+        is the bare primitive), so a caller can pass it at every hop without
+        knowing which hop it holds.
 
         Reads what a real turn reads — the live system blocks and the whole
         message list — and writes nothing: no transcript entry, no append to
@@ -597,7 +610,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 126 public members and a POSITIVE
+    than stylistic. This protocol carries 127 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -629,7 +642,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     two members because the wire tells a renderer both the fact and the
     in-flight state, 125 once a refused gate reply needed a surface to reach the
     pane that pressed APPROVE, 126 once the operator-prompt notice gave that pane
-    the sentence naming what a signature is about to authorise), so recompute it rather
+    the sentence naming what a signature is about to authorise, 127 once a
+    paint-first open needed ``attach_behind`` to narrate the attach behind its
+    paint), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -786,6 +801,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     #: Why this viewer opened WITHOUT live state, when that was not the
     #: ordinary "no runtime was running" case. ``""`` when it was ordinary.
     degraded_reason: str
+    #: The launcher opened this viewer cold in FRONT of a live owner it binds to
+    #: behind the paint (paint-first `lop --resume` / `/resume`), so the TUI
+    #: narrates and bounds that attach. Viewer-only: an owner has no owner to
+    #: attach to.
+    attach_behind: bool
     #: Whether the saved preview this viewer opened against was partial.
     saved_preview_partial: bool
 

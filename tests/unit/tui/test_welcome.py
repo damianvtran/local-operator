@@ -718,6 +718,7 @@ class FakeSession:
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Any], None] | None = None,
     ) -> str:
