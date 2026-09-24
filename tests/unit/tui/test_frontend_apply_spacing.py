@@ -86,6 +86,11 @@ class _Recorder:
                 recorder.stopped += 1
 
         def call_later(callback: Any, *args: Any, **_kw: Any) -> bool:
+            # The arming hop is how a spaced paint reaches ``set_timer`` (it is
+            # armed on the app's own context); run it so the timer is observed.
+            if getattr(callback, "__name__", "") == "_arm_frontend_apply_timer":
+                callback(*args)
+                return True
             self.now.append((callback, args))
             return True
 
@@ -248,8 +253,14 @@ async def test_an_urgent_delta_pulls_a_spaced_paint_forward() -> None:
         app._on_frontend_update(
             viewer.push(pending_gate={"request_id": "r1", "kind": "ask", "title": "Which?"})
         )
-        assert recorder.stopped == 1, "the spaced timer must be cancelled"
-        assert len(recorder.now) == 1, "and the paint pulled onto the next turn"
+        assert len(recorder.now) == 1, "the paint is pulled onto the next turn"
+        painted: list[Any] = []
+        app._apply_frontend_state = painted.append  # type: ignore[method-assign]
+        callback, args = recorder.now[0]
+        callback(*args)
+        assert recorder.stopped == 1, "and the spaced timer is cancelled"
+        assert len(painted) == 1 and painted[0].pending_gate is not None
+        assert app._frontend_apply_scheduled is False
 
 
 @pytest.mark.asyncio

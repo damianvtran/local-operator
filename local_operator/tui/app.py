@@ -10613,6 +10613,7 @@ class OperatorApp(App[None]):
         # The old callback remains queued in Textual, but it carries the retired
         # generation and returns without clearing a newer session's scheduled bit.
         self._frontend_apply_scheduled = False
+        self._frontend_apply_spaced = False
         self._cancel_frontend_apply_timer()
 
     def _cancel_frontend_apply_timer(self) -> None:
@@ -10656,9 +10657,9 @@ class OperatorApp(App[None]):
         if getattr(self, "_frontend_apply_scheduled", False):
             # Already owed. An urgent delta behind a SPACED paint pulls it
             # forward: an approval card must not wait out a roster's spacing.
-            if urgent and getattr(self, "_frontend_apply_timer", None) is not None:
-                self._cancel_frontend_apply_timer()
-                self.call_later(self._apply_pending_frontend_state, generation)
+            if urgent and getattr(self, "_frontend_apply_spaced", False):
+                self._frontend_apply_spaced = False
+                self.call_later(self._pull_frontend_apply_forward, generation)
             return
         self._frontend_apply_scheduled = True
         done_at = getattr(self, "_frontend_painted_at", None)
@@ -10672,9 +10673,30 @@ class OperatorApp(App[None]):
         if wait <= 0.0:
             self.call_later(self._apply_pending_frontend_state, generation)
         else:
-            self._frontend_apply_timer = self.set_timer(
-                wait, partial(self._apply_pending_frontend_state, generation)
-            )
+            # ARMED ON THE APP, not here: this callback runs on whatever task
+            # delivered the delta -- the attach client's socket pump on a viewer
+            # -- and a Textual timer created outside the app's context fails at
+            # shutdown (``LookupError: active_app``). ``call_later`` is the one
+            # scheduling call that is safe from anywhere.
+            self._frontend_apply_spaced = True
+            self.call_later(self._arm_frontend_apply_timer, generation, wait)
+
+    def _arm_frontend_apply_timer(self, generation: int, wait: float) -> None:
+        if generation != getattr(self, "_frontend_session_generation", 0):
+            return
+        if not getattr(self, "_frontend_apply_spaced", False):
+            # Pulled forward by an urgent delta before this hop ran.
+            return
+        self._frontend_apply_timer = self.set_timer(
+            wait, partial(self._apply_pending_frontend_state, generation)
+        )
+
+    def _pull_frontend_apply_forward(self, generation: int) -> None:
+        if not getattr(self, "_frontend_apply_scheduled", False):
+            # The spaced paint already fired between the delta and this hop.
+            return
+        self._cancel_frontend_apply_timer()
+        self._apply_pending_frontend_state(generation)
 
     def _apply_pending_frontend_state(self, generation: int) -> None:
         if self._restart_plan is not None:
@@ -10682,7 +10704,8 @@ class OperatorApp(App[None]):
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
-        self._frontend_apply_timer = None
+        self._frontend_apply_spaced = False
+        self._cancel_frontend_apply_timer()
         session = getattr(self, "_pending_frontend_session", None)
         self._pending_frontend_session = None
         # Wall, not CPU, as #1528's runtime tick measures it: what the loop could
