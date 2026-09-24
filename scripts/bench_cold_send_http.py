@@ -150,6 +150,25 @@ def _wait_for_health(client: Any, url: str, proc: subprocess.Popen[bytes]) -> No
     raise SystemExit("server never answered /health")
 
 
+def _await_standby(config_dir: Path, timeout_s: float = 900.0) -> float | None:
+    """Seconds until the daemon's standby for ``config_dir`` listens, or None.
+
+    Outside the timed span on purpose: this arm measures a daemon whose standby
+    is warm, which is its state whenever the previous engage was more than one
+    warm (~1-5 min at load 100+) ago. A send that lands before the replacement
+    is warm pays the cold path, and that case is the ``off`` arm's number.
+    """
+    from local_operator.session.runtime import standby
+
+    started = time.monotonic()
+    sock = standby.socket_path(config_dir, create=False)
+    while time.monotonic() - started < timeout_s:
+        if sock.exists():
+            return round(time.monotonic() - started, 1)
+        time.sleep(0.1)
+    return None
+
+
 def _kill_runtime(config_dir: Path, session_id: str) -> None:
     """Kill the runtime this session spawned, so runs stay independent.
 
@@ -303,6 +322,17 @@ def main() -> int:
             "refused when they disagree (review round 2, R2-1)"
         ),
     )
+    parser.add_argument(
+        "--standby",
+        choices=("off", "on"),
+        default="off",
+        help=(
+            "off: LOP_RUNTIME_STANDBY_DISABLED=1, the fork+import cold spawn. on: the "
+            "daemon keeps its pre-imported standby (session/runtime/standby.py), and "
+            "each timed send starts only once one is listening, i.e. the steady state "
+            "of a daemon that has been up a while"
+        ),
+    )
     args = parser.parse_args()
     # Refuse BEFORE measuring (and the fields are re-derived at the end, so a
     # subtree that moved under the run is caught too): a campaign that records a
@@ -325,7 +355,10 @@ def main() -> int:
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
 
-    saved = {k: os.environ.get(k) for k in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "PYTHONPATH")}
+    saved = {
+        k: os.environ.get(k)
+        for k in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "PYTHONPATH", "LOP_RUNTIME_STANDBY_DISABLED")
+    }
     _strip_inherited()
     # The daemon below (``lop serve``) is the process whose machine-wide feed
     # raises desktop banners, and this rig drives a real send through it.
@@ -334,6 +367,8 @@ def main() -> int:
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = token
     os.environ.pop("LOCAL_OPERATOR_DESKTOP_ORIGINS", None)
+    if args.standby == "off":
+        os.environ["LOP_RUNTIME_STANDBY_DISABLED"] = "1"
     os.environ["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
 
     server_log = root / "serve.log"
@@ -361,7 +396,9 @@ def main() -> int:
                 _wait_for_health(client, base, proc)
                 print(f"  server up on {base} (pid {proc.pid})", flush=True)
                 for index in range(args.runs):
+                    waited = _await_standby(config_dir) if args.standby == "on" else None
                     row = _one_run(client, base, workspace, config_dir, index, args.mcp_variant)
+                    row["standby_wait_s"] = waited
                     rows.append(row)
                     print(
                         f"  run {index + 1}/{args.runs}: first send = "
@@ -371,6 +408,17 @@ def main() -> int:
                         flush=True,
                     )
     finally:
+        # The daemon's standby is a detached process of its own (a standby must
+        # outlive the host that warmed it), so it is ended here by exact pid: the
+        # holder of THIS root's standby lock, which no other process can hold.
+        lock = config_dir / "run" / "standby" / "lock"
+        if lock.exists():
+            holders = subprocess.run(["lsof", "-t", str(lock)], capture_output=True, text=True)
+            for pid in {int(x) for x in holders.stdout.split() if x.strip().isdigit()}:
+                try:
+                    os.kill(pid, 15)
+                except OSError:
+                    pass
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -391,8 +439,9 @@ def main() -> int:
     stats["worktree_head"] = tree["worktree_head"]
     stats["measured_tree_verified"] = tree["verified"]
     stats["label"] = args.label
+    stats["standby"] = args.standby
     print("\n--- first POST /messages wall time (ms) ---")
-    print(f"  mcp variant: {args.mcp_variant}")
+    print(f"  mcp variant: {args.mcp_variant}  standby: {args.standby}")
     print(bench_tree.format_banner(tree))
     if args.label:
         print(f"  label: {args.label}")
