@@ -843,7 +843,16 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
                 default=str,
             ).encode()
         )
-        digest.update(result.text.encode())
+        # ``surrogatepass``: this digests MODEL-VISIBLE error text, and a lone
+        # surrogate reaches it whenever a malformed path argument is echoed back
+        # (``read {"path": "notes\ud800.txt"}`` returns an error result carrying
+        # that very string). A plain ``.encode()`` raises ``UnicodeEncodeError``
+        # out of the turn on the first such result — the identical class of
+        # turn-killing raise the guard-area matcher had, on an input an agent can
+        # produce by accident. The digest only has to DISCRIMINATE repeated error
+        # batches, so the surrogate's own bytes serve it; the alternative of
+        # skipping the update would make two distinct errors collide.
+        digest.update(result.text.encode("utf-8", "surrogatepass"))
     return digest.hexdigest()
 
 
@@ -951,6 +960,19 @@ async def _cancel_when_aborted(signal: AbortSignal, task: asyncio.Task[None]) ->
     reference to the generator frame it belongs to."""
     await signal.wait()
     task.cancel()
+
+
+def _session_cwd(context: "LoopContext") -> str | None:
+    """The root the READER resolves a relative path against, or None.
+
+    One definition for both redaction sites, because it is the same value the
+    reader itself uses: ``_safe_cwd`` hands ``context.cwd`` to
+    ``_resolve_workspace_path`` in every reading tool, and this is the loop's
+    view of that same field. A site that reconstructed it from the process CWD
+    is exactly the divergence the guard-area exemption must not have (see
+    ``harness/guard_area.py``).
+    """
+    return context.tool_context.cwd if context.tool_context is not None else None
 
 
 def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]:
@@ -3185,6 +3207,7 @@ class AgentLoop:
                                     config.redact_tool_result,
                                     name,
                                     planned.args,
+                                    execution_context.cwd,
                                 )
                             }
                         )
@@ -4004,6 +4027,7 @@ class AgentLoop:
                     redact,
                     result.tool_name,
                     _call_arguments(context, result.tool_call_id),
+                    _session_cwd(context),
                 )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
@@ -4032,6 +4056,7 @@ class AgentLoop:
         redact: Callable[[str], str],
         tool_name: str,
         arguments: Mapping[str, Any] | None,
+        session_cwd: str | None = None,
     ) -> list[Content]:
         """Mask one result's text blocks OFF the event loop.
 
@@ -4064,13 +4089,22 @@ class AgentLoop:
         context also wraps the scrub of a call's own ARGUMENTS — where a
         credential typed into a different argument of a reading tool would be
         laundered past the guard by scoping the call to the guard's own file.
+
+        ``session_cwd`` is threaded in for that same exemption: a relative
+        ``path`` must be resolved against the root the READER uses, and a
+        verdict that resolved it against anything else would exempt a read of a
+        different file — the round-1 blocker on PR #1502. ``None`` is the
+        escalating reading, so a caller that has no session root cannot widen
+        the exemption by forgetting it.
         """
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
             return content  # decided ON THE LOOP: imagery/empty pays no hop
 
         def _run() -> list[str]:
-            with tool_source(tool_name, arguments), exempt_from_escalation(tool_name, arguments):
+            with tool_source(tool_name, arguments), exempt_from_escalation(
+                tool_name, arguments, session_cwd
+            ):
                 return [redact(text) for text in texts]
 
         masked = await asyncio.to_thread(_run)
