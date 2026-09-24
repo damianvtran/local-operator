@@ -310,6 +310,8 @@ async def test_the_desktop_stream_carries_a_watched_childs_trajectory(
                     "base_seq": None,
                     "total": 0,
                     "trajectory_length": 0,
+                    "watchers": 0,
+                    "joined": False,
                     "available": False,
                     "reason": "unsupported",
                 }
@@ -367,6 +369,56 @@ async def test_the_desktop_stream_carries_a_watched_childs_trajectory(
                     f"frames carried {len(rows)} rows, stamps "
                     f"{min(r['_lo_seq'] for r in rows)}-{max(r['_lo_seq'] for r in rows)} "
                     f"(seed ended at {stamps[-1]}), no replacement marker, row types {kinds}"
+                )
+
+                # -- 3b. THE SEED UNDER A RACING STREAM --------------------------
+                # The seed is read back out of the window the SAME connection is
+                # growing, and the owner computes each delta against its own last
+                # published window — so a run of rows emitted between that publish
+                # and the seed's install can arrive twice: once inside the seed and
+                # once as an append. Sixteen re-opens on a live child reproduced it
+                # (17 rows for 15 distinct stamps), and the row that must never
+                # repeat is the TEXT delta, whose reducer has no content-based
+                # dedupe. So this cell re-opens until a text delta has been inside
+                # a seed, and asserts the reply is the documented window: every
+                # stamp once, in order, with both counts agreeing.
+                deadline = asyncio.get_running_loop().time() + 30.0
+                racing: list[tuple[int, int, int]] = []
+                text_seeds = 0
+                while (len(racing) < 30 or text_seeds == 0) and (
+                    asyncio.get_running_loop().time() < deadline
+                ):
+                    again = await client.post(url)
+                    assert again.status_code == 200, again.text
+                    again_seed = again.json()["result"]
+                    again_stamps = [row["_lo_seq"] for row in again_seed["rows"]]
+                    duplicates = sorted(
+                        {stamp for stamp in again_stamps if again_stamps.count(stamp) > 1}
+                    )
+                    assert not duplicates, (len(racing), duplicates, again_seed["rows"])
+                    assert again_stamps == sorted(again_stamps), (len(racing), again_stamps)
+                    assert again_seed["total"] == len(again_seed["rows"]), again_seed
+                    assert again_seed["trajectory_length"] == again_seed["total"], again_seed
+                    # The reference the section-3 open still holds: this POST
+                    # joined a live window rather than opening one, and says so.
+                    assert again_seed["watchers"] == 2, again_seed
+                    assert again_seed["joined"] is True, again_seed
+                    if any(row.get("type") == "message_update" for row in again_seed["rows"]):
+                        text_seeds += 1
+                    racing.append((len(again_seed["rows"]), again_stamps[0], again_stamps[-1]))
+                    assert (await client.delete(url)).status_code == 200
+                    await asyncio.sleep(0.02)
+                assert text_seeds > 0, (
+                    "no seed carried a text delta, so the prose case was not measured",
+                    racing,
+                )
+                print(
+                    f"racing seed: {len(racing)} re-opens on a live child, {text_seeds} of them "
+                    f"carrying a message_update TEXT delta inside the window; every reply held "
+                    f"each stamp once, in order, with total==trajectory_length; windows "
+                    f"{min(rows for rows, _, _ in racing)}-{max(rows for rows, _, _ in racing)} "
+                    f"rows, base stamps {min(b for _, b, _ in racing)}-"
+                    f"{max(b for _, b, _ in racing)}"
                 )
 
                 # -- 4. THE REFCOUNT: one release, another window still reading ---

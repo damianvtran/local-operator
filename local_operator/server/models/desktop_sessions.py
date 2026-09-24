@@ -337,19 +337,32 @@ class ChildTrajectoryWindow(BaseModel):
     watermark this seed established. That is what makes the seed/append
     interleave safe without the reader having to care which arrived first.
 
-    ``total`` and ``trajectory_length`` are both published because they answer
-    different questions and can legitimately disagree: ``trajectory_length`` is
-    how many events the RUNTIME retains for this job (the roster row's own
-    count, which is the only honest answer for a window this reply did not carry
-    in full), while ``total`` is the length of the window THIS reply carries.
-    They are equal after a successful load; a reader that sees them differ is
-    holding a partial seed.
+    ``total`` and ``trajectory_length`` BOTH count the window this reply carries,
+    and they are equal by construction: after a successful load the reply IS the
+    whole retained window (the pager loops until the owner's ``total`` is
+    reached), so "what this reply carries" and "what the runtime retains for the
+    job" are the same window — and the roster row's own ``trajectory_length``,
+    which is the follower's COPY of the runtime's number, is not reused for it.
+    That copy drifts in both directions and the reply must not: it lags the window
+    this call just read, and it is inflated by the duplicated rows the seed
+    deduplicates (measured: a reply publishing it reported a count matching
+    neither its rows nor the runtime's, in a window that was OVER-counted rather
+    than partial). A client that wants the runtime's own figure reads the roster
+    row it already has; the reply is about the rows it hands over.
+
+    ``watchers`` and ``joined`` say what this call did to the session's shared
+    count, because every POST increments and one DELETE releases one: a client
+    that re-seeds without unmounting (a rotation, a double mount) accumulates a
+    reference it cannot otherwise observe. ``joined`` is the boolean form of
+    ``watchers > 1``. An unavailable reply carries ``0`` and ``False``.
     """
 
     rows: list[dict[str, Any]] = Field(default_factory=list)
     base_seq: int | None = None
     total: int = 0
     trajectory_length: int = 0
+    watchers: int = 0
+    joined: bool = False
     available: bool
     reason: ChildTrajectoryUnavailable | None = None
 

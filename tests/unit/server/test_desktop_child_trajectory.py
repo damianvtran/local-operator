@@ -14,6 +14,7 @@ obvious wrong implementation:
   are distinct, because a reader must retry on one and stop on the other.
 """
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -98,10 +99,17 @@ class TrajectoryOwner:
     the subscribing, the paging and the seeding, which is the code under test.
     """
 
-    def __init__(self, rows: list[dict[str, Any]] | None = None, *, fail_watch: bool = False):
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        *,
+        fail_watch: bool = False,
+        fail_fetch: BaseException | None = None,
+    ):
         self.connected = True
         self.rows = rows if rows is not None else []
         self.fail_watch = fail_watch
+        self.fail_fetch = fail_fetch
         self.watched: list[str] = []
         self.unwatched: list[str] = []
         self.fetches = 0
@@ -122,6 +130,11 @@ class TrajectoryOwner:
 
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
         self.fetches += 1
+        if self.fail_fetch is not None:
+            # The fetch fails AFTER ``watch_job`` has landed, which is the shape
+            # a dropped socket and a cancelled request both have: the owner is
+            # already relaying rows this bridge will never pass on.
+            raise self.fail_fetch
         return {"rows": list(self.rows), "total": len(self.rows), "base_seq": None}
 
 
@@ -136,12 +149,24 @@ def a_task_job(session_id: str | None = CHILD_ID) -> JobState:
     return JobState(id=JOB_ID, type="task", status="running", session_id=session_id)
 
 
-def an_update(appends: dict[str, list[dict[str, Any]]], replacements: list[str]) -> FrontendUpdate:
-    """One jobs delta carrying the trajectory pair, as the runtime publishes it."""
+def an_update(
+    appends: dict[str, list[dict[str, Any]]],
+    replacements: list[str],
+    jobs_rows: list[dict[str, Any]] | None = None,
+) -> FrontendUpdate:
+    """One jobs delta carrying the trajectory pair, as the runtime publishes it.
+
+    ``jobs_rows`` is the roster arm of the SAME delta: appends only ride a frame
+    that also carries the changed job rows, which is what makes the follower
+    extend one window rather than two.
+    """
+    changes: dict[str, Any] = {"streaming": False}
+    if jobs_rows is not None:
+        changes["jobs"] = jobs_rows
     return FrontendUpdate(
         epoch="e1",
         sequence=1,
-        changes={"streaming": False},
+        changes=changes,
         job_trajectory_appends=appends,
         job_trajectory_replacements=replacements,
     )
@@ -321,6 +346,8 @@ async def test_a_failed_load_does_not_leave_a_count_behind(tmp_path):
             "base_seq": None,
             "total": 0,
             "trajectory_length": 0,
+            "watchers": 0,
+            "joined": False,
             "available": False,
             "reason": "no-owner",
         }
@@ -374,6 +401,306 @@ async def test_the_seed_is_the_window_the_stream_will_extend(tmp_path):
         # reached a client as a list of pairs would be worse than useless.
         assert all(isinstance(row, dict) for row in seed["rows"])
         assert seed["rows"][0][TRAJECTORY_SEQ_KEY] == 7
+
+
+# -- round 1: the seed boundary, the connection binding, and the count ----------
+
+
+@pytest.mark.asyncio
+async def test_the_seed_keeps_each_stamp_once_at_its_first_position(tmp_path):
+    """R1-1: the window the reply READS can hold a row twice; the reply does not.
+
+    The seed is read back out of the follower's canonical window, and that window
+    is grown by the same attach connection that relays the deltas: ``watch_job``
+    lands before the fetch, and the owner computes each delta against ITS OWN
+    last published window, so a run of rows emitted in that overlap arrives twice
+    — once inside the seed and once as an append. The measured shape (16 live
+    opens, every open after the first: 17 rows for 15 distinct stamps,
+    ``[(12, turn_start), (13, message_start), (12, turn_start), (13,
+    message_start)]``) is reproduced here exactly, because a client that folds
+    the rows as delivered paints the repeated ones twice and a text delta has no
+    content-based dedupe to save it.
+
+    FIRST OCCURRENCE WINS is the whole rule: it keeps the window's own order and
+    its stamps verbatim and drops only the later copy, so the reply is the window
+    the docs describe rather than a re-ordered or re-stamped one.
+    """
+    parent_dir, child_dir = a_parent_and_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    window = [
+        {"type": "message_update", "delta": f"t{n}", TRAJECTORY_SEQ_KEY: n} for n in range(15)
+    ]
+    window[12] = {"type": "turn_start", TRAJECTORY_SEQ_KEY: 12}
+    window[13] = {"type": "message_start", "message": {"id": "m1"}, TRAJECTORY_SEQ_KEY: 13}
+    # ...and the two rows the racing delta re-delivered, exactly as measured.
+    window.extend([dict(window[12]), dict(window[13])])
+    duplicated = a_task_job().model_copy(update={"trajectory": window, "trajectory_length": 15})
+
+    pool = DesktopSessions(tmp_path)
+    async with pool.session(PARENT_ID, read=True) as bridge:
+        install_roster(bridge, jobs=[duplicated])
+        seed = bridge.trajectory_window(JOB_ID)
+        assert seed is not None
+        stamps = [row[TRAJECTORY_SEQ_KEY] for row in seed["rows"]]
+        assert stamps == list(range(15)), stamps
+        assert stamps == sorted(stamps), stamps
+        assert seed["base_seq"] == 0, seed
+        assert seed["total"] == len(seed["rows"]) == 15, seed
+        # The counts AGREE again, which is the invariant the duplicated rows
+        # broke (measured: total 17 against trajectory_length 15).
+        assert seed["trajectory_length"] == seed["total"], seed
+        # The kept rows are the FIRST occurrences, not a re-typed set: the two
+        # rows the measurement caught racing are the ones a reader would paint
+        # twice, and they are still the ones at stamps 12 and 13.
+        assert seed["rows"][12]["type"] == "turn_start", seed["rows"][12]
+        assert seed["rows"][13]["type"] == "message_start", seed["rows"][13]
+
+
+def test_a_stampless_row_survives_the_seed_dedupe(tmp_path):
+    """Identity is what makes the rule possible, so an unstamped row is KEPT.
+
+    A restored roster row, a fixture and a row from an older release all reach a
+    reader without ``_lo_seq``, and the documented fallback for them is position.
+    A dedupe that dropped or reordered them would break a reader that never sees
+    a stamp at all — and a dedupe keyed on position rather than identity would
+    collapse a legitimate repeat of the same TEXT.
+    """
+    from local_operator.server.utils.desktop_sessions import _first_occurrence_window
+
+    rows = [
+        {"type": "message_update", "delta": "the the"},
+        {"type": "message_update", "delta": "same text", TRAJECTORY_SEQ_KEY: 4},
+        {"type": "message_update", "delta": "same text", TRAJECTORY_SEQ_KEY: 5},
+        {"type": "message_end", TRAJECTORY_SEQ_KEY: 4},
+        {"type": "notice"},
+    ]
+    assert _first_occurrence_window(rows) == [
+        rows[0],
+        rows[1],
+        rows[2],
+        rows[4],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_delta_that_overtook_the_seed_does_not_reach_the_client_twice(tmp_path):
+    """R1-1's mechanism, driven through the REAL store rather than a fixture.
+
+    The seed installs the fetched page INTO canonical state, and the next delta
+    the attach connection relays is computed against the OWNER's last published
+    window — not against what this follower happens to hold — so a delta covering
+    rows the seed already carried extends the local window with a SECOND copy of
+    them. That is the duplication the review measured on a live child (17 rows for
+    15 distinct stamps), reproduced here without relying on a race: the store is
+    left holding the overlap on purpose (the TUI reads the same shared functions
+    and keys rows by stamp), and the assertion is on the reader's contract — the
+    seed this route hands over.
+    """
+    from local_operator.session.frontend_state import job_trajectory_wire_value
+
+    parent_dir, child_dir = a_parent_and_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    fetched = [
+        {"type": "message_update", "delta": f"t{n}", TRAJECTORY_SEQ_KEY: n} for n in range(15)
+    ]
+    pool = DesktopSessions(tmp_path)
+    async with pool.session(PARENT_ID, read=True) as bridge:
+        bridge.remote._client = TrajectoryOwner(fetched)  # type: ignore[assignment]
+        install_roster(bridge, jobs=[a_task_job()])
+        seed = await bridge.load_child_trajectory(JOB_ID)
+        assert seed["total"] == 15 and seed["base_seq"] == 0, seed
+
+        facade = bridge.remote
+        assert facade is not None
+        store = facade._frontend_store
+        assert store is not None
+        store.apply_update(
+            an_update(
+                {JOB_ID: [dict(fetched[12]), dict(fetched[13]), dict(fetched[14])]},
+                [],
+                jobs_rows=[{"id": JOB_ID, "type": "task", "status": "running"}],
+            )
+        )
+
+        # The mechanism is real: canonical state now holds the rows twice...
+        stored = next(job for job in bridge.roster_jobs() if job.id == JOB_ID)
+        raw = job_trajectory_wire_value(stored.trajectory)
+        assert len(raw) == 18, [row.get(TRAJECTORY_SEQ_KEY) for row in raw]
+        assert [row[TRAJECTORY_SEQ_KEY] for row in raw][-3:] == [12, 13, 14]
+
+        # ...and the window this route hands over is the documented one: every
+        # stamp once, in order, with the counts agreeing.
+        grown = bridge.trajectory_window(JOB_ID)
+        assert grown is not None
+        stamps = [row[TRAJECTORY_SEQ_KEY] for row in grown["rows"]]
+        assert stamps == list(range(15)), stamps
+        assert grown["total"] == 15, grown
+        assert grown["trajectory_length"] == 15, grown
+
+
+@pytest.mark.asyncio
+async def test_the_reply_counts_its_own_window_in_both_directions(tmp_path):
+    """The two counts are about the REPLY, so a roster row cannot skew either one.
+
+    The roster row's `trajectory_length` is the follower's copy of the runtime's
+    number, and it drifts in both directions: it LAGS the window a call just read,
+    and it is INFLATED by the duplicated rows :func:`_first_occurrence_window`
+    drops. A reply that republished it therefore reported a count matching neither
+    its rows nor the runtime's — the measurement this round answered, where the
+    difference looked like a partial seed and was the opposite — so both numbers
+    come from the rows in hand.
+    """
+    parent_dir, child_dir = a_parent_and_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+    async with pool.session(PARENT_ID, read=True) as bridge:
+        rows = [{"type": "message_end", TRAJECTORY_SEQ_KEY: n} for n in range(4)]
+        lagging = a_task_job().model_copy(update={"trajectory": rows, "trajectory_length": 2})
+        install_roster(bridge, jobs=[lagging])
+        seed = bridge.trajectory_window(JOB_ID)
+        assert seed is not None and seed["total"] == 4
+        assert seed["trajectory_length"] == 4, seed
+
+        inflated = a_task_job().model_copy(update={"trajectory": rows, "trajectory_length": 90})
+        install_roster(bridge, jobs=[inflated])
+        grown = bridge.trajectory_window(JOB_ID)
+        assert grown is not None and grown["total"] == 4
+        assert grown["trajectory_length"] == 4, grown
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_owner_connection_reopens_instead_of_answering_stale(tmp_path):
+    """R1-2: the count belongs to the connection it was taken on.
+
+    A reconnect rebinds the facade IN PLACE — same store, same ``AttachedSession``,
+    a NEW client — and ``AttachedSession`` keeps no record of the jobs it has
+    watched, so nothing tells this bridge its subscription went with the old
+    connection. Left unchecked the count short-circuits ``watch_trajectory``, and
+    the re-open answers ``available: true`` over a window that has stopped
+    growing: the failure the count's own docstring names as this feature's most
+    likely regression, reached here by the reconnect path.
+
+    Measured before the fix (the reviewer's probe): after the owner connection was
+    replaced, a re-open answered ``available=True`` with one stale row while the
+    NEW owner was asked to watch nothing and the fetch count was 0.
+    """
+    parent_dir, child_dir = a_parent_and_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+    async with pool.session(PARENT_ID, read=True) as bridge:
+        first = TrajectoryOwner([{"type": "message_end", TRAJECTORY_SEQ_KEY: 1}])
+        bridge.remote._client = first  # type: ignore[assignment]
+        install_roster(bridge, jobs=[a_task_job()])
+        assert (await bridge.load_child_trajectory(JOB_ID))["available"] is True
+        assert first.watched == [JOB_ID]
+
+        # The rebind: a fresh ``AttachClient`` object, the same facade and store.
+        second = TrajectoryOwner([{"type": "message_end", TRAJECTORY_SEQ_KEY: 9}])
+        bridge.remote._client = second  # type: ignore[assignment]
+        reopen = await bridge.load_child_trajectory(JOB_ID)
+        assert second.watched == [JOB_ID], "the NEW connection was never asked to watch"
+        assert second.fetches >= 1, "the re-open answered from a window it did not re-read"
+        assert [row[TRAJECTORY_SEQ_KEY] for row in reopen["rows"]] == [9], reopen
+        # Treated as zero, not added to: the old connection's reference went with
+        # the old connection.
+        assert reopen["watchers"] == 1 and reopen["joined"] is False, reopen
+        assert bridge.watched_trajectory_jobs == frozenset({JOB_ID})
+
+        # ...and a release after a rebind WITH A READER REOPENED is the new
+        # connection's own reference to give back: the count was re-taken on it,
+        # so the unwatch reaches the owner that armed it.
+        assert await bridge.unwatch_trajectory(JOB_ID) == 0
+        assert second.unwatched == [JOB_ID], second.unwatched
+
+        # A count left over from the OLD connection is a different case: it is
+        # dropped rather than decremented, because the owner it was taken on is
+        # gone and the connection in its place never armed it.
+        stale_owner = TrajectoryOwner([{"type": "message_end", TRAJECTORY_SEQ_KEY: 11}])
+        bridge.remote._client = stale_owner  # type: ignore[assignment]
+        assert (await bridge.load_child_trajectory(JOB_ID))["available"] is True
+        after_rebind = TrajectoryOwner([{"type": "message_end", TRAJECTORY_SEQ_KEY: 12}])
+        bridge.remote._client = after_rebind  # type: ignore[assignment]
+        assert await bridge.unwatch_trajectory(JOB_ID) == 0
+        assert after_rebind.unwatched == [], after_rebind.unwatched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "propagates"),
+    [
+        (ConnectionError("the owner socket dropped"), False),
+        (asyncio.CancelledError(), True),
+    ],
+    ids=["dropped-socket", "cancelled-request"],
+)
+async def test_a_failed_load_hands_an_armed_watch_back(tmp_path, failure, propagates):
+    """R1-3: the count going back is not enough if the watch stayed armed.
+
+    ``load_job_trajectory`` subscribes BEFORE it pages, so a failure after that
+    point leaves the owner relaying rows this bridge then drops (the count is
+    what passes them). The unwind is symmetric now: the count goes back AND the
+    owner-side subscription is released, best effort, without masking the failure
+    the caller is handling — including a cancellation, where the release may be
+    cut short by the same cancellation and must not replace the original error.
+
+    The two shapes are asserted separately because they differ at the caller: a
+    dropped socket is SWALLOWED by ``load_job_trajectory`` and answered as
+    ``no-owner`` (the reader retries on its pulse), while a cancellation is the
+    caller's own unwinding and must propagate.
+    """
+    parent_dir, child_dir = a_parent_and_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+    async with pool.session(PARENT_ID, read=True) as bridge:
+        owner = TrajectoryOwner([], fail_fetch=failure)
+        bridge.remote._client = owner  # type: ignore[assignment]
+        install_roster(bridge, jobs=[a_task_job()])
+        if propagates:
+            with pytest.raises(type(failure)):
+                await bridge.load_child_trajectory(JOB_ID)
+        else:
+            answer = await bridge.load_child_trajectory(JOB_ID)
+            assert answer["available"] is False, answer
+            assert answer["reason"] == "no-owner", answer
+            assert (answer["watchers"], answer["joined"]) == (0, False), answer
+        assert owner.watched == [JOB_ID], "the subscribe never landed, so nothing was armed"
+        assert owner.unwatched == [JOB_ID], "the armed watch outlived the failed load"
+        assert bridge.watched_trajectory_jobs == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_post_states_the_reference_it_leaves_behind(tmp_path):
+    """R1-5: every POST increments and one DELETE releases one, so the POST says so.
+
+    A re-seed without an unmount (a rotation, a double mount) is legitimate, and
+    it is also the shape that leaks a reference nobody can see: the owner keeps
+    relaying, the filter keeps passing rows, and the eventual DELETE answers
+    ``watchers: 1`` with no window left to read them. ``watchers`` and ``joined``
+    are what make an accumulation observable at the call that caused it.
+    """
+    parent_dir, child_dir = a_parent_and_child(tmp_path)
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+    async with pool.session(PARENT_ID, read=True) as bridge:
+        owner = TrajectoryOwner([{"type": "message_end", TRAJECTORY_SEQ_KEY: 2}])
+        bridge.remote._client = owner  # type: ignore[assignment]
+        install_roster(bridge, jobs=[a_task_job()])
+        opened = await bridge.load_child_trajectory(JOB_ID)
+        assert (opened["watchers"], opened["joined"]) == (1, False), opened
+        again = await bridge.load_child_trajectory(JOB_ID)
+        assert (again["watchers"], again["joined"]) == (2, True), again
+        assert await bridge.unwatch_trajectory(JOB_ID) == 1
+        assert await bridge.unwatch_trajectory(JOB_ID) == 0
+        # An unavailable reply states the count too, so a client never has to
+        # infer it from the absence of a number: a job whose type records no
+        # trajectory answers with the pair at zero.
+        install_roster(
+            bridge,
+            jobs=[a_task_job(), JobState(id=OTHER_JOB_ID, type="bash", status="running")],
+        )
+        unsupported = await bridge.load_child_trajectory(OTHER_JOB_ID)
+        assert unsupported["available"] is False and unsupported["reason"] == "unsupported"
+        assert (unsupported["watchers"], unsupported["joined"]) == (0, False), unsupported
 
 
 # -- containment and the absences ---------------------------------------------
@@ -506,6 +833,8 @@ async def test_the_route_pair_is_wired_and_the_capability_is_advertised(desktop_
                 "base_seq": 3,
                 "total": 1,
                 "trajectory_length": 1,
+                "watchers": 1,
+                "joined": False,
                 "available": True,
                 "reason": None,
             }
