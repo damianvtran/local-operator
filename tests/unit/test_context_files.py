@@ -83,6 +83,28 @@ def test_nested_repo_under_home_loads_the_folder_above_it_but_not_home(
     assert [f.read_text() for f in files] == ["domain\n", "repo\n"]
 
 
+def test_nested_repo_walk_never_climbs_above_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Home is set inside this test's own directory so a file can sit in
+    # home's parent without writing into pytest's shared basetemp, where
+    # sibling tests' walks would find it.
+    (tmp_path / "AGENTS.md").write_text("above home\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    (home / "AGENTS.md").write_text("home\n")
+    domain = home / "domain"
+    repo = _make_repo(domain)
+    (domain / "AGENTS.md").write_text("domain\n")
+    (repo / "AGENTS.md").write_text("repo\n")
+    files = discover_context_files(repo)
+    # Stopping below home is what keeps the new walk inside home; skipping
+    # home and carrying on would pick up the file above it.
+    assert [f.read_text() for f in files] == ["domain\n", "repo\n"]
+
+
 def test_repo_at_home_still_includes_homes_own_guidance(tmp_path: Path) -> None:
     home = Path.home()
     (home / ".git").mkdir()
@@ -169,6 +191,38 @@ def test_symlinked_home_still_stops_a_no_git_walk_at_home(
     assert [f.read_text() for f in files] == ["home\n"]
 
 
+def _repo_with_guided_parent(tmp_path: Path) -> tuple[Path, Path]:
+    parent = tmp_path / "shared"
+    repo = parent / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (parent / "AGENTS.md").write_text("parent of a repo, not under any real home\n")
+    (repo / "AGENTS.md").write_text("repo\n")
+    return parent, repo
+
+
+def test_home_at_filesystem_root_does_not_make_every_repo_nested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, repo = _repo_with_guided_parent(tmp_path)
+    monkeypatch.setenv("HOME", "/")
+    monkeypatch.setenv("USERPROFILE", "/")
+
+    assert discover_context_files(repo) == [repo / "AGENTS.md"]
+
+
+def test_symlink_loop_home_does_not_drop_the_repos_own_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, repo = _repo_with_guided_parent(tmp_path)
+    loop_a, loop_b = tmp_path / "loop-a", tmp_path / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    monkeypatch.setenv("HOME", str(loop_a))
+    monkeypatch.setenv("USERPROFILE", str(loop_a))
+
+    assert discover_context_files(repo) == [repo / "AGENTS.md"]
+
+
 @pytest.mark.parametrize(
     ("root", "home", "expected"),
     [
@@ -187,6 +241,10 @@ def test_symlinked_home_still_stops_a_no_git_walk_at_home(
         (PurePosixPath("/home"), PurePosixPath("/home/ben"), False),
         (PurePosixPath("/home/ben"), PurePosixPath("/home/ben"), False),
         (PurePosixPath("/home/ben/dom/.worktrees/x"), PurePosixPath("/home/ben"), False),
+        (PurePosixPath("/home/ben/dom/.repo"), PurePosixPath("/home/ben"), False),
+        (PurePosixPath("/srv/dom/repo"), PurePosixPath("/"), False),
+        (PureWindowsPath(r"C:\dom\repo"), PureWindowsPath("C:\\"), False),
+        (PureWindowsPath(r"\\srv\share\dom\repo"), PureWindowsPath(r"\\srv\share\\"), False),
         (None, PurePosixPath("/home/ben"), False),
     ],
     ids=[
@@ -201,6 +259,10 @@ def test_symlinked_home_still_stops_a_no_git_walk_at_home(
         "posix-root-above-home",
         "posix-root-is-home",
         "posix-hidden-component",
+        "posix-dot-named-root",
+        "posix-home-is-filesystem-root",
+        "windows-home-is-drive-root",
+        "windows-home-is-share-root",
         "no-git-root",
     ],
 )
