@@ -66,6 +66,7 @@ _update.check_latest = lambda *a, **k: _NotBehind()  # type: ignore[assignment]
 
 from local_operator.session.attached import AttachedSession  # noqa: E402
 from local_operator.session.frontend_state import (  # noqa: E402
+    FrontendModelSpec,
     FrontendSessionState,
     FrontendUpdate,
 )
@@ -126,11 +127,9 @@ async def main(out: str, size: tuple[int, int], expanded: bool) -> None:
             session_id=SESSION,
             epoch="shot",
             cwd="/work/project",
-            selected_model={
-                "provider": "anthropic",
-                "model_id": "claude-sonnet-4-5",
-                "context_window": 200_000,
-            },
+            selected_model=FrontendModelSpec(
+                provider="anthropic", model_id="claude-sonnet-4-5", context_window=200_000
+            ),
         )
     )
 

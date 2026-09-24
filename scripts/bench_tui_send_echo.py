@@ -437,7 +437,7 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--repo", default=str(REPO), help="checkout whose code to measure")
     parser.add_argument("--lanes", type=int, default=12)
     parser.add_argument("--roster", type=int, default=240)
