@@ -30,8 +30,10 @@ failure names the guard that dropped the card rather than a theory about one.
 * **C — gate arrives while backgrounded.** It mounts on return. See
   :func:`test_a_gate_raised_while_the_session_is_backgrounded_mounts_on_return`.
 * **D — a source whose reconnect can never complete.** Its ``display_only``
-  latch never clears, and its card must still come back. See
-  :func:`test_a_source_that_can_never_bind_loses_its_gate_card`.
+  latch never clears, and it is offered NO card — the band's stopped-session
+  verdict is the honest surface, and an answer given on the card could not
+  reach an owner (UX round 1, U1). See
+  :func:`test_a_source_that_can_never_bind_is_offered_no_gate_card`.
 * **E — the answered-key latch against a second question.** The second question
   of one ask still resurfaces. See
   :func:`test_a_second_question_in_the_same_ask_resurfaces_across_a_switch`.
@@ -77,7 +79,9 @@ from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
+from local_operator.tui.widgets.approval import ApprovalBlock
 from local_operator.tui.widgets.session_sidebar import SessionSidebar
+from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript
 
 # The instrumentation IS the sibling file's. Imported rather than copied so the
@@ -663,12 +667,12 @@ async def test_a_gate_raised_while_the_session_is_backgrounded_mounts_on_return(
         await rig.dispose()
 
 
-# --- D: A SOURCE WHOSE RECONNECT CAN NEVER COMPLETE --- THE REPRODUCTION -----
+# --- D: A SOURCE WHOSE RECONNECT CAN NEVER COMPLETE ---------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkeypatch) -> None:
-    """A session whose ``display_only`` latch can never clear still gets its card.
+async def test_a_source_that_can_never_bind_is_offered_no_gate_card(tmp_path, monkeypatch) -> None:
+    """An un-bindable source is offered NO card; the band is the honest surface.
 
     THE CHAIN this pins, every link checked by the readout this test prints:
 
@@ -684,24 +688,37 @@ async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkey
        builds (``AttachedSession.connect`` with no ``viewer=True``), and
        ``can_ever_bind``'s own docstring names this as the reachable False.
     3. The user clicks back onto A. ``_prepare_sidebar_session`` latches
-       ``display_only`` (``or session.is_cold``), and nothing on this path can
-       clear it: the connect armed after the paint raises at the bind
-       postcondition and takes the ``terminal_reason`` arm, which sets no retry.
-    4. The card must come back anyway, on the first return and on every later
-       one. The commit's ``resume_viewer_gates()`` and the settled-navigation
-       re-arm both run for a ``display_only`` source, so ``_gates_detached``
-       clears and the ladder mounts the card. Gating either of them on
-       ``display_only`` drops the card here for good, with G4 refusing every
-       attempt and nothing on screen mentioning the pending question.
+       ``display_only`` (``or session.is_cold``). The commit's
+       ``resume_viewer_gates()`` and the settled-navigation re-arm BOTH still
+       run — ``test_a_display_only_commit_rearms_its_gate_bridge`` and the
+       sibling file's ``test_the_navigation_settled_rearm_heals_a_display_only_
+       source`` defend that, and both must keep running: a ``display_only``
+       source whose viewer CAN still bind is the shape this PR exists to heal.
+       What the ladder does with this one is different, and that is the
+       regression this case now guards: ``can_ever_bind`` is False, so
+       ``_maybe_start_gate`` drops at G6 and no bridge starts at all.
+    4. The card is therefore ABSENT on the first return and on every later one,
+       and the band carries the stopped-session verdict — the surface whose own
+       next step (``/resume <id>``) is runnable from the state it names.
 
-    WHAT THIS DOES AND DOES NOT CLAIM. The card loss is real and permanent
-    without the re-arm. The BLOCKED TURN behind it is not fully modelled: a
-    stopped owner's turn dies with its process, so in production the gate
-    behind the card goes too. Here the owner is in-process and its gate
-    coroutine survives, which is a property of the rig. What generalises is
-    the LATCH: any source that reaches ``display_only`` with a reconnect that
-    cannot complete needs a route back that does not depend on the latch, and
-    the un-bindable stop is the shape reachable end to end today.
+    WHY WITHHELD RATHER THAN ANSWERABLE. This test used to assert the opposite,
+    and the reversal is the fix rather than a change of mind (UX review round 1,
+    U1). The card is mounted from the viewer's STALE ``pending_gate``, so an
+    answer given on it is posted to an owner that is gone: measured, an ask
+    un-mounted silently with no receipt and the gate still unresolved, and an
+    approval wrote a FALSE ``✓ allowed`` receipt for a decision that reached
+    nobody. The old docstring's own note carried the reason already — "a stopped
+    owner's turn dies with its process, so in production the gate behind the card
+    goes too" — which is exactly the state in which the card must not be offered.
+    What generalises from the rig is the 1:1 of card and gate: on this source
+    there is no gate left for a card to answer.
+
+    WHAT THIS DOES AND DOES NOT CLAIM. The un-bindable stop is the reachable
+    shape of ``can_ever_bind`` False today, and this rig's in-process owner
+    keeps the gate coroutine alive past the stop, which a real stop would not.
+    Both are stated: the card's ABSENCE here is decided by the viewer's
+    predicate and its latched ``pending_gate``, neither of which depends on the
+    rig's surviving coroutine.
     """
     rig = await _rig(tmp_path / "config", monkeypatch, "alpha", "beta")
     # `viewer=False`: the boot contract `lop` itself builds, and the one on which
@@ -745,20 +762,24 @@ async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkey
                         + _state(app, alpha, source, probe)
                     )
 
-                    # Step 3: the user clicks back onto A.
+                    # Step 3: the user clicks back onto A. The commit's
+                    # `resume_viewer_gates()` and the settled-navigation re-arm
+                    # both run (they are not gated on `display_only`), and the
+                    # ladder then refuses to start a bridge because the viewer
+                    # can never bind.
                     marker = probe.marker
                     await _click(app, pilot, "alpha", rounds=20)
-                    resurfaced = await _pump_until(
+                    offered = await _pump_until(
                         pilot, lambda: app._ask_screen is not None, tries=_RESURFACE_TURNS
                     )
 
-                    # Step 4/5: and it is PERMANENT, not transient. Two further
-                    # ordinary round trips, each given a full settle, so a pass
-                    # cannot mean "it was going to arrive eventually".
+                    # Step 4: PERMANENT, not transient. Two further ordinary
+                    # round trips, each given a full settle, so a pass cannot
+                    # mean "it was going to arrive eventually".
                     for _ in range(2):
                         await _click(app, pilot, "beta")
                         await _click(app, pilot, "alpha", rounds=20)
-                        resurfaced = resurfaced or await _pump_until(
+                        offered = offered or await _pump_until(
                             pilot, lambda: app._ask_screen is not None, tries=200
                         )
 
@@ -767,6 +788,11 @@ async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkey
                         + _state(app, alpha, source, probe)
                         + f"\n  gate_task.done() = {gate_task.done()!r}"
                         + f"\n  alpha.pending_gate is not None = {alpha.pending_gate is not None!r}"
+                        + f"\n  alpha.can_ever_bind = {alpha.can_ever_bind!r}"
+                        + (
+                            "\n  band = "
+                            f"{app._status._connection if app._status is not None else None!r}"
+                        )
                     )
                     _dump(diagnosis)
 
@@ -780,17 +806,33 @@ async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkey
                         "display_only never latched, so the guard this case exists for "
                         "was not exercised" + diagnosis
                     )
-
-                    assert resurfaced, (
-                        "REPRODUCED (D): the user returns to a session that still has an "
-                        "unanswered gate on the owner's books, and the card is GONE — "
-                        "permanently, across three separate returns. display_only is "
-                        "latched True with no reconnect that can ever clear it "
-                        "(can_ever_bind is False), so the commit skips "
-                        "resume_viewer_gates() at app.py:7537 AND the second re-arm at "
-                        "app.py:6645 is skipped for the same reason. _gates_detached "
-                        "stays True and guard G4 drops every attempt. Nothing on "
-                        "screen mentions the pending question." + diagnosis
+                    # THE ROUTE WAS TAKEN. `_gates_detached` is cleared by the
+                    # commit's `resume_viewer_gates()`, so a False here proves
+                    # the refusal is the LADDER's (G6) and not the latch's (G4):
+                    # a rig whose latch was still set would drop at G4 and this
+                    # test would be measuring the old bug rather than the fix.
+                    assert not alpha._gates_detached, (
+                        "the commit did not even clear `_gates_detached` for this "
+                        "display_only source, so the ladder was never reached and "
+                        "this test is not measuring the G6 drop" + diagnosis
+                    )
+                    assert not offered, (
+                        "OFFERED (D): a session whose owner can never take an answer "
+                        "was offered an answerable card, on the first return or a "
+                        "later one. Pressing a key on it discards the answer in "
+                        "silence for an ask and writes a FALSE `✓ allowed` receipt "
+                        "for an approval (UX round 1, U1); the card's own gate was "
+                        "mounted from the viewer's stale `pending_gate`, and no "
+                        "owner on the other end can take it. `can_ever_bind` is "
+                        "False for the life of the process, so guard G6 drops every "
+                        "attempt — measured by the readout above." + diagnosis
+                    )
+                    # THE BAND IS THE HONEST SURFACE, and it is the only one left:
+                    # it has to name the state and its runnable next step.
+                    band = app._status._connection if app._status is not None else None
+                    assert band is not None and "was stopped" in band and "/resume alpha" in band, (
+                        f"the band is {band!r} rather than the stopped-session "
+                        "verdict this source's own state names" + diagnosis
                     )
                 finally:
                     gate_task.cancel()
@@ -925,6 +967,144 @@ async def test_a_second_question_in_the_same_ask_resurfaces_across_a_switch(
                         "after a switch, while the first one did. Check whether "
                         "_gate_answered_key (G3) matched an identity it should not "
                         "have." + diagnosis
+                    )
+                finally:
+                    gate_task.cancel()
+                    await asyncio.gather(gate_task, return_exceptions=True)
+    finally:
+        await rig.dispose()
+
+
+# --- F: AN ANSWER THAT NEVER REACHED THE OWNER -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    """A settled card whose answer did not land leaves no receipt, and says so once.
+
+    THE SHAPE, and it is the one the card cannot know from the answer alone. An
+    approval card is up and answerable; the operator presses ``y``; the POST that
+    carries the answer to the owner fails. The card resolves on the KEYPRESS and
+    the transcript receipt is written in the same breath (``request_tool_approval``
+    appends ``ApprovalBlock.receipt`` in its ``finally``), while
+    ``AttachedSession._run_approval`` posts the answer one await LATER — so by the
+    time the failure is known there is a ``✓ allowed write Save one record`` row
+    on screen for a decision that reached nobody. Nothing downstream can revise a
+    transcript row, so the correction has to reach back to the block:
+    ``TranscriptView.remove_block``, the seam ``/clear`` and the boot hint already
+    use.
+
+    TWO HALVES, BOTH ASSERTED, because either alone is a lie: the false record is
+    GONE, and the operator is TOLD — once — in the register the composer already
+    refuses in (``_unavailable_notice``).
+
+    WHAT IS FAKED, AND WHAT IS NOT. The runtime, the owner, its gate, the card,
+    the keystroke, the swallow arms and the notice are all real. Only the
+    transport's answer is, because a socket dying exactly between two awaits
+    cannot be scheduled from a test: it is raised from ``client.approval_answer``,
+    which is precisely the boundary the product itself treats as fallible —
+    ``ConnectionError`` out of it is swallowed two frames up by design.
+
+    WHAT THIS DOES NOT PIN. Whether a card is offered AGAIN after the notice. The
+    gate is still unanswered, so the ladder may start a second bridge — correct
+    while the viewer can still bind (the question is open, and the operator should
+    be able to answer it once the session is back), and refused one level down by
+    the ladder's G6 on ``can_ever_bind`` for a session whose owner is gone
+    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). This rig fakes
+    only the transport, so its owner still looks perfectly bindable and a second
+    card is expected here. The receipt, the sentence and the unanswered gate are
+    what must hold either way, and those are what this asserts.
+    """
+    rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
+    app = _app(rig, "alpha")
+    try:
+        with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
+            async with app.run_test(size=(110, 32)) as pilot:
+                assert await _pump_until(
+                    pilot, lambda: app._session is not None, tries=300
+                ), "the app never adopted a session; the rig never reached its premise"
+                alpha, source = _attached(app._session), app._interaction
+                app._set_approve_all(False)
+                probe = _install_probe(monkeypatch, alpha)
+                client = alpha._client
+                assert client is not None, "the premise is a bound facade with a live owner"
+
+                gate_task = asyncio.create_task(
+                    rig.handles["alpha"]._approval_gate("write", "Save one record")
+                )
+                #: The posts the app attempted. One entry is how this test knows the
+                #: keypress was TAKEN and a delivery attempted — the fact the whole case
+                #: turns on, and one the card's own presence cannot tell us (see the
+                #: docstring: whether a card is offered again afterwards depends on
+                #: whether the viewer can still bind, which this rig leaves alone).
+                posted: list[Any] = []
+                try:
+                    # Mounted AND FOCUSED: the premise is a card the operator can
+                    # answer, and a `y` delivered while the dock card does not hold
+                    # focus goes to the composer instead and answers nothing.
+                    # Asserted rather than assumed because the two are separate
+                    # events in the pump.
+                    assert await _pump_until(
+                        pilot,
+                        lambda: app._approval is not None and app.focused is app._approval,
+                        tries=300,
+                    ), "the approval card never mounted with focus; the premise is unmet"
+
+                    async def dead_socket(*args: Any, **_kwargs: Any) -> Any:
+                        posted.append(args[0] if args else None)
+                        raise ConnectionError("the owner's socket is gone")
+
+                    monkeypatch.setattr(client, "approval_answer", dead_socket)
+
+                    await pilot.press("y")
+                    # The post happens one await after the settle, and the notice is
+                    # scheduled with `call_later`, so the correction lands on a later
+                    # turn than the keypress.
+                    await _pump(pilot, 40)
+
+                    blocks = app._transcript_view().blocks()
+                    receipts = [b for b in blocks if isinstance(b, ApprovalBlock)]
+                    notices = [b.text() for b in blocks if isinstance(b, NoticeBlock) and b.text()]
+                    undelivered = [text for text in notices if "Answer not delivered" in text]
+                    diagnosis = (
+                        _state(app, alpha, source, probe)
+                        + f"\n  transcript notices = {notices!r}"
+                        + f"\n  approval receipts on the transcript = {len(receipts)!r}"
+                        + f"\n  posts attempted = {len(posted)!r}"
+                        + f"\n  owner gate done = {gate_task.done()!r}"
+                        + f"\n  app.focused = {app.focused!r}"
+                    )
+                    _dump(diagnosis)
+
+                    # The premise: the key was taken, so a delivery WAS attempted.
+                    # Without it this case could pass by the card never having been
+                    # answerable at all.
+                    assert len(posted) == 1, (
+                        "the answer was never posted, so there was no undelivered reply "
+                        "to report and this test proves nothing" + diagnosis
+                    )
+                    assert not gate_task.done(), (
+                        "the owner's gate resolved, so the answer somehow arrived and "
+                        "there was nothing undelivered to report" + diagnosis
+                    )
+                    assert not receipts, (
+                        "a `✓ allowed` receipt survived an answer that never reached the "
+                        "owner: the transcript claims a call was authorised that nobody "
+                        'received, and it is the strongest "it worked" affordance the '
+                        "row has" + diagnosis
+                    )
+                    assert len(undelivered) == 1, (
+                        "an undelivered answer must be said exactly once, in the "
+                        "unavailable-until-connected register" + diagnosis
+                    )
+                    assert "unavailable until connected" in undelivered[0] or (
+                        "was stopped" in undelivered[0]
+                    ), (
+                        "the notice did not use the register the composer already refuses "
+                        "in, so the operator has no sentence telling them what to do next"
+                        + diagnosis
                     )
                 finally:
                     gate_task.cancel()

@@ -119,7 +119,7 @@ def _attached(session: SessionProtocol | None) -> AttachedSession:
 
 
 #: The ladder in ``AttachedSession._maybe_start_gate``, in evaluation order,
-#: labelled with the same G1-G5 names as its debug lines. Each check answers
+#: labelled with the same G1-G6 names as its debug lines. Each check answers
 #: "does THIS guard return early?". Replayed read-only just before each real
 #: call, so the readout names a guard rather than a theory about one. It
 #: carries no line numbers: they move with every edit to the file.
@@ -138,6 +138,8 @@ def _first_guard_that_drops(session: AttachedSession) -> str:
     )
     if session._gates_detached and not background:
         return "G4 gates-detached"
+    if not session.can_ever_bind:
+        return "G6 viewer-can-never-bind"
     if pending.kind == "approval" and (session._approval_handler is not None or background):
         return ""
     if pending.kind == "ask" and session._ask_handler is not None:
