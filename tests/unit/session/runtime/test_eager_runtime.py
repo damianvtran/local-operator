@@ -35,7 +35,9 @@ DEADLOCK_GUARD_S = 30.0
 
 #: The stable half of each notice sentence — the part that names the FACT rather
 #: than the advice, so the copy can be reworded without un-pinning the behaviour.
-FAIL_START_FRAGMENT = "no runtime yet"
+# "session", not "runtime" (UX round 1, U5 on #1474): the user's word for what
+# they opened. The fragments still tell the two ceilings apart.
+FAIL_START_FRAGMENT = "may still be starting"
 SILENT_OWNER_FRAGMENT = "not answering yet"
 
 
