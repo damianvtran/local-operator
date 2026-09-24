@@ -47,6 +47,20 @@ the parts that are dangerous are written once:
   a bounded wait for the label to be released, bounded bootstrap retries, and
   a check that the job is registered before anything claims success.
 
+- **A current plist is not a current BUILD, and its repair is a ``kickstart``.**
+  Under the generation layout every daemon's plist names the stable shim, so it is
+  byte-identical across builds and a content comparison cannot see a daemon that is
+  still serving a generation the pointer has left — measured on the operator's
+  machine 2026-09-24, where two of the four daemons were two and three generations
+  behind while all four plists compared equal. What can see it is the running
+  process's own argv (:func:`local_operator.update.stale_generation_of_process`),
+  and the repair is :func:`restart_if_build_moved`: a ``kickstart -k``, which is
+  correct HERE precisely because the plist did NOT change — launchd restarts the
+  job from its in-memory definition, and that definition names the shim, which
+  resolves ``current`` afresh at every exec. The rewrite-then-reload rule above is
+  about a plist that CHANGED, and the two must not be confused: this is the
+  narrower repair of the two (it never unregisters the label).
+
 WHY THE REPAIR MUST RUN IN A NEW PROCESS
 ----------------------------------------
 ``lop update`` upgrading the wheel does not change the code its own process has
@@ -75,7 +89,13 @@ logger = logging.getLogger(__name__)
 _PLIST_DIR = ("Library", "LaunchAgents")
 
 PlistRefreshKind = Literal[
-    "unsupported", "not-installed", "not-addressable", "current", "repaired", "failed"
+    "unsupported",
+    "not-installed",
+    "not-addressable",
+    "current",
+    "repaired",
+    "restarted",
+    "failed",
 ]
 
 ReloadOutcome = Literal["reloaded", "not-addressable", "failed"]
@@ -185,6 +205,11 @@ class PlistRefresh:
     repair (Linux, where the unit is re-read on every start) and on a machine
     with no ``launchctl``; it is deliberately silent, because a platform that
     cannot have this problem must not read as a failure on every upgrade.
+
+    ``detail`` carries the specifics whichever rung of the ladder produced them:
+    the generation a ``restarted`` daemon was still running, launchd's own stderr
+    on a ``failed`` rewrite. ``summary`` and ``warning`` are the two readers, and
+    each uses the one that belongs to it.
     """
 
     name: str
@@ -198,9 +223,20 @@ class PlistRefresh:
         or already current is the normal state of a machine and printing a line
         for it would turn every upgrade into a list of non-events — the same
         reason the mobile refresh stays silent when it skips.
+
+        THE ``restarted`` LINE IS A SECOND REPAIR and says the one thing the
+        ``repaired`` line cannot: no unit was rewritten. The reader's question is
+        "why did my tunnel bounce on an upgrade that changed nothing?", and the
+        answer is the generation the daemon was still running — which is what this
+        line carries.
         """
         if self.kind == "repaired":
             return f"{self.name} daemon: refreshed a stale LaunchAgent and restarted it"
+        if self.kind == "restarted":
+            return (
+                f"{self.name} daemon: restarted onto the install `current` points at "
+                f"(it was still running {self.detail})"
+            )
         return ""
 
     def warning(self) -> str:
@@ -254,6 +290,30 @@ def reload_failure(name: str, path: Path, recovery: str, error: str) -> PlistRef
         detail=(
             f"rewrote {path} but launchctl could not load it: {error} "
             f"— the daemon is now STOPPED; run `{recovery}` to reinstall it"
+        ),
+    )
+
+
+def build_move_failure(name: str, recovery: str, stale: Path) -> PlistRefresh:
+    """Outcome for a daemon whose BUILD had moved and could not be restarted.
+
+    THE SECOND FAILURE SHAPE, and it deliberately does not borrow
+    :func:`reload_failure`'s sentence. That one is about a plist this repair just
+    REWROTE and a ``bootout`` that has already landed, so it may say the daemon is
+    STOPPED. Here nothing was written — the plist was already current — and a
+    refused ``kickstart`` does not tell us whether the job is still running the old
+    build or has stopped, so the honest line is the fact both cases share: it was
+    running an install that is not ``current``, and a command exists that fixes it.
+
+    The reader of this line is deciding whether to touch anything, so it names that
+    command — same four strings, same reason, as :func:`reload_failure`.
+    """
+    return PlistRefresh(
+        name=name,
+        kind="failed",
+        detail=(
+            f"it was running an older install ({stale.name}) and launchctl would not "
+            f"restart it — run `{recovery}` to bring it onto this build"
         ),
     )
 
@@ -342,6 +402,58 @@ def job_domain() -> str:
         ) from exc
 
 
+def _pid_from_print(printed: str) -> int | None:
+    """The pid in a ``launchctl print`` body, or ``None``.
+
+    ``pid = 47545`` is printed only while a process is alive behind the label (the
+    same reading ``wakes.install._parse_supervisor_state`` makes); a job that has
+    exited prints ``last exit code`` instead and no pid line at all, which is the
+    distinction this module needs and the one a bare ``state = running`` cannot
+    give. Anchored per line and tolerant of the leading whitespace launchd's tree
+    format uses.
+    """
+    match = re.search(r"^\s*pid = (\d+)", printed, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def job_pid(*, label: str, path: Path, run: Callable[..., object]) -> int | None:
+    """The pid launchd is running for ``label``, or ``None``.
+
+    :func:`job_running`'s reading, KEPT rather than collapsed to a boolean: the
+    build probe needs the pid to ask the running process what it loaded (see
+    :func:`restart_if_build_moved`), and a second ``launchctl print`` regexp
+    somewhere else is exactly the kind of duplicate this module exists to avoid.
+    ``job_running`` is now the ``is not None`` of this.
+
+    ``launchctl print`` and not a health probe, because only launchd knows which
+    process it is running: a leftover FOREGROUND daemon on the same port answers
+    every probe while the supervised one is dead (the trap
+    ``mobile.install._our_daemon_listening`` was written for). A label that is not
+    registered at all answers non-zero, which is also "no pid".
+
+    TAKES THE PLIST PATH AND APPLIES :func:`is_own_plist`, exactly as
+    :func:`reload_job` does and for the same reason: the LABEL is a fixed module
+    constant in two of the three installers while the plist path moves with
+    ``$HOME``, so asking about ``gui/<uid>/<label>`` from a redirected home is a
+    question about the OPERATOR's job, not this run's. Round 1 (R-1) reproduced the
+    inverse of the incident ``AGENTS.md`` records: a sandboxed install that found a
+    loaded-but-stopped job issued ``kickstart -k gui/501/<label>`` against the
+    operator's live daemon. A caller that forgot the guard cannot reach launchd
+    through this function.
+
+    ``None`` on a refusal, which sends callers down the path they took before this
+    existed. Never raises: an unanswerable supervisor has no pid.
+    """
+    if not is_own_plist(path, label):
+        return None
+    result, _ = _call(run, "print", f"{job_domain()}/{label}")
+    if result is None:
+        return None
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    return _pid_from_print(_text(getattr(result, "stdout", "")))
+
+
 def job_running(*, label: str, path: Path, run: Callable[..., object]) -> bool:
     """Whether launchd holds a LIVE PID for ``label`` right now.
 
@@ -351,39 +463,16 @@ def job_running(*, label: str, path: Path, run: Callable[..., object]) -> bool:
     providing. Getting this wrong is not cosmetic — skipping a needed reload
     leaves the daemon down.
 
-    ``launchctl print`` and not a health probe, because only launchd knows
-    which process it is running: a leftover FOREGROUND daemon on the same port
-    answers every probe while the supervised one is dead (the trap
-    ``mobile.install._our_daemon_listening`` was written for). A label that is
-    not registered at all answers non-zero, which is also "not running" — and
-    the caller then reloads, which is what registers it.
-
-    TAKES THE PLIST PATH AND APPLIES :func:`is_own_plist`, exactly as
-    :func:`reload_job` does and for the same reason: the LABEL is a fixed
-    module constant in two of the three installers while the plist path moves
-    with ``$HOME``, so asking about ``gui/<uid>/<label>`` from a redirected home
-    is a question about the OPERATOR's job, not this run's. Round 1 (R-1)
-    reproduced the inverse of the incident ``AGENTS.md`` records: a sandboxed
-    install that found a loaded-but-stopped job issued
-    ``kickstart -k gui/501/<label>`` against the operator's live daemon. A
-    caller that forgot the guard cannot reach launchd through this function.
+    :func:`job_pid` is the reading; this is its boolean, kept because the question
+    "is it running" is what most callers ask and because the two must never drift
+    apart about what "running" means.
 
     False on a refusal, which sends the caller to :func:`reload_job` — which
     refuses too, and says so with its own sentence, so a sandboxed run declines
     loudly rather than silently. Never raises: an unanswerable supervisor
     returns False, and False means the caller does the work it did before.
     """
-    if not is_own_plist(path, label):
-        return False
-    result, _ = _call(run, "print", f"{job_domain()}/{label}")
-    if result is None:
-        return False
-    if getattr(result, "returncode", 1) != 0:
-        return False
-    # `pid = 47545` is printed only while a process is alive behind the label
-    # (the same reading `wakes.install._parse_supervisor_state` makes).
-    live_pid = re.search(r"^\s*pid = \d+", _text(getattr(result, "stdout", "")), re.MULTILINE)
-    return live_pid is not None
+    return job_pid(label=label, path=path, run=run) is not None
 
 
 def _registration(target: str, run: Callable[..., object]) -> tuple[bool, str]:
@@ -903,3 +992,107 @@ def rewrite_if_stale(*, name: str, path: Path, rendered: dict[str, object]) -> P
         logger.debug("could not rewrite %s", path, exc_info=True)
         return PlistRefresh(name=name, kind="failed", detail=f"could not rewrite {path}: {exc}")
     return PlistRefresh(name=name, kind="repaired")
+
+
+def restart_if_build_moved(
+    *,
+    name: str,
+    label: str,
+    path: Path,
+    recovery: str,
+    run: Callable[..., object],
+) -> PlistRefresh:
+    """THE SECOND STALENESS QUESTION: is the RUNNING daemon's build current?
+
+    WHY THIS EXISTS, measured rather than argued. A supervised unit names the
+    STABLE shim (``~/.local/share/lop/bin/python3``), and the shim resolves
+    ``current`` ONCE, at exec (the shim is :data:`local_operator.update._DAEMON_SHIM`,
+    written verbatim). So under the generation layout the rendered plist is
+    byte-identical across builds — ``Program`` is the shim, and
+    ``ProgramArguments`` carries a role label and a module name and nothing else —
+    which means ``rewrite_if_stale`` answers "current" for every generation at once,
+    and a daemon that is already running stays on the generation it started with
+    while the pointer moves a dozen times. Live on the operator's machine
+    2026-09-24: the four supervised daemons' own launchd pids, with ``current``
+    naming ``20260924T103058Z-509c7450dbf6`` (each line's module argv is elided for
+    width; the home is elided to ``~``):
+
+    .. code-block:: text
+
+        59435   tunnel            …/generations/20260924T103058Z-509c7450dbf6/…
+        60913   mobile            …/generations/20260924T103058Z-509c7450dbf6/…
+        64865   wakes supervisor  …/generations/20260922T082114Z-aba13b8246fb/…
+        67449   browser bridge    …/generations/20260923T114635Z-bfe5f78fbcf4/…
+
+    …two daemons on the current generation and two two-and-three generations
+    behind, with FOUR BYTE-IDENTICAL PLISTS. The consequence is why this was found
+    at all: a released fix (PR #1509, v0.62.22) could not reach the tunnel connector
+    until an explicit ``lop tunnel restart`` moved pid 1206 to pid 59435 — and the
+    generation pid 1206 had been serving was by then PRUNED, so that connector had
+    been importing from a deleted tree for three days.
+
+    WHAT IT ASKS. The pid launchd holds (:func:`job_pid`), then that process's own
+    argv (:func:`local_operator.update.stale_generation_of_process`), and it acts
+    only when the generation named there is provably not ``current``. The argv is the
+    READING and not a proxy for it: ``ps -o args`` names the generation the process
+    was exec'd from, on the same axis the shim resolves, so the answer is the build
+    in memory rather than an inference from timestamps.
+
+    WHAT IT DOES NOT ACT ON — three shapes, all silent, all decisions rather than
+    omissions:
+
+    * **No generation layout** (no pointer, or a pointer this process cannot read).
+      The question does not exist on a machine without the layout — a pip/pipx
+      install, or a host before its first migration — so this declines BEFORE
+      touching ``launchctl`` at all. Asked first because it is one ``readlink``, and
+      because a machine that cannot have this problem should not pay for the repair.
+    * **No live pid.** A stopped daemon has no build to compare, and the repair for a
+      stopped-but-loaded job is the installers' own ``kickstart`` path
+      (:func:`kickstart`), not this one.
+    * **A live pid whose build is current, or whose build cannot be established.**
+      Two different facts with the same consequence, and the direction is chosen: a
+      missed reload leaves a daemon where it is, while a reload reasoned from a
+      failed probe interrupts a working one — for the tunnel connector, seconds of
+      remote access.
+
+    WHY A ``kickstart`` AND NOT :func:`reload_job`. The rule the module docstring
+    states — ``bootout`` + ``bootstrap`` after a REWRITE, because a kickstart
+    restarts from launchd's in-memory definition and would keep the old argv — is
+    about a plist that CHANGED. Here nothing changed: the plist on disk is exactly
+    what this build would render, and the in-memory definition is precisely what
+    wants re-executing, because it names the shim, which resolves ``current``
+    afresh. (A daemon started through the branded image directly, with no shim,
+    shows its role label in argv instead of a generation and is therefore never
+    touched here — correct: on such a machine the plist path is the one that
+    repairs it.) A kickstart is also the NARROWER repair of the two — it never
+    unregisters the label, so the job is not briefly absent for anything watching
+    the same launchd domain.
+
+    NO LOOP IS POSSIBLE, which is worth being explicit about because this acts on a
+    RUNNING process: at most ONE kick per daemon per invocation. A daemon that fails
+    to come up has no live pid when the next upgrade asks, so nothing is kicked
+    again; a refused kickstart is reported (:func:`build_move_failure`) and never
+    retried here; and the one shape that could ask again — a daemon that comes back
+    on the old build anyway, i.e. a shim that did not resolve ``current`` — asks
+    once per upgrade, which is a report, not a cycle.
+
+    The addressability guard has already run inside :func:`job_pid`, so a ``False``
+    from :func:`kickstart` here is launchd refusing the restart rather than this run
+    having no business touching the job.
+    """
+    # Function-local, this module's habit for the one edge it has into `update`
+    # (see `procname.supervised_image`): `update` imports `launchd` at module level,
+    # and this module is on the installers' startup path while `update` is not.
+    from local_operator import update
+
+    if update.current_generation() is None:
+        return PlistRefresh(name=name, kind="current")
+    pid = job_pid(label=label, path=path, run=run)
+    if pid is None:
+        return PlistRefresh(name=name, kind="current")
+    stale = update.stale_generation_of_process(pid)
+    if stale is None:
+        return PlistRefresh(name=name, kind="current")
+    if kickstart(label=label, path=path, run=run):
+        return PlistRefresh(name=name, kind="restarted", detail=stale.name)
+    return build_move_failure(name=name, recovery=recovery, stale=stale)

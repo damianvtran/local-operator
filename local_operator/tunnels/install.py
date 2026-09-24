@@ -298,6 +298,18 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         if not launchd.config_lives_in_real_home(base):
             return launchd.PlistRefresh(name=name, kind="not-addressable")
         outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(base))
+        if outcome.kind == "current":
+            # A CURRENT PLIST IS NOT A CURRENT BUILD: this unit names the stable
+            # shim, so its content is byte-identical across generations while a
+            # daemon started from an older one keeps serving it. See
+            # :func:`launchd.restart_if_build_moved`.
+            return launchd.restart_if_build_moved(
+                name=name,
+                label=LABEL,
+                path=path,
+                recovery="lop tunnel install",
+                run=_launchctl,
+            )
         if outcome.kind != "repaired":
             return outcome
         # bootout + bootstrap through the shared helper, NOT kickstart -k: a

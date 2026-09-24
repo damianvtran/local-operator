@@ -257,6 +257,18 @@ Five things, all small relative to what exists:
    published 0.56.11, while the pointer they would load on a restart says 0.56.9
    (§1.6). The same is true on a systemd host through the sibling unit renderer
    (§2's note on supervision).
+
+   **Landed 2026-09-24 (PR #1516), for the supervised daemons.** The refresh now asks
+   the second question after the plist comparison: the pid launchd holds for the
+   label (``launchd.job_pid``), then the generation that process's own argv names
+   (``update.stale_generation_of_process``, which reads ``ps -o args=`` — the shim
+   execs the generation's own image, so argv carries the generation). A daemon whose
+   build provably moved is restarted with a ``kickstart -k``; every unreadable answer
+   leaves it where it is, and a machine without the layout is not probed at all. §5.4
+   carries the measurement. Items 2 and 4 above are untouched by that change, and the
+   same question is still unasked on a systemd host — there the unit names
+   ``procname.supervised_image()``, so there is no stale interpreter path for a
+   rewrite to fix and nothing in argv to compare.
 4. **The mobile daemon is bounced unconditionally** (`refresh_mobile_after_upgrade`,
    `update.py:3495`) — a fix for a much older gap, and the one place today where
    an upgrade interrupts a live daemon rather than deferring to it.
@@ -705,6 +717,25 @@ why §1.5 items 3 and 4 are on the PR plan rather than left implicit: a correct
 serving the generation each started on for an unbounded time is not "properly
 updated" in the operator's sense, however clean the pointer flip was — **and
 §1.6 shows that is the state of this machine today**, not a risk.
+
+**Landed 2026-09-24 (PR #1516): the refresh asks a second question.** After the
+plist comparison comes the RUNNING daemon: the pid launchd holds for the label
+(`launchd.job_pid`) and the generation that process's own argv names
+(`update.stale_generation_of_process`, reading `ps -o args=` — the shim `exec`s
+the generation's own image, so argv carries the generation and not a proxy for
+it). A daemon whose build provably moved is restarted with a `kickstart -k`, not
+a `bootout`/`bootstrap` pair: nothing about the unit changed, so the in-memory
+definition is exactly what wants re-executing, and it names the shim. Measured on
+the operator's machine that day — four byte-identical plists, two daemons on the
+current generation and two two-and-three generations behind — this moved the
+wakes supervisor and the browser bridge and left the tunnel and the mobile daemon
+alone. Every unreadable answer (no `ps`, a dead pid, an argv naming no generation,
+no readable pointer) leaves the daemon where it is, and a machine without the
+layout is not probed at all.
+
+What this closes, concretely: a released fix now reaches a running daemon without
+the hand-run `lop tunnel restart` the v0.62.22 release note had to carry — the step
+whose absence let the tunnel connector serve a pruned generation for three days.
 
 ## 6. The clickable action
 
