@@ -604,9 +604,9 @@ SECTIONS: tuple[Section, ...] = (
         "network",
         "Mesh network",
         Scope.NEW_LAUNCH,
-        "Bounds for `lop network`: audit retention, and how many unauthenticated "
-        "connections the relay will hold at once. All take effect when the relay "
-        "restarts.",
+        "Bounds for `lop network`: audit retention, how many unauthenticated "
+        "connections the relay will hold at once, session-copy cadence and how long "
+        "a borrowed login lives. All take effect when the relay restarts.",
     ),
     Section(
         "retired",
@@ -3160,6 +3160,54 @@ SETTINGS: tuple[Setting, ...] = (
             "Unauthenticated connections this relay will hold at once. A pairing "
             "holds one for the seconds until the code is typed; anything past the "
             "cap is dropped at accept, with no reply frame."
+        ),
+    ),
+    # -- network.sync / network.credentials (mesh build plan P0) ---------------
+    # Declared by P0 so the sync and credentials slices never edit this file (the
+    # plan's conflict rule). Defaults mirror the READERS' module constants —
+    # ``network/sync.py`` SYNC_DEBOUNCE_S / SYNC_TICK_S and
+    # ``network/credentials/__init__.py`` GRANT_TTL_S — which ``_consumer_defaults()``
+    # in tests/unit/test_settings_io.py pins. Relay-restart scope like the rest of
+    # the section: the watcher and the broker read them when the relay starts.
+    Setting(
+        key="network.sync.debounce_s",
+        path=("network", "sync", "debounce_s"),
+        section="network",
+        label="Sync quiet period (s)",
+        kind=Kind.FLOAT,
+        default=30.0,
+        minimum=1.0,
+        maximum=3600.0,
+        help=(
+            "Seconds a session's transcript must stay unchanged before its owner "
+            "tells devices holding a copy to pull. A session going idle pushes at "
+            "once, so its final message is never held back by this."
+        ),
+    ),
+    Setting(
+        key="network.sync.tick_s",
+        path=("network", "sync", "tick_s"),
+        section="network",
+        label="Sync check interval (s)",
+        kind=Kind.FLOAT,
+        default=15.0,
+        minimum=1.0,
+        maximum=3600.0,
+        help="How often the owner checks copied sessions for changes: one file stat each.",
+    ),
+    Setting(
+        key="network.credentials.grant_ttl_s",
+        path=("network", "credentials", "grant_ttl_s"),
+        section="network",
+        label="Borrowed login lifetime (s)",
+        kind=Kind.FLOAT,
+        default=900.0,
+        minimum=60.0,
+        maximum=3600.0,
+        help=(
+            "The longest a device may use a login it borrowed from its owner before "
+            "asking again, and so how long a revoked or offline owner's login keeps "
+            "working elsewhere. Never longer than the token itself."
         ),
     ),
 )

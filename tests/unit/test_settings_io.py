@@ -69,7 +69,12 @@ def _consumer_defaults() -> dict[str, object]:
     # ``NetworkSettings.from_config`` resolves an absent key against
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
+    from local_operator.network.credentials import GRANT_TTL_S
     from local_operator.network.relay import DEFAULT_MAX_HANDSHAKES
+
+    # The mesh sync cadence, from the module whose watcher reads it
+    # (``SyncSettings.from_config`` falls back to exactly these).
+    from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -170,6 +175,9 @@ def _consumer_defaults() -> dict[str, object]:
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
+        "network.sync.debounce_s": SYNC_DEBOUNCE_S,
+        "network.sync.tick_s": SYNC_TICK_S,
+        "network.credentials.grant_ttl_s": GRANT_TTL_S,
         # The reader's own fallback, which is also what every unrecognised
         # shape resolves to — so the page cannot advertise a default the
         # delegating model's tier picker disagrees with.

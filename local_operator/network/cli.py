@@ -181,6 +181,18 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     member_rm.add_argument("network")
     member_rm.add_argument("device")
     member_rm.add_argument("--json", action="store_true")
+    # GRANT/REVOKE edit what a peer may do ON THIS DEVICE (build plan §0 finding 3):
+    # the default `drive` role cannot move, delete or borrow a login, and the only
+    # other way to widen it is a re-pair that burns the device id.
+    for verb, words in (
+        ("grant", "Allow a peer more on this device (move, delete, broker_credential, ...)"),
+        ("revoke", "Take capabilities back from a peer on this device"),
+    ):
+        caps = member_actions.add_parser(verb, help=words)
+        caps.add_argument("network")
+        caps.add_argument("device")
+        caps.add_argument("capabilities", nargs="+", metavar="capability")
+        caps.add_argument("--json", action="store_true")
 
     peers = actions.add_parser("peers", help="Reachable peers right now")
     peers.add_argument("--json", action="store_true")
@@ -794,6 +806,73 @@ def _cmd_rm(args: argparse.Namespace) -> int:
         {"ok": True, "network_id": record.network_id, "removed": removed},
         [f"forgot {record.name} on this device ({len(removed)} file(s) removed)"],
     )
+
+
+def _cmd_member_caps(args: argparse.Namespace) -> int:
+    """``member grant|revoke <net> <dev> <cap...>``: edit a peer's LOCAL row.
+
+    The relay does it when running (it owns the record's writers); otherwise the
+    same primitive runs here under the same lock. Either way the change is local
+    to this device, needs no rotation and no broadcast, and is audited.
+    """
+    verb = args.member_command
+    caps = [str(item) for item in args.capabilities]
+    # ``Any`` because the two spellings carry a differently-named keyword list; a
+    # narrower annotation makes pyright read ``**fields`` as a ``timeout`` conflict.
+    fields: dict[str, Any] = {"grant": caps} if verb == "grant" else {"revoke": caps}
+    from local_operator.network import store
+    from local_operator.network.relay import (
+        CapabilityChange,
+        capability_change_event,
+        capability_change_lines,
+        set_member_capabilities,
+    )
+
+    record = _resolve(args.network)
+    live = _relay_call(
+        "net_member_caps",
+        network=record.network_id,
+        device_id=args.device,
+        allow_no_answer=True,
+        **fields,
+    )
+    if live is not None:
+        change = CapabilityChange(
+            device_id=str(live.get("device_id") or args.device),
+            name=_member_name(record, args.device),
+            added=tuple(live.get("added") or ()),
+            removed=tuple(live.get("removed") or ()),
+            capabilities=tuple(live.get("capabilities") or ()),
+        )
+        applied = "relay"
+    else:
+        from local_operator.network.audit import AuditLog
+
+        with store.mutate(record.network_id) as fresh:
+            change = set_member_capabilities(fresh, device_id=args.device, **fields)
+            if change.changed:
+                store.save(fresh)
+                log = AuditLog()
+                log.record(capability_change_event(fresh, change))
+                log.close()
+        applied = "locally (relay not running)"
+    payload = {
+        "ok": True,
+        "network_id": record.network_id,
+        "network": record.name,
+        "device_id": change.device_id,
+        "added": list(change.added),
+        "removed": list(change.removed),
+        "capabilities": list(change.capabilities),
+        "changed": change.changed,
+        "applied": applied,
+    }
+    return _emit(args, payload, capability_change_lines(change, network_name=record.name))
+
+
+def _member_name(record: Any, device_id: str) -> str:
+    member = record.member(device_id)
+    return str(member.name) if member is not None else ""
 
 
 def _cmd_member_rm(args: argparse.Namespace) -> int:
@@ -2721,8 +2800,15 @@ def _guard_member_subcommand(args: argparse.Namespace) -> int:
     A group whose default action is ``rm`` would make a typo revoke a member, so the
     verb is required and the message says which one.
     """
-    if getattr(args, "member_command", None) != "rm":
-        print("usage: lop network member rm <network> <device>", file=sys.stderr)
+    verb = getattr(args, "member_command", None)
+    if verb in ("grant", "revoke"):
+        return _cmd_member_caps(args)
+    if verb != "rm":
+        print(
+            "usage: lop network member rm <network> <device>\n"
+            "       lop network member grant|revoke <network> <device> <capability>...",
+            file=sys.stderr,
+        )
         return 2
     return _cmd_member_rm(args)
 
