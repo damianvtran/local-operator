@@ -1649,7 +1649,10 @@ def test_pin_route_refuses_a_live_session_with_no_folder_yet(tmp_path, monkeypat
 
     refused = client.post("/api/sessions/ghost-1/pin", json={"pinned": True})
     assert refused.status_code == 409, refused.text
-    assert "not saved yet" in refused.json()["error"]
+    # The actionable half only: both screens wrap this as
+    # "Could not save the pin: <body>", and a body that repeated the failure read
+    # as two clauses doing one job (design round 5, D13).
+    assert refused.json()["error"] == "no saved messages yet — pin it after you send one"
     assert not (cfg / PINS_FILE).exists(), "a refused pin must not reach the store"
     assert not queue.empty(), "the refusal must repaint the list over the optimistic star"
     # Unpinning is harmless and stays answerable.
