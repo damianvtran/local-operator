@@ -96,12 +96,15 @@ default rollback journal, so a reader blocks a writer's `COMMIT`, and under the
 contention of many concurrent sessions a publish gives up after its bounded
 budget (~11 s) and is DEFERRED rather than lost — the outcome is already durable
 in the transcript journal. The owning session then republishes it in-process on a
-bounded ladder (four rungs, ~86 s), and a viewer already polling drains the same
-latch on its next tick, so the mark normally appears within about a second of the
-store clearing. Nothing here needs a restart or a `/resume`, and no test loop has
-to watch for it; if the whole ladder is exhausted the mark waits for that
-session's next boot, which the log says once. Subagent rows are never polled for
-a completion mark at all (see above).
+bounded ladder (four rungs, ~86 s), and a viewer already polling fires the parked
+rung early on its next tick — the tick itself never writes — so the mark normally
+appears within about a second of the store clearing, at the ladder's own attempt
+count rather than one store write per tick. Nothing here needs a restart or a
+`/resume`, and no test loop has to watch for it; if the whole ladder is exhausted
+the mark waits for that session's next boot, which the log says once. A newer
+completion is never outranked by an older republished one: this session
+serialises the journal-read-then-insert against its own turn-end publication.
+Subagent rows are never polled for a completion mark at all (see above).
 
 ### The footer count
 

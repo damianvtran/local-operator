@@ -2020,17 +2020,38 @@ class Session:
         #: the distinction that decides whether dispose has to publish one.
         self._attention_run_settled: bool = True
         self._attention_restored = False
+        #: SERIALISES THIS SESSION'S OWN PUBLICATION CRITICAL SECTIONS. Held by both
+        #: :meth:`_publish_attention_outcome` (journal append + store insert) and
+        #: :meth:`_republish_journalled_outcome` (journal read + store insert), and
+        #: it is load-bearing for ORDERING rather than for mutual exclusion of the
+        #: file: `completions.sequence` is AUTOINCREMENT, i.e. INSERT order, so a
+        #: rung that read the journal, then lost the store to a NEWER same-session
+        #: turn inside its `await`, would insert the OLDER completion second and
+        #: leave it as MAX(sequence) -- the sidebar mark, the Active ordering and
+        #: the newest-row pointer all moving to the older result, with the newer
+        #: one never unread again once a client acks the highest sequence. The
+        #: journal re-read bounds WHICH marker a rung picks, never what lands after
+        #: it; this lock is what makes the pair atomic against this process's own
+        #: turn-end publish. Cross-process ordering is unchanged (it never was
+        #: coordinated), and the cost is bounded: a turn's `finally` publish can
+        #: wait behind a rung already inside the store's own retry budget.
+        self._attention_publish_lock = asyncio.Lock()
         #: Set while a DEFERRED attention publication is still only in the
         #: transcript journal, so THIS process retries it instead of leaving the
         #: completion to a boot that an idle session may never have. Armed only by
         #: a real ``AttentionWriteDeferred`` (see
         #: :meth:`_schedule_attention_republish`), which is what keeps it from
         #: becoming a warning per tick, and cleared by a newer outcome, by a
-        #: successful republish, or when the ladder is exhausted.
+        #: successful republish, by a non-contention store failure, or when the
+        #: ladder is exhausted.
         self._attention_republish_due: bool = False
         #: The running republish ladder, so a second deferral joins the ladder in
         #: flight rather than stacking a second one on the same store.
         self._attention_republish_task: asyncio.Task[Any] | None = None
+        #: Fires a rung that is waiting out its delay, so a viewer's tick repairs
+        #: the completion within a tick WITHOUT the tick itself touching the store
+        #: (see :meth:`refresh_attention`).
+        self._attention_republish_wake = asyncio.Event()
         #: Set by the ``bootstrap_transcript`` call ABOVE (see the attention
         #: block) to the ``(kind, cause, reason, token)`` this boot classified
         #: and published for an ORPHANED run, and journaled from ``async_init``
@@ -7762,14 +7783,16 @@ class Session:
             # doing it again is free.
             self._attention_restored = True
         elif self._attention_republish_due:
-            # A VIEWER'S TICK IS THE CHEAPEST REPAIR POINT THERE IS, so a deferred
-            # publication is drained here too: an attached frontend then repairs
-            # the completion within one tick instead of waiting out the ladder's
-            # next rung. The check is the boolean latch alone (no journal read), so
-            # a tick with nothing owed pays nothing, and the ladder remains the
-            # path for a session with NO viewer -- which is the case that lost the
-            # operator's notifications.
-            await self._republish_journalled_outcome()
+            # A VIEWER'S TICK IS THE CHEAPEST REPAIR POINT THERE IS -- and the way
+            # to spend it is to FIRE THE PARKED RUNG, never to publish here. The
+            # tick costs a boolean check and an `Event.set()`; the store write
+            # stays the ladder's, so the attempt count is the ladder's four rungs
+            # rather than one per second per client-attached session for the whole
+            # contention window. Publishing from the tick was measured at ~20x the
+            # ladder's load on the store this module calls the most contended on
+            # the machine, which is the opposite of the bounded exposure the ladder
+            # exists to provide.
+            self._attention_republish_wake.set()
         # The in-process TUI never calls ``async_init``, so this is its only
         # route to the restored cut-off notice. Deduped on the token, so the
         # runtime path (which calls both) narrates exactly once.
@@ -7802,27 +7825,28 @@ class Session:
         return state
 
     async def _republish_journalled_outcome(self) -> bool:
-        """Publish the journal's LATEST completion marker; True when the store has it.
+        """Publish the journal's LATEST completion marker; True when nothing is owed.
 
         The one-shot boot-restore's body, extracted so the republish ladder and a
         viewer's tick can both call it. It re-reads the journal EVERY time on
         purpose: what must land is whatever marker the transcript holds *now*,
         never the token that happened to be deferred. A later turn may have
-        superseded that token, and republishing it would be a revive -- an old
-        completion jumping to the front of the sequence and re-firing a
-        notification for a result the human has already seen.
+        superseded that token, and republishing the older one would be a revive.
 
-        True also covers "nothing to publish": no marker, another conversation's
-        marker, or one written ``eligible: False`` (the product's own way of saying
-        a turn has no viewable result). Those are satisfied, not deferred, so a
-        caller must not read True as "something was written".
+        THAT RE-READ IS NOT WHAT MAKES THE OUTCOME ORDERED, and the comment here
+        used to claim it was. `completions.sequence` is INSERT order, so the read
+        bounds only which marker this call PICKS; what protects the ordering is
+        `_attention_publish_lock`, held across this read AND the insert below, so a
+        newer turn of this session cannot slip between them and be outranked by the
+        older completion this call is republishing.
 
-        Only ``AttentionWriteDeferred`` -- real contention -- comes back False, and
-        it comes back silently: the arming path logs the transition once, and the
-        ladder logs once if it is finally given up on. Anything else is a broken
-        store rather than a busy one, so it gets the single ``exc_info`` warning it
-        had before this helper existed and returns True rather than buying four
-        identical tracebacks over 86 s of rungs.
+        True means "nothing more is owed in this process": the store has the
+        marker, there was nothing to publish (no marker, another conversation's, or
+        one written ``eligible: False`` -- the product's own way of saying a turn
+        has no viewable result), or the store failed in a way that retrying will not
+        fix. Only ``AttentionWriteDeferred`` -- real contention -- comes back False,
+        and it comes back silently: the arming path logs the transition once, and
+        the ladder logs once if it is finally given up on.
         """
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
@@ -7831,44 +7855,57 @@ class Session:
             conversation_identity,
         )
 
-        identity = conversation_identity(self._transcript.directory)
-        saved = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
-        if not (
-            isinstance(saved, dict)
-            and saved.get("conversation_id") == identity
-            and saved.get("eligible", True)
-        ):
+        async with self._attention_publish_lock:
+            identity = conversation_identity(self._transcript.directory)
+            saved = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+            if not (
+                isinstance(saved, dict)
+                and saved.get("conversation_id") == identity
+                and saved.get("eligible", True)
+            ):
+                self._attention_republish_due = False
+                return True
+            try:
+                # THE SAME RULE THE BOOT PATH STATES (see `bootstrap_transcript`),
+                # for the same reason: this runs on request paths (the runtime's
+                # refresh op, the mobile handle, the desktop poll) and from a
+                # background ladder that must never take the turn down, and the
+                # caller asked for a RECEIPT, not for a store write. A raise here
+                # failed the whole call -- `snapshot` already suppresses
+                # `sqlite3.Error` around exactly this call for exactly that reason.
+                # Logged rather than silent: the store row is what the sidebar
+                # reads, so a failure to write it is real.
+                await asyncio.to_thread(
+                    AttentionStore().publish,
+                    identity,
+                    saved["token"],
+                    saved["anchor"],
+                    saved["kind"],
+                    reason=str(saved.get("reason") or ""),
+                    cause=str(saved.get("cause") or ""),
+                )
+            except AttentionWriteDeferred:
+                # CONTENTION: the ladder's own case, and the latch stays armed for
+                # it.
+                return False
+            except Exception:  # noqa: BLE001 — attention is an observability nicety
+                # A BROKEN STORE IS NOT A BUSY ONE, so the latch goes with this
+                # arm. Returning True without clearing it (review round 1,
+                # MAJOR-2) meant every caller of `refresh_attention` -- the
+                # runtime's 1 Hz loop, the TUI's 1 Hz poll, the mobile handle --
+                # re-read the journal, re-attempted the write and logged an
+                # `exc_info` traceback EVERY SECOND for the life of the session,
+                # which is the per-tick cost this whole ladder exists to bound.
+                # One traceback, one attempt, then the next boot's import owns it.
+                self._attention_republish_due = False
+                logger.warning(
+                    "attention: could not republish the journalled outcome for %s",
+                    identity,
+                    exc_info=True,
+                )
+                return True
             self._attention_republish_due = False
             return True
-        try:
-            # THE SAME RULE THE BOOT PATH STATES (see `bootstrap_transcript`), for
-            # the same reason: this runs on request paths (the runtime's refresh op,
-            # the mobile handle, the desktop poll) and from a background ladder that
-            # must never take the turn down, and the caller asked for a RECEIPT, not
-            # for a store write. A raise here failed the whole call -- `snapshot`
-            # already suppresses `sqlite3.Error` around exactly this call for exactly
-            # that reason. Logged rather than silent: the store row is what the
-            # sidebar reads, so a failure to write it is real.
-            await asyncio.to_thread(
-                AttentionStore().publish,
-                identity,
-                saved["token"],
-                saved["anchor"],
-                saved["kind"],
-                reason=str(saved.get("reason") or ""),
-                cause=str(saved.get("cause") or ""),
-            )
-        except AttentionWriteDeferred:
-            return False
-        except Exception:  # noqa: BLE001 — attention is an observability nicety
-            logger.warning(
-                "attention: could not republish the journalled outcome for %s",
-                identity,
-                exc_info=True,
-            )
-            return True
-        self._attention_republish_due = False
-        return True
 
     def _schedule_attention_republish(self, attempt: int = 0) -> None:
         """Arm the latch and put the republish ladder in flight.
@@ -7890,11 +7927,40 @@ class Session:
             # A ladder is already in flight and its rung re-reads the journal, so
             # it will publish the newest marker too. Stacking a second one would
             # only double the load on the store this ladder exists to ride out.
+            #
+            # THE IN-FLIGHT LADDER IS NOT ALWAYS GOOD ENOUGH, which is why the
+            # last rung checks this latch again before it gives up: a deferral that
+            # lands while the final rung is publishing would otherwise inherit a
+            # spent budget and be cleared with the latch it just armed (review
+            # round 1, MINOR-2).
             return
-        delays = ATTENTION_REPUBLISH_DELAYS_S
-        self._attention_republish_task = self._spawn_background(
-            self._run_attention_republish(attempt, delays[attempt])
+        self._start_attention_republish(attempt)
+
+    def _start_attention_republish(self, attempt: int) -> None:
+        """Spawn rung ``attempt``, replacing the tracked handle.
+
+        Unconditional, unlike :meth:`_schedule_attention_republish`: a rung spawning
+        its successor is by definition running, so the "is one already in flight?"
+        guard would make every rung after the first a no-op.
+        """
+        task = self._spawn_background(
+            self._run_attention_republish(attempt, ATTENTION_REPUBLISH_DELAYS_S[attempt])
         )
+        self._attention_republish_task = task
+        if task is not None:
+            task.add_done_callback(self._attention_republish_finished)
+
+    def _attention_republish_finished(self, task: asyncio.Task[Any]) -> None:
+        """Drop the handle when the ladder's last rung is gone (review NIT-1).
+
+        Guarded on identity rather than cleared blindly: a rung that spawned its
+        successor has already replaced the handle, and the successor is the ladder
+        now. Without this the session kept a completed Task -- and its coroutine
+        frame -- alive for its whole life, which is the opposite of how
+        ``_background_tasks`` is kept.
+        """
+        if self._attention_republish_task is task:
+            self._attention_republish_task = None
 
     async def _run_attention_republish(self, attempt: int, delay: float) -> None:
         """One rung: wait ``delay``, republish the journal's latest marker, re-arm.
@@ -7906,27 +7972,47 @@ class Session:
         """
         from local_operator.session.attention import conversation_identity
 
-        await asyncio.sleep(delay)
-        # The latch is the whole guard: a newer outcome, a successful republish
-        # (from any rung, or from a viewer's tick) or an exhausted ladder clears it,
-        # and a rung that wakes to a clear latch stops rather than publishing a
-        # marker that is no longer owed.
+        # WAITING ON A FIREABLE EVENT, not on the clock alone: a viewer's tick sets
+        # it, so an attached frontend repairs the completion within a tick while the
+        # tick itself never touches the store (review round 1, MAJOR-3). The clear
+        # is deliberately AFTER the wait -- a tick that lands while this rung is
+        # publishing should hurry the NEXT rung along, not be discarded.
+        try:
+            await asyncio.wait_for(self._attention_republish_wake.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+        self._attention_republish_wake.clear()
+        # The latch is the whole guard: a newer outcome, a successful republish or
+        # an exhausted ladder clears it, and a rung that wakes to a clear latch
+        # stops rather than publishing a marker that is no longer owed.
         if not self._attention_republish_due:
             return
+        # The token this rung is ABOUT, captured before the insert: if the journal
+        # holds a different one when the budget runs out, a newer deferral arrived
+        # underneath this rung and it needs a budget of its own (MINOR-2 below).
+        attempted = self._journalled_attention_token()
         if await self._republish_journalled_outcome():
             return
         delays = ATTENTION_REPUBLISH_DELAYS_S
         if attempt + 1 < len(delays):
-            self._attention_republish_task = self._spawn_background(
-                self._run_attention_republish(attempt + 1, delays[attempt + 1])
-            )
+            self._start_attention_republish(attempt + 1)
             return
-        # EXHAUSTED, AND SAID ONCE. The latch is cleared with this line rather than
-        # left armed, because an armed latch makes every viewer tick attempt the
-        # publish again -- up to a full store budget per tick, which is the opposite
-        # of the bounded exposure this ladder exists to provide. What remains is the
-        # old remedy: the marker is durable in the transcript from before the first
-        # publish, so the next boot's `bootstrap_transcript` re-imports it.
+        # EXHAUSTED -- unless something NEWER arrived while this rung was trying,
+        # in which case that is a fresh fact with a fresh budget and the ladder
+        # restarts rather than clearing the latch it just earned. This is the
+        # MINOR-2 case: a deferral landing inside the last rung used to inherit a
+        # spent budget, be cleared with it, and wait for the next boot while the log
+        # blamed "4 republish attempts". The restart cannot spin: it needs the
+        # journal to hold a DIFFERENT token, which only a real turn appends.
+        current = self._journalled_attention_token()
+        if self._attention_republish_due and current is not None and current != attempted:
+            self._start_attention_republish(0)
+            return
+        # SAID ONCE. The latch is cleared with this line rather than left armed,
+        # because an armed latch is what makes a viewer tick keep asking. What
+        # remains is the old remedy: the marker is durable in the transcript from
+        # before the first publish, so the next boot's `bootstrap_transcript`
+        # re-imports it.
         self._attention_republish_due = False
         logger.warning(
             "attention: the journal still holds a completion outcome for %s after %d "
@@ -7934,6 +8020,27 @@ class Session:
             conversation_identity(self._transcript.directory),
             len(delays),
         )
+
+    def _journalled_attention_token(self) -> str | None:
+        """The token of THIS conversation's latest journalled marker, if any.
+
+        The ladder's own bookkeeping only -- which marker a rung is about, and
+        whether a newer one arrived underneath it. `_republish_journalled_outcome`
+        keeps its own read, because what it publishes must be the marker that is
+        latest at the moment of the insert.
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            conversation_identity,
+        )
+
+        saved = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        if not isinstance(saved, dict):
+            return None
+        if saved.get("conversation_id") != conversation_identity(self._transcript.directory):
+            return None
+        token = saved.get("token")
+        return str(token) if token else None
 
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
         """Acknowledge the observed outcome, never whichever turn is newest now.
@@ -7976,8 +8083,9 @@ class Session:
         # flight from republishing on behalf of the deferral it was armed for. It
         # is cleared here rather than after the publish because the publish below
         # re-arms it if the store defers THIS outcome -- the newest fact wins
-        # either way, and the two writes cannot interleave (no await between the
-        # clearing and the journal append that follows).
+        # either way. What makes the ordering hold is the LOCK below, not this
+        # line: a rung that read the journal before this marker existed must not be
+        # able to insert the older completion after it (review round 1, MAJOR-1).
         self._attention_republish_due = False
         # A delegating parent's first idle boundary is not a finished task.
         delegated = any(job.type == "task" and job.status == "running" for job in self.jobs.list())
@@ -8024,76 +8132,88 @@ class Session:
         else:
             cause = ""
             reason = outcome.error or ""
-        if kind == "complete" and (not messages or delegated):
+        # THE JOURNAL APPEND AND THE INSERT ARE ONE CRITICAL SECTION against this
+        # session's own republish rung (`_republish_journalled_outcome` takes the
+        # same lock). Without it a rung that had already read the journal could lose
+        # the store to THIS newer outcome and then insert the OLDER completion on
+        # top of it: `sequence` is INSERT order, so the older result would become
+        # `MAX(sequence)` -- the sidebar mark, the Active ordering and the
+        # newest-row pointer all moving to the older turn, with the newer one never
+        # unread again once a client acknowledges the highest sequence. That is the
+        # symptom this PR exists to remove, reachable through the window the ladder
+        # opens, so the pair is serialised rather than left to interleave
+        # (review round 1, MAJOR-1).
+        async with self._attention_publish_lock:
+            if kind == "complete" and (not messages or delegated):
+                await self._transcript.append_custom(
+                    ATTENTION_CUSTOM_TYPE,
+                    {
+                        "conversation_id": conversation_identity(self._transcript.directory),
+                        "token": token,
+                        "eligible": False,
+                    },
+                )
+                return
+            # Failure may precede the first assistant message. Its durable outcome
+            # marker, not an unrelated previous answer, is the viewable anchor.
+            anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
+            # The journal precedes publication: runtime death between these writes
+            # is repaired idempotently on resume, without fabricating a new token.
             await self._transcript.append_custom(
                 ATTENTION_CUSTOM_TYPE,
                 {
                     "conversation_id": conversation_identity(self._transcript.directory),
                     "token": token,
-                    "eligible": False,
+                    "anchor": anchor,
+                    "kind": kind,
+                    "cause": cause,
+                    "reason": reason,
                 },
             )
-            return
-        # Failure may precede the first assistant message. Its durable outcome
-        # marker, not an unrelated previous answer, is the viewable anchor.
-        anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
-        # The journal precedes publication: runtime death between these writes is
-        # repaired idempotently on resume, without fabricating a new token.
-        await self._transcript.append_custom(
-            ATTENTION_CUSTOM_TYPE,
-            {
-                "conversation_id": conversation_identity(self._transcript.directory),
-                "token": token,
-                "anchor": anchor,
-                "kind": kind,
-                "cause": cause,
-                "reason": reason,
-            },
-        )
-        try:
-            self._attention = await asyncio.to_thread(
-                AttentionStore().publish,
-                conversation_identity(self._transcript.directory),
-                token,
-                anchor,
-                kind,
-                reason=reason,
-                cause=cause,
-            )
-        except AttentionWriteDeferred as deferred:
-            # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
-            # is STILL not lost -- but "the next boot re-imports it" was never the
-            # whole of the remedy and is not the answer here (2026-09-23: a
-            # finished session is idle, an idle session does not boot again, and
-            # two live sessions ended up with a settled marker in the transcript
-            # and no row in the store -- hence no notification and no sidebar
-            # checkmark). The durable journal marker was appended just above, and
-            # the republish ladder armed below retries it AGAINST THE LIVE STORE
-            # from this process, where the operator is actually waiting. That
-            # ordering is what makes deferring honest here rather than a quiet
-            # drop -- and it is why this arm does not re-raise.
-            logger.warning(
-                "attention: completion outcome for %s deferred; retrying it against "
-                "the store in-process: %s",
-                conversation_identity(self._transcript.directory),
-                deferred,
-            )
-            self._schedule_attention_republish()
-        except Exception:  # noqa: BLE001 — attention is an observability nicety
-            # THE OUTAGE PATH. This runs in the turn's `finally`, on the runtime
-            # an ASGI request handler drives, so a raise here did not merely lose
-            # a receipt: it ended the response with "ASGI callable returned
-            # without completing response" and skipped the rest of the teardown
-            # with it (2026-09-20). Attention bookkeeping outranks a receipt, not
-            # the work the caller asked for -- the same rule, and the same broad
-            # guard, as `bootstrap_transcript` and `_journal_witnessed_cut_off`.
-            # `self._attention` keeps its previous value rather than being set to
-            # a state nothing wrote.
-            logger.warning(
-                "attention: could not publish the outcome for %s",
-                conversation_identity(self._transcript.directory),
-                exc_info=True,
-            )
+            try:
+                self._attention = await asyncio.to_thread(
+                    AttentionStore().publish,
+                    conversation_identity(self._transcript.directory),
+                    token,
+                    anchor,
+                    kind,
+                    reason=reason,
+                    cause=cause,
+                )
+            except AttentionWriteDeferred as deferred:
+                # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
+                # is STILL not lost -- but "the next boot re-imports it" was never
+                # the whole of the remedy and is not the answer here (2026-09-23: a
+                # finished session is idle, an idle session does not boot again,
+                # and two live sessions ended up with a settled marker in the
+                # transcript and no row in the store -- hence no notification and no
+                # sidebar checkmark). The durable journal marker was appended just
+                # above, and the republish ladder armed below retries it AGAINST
+                # THE LIVE STORE from this process, where the operator is actually
+                # waiting. That ordering is what makes deferring honest here rather
+                # than a quiet drop -- and it is why this arm does not re-raise.
+                logger.warning(
+                    "attention: completion outcome for %s deferred; retrying it against "
+                    "the store in-process: %s",
+                    conversation_identity(self._transcript.directory),
+                    deferred,
+                )
+                self._schedule_attention_republish()
+            except Exception:  # noqa: BLE001 — attention is an observability nicety
+                # THE OUTAGE PATH. This runs in the turn's `finally`, on the runtime
+                # an ASGI request handler drives, so a raise here did not merely
+                # lose a receipt: it ended the response with "ASGI callable
+                # returned without completing response" and skipped the rest of the
+                # teardown with it (2026-09-20). Attention bookkeeping outranks a
+                # receipt, not the work the caller asked for -- the same rule, and
+                # the same broad guard, as `bootstrap_transcript` and
+                # `_journal_witnessed_cut_off`. `self._attention` keeps its previous
+                # value rather than being set to a state nothing wrote.
+                logger.warning(
+                    "attention: could not publish the outcome for %s",
+                    conversation_identity(self._transcript.directory),
+                    exc_info=True,
+                )
         # The model has to learn WHY even when this process survives the
         # cut-off (a graceful termination signal aborts the turn and then exits,
         # but a retirement that caught a live turn does not). Deduped on the
