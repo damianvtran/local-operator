@@ -38,7 +38,11 @@ def _rig(exc: Exception) -> tuple[RuntimeServer, list[dict[str, Any]], _ClientCo
     async def capture(target, frame):  # noqa: ANN001
         sent.append(frame)
 
-    async def failing_dispatch(op, frame):  # noqa: ANN001
+    async def failing_dispatch(op, frame, **_kwargs):  # noqa: ANN001
+        # ``**_kwargs`` because the real dispatcher takes keyword-only extras a
+        # caller may pass (the aside delta sink — see ``RuntimeServer._dispatch``);
+        # a double pinned to the old arity would raise TypeError instead of the
+        # exception under test and report it as a missing ``error_code``.
         raise exc
 
     server._send_to = capture  # type: ignore[assignment]

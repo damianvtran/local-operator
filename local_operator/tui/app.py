@@ -34303,8 +34303,16 @@ class OperatorApp(App[None]):
             return None, ""
         turns = [Message.user(LOOP_JUDGE_PROMPT.format(goal=goal))]
         try:
+            # ``aside_instruction=False``: this request is a JUDGE, not an aside,
+            # and its turn already carries the only instruction it may receive.
+            # Without it the remote seam framed the judge as an off-record side
+            # question ("no work is being asked for … answer briefly") on a TUI
+            # viewing another owner — the one request ``session/aside.py`` says
+            # must never receive that wrapper.
             answer = await session.complete_aside(
-                turns, on_usage=lambda usage: self._charge_aside_for(source, usage)
+                turns,
+                aside_instruction=False,
+                on_usage=lambda usage: self._charge_aside_for(source, usage),
             )
         except Exception as error:  # noqa: BLE001 — any provider failure is a judge failure
             self._notice_for(source, f"judge unavailable, continuing: {error}", "warning")
@@ -36329,8 +36337,17 @@ class OperatorApp(App[None]):
         source.active_workers += 1
         try:
             try:
+                # ``aside_instruction=False`` because THIS call site just built the
+                # instruction (the line above). The session here is the viewer's:
+                # the local ``Session`` (which never wraps) or an
+                # ``AttachedSession`` when another process owns the conversation —
+                # and on that hop the owner's seam would wrap the already-wrapped
+                # turn a second time. The flag is how this call site states its
+                # intent without branching on which hop it holds; the wrap is
+                # idempotent underneath as the belt.
                 answer = await session.complete_aside(
                     turns,
+                    aside_instruction=False,
                     on_delta=delta,
                     on_usage=lambda usage: self._charge_aside_for(source, usage),
                 )
