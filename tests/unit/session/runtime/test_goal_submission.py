@@ -271,9 +271,7 @@ async def test_a_new_goal_over_a_settled_one_is_armed_on_the_owner_side(entry):
     assert session.goal_status == "active", "the new objective is not a settled one"
     assert session.goal_state.token and session.goal_state.token != settled_token
     assert session.goal_state.judge.state == "waiting"
-    assert [(row["text"], row["status"]) for row in session.history_view()] == [
-        ("ship it", "done")
-    ]
+    assert [(row["text"], row["status"]) for row in session.history_view()] == [("ship it", "done")]
     assert session.prompt_calls, "the new objective is submitted as work, not reported"
 
 
