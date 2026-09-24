@@ -212,6 +212,32 @@ def _run_script(
     )
 
 
+def _spawn_script(
+    script: str,
+    config_dir: Path,
+    args: tuple[str, ...] = (),
+) -> subprocess.Popen[str]:
+    """Start ``script`` as a REAL file and hand back the LIVE child.
+
+    ``_run_script``'s sibling for the cells whose child cannot be waited for on a
+    clock: a park is not a slow subroutine, so a cell that needs the process ALIVE
+    (to signal it, to read what it left, to assert it did not leave) starts it and
+    reaps it itself. Same file-not-``-c`` rule as ``_run_script``, for the same
+    reason: under ``-c`` every frame reads ``File "<string>"`` and the dump's own
+    evidence -- which source line was parked -- becomes unattributable.
+    """
+    path = config_dir / "parked_child.py"
+    path.write_text(script, encoding="utf-8")
+    return subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, str(path), *args],
+        env=_child_env(config_dir),
+        cwd=str(config_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
 def _dump_for(config_dir: Path, pid: int) -> Path:
     return config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
 
@@ -336,7 +362,18 @@ print(f"armed:{{os.getpid()}}", flush=True)
 def park_the_loop_deliberately() -> None:
     lib = ctypes.PyDLL(None)
     lib.sleep.argtypes = [ctypes.c_uint]
-    lib.sleep(600)
+    # RE-ENTERED ON INTERRUPTION, and that is what makes this a park rather than a nap:
+    # ``sleep`` returns EARLY when a signal arrives, and the evidence leg IS a signal --
+    # so a bare ``sleep(600)`` would resume the main thread, hand the sampler the GIL it
+    # had been starved of, and let the bound fire on exactly the run that is supposed to
+    # prove nothing inside this process can fire. Measured: without this loop the same
+    # child both hung for 60 s and, on a run where a signal landed first, left with a
+    # ``Timeout (`` line in its dump. The loop holds the GIL for the whole ten minutes,
+    # which is also what the thing this stands for does -- ``_sre_Search`` does not
+    # return on EINTR either.
+    remaining = 600
+    while remaining > 0:
+        remaining = int(lib.sleep(remaining))
     resumed.write_text("the parked call returned", encoding="utf-8")
 
 
@@ -432,45 +469,33 @@ def test_a_stalled_loop_is_named_by_a_dump_pulled_from_outside(tmp_path: Path) -
     script = tmp_path / "parked_child.py"
     script.write_text(_PARKED_CHILD, encoding="utf-8")
     resumed = tmp_path / "resumed.txt"
-    child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, str(script), str(resumed), str(CHILD_BOUND_S)],
-        env=_child_env(tmp_path),
-        cwd=str(tmp_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    child = _spawn_script(_PARKED_CHILD, tmp_path, args=(str(resumed), str(CHILD_BOUND_S)))
     try:
         pid = _wait_for_armed(child)
         dump = _dump_for(tmp_path, pid)
         assert (
             dump.is_file()
         ), f"the bound never armed its own dump: {sorted((tmp_path / 'logs').glob('*'))}"
-        # THE DEADLINE COMES AND GOES FIRST, so what follows is "this mechanism never
-        # fired" rather than "it had not fired yet". Waiting on the clock is right
-        # here and only here: the event being waited for IS an absence, and an
-        # absence has nothing to wait ON.
-        time.sleep(CHILD_BOUND_S * 1.5)
-        assert child.poll() is None, (
-            f"the parked child left (rc={child.returncode}); no leg of this module can "
-            "fire while the parked call holds the GIL, so a departure here means a "
-            "native timer path has come back"
-        )
-        # SIGNAL THE PARK, AND RETRY: a first signal that lands while the child is
-        # still between its ``print`` and the C call names the ARMING frame instead,
-        # and the cell would then be measuring that race rather than the park.
+        # SIGNAL THE PARK FIRST, BEFORE THE DEADLINE IS DUE, and that ordering is
+        # load-bearing rather than convenient. The handler runs on the parked thread and
+        # ``sleep`` returns early when a signal arrives, so the instant a signal lands
+        # there is a brief window in which that thread runs Python again -- and if the
+        # deadline has ALREADY passed by then, the sampler can take the GIL inside that
+        # window and fire. Measured, not reasoned: with the signal sent at 1.5x the bound
+        # this cell failed exactly that way, the child leaving with a fired marker.
+        # Signalling first keeps the window harmless (the deadline is not due yet, so the
+        # sampler re-arms and sleeps) and the park re-engages on the next bytecode.
         deadline = time.monotonic() + 30.0
         text = ""
         while "park_the_loop_deliberately" not in text and time.monotonic() < deadline:
             os.kill(pid, signal.SIGUSR1)
-            text = _wait_for_dump_text(dump, "park_the_loop_deliberately", timeout=3.0)
+            text = _wait_for_dump_text(dump, "park_the_loop_deliberately", timeout=2.0)
         assert (
             "park_the_loop_deliberately" in text
         ), f"the evidence signal never named the parked frame: {text[-400:]!r}"
         assert (
             "parked_child.py" in text
         ), f"the dump names the frame but not the file it is in: {text[-400:]!r}"
-        assert child.poll() is None, "the child died taking its own evidence signal"
         assert (
             stall_watchdog.FIRED_MARKER not in text
         ), "a signal dump was read as a bound fire; the leg writes no fired marker"
@@ -478,6 +503,24 @@ def test_a_stalled_loop_is_named_by_a_dump_pulled_from_outside(tmp_path: Path) -
             "park_the_loop_deliberately"
         ), "the dump was written before the header, so a reader cannot tell arm from park"
         assert LOCAL_SENTINEL not in text, "faulthandler printed local values into the dump"
+        # ONLY NOW, PAST THE DEADLINE: the bound comes and goes with the park held, so this
+        # is the point at which "nothing inside the process fires" is a claim about the
+        # mechanism rather than about a wait that had not elapsed.
+        time.sleep(CHILD_BOUND_S * 1.5)
+        assert child.poll() is None, (
+            f"the parked child left (rc={child.returncode}); no leg of this module can "
+            "fire while the parked call holds the GIL, so a departure here means a "
+            "native timer path has come back"
+        )
+        assert not resumed.exists(), (
+            "the parked call RETURNED: a park a signal can end hands the sampler the GIL, "
+            "so this cell would be measuring an interrupted nap rather than a park"
+        )
+        final = dump.read_text(encoding="utf-8", errors="replace")
+        assert stall_watchdog.FIRED_MARKER not in final, (
+            f"the bound fired on a GIL-held park after {CHILD_BOUND_S}s, so a leg still "
+            f"exists which this module was supposed to have given up: {final[-400:]!r}"
+        )
     finally:
         _stop_child(child)
 
@@ -2770,6 +2813,7 @@ import asyncio
 import os
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, sys.argv[3])
 
@@ -2813,11 +2857,22 @@ async def main() -> None:
     print("both-planes-ran", flush=True)
 
     # THE INCIDENT: yielding on every pass, so the ticker and the serving plane
-    # keep their cadence and keep re-arming the timer, while burning CPU and
+    # keep their cadence and keep re-arming the bound, while burning CPU and
     # advancing no work at all. Nothing here is a double: the spin is real CPU.
-    while True:
+    #
+    # BOUNDED, WHERE IT USED TO BE ``while True``: under the retired design the
+    # bound cut this process, so the loop never needed an exit of its own. The
+    # verdict is recorded in Python now and does NOT end the runtime (see the cell),
+    # so the child has to leave on its own terms and PRINT that it was still healthy
+    # when it did -- which is what makes "it survived the spin" a fact the child
+    # states rather than one the parent infers from a missing exit status.
+    started = time.monotonic()
+    while time.monotonic() - started < bound * 4:
         await asyncio.sleep(0)
         sum(range(200_000))
+    print(f"still-alive:{time.monotonic() - started:.1f}", flush=True)
+    sys.stdout.flush()
+    os._exit(0)
 
 
 asyncio.run(main())
@@ -2888,9 +2943,32 @@ asyncio.run(main())
 def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path: Path) -> None:
     """The reproduction, on the REAL plumbing: alive, ticking, and going nowhere.
 
-    Cannot pass on the committed head: the only leg that existed there re-armed
-    the timer from both planes, and both planes were healthy in this child — so
-    the run produced no dump and had to be killed externally.
+    WHAT THIS CELL PINNED BEFORE, AND WHAT REPLACED IT. It read ``rc == 1`` — the
+    progress verdict ENDED the runtime. That ending was the C timer's: the verdict
+    armed a native timer for ``MIN_REARM_S`` and the timer's expiry took the dump and
+    the process with it. There is no native timer to arm any more, and the verdict the
+    sampler records in Python does not end a runtime (see the module docstring: a fire
+    is evidence, and the exit leg is the arm's). So the child leaves on its OWN terms
+    after four bounds and reports that it was still healthy while it did — which is
+    what keeps "it survived the spin" a fact the child states rather than a missing
+    exit status.
+
+    WHAT IS STILL PROVEN, and it is the whole subject of the cell: the predicate
+    FIRED. The incident was never "the process died", it was "the process burned a
+    core to produce nothing and nothing said so" — a session whose loops were alive and
+    ticking while the work went nowhere, 12 s short of the liveness deadline. The
+    verdict is still recorded, still names its leg, and still lands in the module's own
+    dump, so a reader can now tell a spin from a silence. THIS is the leg the C timer
+    was there to deliver, and it is the one that must not go quiet.
+
+    THE GAP THIS CELL NOW NAMES RATHER THAN PINS, because a reader of the next fire
+    will ask: the progress verdict writes its MARKER through this module's own writer
+    but does not reach :func:`_fire`, so the all-thread dump the liveness leg takes is
+    not taken here — the sampler stops on its own verdict (``_sample`` returns True
+    when the arm is not held) before the recorded deadline is honoured. Whether an idle
+    spin should also have its stacks dumped, and whether it should still be cut, is a
+    policy question for this change's owner; what this cell pins is that the verdict
+    itself is recorded, which is a claim no redesign of the exit leg can make false.
     """
     result = _run_script(
         _SPINNING_CHILD,
@@ -2899,8 +2977,13 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
         timeout=120.0,
     )
     assert (
-        result.returncode == 1
-    ), f"the spinning loop was not ended by the progress leg: {result.stdout!r} {result.stderr!r}"
+        result.returncode == 0
+    ), f"the spinning child did not leave on its own terms: {result.stdout!r} {result.stderr!r}"
+    waited = float(result.stdout.split("still-alive:", 1)[1].split()[0])
+    assert waited >= CHILD_BOUND_S * 3, (
+        f"the child did not actually spin past the bound ({waited}s), so it proves "
+        f"nothing: {result.stdout!r}"
+    )
     assert "both-planes-ran" in result.stdout, (
         f"the planes never ran, so this says nothing about a process whose loops were "
         f"ALIVE: {result.stdout!r} {result.stderr!r}"
@@ -2915,7 +2998,6 @@ def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path:
     assert stall_watchdog.PROGRESS_MARKER in text, text
     assert incidents.STALL_BOUND_CAUSE in text, text
     assert stall_watchdog.fired_leg(pid, tmp_path / "logs") == stall_watchdog.LEG_PROGRESS
-    assert "parked_child.py" in text, f"the dump does not name the spinning loop: {text}"
 
 
 def test_the_progress_leg_spares_a_genuine_long_await(tmp_path: Path) -> None:
@@ -5694,29 +5776,95 @@ stall_watchdog.beat(stall_watchdog.WORKLOAD)
 
 lib = ctypes.PyDLL(None)
 lib.sleep.argtypes = [ctypes.c_uint]
-lib.sleep(600)
+# RE-ENTERED ON INTERRUPTION, for the reason ``_PARKED_CHILD`` gives: the evidence leg
+# is a signal, ``sleep`` returns early when one arrives, and a bare ``sleep(600)``
+# would therefore hand the sampler the GIL the moment the parent signals -- on a run
+# whose whole premise is that nothing inside this process can run.
+remaining = 600
+while remaining > 0:
+    remaining = int(lib.sleep(remaining))
 sys.stdout.write("the parked call returned\\n")
 """
 
 
-def test_a_frame_frozen_in_a_c_matcher_is_still_cut(tmp_path: Path) -> None:
-    """THE INCIDENT CELL: the frozen frame still fires with the abstraction in place.
+def test_a_frame_frozen_in_a_c_matcher_is_named_from_outside(tmp_path: Path) -> None:
+    """THE INCIDENT CELL, ON THE LEG THAT CAN STILL REACH IT.
 
-    The 2026-09-20 incident was 100% of the loop inside one C-level matcher for
-    1.5-7.2 h. Both legs abstain for different reasons here — no stamp can arrive and
-    the frame cannot move, so the liveness leg has nothing to extend; and a step is in
-    flight, so the progress leg has nothing to judge — which is exactly why the bound
-    has to fire on the stamp alone.
+    WHAT CHANGED, and the name moved with it. This cell used to assert ``rc == 1``:
+    the frozen frame was CUT. That cut was the native timer's, and the timer is gone
+    (see the module docstring) — which lands hardest exactly here, because this is the
+    one class where the replacement cannot reach: the ``PyDLL`` call holds the GIL for
+    its whole duration, so the sampler cannot run, the recorded deadline passes
+    unwitnessed, and NO leg of this module fires. The 2026-09-20 shape is therefore no
+    longer self-bounded from inside, and this cell says so instead of pinning a cut
+    that cannot happen.
+
+    THE TWO FACTS THAT REPLACED IT, and they are the ones an operator actually needs:
+
+    * THE EVIDENCE IS STILL OBTAINABLE, from outside, by ``SIGUSR1`` — the leg built
+      for a process that can run no Python. It writes this module's own file with the
+      signal thread's stack, and the signal thread IS the parked one. That is the
+      instrument the five frozen runtimes of 2026-09-20 needed ``sample`` from outside
+      to get.
+    * THE DEADLINE IS STILL ON DISK FOR WHOEVER WATCHES: the ``beat`` this child issues
+      before parking wrote the ``.deadline`` sibling, so the hard-deadline class is a
+      bounded wait for the supervisor rather than an open-ended one.
+
+    AND THE ABSENCE IS ASSERTED, not left implied: the child is alive after the bound
+    has passed and its dump carries no fired marker. An edit that gives this module a
+    leg which cuts a GIL-held park goes red here — which is the regression that would
+    matter, because a leg that cuts a hard park is a leg that can cut a turn.
     """
-    result = _run_script(_FROZEN_MATCHER_CHILD, tmp_path, args=(str(SHORT_BOUND_S),))
-
-    assert (
-        result.returncode == 1
-    ), f"a C-level freeze was spared: {result.stdout!r} {result.stderr!r}"
-    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
-    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
-    assert stall_watchdog.FIRED_MARKER in text, text[:2000]
-    assert stall_watchdog.executing_planes(pid, tmp_path / "logs") == ()
+    child = _spawn_script(_FROZEN_MATCHER_CHILD, tmp_path, args=(str(CHILD_BOUND_S),))
+    try:
+        pid = _wait_for_armed(child)
+        dump = _dump_for(tmp_path, pid)
+        # ...AND THE EVIDENCE, PULLED FROM OUTSIDE, BEFORE THE DEADLINE IS DUE: the
+        # handler runs on the parked thread and ``sleep`` returns early on a signal, so
+        # signalling after the bound has passed would open a window in which the sampler
+        # can take the GIL and fire. Signalling first leaves the window harmless -- the
+        # deadline is not due yet, so the sampler re-arms and sleeps -- and the park
+        # re-engages on the next bytecode.
+        deadline = time.monotonic() + 30.0
+        text = ""
+        while "parked_child.py" not in text and time.monotonic() < deadline:
+            os.kill(pid, signal.SIGUSR1)
+            text = _wait_for_dump_text(dump, "parked_child.py", timeout=2.0)
+        assert (
+            "parked_child.py" in text
+        ), f"the evidence signal never reached the parked child: {text[-400:]!r}"
+        # THE SUPERVISOR'S HALF: the plane that DID report left its deadline behind.
+        sibling = stall_watchdog.deadline_path(pid, tmp_path / "logs")
+        assert sibling.is_file(), (
+            "the beat wrote no deadline sibling, so nothing outside this process can "
+            "know when this runtime became due"
+        )
+        _, leg = _deadline_record(tmp_path / "logs", pid)
+        # THE PLANE THAT DID *NOT* RE-STAMP IS THE ONE NAMED, and that is the module's
+        # anti-masking rule rather than an accident of ordering: this child beats
+        # WORKLOAD, so WORKLOAD's stamp moved to now while SERVING's is still at the arm
+        # instant -- the earlier deadline -- and ``pin`` takes the earliest of the two.
+        assert leg == stall_watchdog.SERVING, leg
+        assert (
+            stall_watchdog.FIRED_MARKER not in text
+        ), "a signal dump was read as a bound fire; the leg writes no fired marker"
+        # ONLY NOW, PAST THE DEADLINE: the bound comes and goes with the park held, so this
+        # is the point at which "nothing inside the process fires" is a claim about the
+        # mechanism rather than about a wait that had not elapsed yet.
+        time.sleep(CHILD_BOUND_S * 1.5)
+        assert child.poll() is None, (
+            f"a GIL-held park was cut (rc={child.returncode}); no leg of this module can "
+            "fire while the parked call holds the GIL, so a departure means a native "
+            "timer path has come back"
+        )
+        final = dump.read_text(encoding="utf-8", errors="replace")
+        assert stall_watchdog.FIRED_MARKER not in final, (
+            f"the bound fired on a GIL-held park, so a leg still exists which this module "
+            f"was supposed to have given up: {final[-400:]!r}"
+        )
+        assert stall_watchdog.executing_planes(pid, tmp_path / "logs") == ()
+    finally:
+        _stop_child(child)
 
 
 #: A loop parked in its own selector, waiting on a child that never reports, with the
