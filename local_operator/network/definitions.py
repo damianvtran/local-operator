@@ -522,6 +522,68 @@ def _read_teams(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def expand_named_teams(root: Path, names: Mapping[str, Iterable[str]]) -> tuple[set[str], set[str]]:
+    """The names a create should reconcile: what it named, PLUS a team's roster.
+
+    WHY THE MEMBERS COME TOO, and this is the difference between "the team row
+    exists on the peer" and "the team works there". A team resolves without its
+    members — the row carries names, not definitions — so a create could succeed
+    and the session then FAIL at the manager's first ``task(agent=...)``, on a peer
+    that holds the roster and none of the people in it. The operator's own ask is
+    that a team work on a peer, so the roster travels with it.
+
+    Nested teams are followed (``kind: "team"`` slots), breadth-first and bounded by
+    ``teams.MAX_ORG_DEPTH`` — the same bound the resolver and the renderer use, so a
+    cycle cannot make this fan out further than the org chart would.
+    """
+    from local_operator.teams import MAX_ORG_DEPTH, TeamRegistry
+
+    agents = {
+        str(item).strip().casefold() for item in (names.get("agents") or ()) if str(item).strip()
+    }
+    teams = {
+        str(item).strip().casefold() for item in (names.get("teams") or ()) if str(item).strip()
+    }
+    if not teams:
+        return agents, teams
+    registry = TeamRegistry(root)
+    pending = sorted(teams)
+    seen: set[str] = set()
+    for _depth in range(MAX_ORG_DEPTH):
+        if not pending:
+            break
+        nxt: list[str] = []
+        for name in pending:
+            if name in seen:
+                continue
+            seen.add(name)
+            try:
+                team = registry.get_team_by_name(name)
+            except Exception:  # noqa: BLE001 — an unreadable roster costs its members
+                team = None
+            if team is None:
+                continue
+            # THE MANAGER IS PART OF THE GRAPH TOO. ``attach_team`` resolves it to
+            # layer its profile's preamble in front of the team brief, and the desktop
+            # path validates it alongside every member (``desktop_profiles.
+            # validate_target``) — so a roster whose members resolve but whose manager
+            # does not is the same failure one line further in.
+            manager = str(getattr(team, "manager", "") or "").strip()
+            if manager:
+                agents.add(manager.casefold())
+            for member in team.members:
+                role = str(member.role or "").strip()
+                if not role:
+                    continue
+                if str(getattr(member, "kind", "agent") or "agent") == "team":
+                    teams.add(role.casefold())
+                    nxt.append(role.casefold())
+                else:
+                    agents.add(role.casefold())
+        pending = nxt
+    return agents, teams
+
+
 def local_bundle(
     root: Path,
     *,
@@ -557,11 +619,21 @@ def local_bundle(
         "teams": [],
         "withheld": withheld,
     }
+    # A NAMED TEAM PULLS ITS ROSTER IN (``expand_named_teams``): a team that resolves
+    # on the peer with none of its members is a session that fails at the first
+    # delegation, which is not "the team works there".
+    # STRICT WHEN ``names`` IS GIVEN, INCLUDING AN EMPTY LIST. "No team was named in
+    # this create" has to mean "send no teams", not "send every team": the first
+    # spelling shipped an install's whole roster on every agent-only create, because an
+    # empty ``wanted_set`` read as "no filter". The narrowing is the create path's
+    # bandwidth contract, so the absence of a name is a decision about that kind rather
+    # than a gap in it.
+    narrowed = names is not None
+    wanted_agents, wanted_teams = expand_named_teams(root, names) if names else (set(), set())
     for kind, rows in (("agents", agents), ("teams", teams)):
-        wanted = names.get("agents" if kind == "agents" else "teams") if names else None
-        wanted_set = {str(item).strip().casefold() for item in (wanted or ()) if str(item).strip()}
+        wanted_set = wanted_agents if kind == "agents" else wanted_teams
         for row in rows[:MAX_DEFINITION_ROWS]:
-            if wanted_set and str(row.get("name") or "").casefold() not in wanted_set:
+            if narrowed and str(row.get("name") or "").casefold() not in wanted_set:
                 continue
             if not include_mirrors and not authored_locally(
                 root, kind=kind, name=str(row.get("name") or ""), row=row
@@ -1054,17 +1126,12 @@ def definition_state(
     """
     agents = {str(row["name"]): digest_of(row) for row in _read_agents(root)}
     teams = {str(row["name"]): digest_of(row) for row in _read_teams(root)}
-    if names:
-        wanted_agents = {str(item).casefold() for item in (names.get("agents") or ())}
-        wanted_teams = {str(item).casefold() for item in (names.get("teams") or ())}
-        if wanted_agents:
-            agents = {
-                name: value for name, value in agents.items() if name.casefold() in wanted_agents
-            }
-        if wanted_teams:
-            teams = {
-                name: value for name, value in teams.items() if name.casefold() in wanted_teams
-            }
+    if names is not None:
+        # STRICT PER KIND, like ``local_bundle``: the sender always names both keys, and
+        # "no teams" is one of the answers it can give.
+        wanted_agents, wanted_teams = expand_named_teams(root, names)
+        agents = {name: value for name, value in agents.items() if name.casefold() in wanted_agents}
+        teams = {name: value for name, value in teams.items() if name.casefold() in wanted_teams}
     return {"agents": agents, "teams": teams}
 
 

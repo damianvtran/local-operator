@@ -352,6 +352,58 @@ def test_the_bundle_refuses_a_version_it_does_not_understand(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
+def test_a_named_team_travels_with_its_roster(tmp_path: Path) -> None:
+    """A team that resolves without its members FAILS LATER, at the first delegation.
+
+    The row carries names, not definitions, so the create itself would succeed and the
+    manager's first ``task(agent=...)`` would be the thing that could not resolve. This
+    pins the fix at the payload: naming the team pulls in its members (and, through a
+    nested slot, the members of the team that member names).
+    """
+    root = _root(tmp_path)
+    _make_agent(root, "coder")
+    _make_agent(root, "reviewer")
+    _make_agent(root, "manager")
+    _make_agent(root, "designer")
+    teams = TeamRegistry(root)
+    teams.create_team(
+        TeamEditFields(name="pod", manager="manager", members=[TeamMember(role="designer")])
+    )
+    teams.create_team(
+        TeamEditFields(
+            name="release",
+            manager="manager",
+            members=[TeamMember(role="coder"), TeamMember(role="reviewer")],
+        )
+    )
+    # A roster slot that names ANOTHER team, so the expansion has to descend.
+    teams.create_team(
+        TeamEditFields(
+            name="whole-org",
+            manager="manager",
+            # BOTH slots are team references: the expansion has to descend through a
+            # nested team to reach the people in it.
+            members=[TeamMember(role="release", kind="team"), TeamMember(role="pod", kind="team")],
+        )
+    )
+
+    named = definitions.local_bundle(root, names={"teams": ["release"]})
+    assert [row["name"] for row in named["agents"]] == ["coder", "manager", "reviewer"]
+    assert [row["name"] for row in named["teams"]] == ["release"]
+
+    nested = definitions.local_bundle(root, names={"teams": ["whole-org"]})
+    assert [row["name"] for row in nested["teams"]] == ["pod", "release", "whole-org"]
+    assert [row["name"] for row in nested["agents"]] == [
+        "coder",
+        "designer",
+        "manager",
+        "reviewer",
+    ]
+
+    # And a NARROW bundle still excludes everything else on the device.
+    assert definitions.local_bundle(root, names={"agents": ["coder"]})["teams"] == []
+
+
 def test_resolve_create_identity_names_what_is_missing(tmp_path: Path) -> None:
     """The requirement's hard edge: a refusal that NAMES the name."""
     root = _root(tmp_path)
