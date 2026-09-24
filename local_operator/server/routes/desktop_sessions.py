@@ -1928,9 +1928,16 @@ async def child_trajectory(session_id: str, child_id: str, request: Request) -> 
     path. It is counted per job on the session's shared bridge, so closing one
     window does not stop another window's stream — but it must still be sent, or
     the owner keeps relaying a window nobody is reading.
+
+    The bridge comes from the pool's own door, in the READ envelope, so this
+    route is covered by the refusal matrix like every other bridge-taking route
+    (the alternative — a pool adapter that acquires the bridge itself — reads
+    identically at the call site and drops out of
+    ``test_serve_retire``'s AST walk, which is the guard that keeps that matrix
+    complete).
     """
-    async with errors(request):
-        return reply(await host(request).load_child_trajectory(session_id, child_id))
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
+        return reply(await bridge.load_child_trajectory(child_id))
 
 
 @router.delete(

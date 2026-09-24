@@ -1763,6 +1763,98 @@ class DesktopSessionBridge:
             await remote.unload_job_trajectory(job_id)
         return 0
 
+    async def load_child_trajectory(self, child_id: str) -> dict[str, Any]:
+        """Seed AND SUBSCRIBE to one child JOB's live trajectory window.
+
+        The child reader's live half (design § 1). ``child_id`` is a JOB id, not
+        the child's session id: the retained window lives on the job, every
+        lookup path beneath this method is job-keyed, and a child that ran more
+        than one attempt has several job ids over one directory — the reader
+        holds one of them. The reply IS the seed (see
+        :class:`~local_operator.server.models.desktop_sessions
+        .ChildTrajectoryWindow`), because a client that had to fetch and then
+        subscribe would lose whatever landed between the two calls.
+
+        THE CALLER HAS ALREADY TAKEN THIS BRIDGE, in the read envelope, and that
+        split is deliberate: a subscribe is not work, so a cold conversation must
+        not be STARTED by someone opening a child's page, and a busy owner must
+        not fail the read. The envelope therefore belongs to the route that owns
+        the door, while everything below it — the containment proof, the job-type
+        question and the seed — needs a bridge and reads it here.
+
+        THE REFERENCE IS COUNTED PER JOB ON THIS BRIDGE (see
+        :meth:`watch_trajectory`): one bridge is shared by every window watching
+        the session, so an unload that was not counted would silently freeze
+        another window's reader. The matching release is the ``DELETE`` route.
+
+        A CONTAINMENT PROOF RUNS FOR EVERY CHILD JOB (:func:`_contained_child_job`),
+        so a job id that is not one of this conversation's own children is refused
+        rather than subscribed: the route takes ids and never a path, and the
+        proof — not the caller — decides that this job belongs to this parent. It
+        sits behind the job-type question below, which is a different question
+        rather than a way around it.
+
+        Three answers, and the distinctions are load-bearing:
+
+        * a refusal (404 ``child_not_found``) for an id that does not name one of
+          this conversation's child jobs;
+        * ``available: false, reason: "unsupported"`` for a job type that records
+          no trajectory at all — the reader stops asking;
+        * ``available: false, reason: "no-owner"`` when there is nothing live to
+          read the window from — no owner is attached, the owner is too old for
+          the subscription op, or the connection dropped mid-fetch. Retryable, so
+          the reader keeps its pulse.
+        """
+        roster = self.roster_jobs()
+        if not roster:
+            # NO CANONICAL STATE YET, so membership cannot be proved and there is
+            # nothing to subscribe to. The ids are still checked, because a
+            # crafted value must be refused here exactly as it is below; the
+            # "parent is the user's own conversation" clause is NOT repeated for
+            # the same reason the child routes do not repeat it — the session
+            # door resolved this id to a real conversation before this bridge
+            # existed, and it refuses a subagent or a fork there. What the empty
+            # roster costs is the MEMBERSHIP clause, which is the one no
+            # roster-free reader can answer.
+            if not SESSION_ID.fullmatch(self.session_id) or not JOB_ID.fullmatch(child_id):
+                raise SubagentChildUnavailable()
+            return _unavailable_child_trajectory("no-owner")
+        row = next((job for job in roster if str(getattr(job, "id", "")) == child_id), None)
+        if row is None:
+            # Not a job of this conversation at all: the containment refusal,
+            # which is the same answer every other child route gives for a pair
+            # this conversation never named.
+            raise SubagentChildUnavailable()
+        if str(getattr(row, "type", "") or "") != SUBAGENT_JOB_TYPE:
+            # A job type that records no trajectory: ``AsyncJob.trajectory`` is
+            # ``None`` for it and only a ``task`` child's is a list. The wire
+            # cannot state that distinction — the roster row's ``trajectory`` is
+            # a list on both sides, and its ``trajectory_length`` is 0 for "none"
+            # and "none yet" alike — so this job's TYPE is the only signal the
+            # follower has, read from the owner's own roster row rather than
+            # guessed from a request.
+            #
+            # ASKED BEFORE CONTAINMENT, deliberately, and it is not a shortcut
+            # around it: a background ``bash`` job of this conversation's own
+            # session has no child directory to contain, so the child proof could
+            # only refuse it — turning "this job type has nothing to follow" into
+            # "this job is not yours", which is the one answer the reader must
+            # not act on. Nothing is handed over here, and the row is one the
+            # caller may already read through ``/snapshot``.
+            return _unavailable_child_trajectory("unsupported")
+        await asyncio.to_thread(_contained_child_job, self.root, self.session_id, child_id, roster)
+        if not await self.watch_trajectory(child_id):
+            return _unavailable_child_trajectory("no-owner")
+        window = self.trajectory_window(child_id)
+        if window is None:
+            # The job left the roster between the load and this read — it settled
+            # and was swept. Give the reference back so the count cannot outlive
+            # the job it described, and tell the reader the same thing the next
+            # open will see.
+            await self.unwatch_trajectory(child_id)
+            return _unavailable_child_trajectory("no-owner")
+        return {"available": True, "reason": None, **window}
+
     def _frontend(self, update: FrontendUpdate) -> None:
         # Keep the runtime's field deltas, not a full snapshot per streamed token.
         # Large roster/usage fields still pass through the shared wire budget; the
@@ -3867,100 +3959,6 @@ class DesktopSessions:
             "cursor_missing": page.reconciled,
             "state": "ready",
         }
-
-    async def load_child_trajectory(self, session_id: str, child_id: str) -> dict[str, Any]:
-        """Seed AND subscribe to one child JOB's live trajectory window.
-
-        The child reader's live half (design § 1). ``child_id`` is a JOB id, not
-        the child's session id: the retained window lives on the job, every
-        lookup path beneath is job-keyed, and a child that ran more than one
-        attempt has several job ids over one directory — the reader holds one of
-        them. The reply IS the seed (see :class:`ChildTrajectoryWindow`), because
-        a client that had to fetch and then subscribe would lose whatever landed
-        between the two calls.
-
-        THE SUBSCRIPTION IS REFCOUNTED ON THE BRIDGE, not created here: a
-        session's bridge is shared by every window watching it, so an unload that
-        was not counted would silently freeze another window's reader. This
-        method therefore asks the bridge to take a reference and never to release
-        one it did not take — the matching release is the ``DELETE`` route.
-
-        A CONTAINMENT PROOF RUNS FOR EVERY CHILD JOB
-        (:func:`_contained_child_job`), so a job id that is not one of this
-        conversation's children is refused rather than subscribed: the route
-        takes ids and never a path, and the proof — not the caller — decides that
-        this job belongs to this parent. It sits behind the job-type question
-        below, which is a different question and not a way around it.
-
-        Three answers, and the distinctions are load-bearing:
-
-        * a refusal (404 ``child_not_found``) for an id that does not name one of
-          this conversation's child jobs;
-        * ``available: false, reason: "unsupported"`` for a job type that records
-          no trajectory at all — the reader stops asking;
-        * ``available: false, reason: "no-owner"`` when there is nothing live to
-          read the window from — no owner is attached, the owner is too old for
-          the subscription op, or the connection dropped mid-fetch. Retryable, so
-          the reader keeps its pulse.
-
-        The facade is acquired in the READ envelope deliberately: a subscribe is
-        not work. A cold conversation must not be STARTED by someone opening a
-        child's page, and a busy owner must not fail the read — both of which are
-        what the control envelope would do. A session with no live owner answers
-        ``no-owner``, which is the same fact the reader shows for it.
-        """
-        async with self.session(session_id, read=True) as bridge:
-            roster = bridge.roster_jobs()
-            if not roster:
-                # NO CANONICAL STATE YET, so membership cannot be proved and there
-                # is nothing to subscribe to. The ids are still checked, because
-                # a crafted value must be refused here exactly as it is below;
-                # the "parent is the user's own conversation" clause is NOT
-                # repeated for the same reason the child routes do not repeat it —
-                # the session door resolved this id to a real conversation before
-                # this bridge existed, and it refuses a subagent or a fork there.
-                # What the empty roster costs is the MEMBERSHIP clause, which is
-                # the one no roster-free reader can answer.
-                if not SESSION_ID.fullmatch(session_id) or not JOB_ID.fullmatch(child_id):
-                    raise SubagentChildUnavailable()
-                return _unavailable_child_trajectory("no-owner")
-            row = next((job for job in roster if str(getattr(job, "id", "")) == child_id), None)
-            if row is None:
-                # Not a job of this conversation at all: the containment refusal,
-                # which is the same answer every other child route gives for a
-                # pair this conversation never named.
-                raise SubagentChildUnavailable()
-            if str(getattr(row, "type", "") or "") != SUBAGENT_JOB_TYPE:
-                # A job type that records no trajectory: ``AsyncJob.trajectory``
-                # is ``None`` for it and only a ``task`` child's is a list. The
-                # wire cannot state that distinction — the roster row's
-                # ``trajectory`` is a list on both sides, and its
-                # ``trajectory_length`` is 0 for "none" and "none yet" alike —
-                # so this job's TYPE is the only signal the follower has, read
-                # from the owner's own roster row rather than guessed from a
-                # request.
-                #
-                # ASKED BEFORE CONTAINMENT, deliberately, and it is not a
-                # shortcut around it: a background ``bash`` job of this
-                # conversation's own session has no child directory to contain,
-                # so the child proof could only refuse it — turning "this job
-                # type has nothing to follow" into "this job is not yours",
-                # which is the one answer the reader must not act on. Nothing is
-                # handed over here, and the row is one the caller may already
-                # read through ``/snapshot``.
-                return _unavailable_child_trajectory("unsupported")
-            await asyncio.to_thread(_contained_child_job, self.root, session_id, child_id, roster)
-            if not await bridge.watch_trajectory(child_id):
-                return _unavailable_child_trajectory("no-owner")
-            window = bridge.trajectory_window(child_id)
-            if window is None:
-                # The job left the roster between the load and this read — it
-                # settled and was swept. Give the reference back so the count
-                # cannot outlive the job it described, and tell the reader the
-                # same thing the next open will see.
-                await bridge.unwatch_trajectory(child_id)
-                return _unavailable_child_trajectory("no-owner")
-            return {"available": True, "reason": None, **window}
 
     async def unload_child_trajectory(self, session_id: str, child_id: str) -> dict[str, Any]:
         """Release ONE reader's subscription to a child job's live window.

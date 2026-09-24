@@ -278,8 +278,8 @@ async def test_two_readers_of_one_child_share_one_subscription(tmp_path, monkeyp
     async with pool.session(PARENT_ID, read=True) as bridge:
         bridge.remote._client = owner  # type: ignore[assignment]
         install_roster(bridge, jobs=[a_task_job()])
-        first = await pool.load_child_trajectory(PARENT_ID, JOB_ID)
-        second = await pool.load_child_trajectory(PARENT_ID, JOB_ID)
+        first = await bridge.load_child_trajectory(JOB_ID)
+        second = await bridge.load_child_trajectory(JOB_ID)
         assert first["available"] is True and second["available"] is True
         assert owner.watched == [JOB_ID]
         assert bridge.watched_trajectory_jobs == frozenset({JOB_ID})
@@ -316,7 +316,7 @@ async def test_a_failed_load_does_not_leave_a_count_behind(tmp_path):
     async with pool.session(PARENT_ID, read=True) as bridge:
         bridge.remote._client = TrajectoryOwner(fail_watch=True)  # type: ignore[assignment]
         install_roster(bridge, jobs=[a_task_job()])
-        assert await pool.load_child_trajectory(PARENT_ID, JOB_ID) == {
+        assert await bridge.load_child_trajectory(JOB_ID) == {
             "rows": [],
             "base_seq": None,
             "total": 0,
@@ -327,7 +327,7 @@ async def test_a_failed_load_does_not_leave_a_count_behind(tmp_path):
         assert bridge.watched_trajectory_jobs == frozenset()
         # The retry is not refused by a count the failure left behind.
         bridge.remote._client = TrajectoryOwner()  # type: ignore[assignment]
-        assert (await pool.load_child_trajectory(PARENT_ID, JOB_ID))["available"] is True
+        assert (await bridge.load_child_trajectory(JOB_ID))["available"] is True
 
 
 @pytest.mark.asyncio
@@ -365,7 +365,7 @@ async def test_the_seed_is_the_window_the_stream_will_extend(tmp_path):
     async with pool.session(PARENT_ID, read=True) as bridge:
         bridge.remote._client = TrajectoryOwner(rows)  # type: ignore[assignment]
         install_roster(bridge, jobs=[a_task_job()])
-        seed = await pool.load_child_trajectory(PARENT_ID, JOB_ID)
+        seed = await bridge.load_child_trajectory(JOB_ID)
         assert seed["available"] is True and seed["reason"] is None
         assert seed["rows"] == rows
         assert seed["base_seq"] == 7
@@ -394,7 +394,7 @@ async def test_the_route_refuses_a_job_this_conversation_does_not_own(tmp_path, 
         bridge.remote._client = TrajectoryOwner()  # type: ignore[assignment]
         install_roster(bridge, jobs=[a_task_job()])
         with pytest.raises(SubagentChildUnavailable):
-            await pool.load_child_trajectory(PARENT_ID, job_id)
+            await bridge.load_child_trajectory(job_id)
         assert bridge.watched_trajectory_jobs == frozenset()
 
 
@@ -408,7 +408,7 @@ async def test_a_child_that_is_not_a_subagent_is_refused(tmp_path):
         bridge.remote._client = TrajectoryOwner()  # type: ignore[assignment]
         install_roster(bridge, jobs=[a_task_job()])
         with pytest.raises(SubagentChildUnavailable):
-            await pool.load_child_trajectory(PARENT_ID, JOB_ID)
+            await bridge.load_child_trajectory(JOB_ID)
 
 
 @pytest.mark.asyncio
@@ -425,7 +425,7 @@ async def test_a_job_with_no_live_lineage_is_answered_by_the_persisted_roster(tm
     async with pool.session(PARENT_ID, read=True) as bridge:
         bridge.remote._client = TrajectoryOwner()  # type: ignore[assignment]
         install_roster(bridge, jobs=[a_task_job(session_id=None)])
-        seed = await pool.load_child_trajectory(PARENT_ID, JOB_ID)
+        seed = await bridge.load_child_trajectory(JOB_ID)
         assert seed["available"] is True
 
 
@@ -443,7 +443,7 @@ async def test_a_bash_job_answers_unsupported_rather_than_not_yours(tmp_path):
     async with pool.session(PARENT_ID, read=True) as bridge:
         bridge.remote._client = owner  # type: ignore[assignment]
         install_roster(bridge, jobs=[JobState(id=JOB_ID, type="bash", status="running")])
-        answer = await pool.load_child_trajectory(PARENT_ID, JOB_ID)
+        answer = await bridge.load_child_trajectory(JOB_ID)
         assert answer["available"] is False and answer["reason"] == "unsupported"
         assert owner.watched == []
 
@@ -455,12 +455,12 @@ async def test_a_bridge_with_no_canonical_state_answers_no_owner(tmp_path):
     pool = DesktopSessions(tmp_path)
     async with pool.session(PARENT_ID, read=True) as bridge:
         assert bridge.roster_jobs() == ()
-        answer = await pool.load_child_trajectory(PARENT_ID, JOB_ID)
+        answer = await bridge.load_child_trajectory(JOB_ID)
         assert answer["available"] is False and answer["reason"] == "no-owner"
         # The id SHAPES are still enforced here, so an empty roster cannot be
         # used to walk values the surface refuses everywhere else.
         with pytest.raises(SubagentChildUnavailable):
-            await pool.load_child_trajectory(PARENT_ID, "not-an-id")
+            await bridge.load_child_trajectory("not-an-id")
 
 
 # -- the route and the capability ---------------------------------------------
