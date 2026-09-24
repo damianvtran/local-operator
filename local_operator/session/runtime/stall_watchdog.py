@@ -343,12 +343,14 @@ cheap class.
 
 AT A REAL WIDTH THE READ IS CHEAP AND THE FLOOR IS UNDER NO PRESSURE. The widest
 walk those transcripts show, on a 256-lane roster, is 11.7-13.5 ms of CPU per
-sample: 47-54 ms of a CPU minute, ~0.08-0.09% of one core, three orders below the
+sample: 47-54 ms of a CPU minute, ~0.08-0.09% of one core, about 55x below the
 :data:`PROGRESS_CPU_FLOOR`. At the median 5-row walk it is 2.3-2.7 ms per sample,
-~0.015-0.018% of a core. That is the honest form of the "three orders" claim, and
-it is about ROWS more than lanes: the lane axis alone, over a real completed-turn
-tail (four rows plus the boundary the scan breaks on), is 191-239 µs at 256 lanes,
-0.75-0.93 µs per lane.
+~0.015-0.018% of a core, ~300x below it. That is the honest form of the "three
+orders" claim: it holds for the tail rows a real lane carries, and it is about ROWS
+more than lanes — the lane axis alone, over a real completed-turn tail (four rows
+plus the boundary the scan breaks on), is 191-239 µs at 256 lanes, 0.75-0.93 µs per
+lane, this round's own re-measure at the low end of the table above and inside the
+rig spread that paragraph names.
 
 THE SHAPE THAT BREACHES THE FLOOR, NAMED, BECAUSE THE FLOOR KEEPS ITS ROLE: 256
 lanes whose tails are 4098 ``CustomMessage`` rows each — the shape this paragraph
