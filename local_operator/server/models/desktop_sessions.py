@@ -307,6 +307,81 @@ class ChildTranscriptPage(HistoryPage):
     state: ChildTranscriptState
 
 
+#: Why a child job's live window could not be handed over, when its absence
+#: needs naming. A TOKEN, not a sentence: the copy belongs to the surface.
+#:
+#: ``no-owner`` is the runtime half — no owner is attached, the owner is too old
+#: for the subscription op, or the connection dropped while the window was being
+#: fetched. It is RETRYABLE: the reader re-asks on its next pulse. ``unsupported``
+#: is the job half — this job type records no trajectory at all, so there is
+#: nothing to follow and the reader must stop asking. The two must not be folded
+#: into one: a reader cannot tell them apart from the rows alone (both are empty),
+#: and polling forever on ``unsupported`` is the same defect as giving up on
+#: ``no-owner``.
+ChildTrajectoryUnavailable = Literal["no-owner", "unsupported"]
+
+
+class ChildTrajectoryWindow(BaseModel):
+    """One child job's retained trajectory window, seeded by a subscribe.
+
+    The desktop reader's live path (design § 1, D1.1): ``POST``ing this route
+    both loads the window and subscribes the connection to its appends, so the
+    reply IS the seed rather than an acknowledgement of one. A client that had
+    to fetch and then subscribe would lose whatever landed between the two calls.
+
+    The fields are the runtime's own fetch op's (``job_trajectory``) plus the two
+    that only a failed load needs, and the identity rule is why ``base_seq`` is
+    here at all: the rows rotate out of the front of a bounded window, so list
+    position is not identity — ``base_seq`` is the ``_lo_seq`` stamp of
+    ``rows[0]``, and a reader applies an append iff its stamp is greater than the
+    watermark this seed established. That is what makes the seed/append
+    interleave safe without the reader having to care which arrived first.
+
+    ``total`` and ``trajectory_length`` BOTH count the window this reply carries,
+    and they are equal by construction: after a successful load the reply IS the
+    whole retained window (the pager loops until the owner's ``total`` is
+    reached), so "what this reply carries" and "what the runtime retains for the
+    job" are the same window — and the roster row's own ``trajectory_length``,
+    which is the follower's COPY of the runtime's number, is not reused for it.
+    That copy drifts in both directions and the reply must not: it lags the window
+    this call just read, and it is inflated by the duplicated rows the seed
+    deduplicates (measured: a reply publishing it reported a count matching
+    neither its rows nor the runtime's, in a window that was OVER-counted rather
+    than partial). A client that wants the runtime's own figure reads the roster
+    row it already has; the reply is about the rows it hands over.
+
+    ``watchers`` and ``joined`` say what this call did to the session's shared
+    count, because every POST increments and one DELETE releases one: a client
+    that re-seeds without unmounting (a rotation, a double mount) accumulates a
+    reference it cannot otherwise observe. ``joined`` is the boolean form of
+    ``watchers > 1``. An unavailable reply carries ``0`` and ``False``.
+    """
+
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    base_seq: int | None = None
+    total: int = 0
+    trajectory_length: int = 0
+    watchers: int = 0
+    joined: bool = False
+    available: bool
+    reason: ChildTrajectoryUnavailable | None = None
+
+
+class ChildTrajectoryRelease(BaseModel):
+    """What one reader's release left behind for a child job's window.
+
+    ``watchers`` is the count still held on the session's shared bridge, and
+    ``watching`` is its nonzero form for a client that only wants the boolean.
+    Both are published because the count is the fact and the boolean is the
+    convenience: a client that had assumed its release was the last one can see
+    that another window is still reading the same child, which is the one case
+    where nothing about its own close is observable on screen.
+    """
+
+    watching: bool
+    watchers: int
+
+
 class SnapshotPayload(BaseModel):
     """The snapshot frame's body: canonical state, the durable page, and WHY.
 
