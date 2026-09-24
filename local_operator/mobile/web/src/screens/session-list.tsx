@@ -616,6 +616,50 @@ export function SessionListScreen() {
 					local operator
 				</h1>
 			</header>
+			{/* THE REFUSAL IS REPORTED WHERE THE READER IS LOOKING (design rounds 5
+			    and 6, D12/D14; review round 8, R8-2; QA round 3, Q4). It is a sibling
+			    of the scroller, between the header and `<main>`, and it is never
+			    inside `<main>`, because a band inside the scroll content is on screen
+			    only at `scrollTop` 0. Its first fix put it above the first row, and a
+			    reader who had scrolled to the row they held (the normal case: a
+			    folder-less session is new and idle, so the shared key files it below
+			    every busy row) still saw the ★ lift and fall back with the reason
+			    about a screen ABOVE them, and the rows slid down under a band nobody
+			    could see. Here it is pinned to the top of the viewport at any scroll
+			    position and any list length, the way the session view renders its
+			    own refusal under its header.
+
+			    IT COLLAPSES RATHER THAN VANISHES, on the caption's `0fr`/`1fr` track
+			    and for the caption's D8 reason: opening it takes height from `<main>`,
+			    so every visible row moves down by the band's height, and an unanimated
+			    insert would snap the list at the moment the reader is watching the row
+			    they pressed. On the track the rows travel with the band's own curve,
+			    and the text that explains the move appears in that same frame. The
+			    list's FLIP settle measures from `<main>`'s own top, so moving `<main>`
+			    does not read to it as a reorder. The `<p>` stays mounted with empty
+			    text for the same reason a conditional child would not: the track would
+			    have nothing to measure, so the collapse would be an instant step.
+
+			    NO `aria-hidden`, unlike the caption. The band has no second state to
+			    express: when it is collapsed its text is empty, so there is nothing for
+			    assistive tech to read, and hanging the caption's predicate on it is
+			    exactly the confusion D12 names. The live region is present from the
+			    first render, which is the shape screen readers announce reliably, and
+			    the refusal is announced when its text arrives. `mx-3` lines its text up
+			    with the header and the search field (`<main>`'s `px-1` plus the field's
+			    `mx-2`). */}
+			<div
+				className={cn(
+					"grid shrink-0 transition-[grid-template-rows] duration-200 ease-out",
+					showPinError ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+				)}
+			>
+				<div className="overflow-hidden">
+					<p role="alert" className="mx-3 mb-2 text-meta text-danger">
+						{pinErrorText}
+					</p>
+				</div>
+			</div>
 			<main
 				ref={mainRef}
 				className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
@@ -626,44 +670,6 @@ export function SessionListScreen() {
 					placeholder="Search conversations…"
 					className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
-				{/* THE REFUSAL IS REPORTED WHERE THE PRESS HAPPENED (design round 5,
-				    D12). It used to render after the last row, so on a list longer than
-				    the screen a refused pin looked like it had silently done nothing:
-				    the reader watched the optimistic ★ lift and fall back, and the one
-				    sentence saying why sat at the bottom of the scroll container where
-				    they would never look. It now shares the top of the list surface
-				    with the caption — in the same frame as the row it is about, at any
-				    scroll position and any list length — and takes the FIRST slot,
-				    because it answers the press the reader just made while the caption
-				    below it is standing chrome.
-
-				    IT COLLAPSES RATHER THAN VANISHES, on the caption's own `0fr`/`1fr`
-				    track and for the caption's own D8 reason: both its appearance and
-				    its retirement (the next pin attempt clears it) move every row below
-				    it, and an unanimated insert would snap the list by the band's height
-				    at the exact moment the reader is watching the row they pressed. The
-				    `<p>` stays mounted with empty text for the same reason a conditional
-				    child would not: the track has nothing left to measure, so the
-				    collapse would be an instant step.
-
-				    NO `aria-hidden`, unlike the caption. The band has no second state to
-				    express — when it is collapsed its text is empty, so there is nothing
-				    for assistive tech to read — and hanging the caption's predicate on it
-				    is exactly the confusion D12 names. The live region is present from
-				    the first render, which is the shape screen readers announce
-				    reliably, and the refusal is announced when its text arrives. */}
-				<div
-					className={cn(
-						"grid transition-[grid-template-rows] duration-200 ease-out",
-						showPinError ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
-					)}
-				>
-					<div className="overflow-hidden">
-						<p role="alert" className="mx-2 mb-2 text-meta text-danger">
-							{pinErrorText}
-						</p>
-					</div>
-				</div>
 				{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 				    round 1, D2). The session view's ☆ is one tap away and does the same
 				    thing, but a reader has to already be in a conversation to find it, so
