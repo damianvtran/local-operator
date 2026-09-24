@@ -184,7 +184,10 @@ Screens, following branding.md §7's agent-output hierarchy:
   the TUI's `F10` and the desktop app's pin action read and write — so a pin
   made on the phone appears on the other surfaces and vice versa. The route is
   `POST /api/sessions/{id}/pin` with `{"pinned": bool}` (desired state, not a
-  toggle, so a retried request cannot flip the pin back).
+  toggle, so a retried request cannot flip the pin back). A pin made on another
+  surface reaches an open phone list without a reload within one discovery
+  pass (`SCAN_INTERVAL_S`, 2 s): that pass stats `sidebar-pins.json` once per
+  tick and repaints the list only when the pinned set changed.
 - **Session view** — transcript with TUI-parity rendering: user rows,
   assistant markdown, one-line tool calls with state glyphs and green/red
   diff counts, tap to expand/collapse args+output+diff; todos panel;
