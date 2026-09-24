@@ -880,6 +880,28 @@ must be able to say so: `503` with `{"detail": {"code": "runtime_unreachable",
 from a `503` that is the server not answering at all. Clients key on the `code`; the sentence rides along
 for the ones that do not.
 
+A control call against an owner that IS reachable but does not answer inside
+the desktop control envelope (`DESKTOP_CONTROL_ATTACH_S`, 3 s over the whole
+dial + sync) is answered `503` with `{"detail": {"code": "runtime_busy",
+"message": <the same sentence>, "retryable": true, "retry_after_ms": 2000}}` and
+a `Retry-After: 2` header, instead of spending 15 s on the welcome and answering
+`runtime_unreachable`. `runtime_busy` means the runtime is alive and busy (a loop
+mid-turn, a long synchronous step): resending the SAME request id is safe
+(admissions are at-most-once by the receipt journal) and will very likely
+succeed shortly. `runtime_unreachable` keeps its meaning — nothing could be
+dialled — and carries no retry fields. Every field is additive: a client that
+predates them reads the unchanged sentence.
+
+The 3 s is PER CALL, and it starts once the call holds the facade's bind lock.
+Control calls to one conversation still dial one at a time, so a second call
+issued while the first is waiting on the same silent owner is refused after
+about twice the envelope (measured: 3,034 ms then 6,046 ms, both
+`runtime_busy`), and N concurrent calls stack to about N × 3 s. Reads are not
+part of this queue. `retry_after_ms` (2 s) is deliberately shorter than the
+envelope: it is the pause before the next attempt, and the retry spends its own
+3 s waiting for the owner, so refuse + pause cycles keep three attempts inside
+a 20 s client deadline.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -929,9 +951,30 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    Because nothing is cut, the snapshot can no longer report
    `cursor_missing: true` — an evicted or replaced cursor is not a state this
    frame can be in. An EMPTY page still means "reconcile through `/history`":
-   that is now exactly the case where the paired state carries no `history_cursor`
-   at all (no frontend refresh or checkpoint yet), and readers depend on that
-   signal, so it is preserved deliberately rather than inferred.
+   that is now exactly the case where a LIVE owner's paired state carries no
+   `history_cursor` at all (no frontend refresh or checkpoint yet), and readers
+   depend on that signal, so it is preserved deliberately rather than inferred.
+   A COLD frame (`cold: true`) carries the filled page too — the same tail
+   `/history` serves — so first paint of a conversation with no live runtime
+   needs no second round trip. A non-empty page beside a `cold_reason` is how a
+   renderer knows this backend fills it and may skip the duplicate `/history`.
+   Key that on the PRESENCE of `cold_reason`, never on its value. The FIRST
+   cold frame for a live-but-busy owner usually carries `cold_reason:
+   "no-runtime"`, not `owner-silent`: the attempt that classifies the owner
+   queues behind any control dial on the same facade (4/4 frames measured while
+   a `/warm` or send was in flight), and the frame goes out before it records
+   the classification. `no-runtime` beside `attaching: true` therefore means
+   "not classified yet", not "no pid holds this conversation". The
+   `frontend.replace` that follows carries the classified token or `cold:
+   false`. A cold snapshot's `cursor_missing` is always `false`: the page is
+   the unanchored tail (no `before_id`, no `through_id`), and only an anchored
+   read can find its cursor missing. This holds whether the page is empty or
+   not.
+   A read waits at most `READ_FIRST_FRAME_GRACE_S` (50 ms) for its attach to an
+   existing owner; a busy owner is painted cold with `attaching: true` and the
+   attach carries on behind the frame, ending in a `frontend.replace` whose
+   `cold` flag is the verdict (`false` once it lands, or the classified
+   `cold_reason` if it does not).
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
@@ -1523,6 +1566,22 @@ eligible.
    question, and using it to suppress meant "this machine can banner" read as "a
    human is reading X": with the panel on X and the window behind another app,
    every OS surface went quiet while nobody was looking.
+
+   This rung reads ATTENTION ("a person is looking right now") and must keep
+   reading it. The runtime also publishes `RuntimeServer.attached_surfaces()` —
+   "an interface could PRESENT a question", with no focus in it and the desktop
+   clause reduced to the LEASE ("a pane holds this conversation"), which is what
+   keeps that answer from moving when a window is raised — and that is a
+   different question serving
+   different consumers: the model's `<interactivity>` block and the gate's park
+   decision, never suppression. Routing on it here would silence the banner for
+   a conversation nobody is looking at, which is what this rung exists to catch
+   (see `docs/design/attached-interface-signal.md`).
+
+   A record whose `session_id` is EMPTY is absence of evidence, not evidence
+   against the session: the publisher blanks the field whenever it cannot vouch
+   for which conversation the window shows, so `_desktop_visible` falls through
+   to the connection's own per-session flag rather than denying.
 2. **A notify-capable desktop app** on this host claims the completion kind —
    the feed above composes it, so the runtime and the TUI stay silent.
 3. **A TUI is running anywhere on this machine** — its 1 s background announcer

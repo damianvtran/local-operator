@@ -222,11 +222,8 @@ async def test_store_maintenance_removes_nothing_from_a_mixed_store(
     expected = _mixed_store(tmp_path)
     manager = ConfigManager(tmp_path)
 
-    async def no_wait() -> None:
-        return None
-
-    monkeypatch.setattr(session_factory, "_wait_for_store_maintenance_idle_window", no_wait)
-    await session_factory._run_store_maintenance(manager, tmp_path, live_dir=None)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    session_factory._run_store_maintenance(manager, tmp_path, live_dir=None)
 
     survivors = {p.name for p in (tmp_path / "sessions").iterdir() if p.is_dir()}
     assert survivors == expected
@@ -257,11 +254,8 @@ async def test_store_maintenance_ignores_aggressive_limits_when_disabled(
         }
     )
 
-    async def no_wait() -> None:
-        return None
-
-    monkeypatch.setattr(session_factory, "_wait_for_store_maintenance_idle_window", no_wait)
-    await session_factory._run_store_maintenance(ConfigManager(tmp_path), tmp_path, live_dir=None)
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    session_factory._run_store_maintenance(ConfigManager(tmp_path), tmp_path, live_dir=None)
 
     survivors = {p.name for p in (tmp_path / "sessions").iterdir() if p.is_dir()}
     assert survivors == expected

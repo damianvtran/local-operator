@@ -612,8 +612,6 @@ def test_a_boot_does_not_move_the_activity_clock(
     (newest non-sidecar file) read a 40-day session as active NOW after one
     boot. Run the REAL maintenance pass, then assert every session's activity
     is unchanged and ``max_inactive_days`` still finds the old ones."""
-    import asyncio
-
     from local_operator import session_factory
     from local_operator.session.retention import _activity_mtime
 
@@ -627,11 +625,8 @@ def test_a_boot_does_not_move_the_activity_clock(
     before = {p.name: _activity_mtime(p, 0.0) for p in made}
     manager = ConfigManager(tmp_path)
 
-    async def no_wait() -> None:
-        return None
-
-    monkeypatch.setattr(session_factory, "_wait_for_store_maintenance_idle_window", no_wait)
-    asyncio.run(session_factory._run_store_maintenance(manager, tmp_path, live_dir=None))
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    session_factory._run_store_maintenance(manager, tmp_path, live_dir=None)
 
     stamped = [p for p in made if (p / "title-scan.json").exists() or (p / "origin.json").exists()]
     assert stamped, "the backfills did not run; the test proves nothing"

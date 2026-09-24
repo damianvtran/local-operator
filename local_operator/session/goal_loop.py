@@ -306,8 +306,8 @@ LOOP_JUDGE_PROMPT = (
     "Then, on the next line, one short sentence of reason. Judge strictly: "
     "answer ACHIEVED only if the goal is fully and verifiably met, not merely "
     "in progress. If unsure, answer CONTINUE. Answer in text only and do not "
-    "call any tool: this is a verdict on the conversation above, and a tool "
-    "call here is discarded unread."
+    "call any tool: this is a verdict on the conversation above, and a tool or "
+    "function call here is rejected and returned to you as an error."
 )
 
 MAX_LOOP_JUDGE_FAILURES = 3

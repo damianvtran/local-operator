@@ -79,6 +79,7 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
+from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import (
@@ -140,6 +141,34 @@ RUNTIME_UNREACHABLE = "runtime_unreachable"
 RUNTIME_UNREACHABLE_MESSAGE = (
     "Session owner is unavailable. Reconnect and reconcile before retrying."
 )
+
+#: The machine code for a control call whose runtime IS alive and reachable but
+#: did not answer inside the desktop control envelope
+#: (``session/attached.py::DESKTOP_CONTROL_ATTACH_S``) — a loop busy mid-turn, a
+#: long synchronous step. Split from :data:`RUNTIME_UNREACHABLE` because the two
+#: call for different client behaviour: unreachable means reconcile, busy means
+#: the same request will very likely succeed shortly and is safe to resend (the
+#: receipt journal makes an admission at-most-once per request id).
+#:
+#: The MESSAGE is deliberately the unchanged :data:`RUNTIME_UNREACHABLE_MESSAGE`:
+#: a shipped app that predates this code matches that prefix for its copy, and a
+#: backend fix must not move user-visible text on machines whose app has not
+#: updated. ``retryable``/``retry_after_ms`` and a ``Retry-After`` header are
+#: additive fields a newer renderer keys on.
+RUNTIME_BUSY = "runtime_busy"
+
+#: How soon a client may usefully resend a ``runtime_busy`` request. Short
+#: because the refusal is produced in ``DESKTOP_CONTROL_ATTACH_S`` rather than
+#: 15 s, so two retries still fit well inside the renderer's 20 s deadline.
+#:
+#: DELIBERATELY SHORTER THAN THE 3 s ENVELOPE (review round 1, N2). It is the
+#: PAUSE before the next attempt, not a forecast of when the owner answers: the
+#: retry spends its own ``DESKTOP_CONTROL_ATTACH_S`` waiting for the owner, so an
+#: owner that recovers within ~5 s of the refusal is admitted by the first
+#: retry, and refuse + pause + retry cycles (3 + 2 + 3 + 2 + 3 = 13 s) keep three
+#: attempts inside the renderer's 20 s deadline. Aligning it to 3 s buys no extra
+#: chance of admission and costs the third attempt's headroom.
+RUNTIME_BUSY_RETRY_AFTER_MS = 2000
 
 #: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is
 #: the ONE-WORD answer to "did the owner take this text", which is why a false
@@ -1330,11 +1359,51 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
+            AsideUnanswered,
             AttachmentUnavailable,
             ProfileRegistryUnavailable,
+            RuntimeRetiring,
         )
 
-        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)):
+            # ``RuntimeRetiring`` IS IN THIS TUPLE FOR THE REASON THE ARM'S
+            # OTHER FOUR REFUSALS ARE: the code is the contract. A retiring runtime refuses an
+            # admission the client can ACT on differently from a broken one —
+            # the message was provably not admitted, so the app restores its
+            # echo and retries the same id instead of holding the text in the
+            # composer as a draft the backend already took (design of record
+            # ``docs/design-ownerless-session-attach.md`` §1.6/F5, §6 U1, which
+            # read this route as carrying ``{code: "runtime_retiring", ...}``).
+            # It reached the bare ``str(error)`` answer below only because it
+            # was never listed here, and that answer is the one shape a renderer
+            # cannot key on: the category it needs was nowhere in the body.
+            #
+            # ADDITIVE FOR OLDER CLIENTS, which is what makes listing it here
+            # safe rather than a wire change: such a client read ``detail`` as a
+            # string and read it as nothing more than that here — the sentence a
+            # refusal object carries in ``message`` is character-for-character
+            # the one the bare 409 carried, so the only difference it can observe
+            # is an object where it expected prose, which it ignores. The same
+            # claim the ``MoveIndeterminate`` arm above states for the same
+            # body shape ("The client is already built for this shape: it reads
+            # ``detail.message`` when ``detail`` is an object").
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        if isinstance(error, AsideUnanswered):
+            # THE REFUSAL IS THE ANSWER, exactly as it is for the three arms around
+            # it: the aside ran, the provider answered, and the model would not
+            # answer in text. Three shapes reach this one arm, and the sentence in
+            # ``session/errors.py`` is worded for all of them: a bare tool call on
+            # the corrected retry (``Session.complete_aside`` spends its one retry
+            # first), nothing at all on that retry, and — as
+            # ``AsideEmptyAnswer``, which subclasses this so it needs no arm of its
+            # own — an answer that settled with no text whatsoever, which the
+            # asides route refuses rather than storing as a finished exchange. A
+            # bare 500 would tell the app the BACKEND broke, and the generic
+            # ``RuntimeError`` arm would tell it the runtime was UNREACHABLE, whose
+            # remedy (reconcile, reconnect) cannot help; the 409 named condition
+            # carries the code a renderer keys on and the sentence that says what
+            # to do (ask again). A ``ValueError`` subclass precisely so it lands in
+            # THIS arm rather than the arms below.
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,
@@ -1370,6 +1439,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # classifier's (QA round 2, Q1).
         raise _store_refusal(
             request, sqlite_store_failure(error, store_root(request)), error, copy
+        ) from None
+    except RuntimeUnresponsiveError:
+        # BEFORE the generic ConnectionError arm (it subclasses it). The runtime
+        # is alive and this host reached it; it did not answer inside the desktop
+        # control envelope. Answered fast and typed so the renderer can retry
+        # instead of reporting a lost session at its 20 s deadline.
+        raise HTTPException(
+            503,
+            {
+                "code": RUNTIME_BUSY,
+                "message": RUNTIME_UNREACHABLE_MESSAGE,
+                "retryable": True,
+                "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
+            },
+            headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
         ) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when

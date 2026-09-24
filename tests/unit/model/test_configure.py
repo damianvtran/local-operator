@@ -3910,6 +3910,103 @@ async def test_the_setting_off_never_decorates_even_with_a_pin_held() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nested_child_provider_streams_share_the_parent_activity_count() -> None:
+    """Only forked model streams count, through nested/concurrent children.
+
+    The runtime can sample this parent-owned integer from its watchdog thread;
+    keep the test on the real ``SessionStreamFn.fork`` and stream recorder so
+    a disconnected callback implementation cannot pass.
+    """
+    parent = _affinity_stream()
+    child = parent.fork("child")
+    grandchild = child.fork("grandchild")
+    parent_started, child_started, grandchild_started = (asyncio.Event() for _ in range(3))
+    parent_release, child_release, grandchild_release = (asyncio.Event() for _ in range(3))
+
+    async def parked(started: asyncio.Event, release: asyncio.Event) -> AsyncIterator[StreamEvent]:
+        started.set()
+        await release.wait()
+        yield StreamEndEvent(stop_reason="stop")
+
+    async def consume(
+        stream: SessionStreamFn, started: asyncio.Event, release: asyncio.Event
+    ) -> None:
+        await _collect_stream(stream._record_stream(_affinity_request(), parked(started, release)))
+
+    parent_task = asyncio.create_task(consume(parent, parent_started, parent_release))
+    child_task = asyncio.create_task(consume(child, child_started, child_release))
+    grandchild_task = asyncio.create_task(
+        consume(grandchild, grandchild_started, grandchild_release)
+    )
+    try:
+        await asyncio.gather(parent_started.wait(), child_started.wait(), grandchild_started.wait())
+        assert parent.child_model_requests_in_flight is True
+        # The parent's own provider request does not set the child-only signal.
+        # Finish one child while another nested request remains outstanding.
+        child_release.set()
+        await child_task
+        await child.close()
+        assert parent.child_model_requests_in_flight is True
+        grandchild_release.set()
+        await grandchild_task
+        await grandchild.close()
+        # The parent request is still parked, but it is not child activity.
+        assert parent.child_model_requests_in_flight is False
+        parent_release.set()
+        await parent_task
+        assert parent.child_model_requests_in_flight is False
+    finally:
+        for release in (parent_release, child_release, grandchild_release):
+            release.set()
+        for task in (parent_task, child_task, grandchild_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(parent_task, child_task, grandchild_task, return_exceptions=True)
+        await grandchild.close()
+        await child.close()
+        await parent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["error", "cancel"])
+async def test_child_provider_request_count_balances_on_error_and_cancellation(
+    terminal: str,
+) -> None:
+    parent = _affinity_stream()
+    child = parent.fork("child")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked() -> AsyncIterator[StreamEvent]:
+        started.set()
+        await release.wait()
+        if terminal == "error":
+            raise RuntimeError("provider stream failed")
+        yield StreamEndEvent(stop_reason="stop")
+
+    task = asyncio.create_task(_collect_stream(child._record_stream(_affinity_request(), parked())))
+    try:
+        await started.wait()
+        assert parent.child_model_requests_in_flight is True
+        if terminal == "error":
+            release.set()
+            with pytest.raises(RuntimeError, match="provider stream failed"):
+                await task
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert parent.child_model_requests_in_flight is False
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await child.close()
+        await parent.close()
+
+
+@pytest.mark.asyncio
 async def test_a_successful_end_records_the_served_host() -> None:
     """The write half, through the real `_record_stream` wrapper."""
     stream = _affinity_stream()

@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import re
 import shlex
+import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -774,6 +777,1362 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
     """
     redactor = builtin._PipeRedactor([])
     assert redactor.feed(b"step 1/3\r") == b"step 1/3\r"
+
+
+# --- the pipe filter's PEM classifiers: gated, linear, and pinned -------------
+#
+# `_mask_open_key_block` runs the header, body and END classifiers over EVERY
+# 64 KiB read a child produces, and `_pump` calls them ON THE EVENT LOOP. Their
+# prefix grammar is the shared `LINE_PREFIX`, which is ambiguous by construction:
+# a unit's `\d+` may end in the middle of a digit run, so a line of numeric
+# columns has 2**k live partitions and `re`, which does not memoise, walks every
+# one of them before concluding that the line is not PEM. Every figure below
+# NAMES ITS POPULATION, because they differ by two orders of magnitude between
+# populations and an unqualified number is how the first version of this comment
+# came to understate the residual by ~300x (round 1's R1-2):
+#
+# * base (`origin/main`), ONE 65-character `%8d` row of FOUR-digit values: the
+#   header search does not return in 300 s (timed out). The same row of ONE-digit
+#   values: 1.357 s in that search, 1.828 s in the body match.
+# * head, the four-digit row: 3.9 s / 6.7 s. The whitespace rewrite of the prefix
+#   fragment (`redaction_shapes.LINE_PREFIX`) is what buys that difference, and
+#   reverting it puts both paths back over 150 s.
+# * head, the body classifier INSIDE AN OPEN BLOCK: 12.5 s for ONE rejected
+#   digit-dense line, 26.1 s for two — charged PER LINE OF THE RELEASED BUFFER
+#   and not per line of the block, because closing the state is what releases the
+#   rest of the read and the loop goes on classifying after it closes.
+#
+# Say precisely what the evidence is, because the frame and the frequency are
+# different claims. The frame is real: `~/.local-operator/logs/runtime-stall-
+# 85845.log` carries `_mask_open_key_block` -> `_feed_scrubbed` -> `feed` ->
+# `_pump` for a session that wedged with its transcript unchanged, burning 97%
+# of a core for 45 s. The instance is ONE: of the 31 bound dumps written on this
+# fleet that night, this routine appears in one, three more carry other
+# `local_operator` frames, 22 are the runtime's ordinary loops parked in stdlib
+# and five carry no `local_operator` frame at all. So this is a located spin,
+# NOT the freeze class of that night; the volume belongs to the liveness axis
+# (#1408/#1419).
+#
+# Nor is size what makes it burn: the `wait` it froze in was blocked over a
+# launch payload of 8-10 KB, and one numeric row inside a 10 KB payload costs
+# 56 s of CPU on its own, while an unclosed block and a block past the cap cost
+# nothing at the same size (measured, all three). The cost is a property of the
+# SHAPE of the bytes, which is why these tests are sized in tens of bytes.
+#
+# THE FIX HAS TWO HALVES. The gates close the ORDINARY read: a read carrying
+# neither literal never reaches a classifier, which is what makes ordinary output
+# free. They cannot close the rest, and the BODY classifier cannot be gated at all
+# — `10000000 10000001` is a line it MATCHES, so no necessary condition rejects it
+# cheaply. That half is the LINEAR DECIDERS: `pem_body_line`, `pem_end_line` and
+# `pem_header_line_end` in `redaction_shapes` decide the same three languages in
+# one pass each, with no backtracking to walk. The arms below hold them to the
+# patterns they replace — a sweep over character-kind sequences in BOTH
+# directions (a dropped line is a published key, an extra one masks prose), the
+# digit predicate against `\d` over the whole code space, and the cost of the
+# ungated path itself, which no gate-based arm could see (round 1's R1-1).
+#
+# THE THIRD HALF, and it was reachable through the PIPE rather than beside it: the
+# shape TABLE's `-open` rule embeds the same ambiguous fragment, and
+# `_PipeRedactor._release_point` runs that rule through `_shape_safe_spans` on any
+# read past the deferral cap — the fatal class by another door (QA round 2, Q3 on
+# #1427). It is also the road the scrub takes on the bytes that release hands it,
+# so the walk was measured on both: past a 60 s cap for a 9,152-byte read and past
+# a 60 s cap for a THREE-row one, because nothing on that path is gated by a
+# classifier — an anchored `private_key` spelling puts the header where the
+# line-anchored block loop cannot see it, and the rule's own walk is 2**(digits-1)
+# partitions per digit run of a dense line. What closes it is the SPELLING the rule
+# uses: `_PEM_DIGIT_MAX_PREFIX` requires each digit run to be maximal, which is the
+# same language (a split inside a contiguous run always has an equivalent one-unit
+# parse) and takes the walk from past 60 s to tens of milliseconds. The arms below
+# hold it: the fragment sweep and the rule-level differential in BOTH directions,
+# the rule's own answer and cost on the dense population, and masking parity
+# through the real pipe filter at four chunk policies. The rewrite arm below is
+# there because that path is where the whitespace rewrite is still the thing
+# keeping the cost at tens of milliseconds.
+
+#: The character KINDS these three languages are functions of. A sequence of kinds
+#: stands for every string built from the same kinds, which is what lets a bounded
+#: sweep below stand for an unbounded one. `\u0661` is an Arabic-Indic digit: `\d`
+#: takes it and `[0-9]` does not, so its presence here is what catches a machine
+#: that read the fragment's digit class as ASCII. `\r` is here for the same reason in
+#: the other direction, and it is the kind this sweep was MISSING: the armour tail is
+#: `[ \t]*(?=\r|\n|$)` and a `\r` is what tells a decider modelling the tail as `$`
+#: apart from the pattern (the merged-tree disagreement with #1445) — without this kind
+#: and the CR fixtures below, this arm passed under exactly the disagreement it exists
+#: to catch.
+_DECIDER_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "a", ",", "\r")
+#: The terminators an armour line is actually written with, for the fixture loop below:
+#: LF, CRLF and a bare CR used as the line end, plus the whitespace an editor or a wiki
+#: leaves between the last dash and the terminator.
+_DECIDER_TERMINATORS = ("\n", "\r\n", "\r")
+_DECIDER_TAIL_WHITESPACE = ("", "  ", "\t")
+#: Tokens for the must-not-reject direction: eight characters is the body floor,
+#: and the shorter ones are what the short-line arm is for.
+_DECIDER_TOKENS = ("MIIEowIB", "MIIEowIB,", "MIIEowIB  ", "M")
+
+
+class _CountingDecider:
+    """A decider stand-in that records the CALL rather than the time.
+
+    `_PipeRedactor` reads the decider off the module at call time, so this is how
+    far "the classifier was not reached" can be asserted as a FACT: the call count
+    is zero or it is not, whatever the runner's load.
+    """
+
+    def __init__(self, decider: Callable[[str], object]) -> None:
+        self._decider = decider
+        self.calls = 0
+
+    def __call__(self, text: str) -> Any:
+        self.calls += 1
+        return self._decider(text)
+
+
+#: The dash run of a PEM banner, and a builder for the banner itself. The banner is
+#: ASSEMBLED rather than written down because the literal is the shape this file's own
+#: subject matter treats as a credential: tooling on the way in that redacts it would
+#: leave a broken line and a test that still passes while asserting nothing.
+#: `_PEM_SPELLINGS` and `_PEM_BODY` are the file's existing spellings and body, reused
+#: so a spelling a future round adds is covered here too.
+_DASHES = "-" * 5
+
+
+def _banner(spelling: str, kind: str = "BEGIN") -> str:
+    """A PEM banner line, without the literal appearing in this file."""
+    return f"{_DASHES}{kind} {spelling}{_DASHES}\n"
+
+
+def _numeric_rows(rows: int, columns: int = 3, start: int = 0) -> str:
+    """A numeric table row of `%8d`-padded columns: the shape that burns.
+
+    `start=0` so the fields are one or two digits wide unless a caller asks for
+    more, and that is not cosmetic: the partitions of a digit run are what the
+    engine walks, so a wider field multiplies a row's cost and turns a regression
+    from a slow test into a hang — which is a worse test than a fast one. The
+    deciders are linear, so a size that a released path could not finish is now
+    the cheapest way to show that nothing walks the partitions.
+    """
+    return "".join(
+        "".join(f"{start + row * columns + column:8d}" for column in range(columns)) + "\n"
+        for row in range(rows)
+    )
+
+
+def _decider_forms(sequence: str) -> tuple[str, ...]:
+    """The shapes one kind sequence is asked about, in BOTH directions.
+
+    A bare sequence is the must-not-accept direction (the pattern rejects it, so
+    the decider has to as well, or prose gets masked). Each token form is the
+    must-not-reject direction: the pattern takes it, and a decider that drops it
+    publishes a key. The newline forms put the short-line arm's lookahead in play.
+    """
+    forms = [sequence]
+    for token in _DECIDER_TOKENS:
+        forms.append(sequence + token)
+        forms.append(f"{sequence}{token}\n")
+        forms.append(f"{sequence}{token}\n{_PEM_BODY}\n")
+    return tuple(forms)
+
+
+def _decider_fixtures() -> list[str]:
+    """The shapes a caller actually sees, both directions, every spelling.
+
+    Assembled from the file's own constants so a spelling a future round adds is
+    covered here too, and including the two shapes that a per-line reading of the
+    body pattern gets wrong: a banner line is NOT a body line, and a numeric table
+    row after one is not the line the match is anchored to.
+    """
+    fixtures = []
+    prefixes = ("", "12|", "12:", "[12]", "\u2502 12 \u2502", "\t", "12| 34|")
+    for spelling in _PEM_SPELLINGS:
+        header = _banner(spelling)
+        for prefix in prefixes:
+            fixtures.append(prefix + _PEM_BODY)
+            fixtures.append(f"{prefix}{_PEM_BODY}\n{prefix}{_PEM_BODY}\n")
+            fixtures.append(prefix + "10000000 10000001")
+            fixtures.append(prefix + "[112345678")
+            fixtures.append(f"{_numeric_rows(1)}")
+            fixtures.append(f"{prefix}{_PEM_BODY}\n{prefix}")
+        fixtures.append(header.rstrip())
+        fixtures.append("the key at ./id_rsa:" + header.rstrip())
+        fixtures.append(header + _PEM_BODY + "\n")
+        fixtures.append(header + _PEM_BODY + "\n" + _banner(spelling, "END"))
+        fixtures.append(header + _numeric_rows(2))
+        fixtures.append("the key at ./id_rsa:" + header.rstrip() + "\n" + _numeric_rows(2))
+        # THE ARMOUR SPELLINGS, in every terminator x tail-whitespace combination: a
+        # CRLF file, a bare-CR one and a wiki/editor's trailing spaces all carry a line
+        # end the `$`-only model of the tail cannot see (the disagreement with #1445),
+        # and `_banner()` emits LF, so nothing above reaches them.
+        armour = header.rstrip("\n")
+        for terminator in _DECIDER_TERMINATORS:
+            for whitespace in _DECIDER_TAIL_WHITESPACE:
+                line = f"{armour}{whitespace}{terminator}"
+                fixtures.append(line)
+                fixtures.append(f"{line}{_PEM_BODY}{terminator}")
+                fixtures.append(f"{line}{_PEM_BODY}{terminator}{_PEM_BODY}{terminator}")
+                fixtures.append(f"12|{line}{_PEM_BODY}{terminator}")
+    return fixtures
+
+
+def _assert_deciders_agree(text: str) -> None:
+    """One input, all three deciders against all three patterns."""
+    body = redaction_shapes.PEM_BODY_LINE_RE.match(text) is not None
+    assert redaction_shapes.pem_body_line(text) == body, f"body decider differs on {text!r}"
+    end = redaction_shapes.PEM_END_LINE_RE.match(text) is not None
+    assert redaction_shapes.pem_end_line(text) == end, f"END decider differs on {text!r}"
+    match = redaction_shapes.PEM_HEADER_LINE_RE.search(text)
+    want = None if match is None else match.end()
+    assert redaction_shapes.pem_header_line_end(text) == want, f"header decider differs on {text!r}"
+
+
+def test_the_linear_deciders_agree_with_the_patterns_they_replace() -> None:
+    """The equivalence obligation: the patterns stay the DEFINITION, and the
+    deciders are only a cheaper way to decide them.
+
+    This is the arm that carries the risk of that trade, so it sweeps rather than
+    spot-checks: every character-KIND sequence up to length three, in both
+    directions, plus the shapes a caller actually sees. A sequence of kinds stands
+    for every string built from those kinds, which is why a bounded sweep is the
+    right shape here — and why the failure it guards against (a dropped line is a
+    published key) is worth the few thousand comparisons it costs.
+    """
+    for length in range(4):
+        for combo in itertools.product(_DECIDER_KINDS, repeat=length):
+            for text in _decider_forms("".join(combo)):
+                _assert_deciders_agree(text)
+    for text in _decider_fixtures():
+        _assert_deciders_agree(text)
+
+
+# --- the armour tail: one definition, two readers (the pattern and the decider) ----
+#
+# `pem_header_line_end` decides the same question `PEM_HEADER_LINE_RE` asks, and the two
+# drifted apart exactly once: #1445 widened the pattern's tail to `_PEM_ARMOUR_TAIL`
+# (`[ \t]*(?=\r|\n|$)`, so CRLF, bare-CR and trailing-whitespace armour lines match),
+# while this branch's decider still modelled the tail as `$` alone — and the pipe then
+# published the whole body of such a block (measured through the real filter with the
+# `$`-only decider: 3 of 3 body lines out, no marker). The arms below hold the two
+# together structurally (the decider reads the tail's own halves) and behaviourally (a
+# spelling differential, plus the pipe's own consequence).
+_ARMOUR_TERMINATORS = ("\n", "\r\n", "\r", "")
+_ARMOUR_TAIL_WHITESPACE = ("", " ", "\t", "  ", " \t")
+
+
+def _armour_texts() -> list[str]:
+    """Every armour spelling a real file, wiki or Windows editor produces."""
+    out: list[str] = []
+    prefixes = ("", "1\t", "12: ", "[12] ", "\u2502 12 \u2502 ", "1.", "  7) ")
+    spellings = ("PRIVATE KEY", "RSA PRIVATE KEY", "OPENSSH PRIVATE KEY", "EC PRIVATE KEY")
+    bodies = ("", _PEM_BODY, "MIIEow", "  1000    1008")
+    for terminator, whitespace, prefix, spelling, body in itertools.product(
+        _ARMOUR_TERMINATORS, _ARMOUR_TAIL_WHITESPACE, prefixes, spellings, bodies
+    ):
+        out.append(f"{prefix}{_DASHES}BEGIN {spelling}{_DASHES}{whitespace}{terminator}{body}")
+    return out
+
+
+def test_the_header_deciders_tail_is_the_patterns_tail() -> None:
+    """The STRUCTURAL half: the decider derives its tail from the pattern's own text.
+
+    A documentary obligation ("keep the decider's tail in step with the pattern's") is
+    what failed on the merge with #1445, so the link is made of constants instead: the
+    pattern embeds `_PEM_ARMOUR_TAIL`, and the decider's two halves are checked HERE to
+    compose exactly that string. Editing either half without the other reddens this arm;
+    editing both leaves the pattern and the decider still agreeing by construction, which
+    is the property that matters.
+    """
+    terminated = "|".join(list(redaction_shapes._PEM_ARMOUR_TAIL_TERMINATOR_TEXT) + ["$"])
+    assert redaction_shapes._PEM_ARMOUR_TAIL == (
+        "[" + redaction_shapes._PEM_ARMOUR_TAIL_RUN_TEXT + "]*(?=" + terminated + ")"
+    ), "the armour tail and the two halves the decider reads have drifted apart"
+    assert (
+        redaction_shapes._PEM_ARMOUR_TAIL in redaction_shapes.PEM_HEADER_LINE_RE.pattern
+    ), "the header pattern no longer embeds the shared armour tail"
+    # And the halves the DECIDER scans are the characters that text denotes, so the
+    # decider's model of the tail cannot describe a different line end than the pattern's.
+    assert redaction_shapes._PEM_ARMOUR_TAIL_RUN == " \t"
+    assert redaction_shapes._PEM_ARMOUR_TAIL_TERMINATORS == "\r\n"
+
+
+def test_the_header_decider_agrees_with_the_pattern_on_every_armour_spelling() -> None:
+    """The BEHAVIOURAL half, over the spellings the tail exists for, plus its sensitivity.
+
+    The decider is the pattern's answer in linear time, so the two must agree on `end()`
+    (not merely on yes/no) for every spelling: LF, CRLF, a bare CR used as the terminator,
+    trailing space or TAB, and every numbered/bracketed/boxed prefix in front of them.
+    The controls are the other direction — ordinary prose, a bare banner, a CERTIFICATE
+    line, a header with no terminator and one followed by extra text — which must stay
+    UNMATCHED by both, since the pipe opens its block state on this answer.
+
+    The last block is the sensitivity: a `$`-only tail — what the pattern carried before
+    #1445 and what a decider modelling it by hand would still carry — does NOT match a
+    CRLF armour line, so the sweep is shown to be able to see the widening it pins rather
+    than agreeing with itself.
+    """
+    pattern = redaction_shapes.PEM_HEADER_LINE_RE
+    texts = _armour_texts()
+    assert len(texts) > 500
+    for text in texts:
+        match = pattern.search(text)
+        want = None if match is None else match.end()
+        assert redaction_shapes.pem_header_line_end(text) == want, repr(text)
+
+    for control in (
+        "[redacted] CERTIFICATE-----",
+        "prose BEGIN PRIVATE KEY here",
+        "12| done",
+        "",
+        "[redacted] PRIVATE KEY---",
+        "[redacted] PRIVATE KEY-----.\n",
+        "[redacted] PRIVATE KEY----- extra\n",
+    ):
+        assert redaction_shapes.pem_header_line_end(control) is None, repr(control)
+        assert pattern.search(control) is None, repr(control)
+
+    crlf = f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r\n{_PEM_BODY}\r\n"
+    dollar_only = re.compile(pattern.pattern.replace(redaction_shapes._PEM_ARMOUR_TAIL, r"$"))
+    assert dollar_only.search(crlf) is None, "the `$`-only tail already matches a CRLF armour line"
+    assert pattern.search(crlf) is not None, "the shipped pattern lost the CRLF spelling"
+
+
+def test_the_pipe_masks_a_crlf_armour_blocks_body() -> None:
+    """The arm that catches the disagreement where it HURTS: the CONSEQUENCE, through the pipe.
+
+    `pem_header_line_end` is what opens the pipe's block state, so a decider that answers
+    `None` for a CRLF or trailing-whitespace armour line is not a cosmetic disagreement —
+    for an unterminated (or cap-forced) block the pipe's own line loop is the ONLY layer
+    that can hide the body, and it never engages. Measured through the real filter with the
+    `$`-only decider (the previous head of this branch, and what a merger resolving the
+    tail in one place leaves behind): 3 of 3 body lines published and no marker, for both
+    spellings; measured with the shared tail: 0 of 3, one marker, for every terminator.
+    """
+    cases = {
+        "lf": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\n{_PEM_BODY}\n{_PEM_BODY}\n{_PEM_BODY}\n",
+        "crlf": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r\n{_PEM_BODY}\r\n"
+        f"{_PEM_BODY}\r\n{_PEM_BODY}\r\n",
+        "bare_cr": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}\r{_PEM_BODY}\r{_PEM_BODY}\r",
+        "trailing_ws": f"{_DASHES}BEGIN PRIVATE KEY{_DASHES}  \n{_PEM_BODY}\n"
+        f"{_PEM_BODY}\n{_PEM_BODY}\n",
+    }
+    for name, text in cases.items():
+        settled = _pipe_settled(('"private_key": "' + text).encode(), 4096)
+        assert _PEM_BODY not in settled, f"the {name} armour block published its body"
+        assert REDACTION_MARKER in settled, f"the {name} armour block was not masked"
+        # AND THE FILTER DID NOT FAULT. `feed` fails closed by DRAINING, so an
+        # exception inside the mask is invisible in this output except as one marker
+        # line — which is exactly how a merge that swapped the header search for the
+        # decider and left `begin.end()` behind (an `int` has no `.end()`) passed the
+        # first two assertions while every one of these payloads was withheld. The
+        # withheld text is the only signal, so it is asserted here.
+        assert builtin._WITHHELD_LIVE_OUTPUT not in settled, f"the pipe faulted on the {name} block"
+
+
+# --- the `-open` rule's digit-maximal spelling -------------------------------
+#
+# `gcp-service-account-value-open` is the table's ONE rule that runs the prefix
+# fragment over text nobody shaped, and the fragment's digit-run ambiguity is what
+# made it exponential (Q3 on #1427). Its body therefore uses
+# `_PEM_DIGIT_MAX_PREFIX` / `_PEM_DIGIT_MAX_LINE_CONTENT` — the same fragments with
+# every digit run required to be maximal — which is a SECOND SPELLING of a language
+# that was already written once, so it carries the same obligation the deciders do:
+# a divergence in either direction is a released mask (over-accepting) or a
+# published body line (rejecting). The arms below enumerate both directions, and
+# they are pinned against the RELEASED spelling rather than against hand-written
+# expectations.
+
+#: Kinds for the fragment sweep: the fragment's own alphabet, BOTH digit predicates
+#: (`\d` takes `\u0661` and `[0-9]` does not — the fault the whole-code-space arm
+#: above guards), the separators with a longer spelling (`->`, `.]`), and the box
+#: glyph. A sequence of kinds stands for every string built from those kinds, which
+#: is what lets a bounded sweep stand for the digit runs a wider one would cover.
+_OPEN_RULE_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "M", ",", "|", ":")
+
+#: The rule under test, by label — never by position, since the table's order is
+#: load-bearing for the guards and a reorder must not repoint these arms.
+_OPEN_RULE_LABEL = "gcp-service-account-value-open"
+
+
+def _open_rule_shape() -> Any:
+    return next(
+        shape for shape in redaction_shapes.CREDENTIAL_SHAPES if shape.label == _OPEN_RULE_LABEL
+    )
+
+
+#: `origin/main`'s LINE_PREFIX, as a LITERAL — the released fragment's own text, not this
+#: module's.
+#:
+#: WHY NOT THE MODULE'S FRAGMENT (agent review R3-4). This branch re-spells the
+#: whitespace around a unit's separator — the trailing `[ \t]*` moved inside the optional
+#: group, which is the same language and one whitespace consumer per unit instead of two
+#: — so `redaction_shapes.LINE_PREFIX` is "the fragment as it stands ON THIS BRANCH". A
+#: reference built from it is the branch's earlier spelling: a language change that the
+#: whitespace rewrite itself introduced would be invisible to every differential that
+#: used it, which is exactly the gap R3-4 measured. With the released text written out
+#: here, `_released_open_rule_pattern` means what it says, and
+#: `test_the_branchs_fragment_speaks_the_released_language` holds the branch's own
+#: spelling to it so the two references cannot drift apart silently either.
+_RELEASED_LINE_PREFIX = (
+    "[ \\t]*(?:(?:\\[?\\d+\\]?[ \\t]*(?:[.)\\]]|\\.\\]|->|[|:>-])?[ \\t]*"
+    "|\\u2502[ \\t]*\\d+[ \\t]*\\u2502[ \\t]*)+)?"
+)
+#: The released body-line fragment: the released floor spelled as the literals the released
+#: module holds (`{8,}` and `{1,7}`), NOT through `redaction_shapes.PEM_BODY_FLOOR` — this
+#: text is a recording of the other revision, so it reads the other revision's numbers.
+_RELEASED_PEM_LINE_CONTENT = (
+    r"[A-Za-z0-9+/=]{8,},?[ \t]*"
+    r"|[A-Za-z0-9+/=]{1,7},?[ \t]*(?="
+    + redaction_shapes.LINE_SEP
+    + _RELEASED_LINE_PREFIX
+    + r"[A-Za-z0-9+/=]{8,})"
+)
+
+
+def _released_open_rule_pattern() -> re.Pattern[str]:
+    """`origin/main`'s `-open` rule, built from the RELEASED fragments as LITERALS.
+
+    The reference the differential arms compare against, and the point of it is that it
+    is INDEPENDENT of what the shipped rule says: it is written out from the released
+    text (see `_RELEASED_LINE_PREFIX` for why a literal, R3-4), and
+    `_open_rule_source_is_the_shared_spelling` is the drift pin that holds the shipped
+    source to the BRANCH's fragments plus exactly the digit-maximal substitution — so an
+    unrelated edit to the rule (its header tail, its anchor, its lookahead) reddens there
+    instead of quietly redefining what this differential compares.
+    """
+    return re.compile(
+        r'(?i)("?private[_-]?key"?\s*:\s*")'
+        r"(-{1,4}[\x27\x22]?-{1,4}BE" + "GIN [A-Z0-9 ]*PRIV" + r"ATE KEY-{1,4}[\x27\x22]?-{1,4}"
+        r"(?:"
+        r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+        r"(?:" + _RELEASED_LINE_PREFIX + r"(?:" + _RELEASED_PEM_LINE_CONTENT + r")[ \t]*)+"
+        r"(?=" + redaction_shapes.LINE_SEP + r"|[\x27\x22]|$)"
+        r")*)"
+    )
+
+
+def _shared_fragment_open_rule_pattern() -> re.Pattern[str]:
+    """The same rule built from the SHARED pieces — the branch's fragments, not released.
+
+    This is what the drift pin compares the shipped source against, because the pin's
+    question is "is the shipped source the branch's spelling plus the digit-maximal
+    substitution", and answering it with the released literal would fold two questions
+    ("did the substitution happen" and "did the fragment change") into one red.
+    """
+    return re.compile(
+        r'(?i)("?private[_-]?key"?\s*:\s*")'
+        r"(-{1,4}[\x27\x22]?-{1,4}BE" + "GIN [A-Z0-9 ]*PRIV" + r"ATE KEY-{1,4}[\x27\x22]?-{1,4}"
+        r"(?:"
+        r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+        r"(?:"
+        + redaction_shapes.LINE_PREFIX
+        + r"(?:"
+        + redaction_shapes._PEM_LINE_CONTENT
+        + r")[ \t]*)+"
+        r"(?=" + redaction_shapes.LINE_SEP + r"|[\x27\x22]|$)"
+        r")*)"
+    )
+
+
+def _open_rule_source_is_the_shared_spelling() -> bool:
+    """The shipped rule, with the substitutions inverted, IS the branch's spelling."""
+    source = _open_rule_shape().pattern.pattern
+    inverted = source.replace(
+        redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT, redaction_shapes._PEM_LINE_CONTENT
+    ).replace(redaction_shapes._PEM_DIGIT_MAX_PREFIX, redaction_shapes.LINE_PREFIX)
+    return inverted == _shared_fragment_open_rule_pattern().pattern
+
+
+#: Bound for the arms that hand a DENSE payload to a rule or through the pipe.
+#:
+#: They assert costs in MILLISECONDS, and the regression they exist for — the ambiguous
+#: fragment back under the shipped rule — does not return at all: measured past a 420 s
+#: selection bound with the fix reverted, and each dense arm past 90 s on its own (agent
+#: review R3-2). WITHOUT a bound that regression does not redden anything; the suite has
+#: no `pytest-timeout`, so it wedges a CI shard until the job cap and the cause is
+#: unreadable.
+#:
+#: It is a CPU bound and not a wall bound, which is the same instrument choice this file's
+#: cost arms make (`time.process_time`): this fleet shares ~14 cores with ~25 agent
+#: sessions, so a probe gets 4-20% of a core and wall inflates 5-25x — measured here, the
+#: differential arm's own 1.1 s of CPU took 18 s of wall during this round. A wall bound
+#: tight enough to fire "in seconds" would therefore red an HONEST run on a loaded host,
+#: which is the worse failure; the CPU bound cannot. `signal.setitimer(ITIMER_PROF)`
+#: decrements only while the process runs (and it does interrupt CPython's regex engine —
+#: verified), so the bound means exactly what the arms measure.
+#:
+#: 15 s is 28x the heaviest honest reading in any bounded arm here (the released rule on
+#: the `dense_4col` fixture, 0.54 s of CPU; the shipped rule on every dense payload is
+#: under 1 ms) and the regressed walk is unbounded, so no reading sits near it.
+_DENSE_WALK_BOUND_SECONDS = 15.0
+
+
+@contextmanager
+def _bounded(seconds: float, what: str) -> Iterator[None]:
+    """Fail fast, and NAME the walk, when something that must be linear is not."""
+    if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGPROF"):
+        yield
+        return
+
+    def _fired(signum: int, frame: Any) -> None:
+        raise AssertionError(
+            f"{what} did not return within {seconds:g}s of CPU: a walk this arm asserts is "
+            "linear is not (the BOUND is the arm's — see _DENSE_WALK_BOUND_SECONDS — so "
+            "this is a regression in the rule or the pipe, not a slow machine)"
+        )
+
+    previous = signal.signal(signal.SIGPROF, _fired)
+    signal.setitimer(signal.ITIMER_PROF, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGPROF, previous)
+
+
+def _open_rule_matches(pattern: re.Pattern[str], text: str) -> list[tuple[Any, ...]]:
+    """Every match as the MASK and the GUARD read it: span, anchor, and group 2.
+
+    Group 2 is the masked region and the group the guard tests, so a comparison
+    over `(start, end, group 1, group 2)` is a comparison over the bytes that reach
+    a surface, not over match counts.
+    """
+    return [
+        (match.start(), match.end(), match.group(1), match.group(2))
+        for match in pattern.finditer(text)
+    ]
+
+
+def _fragment_witnesses(left: re.Pattern[str], right: re.Pattern[str]) -> list[str]:
+    """Strings where the two PREFIX spellings' languages differ, over a bounded sweep.
+
+    Shared by the fragment arms so the sweep a new reference is held to is the same sweep
+    the existing one was: a whole-string kind sweep up to length three (a sequence of
+    KINDS stands for every string built from those kinds), the digit-run locus at widths
+    the kind sweep cannot reach, and the boundary spellings the unit's optional tail
+    exists for.
+    """
+    found: list[str] = []
+    strings = ["".join(combo) for combo in itertools.product(_OPEN_RULE_KINDS, repeat=3)]
+    for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+        for separator in ("", " ", "|", ".", "-", "]", " [", "\t"):
+            strings.append("1" * left_run + separator + "1" * right_run)
+    strings += [
+        "12 34 MIIEowIBAAKCA",
+        "12 34",
+        "1234",
+        "[12]34",
+        "12]34",
+        "1]2",
+        "1.]2",
+        "1->2",
+        "\u2502 1 \u2502",
+        "10000000 10000001",
+        "   1000    1008    1016",
+    ]
+    for text in strings:
+        if bool(left.fullmatch(text)) != bool(right.fullmatch(text)):
+            found.append(text)
+    return found
+
+
+def test_the_digit_maximal_prefix_spells_the_released_fragment_language() -> None:
+    r"""The FREQUENT obligation, swept in both directions and not sampled.
+
+    The rewrite is `\d+` to `\d+(?!\d)` — a unit's digit run may no longer end in
+    the middle of a run — and the merging argument for that being the same language
+    is that a split inside a contiguous run always has an equivalent one-unit
+    parse, because the characters between the two chunks are the unit's own `]`,
+    whitespace and separator, all epsilon exactly when the next character is still
+    a digit. A restriction on the unit END is the change that DOES drop strings
+    (`12 34 MIIEowIBAAKCA` needs the first unit to end immediately before `34`), and
+    telling those two apart is what this arm is for.
+
+    BOTH SIDES ARE THIS BRANCH'S SPELLING — that is the right level for this arm, which
+    is about the maximalisation rather than about the release, and
+    `test_the_branchs_fragment_speaks_the_released_language` is the arm that holds the
+    branch's own spelling to `origin/main`'s (R3-4).
+
+    The last block is the arm's own SENSITIVITY check: the same sweep is run against
+    a spelling whose digit class is `[0-9]`, which differs from `\d` on the
+    Arabic-Indic digit in the alphabet, and a witness must be found. Without it a
+    sweep that had silently stopped seeing anything would pass.
+    """
+    released = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
+    maximal = re.compile("(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX + ")")
+
+    assert not _fragment_witnesses(
+        released, maximal
+    ), "the digit-maximal prefix changed the language"
+    # SENSITIVITY: an ASCII digit class is a DIFFERENT language on this alphabet,
+    # so the sweep above is shown to be able to see a divergence at all.
+    ascii_class = re.compile(
+        "(?:" + redaction_shapes._PEM_DIGIT_MAX_PREFIX.replace("\\d", "[0-9]") + ")"
+    )
+    assert _fragment_witnesses(maximal, ascii_class), "the sweep cannot see a language difference"
+
+
+def test_the_branchs_fragment_speaks_the_released_language() -> None:
+    """R3-4's gap, closed IN the file rather than from outside it.
+
+    This branch re-spells the whitespace around a unit's separator: the trailing
+    `[ \t]*` moved inside the optional group, one whitespace consumer per unit instead
+    of two. Same language — but every reference built from
+    `redaction_shapes.LINE_PREFIX` is then the BRANCH's spelling, and before this arm
+    nothing in the suite compared the branch's fragment with `origin/main`'s at all:
+    the round-4 reviewer had to close that gap with an external 24,309-input run. The
+    rule-level differential now compares against the released text as a literal
+    (`_released_open_rule_pattern`), and this arm is the other half — the fragment the
+    OTHER rules in the table still embed (`PEM_BODY_LINE_RE`, `PEM_HEADER_LINE_RE`,
+    `_PEM_RUN`), held to the released fragment directly.
+
+    The sweep is `_fragment_witnesses`, the same one the maximalisation arm uses, and
+    the sensitivity check is that dropping the separator allowance from the released
+    spelling — a real language change, and the one the whitespace rewrite could have
+    made by accident — is found by it.
+    """
+    branch = re.compile("(?:" + redaction_shapes.LINE_PREFIX + ")")
+    released = re.compile("(?:" + _RELEASED_LINE_PREFIX + ")")
+
+    assert not _fragment_witnesses(
+        branch, released
+    ), "the branch's fragment spelling changed the released language"
+    # SENSITIVITY: a released spelling with its separator allowance removed is a
+    # DIFFERENT language (`1]2`, `1->2`, `1.]2`), so the sweep is shown to be able to
+    # see a whitespace/separator change rather than merely agreeing with itself.
+    no_separator = re.compile(
+        "(?:" + _RELEASED_LINE_PREFIX.replace(r"[.)\]]|\.\]|->|[|:>-]", "") + ")"
+    )
+    assert _fragment_witnesses(
+        released, no_separator
+    ), "the sweep cannot see a separator-allowance change"
+
+
+def test_the_open_rule_is_its_released_spelling_with_the_digits_maximal() -> None:
+    """The drift pin, and the structural half of Q3.
+
+    Two assertions, and the first is the one QA's Q3 asked for: the SHARED
+    fragment must not appear in this rule's source at all. A rule that keeps the
+    ambiguous fragment anywhere — the body unit, or the short arm's lookahead, which
+    carries the same ambiguity and is reached by the same walk — reaches
+    `_shape_safe_spans` and the scrubber with a walk that is exponential in the
+    digits of a dense line, which is the fatal class by another door.
+
+    The second is that the shipped source IS the BRANCH's spelling with exactly
+    those substitutions. That is the pin on the SUBSTITUTION, deliberately and not on
+    the release: the differential arms compare against `origin/main`'s own text
+    (`_released_open_rule_pattern`, R3-4), so holding this pin to the branch's
+    fragments keeps "did the substitution happen" and "did the fragment change" as
+    two questions with two reds instead of one.
+    """
+    source = _open_rule_shape().pattern.pattern
+
+    assert (
+        redaction_shapes.LINE_PREFIX not in source
+    ), "this rule still walks the ambiguous fragment"
+    assert (
+        source.count(redaction_shapes._PEM_DIGIT_MAX_PREFIX) == 2
+    ), "both the body unit and the short arm's lookahead must use the maximal fragment"
+    assert source.count(redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT) == 1
+    assert (
+        _shared_fragment_open_rule_pattern().pattern != source
+    ), "the shipped rule IS the branch's shared spelling; nothing to compare"
+    assert _open_rule_source_is_the_shared_spelling(), (
+        "the shipped rule is not the branch's spelling plus the digit-maximal substitution "
+        "(an edit to the rule that is not that substitution redefines what the drift pin "
+        "and the differential arms compare, so it has to redden here)"
+    )
+
+
+def _open_rule_fixtures() -> dict[str, str]:
+    """The shapes this rule exists for, plus the two families that burn.
+
+    The numbered/boxed/indented bodies are the LINE_PREFIX cases the rule is
+    written for (and the only ones where it is the deciding rule at all — measured,
+    removing it from `_MULTILINE_SHAPES` moves the settled output of these and no
+    others), and the `%8d` rows are the digit-dense population Q3 measured.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    cases = {
+        "body": f"{anchor}{banner}\n{_PEM_BODY}\n{_PEM_BODY}\n",
+        "indented": f"{anchor}{banner}\n   {_PEM_BODY}\n   {_PEM_BODY}\n",
+        "cat_n": f"{anchor}{banner}\n1\t{_PEM_BODY}\n2\t{_PEM_BODY}\n",
+        "boxed": f"{anchor}{banner}\n\u2502 1 \u2502 {_PEM_BODY}\n\u2502 2 \u2502 {_PEM_BODY}\n",
+        "short_mid": f"{anchor}{banner}\n3| Qw9z\n4| {_PEM_BODY}\n",
+        "short_final": f"{anchor}{banner}\n{_PEM_BODY}\n12| done\n",
+        "prose_after": f"{anchor}{banner}\n{_PEM_BODY}\n{_PEM_BODY}\nNOT A KEY, prose\n",
+        "header_only": f"{anchor}{banner}\n",
+        "escaped": anchor + banner + "\\n" + _PEM_BODY + "\\n" + _PEM_BODY,
+        "no_anchor": f"{banner}\n{_PEM_BODY}\n",
+        "unquoted": "private" + f"_key: {banner}\n{_PEM_BODY}\n",
+        "dense_4col": f"{anchor}{banner}\n{_numeric_rows(1, columns=4, start=1000)}",
+        # A read past the deferral CAP, which is the one state where this rule is the
+        # only masker in the pipe: the release point normally cuts AT the banner, so
+        # the pending piece starts with a header line and the pipe's own block loop
+        # masks the body itself (measured: removing this rule from the table moves no
+        # other fixture here). The cap cuts at `len - 8192` instead, which lands the
+        # anchored spelling MID-piece — where the line-anchored loop cannot see it and
+        # this rule is what stands between a numbered body and the model.
+        "numbered_capped": f"{anchor}{banner}\n" + f"1\t{_PEM_BODY}\n" * 400,
+    }
+    return cases
+
+
+def _open_rule_generated() -> list[str]:
+    """A generated sweep of the rule, in the shape a caller actually produces.
+
+    Every string is an anchored spelling and a header followed by ONE generated
+    line, which is where the per-line decision lives: the released rule does not
+    terminate on the dense members of this family, so a differential over them is
+    impossible (recorded, not glossed) and the sweep stays in the region BOTH rules
+    decide.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    out: list[str] = []
+    for length in range(4):
+        for combo in itertools.product(_OPEN_RULE_KINDS, repeat=length):
+            out.append(f"{anchor}{banner}\n{''.join(combo)}\n")
+    for left_run, right_run in itertools.product(range(1, 5), repeat=2):
+        for separator in (" ", "|", ".", "-", "]", " ["):
+            out.append(f"{anchor}{banner}\n{'1' * left_run}{separator}{'1' * right_run}\n")
+    return out
+
+
+def test_the_open_rule_matches_its_released_spelling_on_every_fixture() -> None:
+    """The rule-level differential, in both directions, over fixtures and a sweep.
+
+    The fragment arm above compares the two PREFIX languages; this one compares the
+    two RULES, which is the obligation that matters — the body unit, the short arm's
+    lookahead and the header tail interact, and a divergence in either direction is
+    a released mask or a published body line. The dense members are asserted by SPAN
+    instead of differentially, with the reason stated rather than papered over: the
+    released rule has no answer to compare against on them (that is the defect), so
+    the span it DOES give on the smallest member of the family is the reference, and
+    every denser member must give the same one — the empty-body match, anchored
+    spelling and header, which is what a `%8d` row leaves by construction.
+    """
+    shipped = _open_rule_shape().pattern
+    released = _released_open_rule_pattern()
+    assert (
+        released.pattern != shipped.pattern
+    ), "the reference IS the shipped rule; the differential compares nothing"
+    cases = _open_rule_fixtures()
+    for name, text in cases.items():
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the rule differential on the {name} fixture"):
+            assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), name
+    for text in _open_rule_generated():
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, "the rule differential on the generated sweep"):
+            assert _open_rule_matches(released, text) == _open_rule_matches(shipped, text), repr(
+                text
+            )
+
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    reference = _open_rule_matches(shipped, cases["dense_4col"])
+    assert _open_rule_matches(released, cases["dense_4col"]) == reference, (
+        "the released rule disagrees on the member of the family it CAN decide, so the "
+        "reference span for the dense payloads is wrong"
+    )
+    assert reference == [(0, len(anchor) + len(banner), anchor, banner)]
+    for text in (
+        f"{anchor}{banner}\n{_numeric_rows(1, columns=8, start=1000)}",
+        f"{anchor}{banner}\n{_numeric_rows(140, columns=8, start=1000)}",
+    ):
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped rule on a dense payload"):
+            assert (
+                _open_rule_matches(shipped, text) == reference
+            ), "the dense payload moved the rule's span"
+
+
+def _maximal_only_open_rule_pattern() -> re.Pattern[str]:
+    """The PREVIOUS head's spelling: every unit maximal, and no partial final unit.
+
+    It exists so the bracket arm below can show that it is able to see R3-1's class at
+    all: a family that the previous spelling no longer diverges on has gone vacuous, and
+    an arm over it would pass whatever the shipped rule said.
+    """
+    maximal_only = (
+        r"[ \t]*(?:(?:"
+        + redaction_shapes._PEM_PREFIX_UNIT_MAX
+        + r"|"
+        + redaction_shapes._PEM_PREFIX_BOX_UNIT_MAX
+        + r")+)?"
+    )
+    return re.compile(
+        _released_open_rule_pattern().pattern.replace(_RELEASED_LINE_PREFIX, maximal_only)
+    )
+
+
+#: The bracket family agent review R3-1 reproduced, re-derived here independently of the
+#: review's own matrix: prefix x run length x tail x template, where the class tail of the
+#: body line is reachable ONLY by stopping a digit run at a `[`-introduced unit. The
+#: released grammar allows that stop because the unit's `]`, whitespace and separator are
+#: all optional exactly when the next character is still a digit; a fully maximal
+#: spelling cannot, so it publishes a line the released rule masks.
+_OPEN_RULE_BRACKET_PREFIXES = ("", "[", "[1", "1 [", "[12] ", "12] ", "\u2502 12 \u2502 ")
+_OPEN_RULE_BRACKET_RUNS = (7, 8, 9, 10, 11, 12)
+_OPEN_RULE_BRACKET_TAILS = ("", "M", "MIIEowIBAAKCA", "=", "12", "MIIEowIBAAKCAQEA")
+
+
+def _open_rule_bracket_family() -> list[str]:
+    """The witness class and its neighbours, in the two spellings a caller produces.
+
+    Both templates are ANCHORED (the rule itself needs the `private_key` anchor) and the
+    second puts a full body line after the witness, which is the spelling under which the
+    short arm's lookahead is what has to see it.
+    """
+    banner = _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    anchor = '"private_key": "'
+    out: list[str] = []
+    for prefix, run, tail in itertools.product(
+        _OPEN_RULE_BRACKET_PREFIXES, _OPEN_RULE_BRACKET_RUNS, _OPEN_RULE_BRACKET_TAILS
+    ):
+        line = f"{prefix}{'1' * run}{tail}"
+        out.append(f"{anchor}{banner}\n{line}\n")
+        out.append(f"{anchor}{banner}\n{line}\n{_PEM_BODY}\n")
+    return out
+
+
+def test_the_open_rule_restores_the_released_rules_bracket_family() -> None:
+    """R3-1: the maximal spelling must not mask LESS than the released rule.
+
+    The fragment arms above are both green on the class this arm is about, and that is
+    the finding rather than an accident: they compare FRAGMENTS, and a fragment cannot
+    see a divergence whose cause is what the fragment's tail is serving. Here the
+    question is the RULE's, and the witness is a body line of `[` followed by nine `1`s
+    under an anchored header: the released parse is the unit `[1` plus the content
+    `11111111` and masks the line; a spelling that requires every digit run to be
+    maximal eats all nine digits as the unit's run, has no eight-character content left,
+    and PUBLISHES the line (`origin/main` `(0, 54)` against `(0, 43)`, measured).
+
+    Three assertions, and the middle one is what keeps it honest: the family must
+    DIVERGE under the previous spelling (else the arm is vacuous), every divergent input
+    must be one where the released rule masks MORE (never the other direction, which
+    would be a published line rather than a widened mask), and the shipped rule must
+    agree with the released one on all of them.
+    """
+    shipped = _open_rule_shape().pattern
+    released = _released_open_rule_pattern()
+    previous = _maximal_only_open_rule_pattern()
+    family = _open_rule_bracket_family()
+
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the bracket family under the released rule"):
+        divergences = [
+            text
+            for text in family
+            if _open_rule_matches(previous, text) != _open_rule_matches(released, text)
+        ]
+    assert divergences, (
+        "the family went vacuous: the previous (fully maximal) spelling no longer diverges "
+        "from the released rule on it, so this arm could not see R3-1's class at all"
+    )
+    assert all("[" in text for text in divergences), "the class is bracket-introduced"
+    for text in divergences:
+        previous_spans = _open_rule_matches(previous, text)
+        released_spans = _open_rule_matches(released, text)
+        assert (
+            not previous_spans or previous_spans[0][1] < released_spans[0][1]
+        ), f"a divergent input where the previous spelling masks at least as much: {text!r}"
+    assert all(
+        _open_rule_matches(shipped, text) == _open_rule_matches(released, text) for text in family
+    ), "the shipped rule does not speak the released rule's language on the bracket family"
+
+    # The user-visible half of the same witness: what `scrub_shapes` PUBLISHES. The
+    # reviewer's finding was measured through the shape table (the path a tool result
+    # takes), where the previous head returned the body line verbatim.
+    published_line = "[" + "1" * 9
+    witness = '"private_key": "' + _banner(_PEM_SPELLINGS[0]) + published_line + "\n"
+    assert _open_rule_matches(released, witness) == _open_rule_matches(shipped, witness)
+    assert published_line not in redaction_shapes.scrub_shapes(
+        witness
+    ), "the bracket witness's body line is published by the shape table"
+
+
+def _pipe_settled(raw: bytes, chunk: int) -> str:
+    """One input through the real pipe filter, at one chunk policy."""
+    redactor = builtin._PipeRedactor([])
+    pieces = [redactor.feed(raw[offset : offset + chunk]) for offset in range(0, len(raw), chunk)]
+    pieces.append(redactor.feed(b"", final=True))
+    return b"".join(pieces).decode("utf-8", "replace")
+
+
+def test_the_open_rules_spelling_does_not_move_a_pipe_byte_at_any_chunk_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Masking parity through the real filter, and the arm is shown to discriminate.
+
+    The rule-level differential fixes what the rule MATCHES; this arm fixes what the
+    real pipe PAINTS with it — live and settled, at four chunk policies, since the
+    release point's partition is what a shape can be split by. And it carries its own
+    sensitivity check, because the first version of this corpus did not: measured,
+    the round's earlier corpus is masked by the OTHER rules (the assignment rule
+    masks the same values), so removing this rule from `_MULTILINE_SHAPES` moved no
+    cell and a parity arm over it would have compared the shipped rule with itself.
+    The fixtures above are the ones where this rule is the deciding rule, and the
+    last block asserts that dropping it moves at least one cell — so the arm cannot
+    silently go vacuous again.
+    """
+    original = redaction_shapes._MULTILINE_SHAPES
+    released = _released_open_rule_pattern()
+    cases = _open_rule_fixtures()
+    policies = (7, 64, 4096, 65536)
+
+    shipped_cells: dict[str, list[str]] = {}
+    for name, text in cases.items():
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the shipped spelling through the pipe on {name}"
+        ):
+            shipped_cells[name] = [_pipe_settled(text.encode(), c) for c in policies]
+
+    monkeypatch.setattr(
+        redaction_shapes,
+        "_MULTILINE_SHAPES",
+        tuple(
+            (
+                redaction_shapes.Shape(
+                    shape.label, released, shape.replacement, shape.secret_group, shape.guard
+                )
+                if shape.label == _OPEN_RULE_LABEL
+                else shape
+            )
+            for shape in original
+        ),
+    )
+    for name, text in cases.items():
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the released spelling through the pipe on {name}"
+        ):
+            assert [_pipe_settled(text.encode(), c) for c in policies] == shipped_cells[
+                name
+            ], f"the two spellings paint different bytes for {name}"
+
+    monkeypatch.setattr(
+        redaction_shapes,
+        "_MULTILINE_SHAPES",
+        tuple(shape for shape in original if shape.label != _OPEN_RULE_LABEL),
+    )
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the pipe with the rule dropped, per fixture"):
+        moved = [
+            name
+            for name, text in cases.items()
+            if [_pipe_settled(text.encode(), c) for c in policies] != shipped_cells[name]
+        ]
+    assert moved, "dropping the rule moved nothing, so this arm compares nothing"
+
+
+def test_the_prefix_machine_reads_digits_the_way_the_pattern_does() -> None:
+    """`\\d` is Unicode-decimal and not `[0-9]`, and a machine that read it as
+    ASCII would reject a body line the pattern accepts.
+
+    Whole-code-space rather than sampled: `re.findall` gives the pattern's own set
+    in one pass and the comprehension gives the predicate's, so this compares two
+    sets of every character rather than a list of favourites — the same shape as
+    the sweep above, and cheap enough to be one pass of each.
+    """
+    code_space = "".join(chr(code) for code in range(0x110000))
+    assert set(re.findall(r"\d", code_space)) == {char for char in code_space if char.isdecimal()}
+
+
+def test_the_gates_are_necessary_conditions_of_the_patterns_they_guard() -> None:
+    """Nothing else ties a hint list to the pattern it guards (round 1's R1-4).
+
+    A `PEM_HEADER_LINE_RE` that stopped spelling one of `_PEM_HEADER_HINTS` — the
+    literals it needs, which the gate tests for with `in` — would silently turn
+    the gate into a filter that skips real matches, and no arm would redden. So
+    the implication is asserted directly, over candidates that are MUTATIONS of a
+    real banner (one deletion or one substitution), which is what a hand check
+    does and what a future change would break.
+    """
+    hints = builtin._PEM_HEADER_HINTS
+    candidates = []
+    for spelling in _PEM_SPELLINGS:
+        for kind in ("BEGIN", "END"):
+            line = _banner(spelling, kind).rstrip("\n")
+            candidates.append(line)
+            for index in range(len(line)):
+                candidates.append(line[:index] + line[index + 1 :])
+                for letter in ("A", " ", "x"):
+                    candidates.append(line[:index] + letter + line[index + 1 :])
+            for prefix in ("12|", "the key: ", "  ", "["):
+                candidates.append(prefix + line)
+    for text in candidates:
+        if redaction_shapes.PEM_HEADER_LINE_RE.search(text) is not None:
+            missing = [hint for hint in hints if hint not in text]
+            assert not missing, f"a header match without {missing}: {text!r}"
+        if redaction_shapes.PEM_END_LINE_RE.match(text) is not None:
+            assert builtin._PEM_END_HINT in text, f"an END match without the literal: {text!r}"
+
+
+def test_ordinary_output_reaches_no_pem_classifier_and_is_published_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape, not the size: numeric table output must reach no scan at all.
+
+    A gate that skipped a scan it should have run would surface here as a masked
+    or dropped line, so the bytes are asserted too — a gate may avoid work, never
+    change an answer. Nothing is timed: the assertion is the call count.
+    """
+    spies = {
+        name: _CountingDecider(getattr(builtin, name))
+        for name in ("_pem_header_line_end", "_pem_body_line", "_pem_end_line")
+    }
+    for name, spy in spies.items():
+        monkeypatch.setattr(builtin, name, spy)
+    prose = "".join(
+        f"reading {index}: ordinary output, nothing credential shaped\n" for index in range(400)
+    )
+    raw = (prose + "\n" + _numeric_rows(20)).encode()
+    redactor = builtin._PipeRedactor([])
+    published = b"".join(
+        redactor.feed(raw[start : start + 64 * 1024]) for start in range(0, len(raw), 64 * 1024)
+    )
+    published += redactor.feed(b"", final=True)
+    reached = {name: spy.calls for name, spy in spies.items() if spy.calls}
+    assert not reached, f"ordinary output reached a PEM classifier: {reached}"
+    assert published == raw, "ordinary output must come out byte for byte"
+
+
+def test_a_numeric_row_does_not_cost_more_than_the_line_it_replaces() -> None:
+    """The GATED path's linearity, and what this arm does NOT cover.
+
+    A ratio rather than a laptop-calibrated ceiling, and no growing payload: the
+    40x allowance for a doubled line is the one the shape pass's own linearity
+    test uses, because exponential blowup is orders of magnitude rather than a
+    constant factor. This arm reads the ordinary-approval path, so it is blind to
+    the two paths the gates do not cover — round 1 measured the whole section
+    passing with the prefix fragment reverted. The arm named for the open block
+    below is the one that reaches them.
+    """
+
+    def feed_cpu(text: str) -> float:
+        raw = text.encode()
+        redactor = builtin._PipeRedactor([])
+        start = time.process_time()
+        for offset in range(0, len(raw), 64 * 1024):
+            redactor.feed(raw[offset : offset + 64 * 1024])
+        return time.process_time() - start
+
+    prose = "reading 1: ordinary output, nothing credential shaped\n\n"
+    # Sixteen and thirty-two columns: a ratio test has to be sized where the curve
+    # actually turns, and the fronts moved when the prefix grammar's whitespace
+    # handling did.
+    small = feed_cpu(prose + _numeric_rows(1, columns=16))
+    large = feed_cpu(prose + _numeric_rows(1, columns=32))
+    assert large <= max(small, 1e-4) * 40, f"a numeric row looks super-linear: {small} -> {large}"
+
+
+def test_a_numeric_row_inside_an_open_block_is_not_charged_per_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The path NO GATE can reach — round 1's R1-1, and the arm that was missing.
+
+    The gates close the ordinary read, so a cost regression on the paths they leave
+    open was invisible to every other arm here: with the prefix fragment reverted
+    this whole section still passed while these paths went from seconds to minutes.
+    So this drives the BODY classifier on a `%8d` row of four-digit values with the
+    state open, and asserts two things. First, that the row was CLASSIFIED — a call
+    count, so "it was fast" cannot mean "it was skipped". Second, that it is cheap:
+    the SAME row costs 6.7 s in the pattern's own hands and 12.5 s per rejected
+    line inside an open block at head, so the ceiling below sits three orders of
+    magnitude above the linear path and an order of magnitude under the pattern's
+    cost — a regression fails here in seconds rather than hanging the suite.
+    """
+    spy = _CountingDecider(builtin._pem_body_line)
+    monkeypatch.setattr(builtin, "_pem_body_line", spy)
+    row = _numeric_rows(1, columns=8, start=1000)
+    redactor = builtin._PipeRedactor([])
+    redactor._in_key_block = True
+    start = time.process_time()
+    redactor.feed(row.encode())
+    redactor.feed(b"", final=True)
+    cpu = time.process_time() - start
+    assert spy.calls >= 1, "the body classifier was skipped, so this proves nothing"
+    assert cpu < 0.5, f"one 65-character table row inside an open block cost {cpu:.3f} s of CPU"
+
+
+def test_a_header_candidate_line_is_not_charged_per_stop_or_per_begin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two mechanisms that made a header candidate line quadratic, red first.
+
+    `_pem_header_piece_end` re-ran the whole BEGIN/KEY scan once per armour-tail stop,
+    and re-answered the prefix machine's conjunct once per KEY occurrence, so a line of
+    BEGIN literals or a line of CR terminators cost the two POPULATIONS MULTIPLIED.
+    Both families below are ~40-46 KB and return nothing: the shape a pipe read hands
+    the decider, and a shape no other arm in this file carries — the linearity arm
+    above is a numeric row.
+
+    Measured on this box with `time.process_time()`, one call each, at the head this
+    arm was written against (the PR's own `ed8f924f1`):
+
+    * `per BEGIN` (k=4000, 40019 bytes): 3337 ms before the correction, 2.1 ms after;
+    * `per stop` (k=2000, 46002 bytes): 2712 ms before the correction, 6.3 ms after;
+    * the armour line (29 bytes): an offset answer, microseconds on both trees.
+
+    The ceiling is `0.2` s of CPU: ~95x above the honest post-correction reading of the
+    first family and ~32x above the second, and ~17x / ~14x BELOW the two
+    pre-correction readings — so red and green are ~1600x and ~430x apart, with the
+    ceiling about a decade inside each end. That is a CATASTROPHE-shaped bound and not
+    a CI-derived sample: it is set so a regression fails here in seconds instead of
+    wedging a shard (the suite has no `pytest-timeout`), and the margin is what keeps a
+    loaded box from reddening an honest run. CPU rather than wall for the same reason —
+    this fleet shares ~14 cores with ~25 agent sessions, so wall inflates 5-25x while
+    CPU does not.
+
+    The spy is the NOT-SKIPPED arm and never the cost evidence: `spy.calls` is 1 per
+    case on BOTH trees, and it reddens only if the prefix machine is never reached (0:
+    the piece was not looked at) or is re-run per BEGIN (more than 1), so "it was fast"
+    cannot mean "it was skipped". The cost is asserted after the loop, which is what
+    makes one pre-fix run report both readings while every answer and spy assertion in
+    that same run is already green.
+
+    The `got == want` pins hold on the PRE-FIX tree too, and that is what makes this
+    arm evidence that the correction moves no answer while it is red on cost. The third
+    case is the only one whose answer is an offset, so a decider that got cheap by
+    stopping the scan early fails it.
+    """
+    spy = _CountingDecider(redaction_shapes._pem_prefix_end_flags)
+    monkeypatch.setattr(redaction_shapes, "_pem_prefix_end_flags", spy)
+    per_begin = (
+        "Z"
+        + redaction_shapes._PEM_BEGIN * 4000
+        + redaction_shapes._PEM_KEY
+        + "Y" * 16000
+        + _DASHES
+        + "\rZ"
+    )  # 40019 bytes, no match
+    per_stop = (
+        "Z"
+        + (redaction_shapes._PEM_BEGIN + redaction_shapes._PEM_KEY + _DASHES + "\r") * 2000
+        + "Z"
+    )  # 46002 bytes, no match
+    armour = _banner(redaction_shapes._PEM_KEY).rstrip("\n") + "\r\n"  # 29 bytes, answer 27
+    # _DASHES + "BEGIN " + "PRIVATE KEY" + _DASHES = 27, and 27 is the index of the "\r".
+    cases = (
+        ("per BEGIN", per_begin, None),
+        ("per stop", per_stop, None),
+        ("armour line", armour, 27),
+    )
+    readings: dict[str, float] = {}
+    for what, text, want in cases:
+        before = spy.calls
+        with _bounded(_DENSE_WALK_BOUND_SECONDS, f"the header decider on the {what} family"):
+            start = time.process_time()
+            got = redaction_shapes.pem_header_line_end(text)
+            cpu = time.process_time() - start
+        assert got == want, f"the header decider answered {got} on the {what} line, not {want}"
+        assert spy.calls - before == 1, (
+            f"the prefix machine ran {spy.calls - before} times for one piece on the {what} "
+            "line: it must run once for the piece, not once per stop and not once per BEGIN"
+        )
+        readings[what] = cpu
+    for what, cpu in readings.items():
+        assert cpu < 0.2, (
+            f"the {what} line cost {cpu:.3f} s of CPU (readings: {readings}): a header "
+            "candidate line is being charged per stop or per BEGIN again"
+        )
+
+
+def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
+    """The rewrite's OWN coverage, on the one path where it is still load-bearing.
+
+    Round 1's R1-1 is that the whitespace rewrite — the only thing between the
+    fragment's users and a multi-second burn before the deciders landed — had no
+    test that failed without it. The pipe's classifiers no longer run the fragment
+    (the deciders do), so the arm belongs where the fragment is still the thing
+    being measured: the shape TABLE's PEM block rules, which embed it verbatim.
+
+    Round 2's Q3 is that this arm measured the wrong POPULATION and said so in its
+    own docstring: five columns sat under the ceiling while the shape it is named
+    for was unbounded two columns away (a six-column row was 221 ms, eight past
+    45 s), so a green run here proved nothing about the shape. The fixtures are
+    therefore the ones the defect lives in — up to eight columns and the 140-row
+    payload that a real read past the deferral cap hands `_release_point` — and the
+    ceiling is set from the measured linear cost of that population (26 ms of CPU
+    for the 140-row payload) rather than from the smallest thing that passes.
+
+    The single-row ceiling is 50 ms and NOT the 0.5 s this file's other cost arms
+    use, and that is the whole finding: measured on the released spelling, a
+    six-column row is 222 ms of CPU — under a 0.5 s ceiling, which is how the arm
+    stayed green while the walk was exponential. The shipped cost of the same row is
+    0.7 ms, so 50 ms is a ~70x margin on CPU time (which load does not inflate the
+    way it inflates wall time) and still two orders under the released spelling.
+
+    The rule's ANSWER is asserted too, not only its time: a `%8d` row cannot
+    complete a body line, so what must come back is the empty-body match — the
+    anchored spelling and the header, masked — and a change that made the walk
+    cheap by dropping that match would publish a credential rather than burn.
+    """
+    header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    for columns in (5, 6, 8):
+        rows = _numeric_rows(1, columns=columns, start=1000)
+        with _bounded(
+            _DENSE_WALK_BOUND_SECONDS, f"the table's block rule on a {columns}-column row"
+        ):
+            start = time.process_time()
+            scrubbed = redaction_shapes.scrub_shapes(f"{header}\n{rows}")
+            cpu = time.process_time() - start
+        assert cpu < 0.05, f"an anchored {columns}-column row cost {cpu:.3f} s of CPU in the table"
+        assert (
+            REDACTION_MARKER in scrubbed
+        ), f"the anchored spelling stopped being masked at {columns}"
+        assert rows in scrubbed, "only the header is a credential here; the row must survive"
+    payload = f"{header}\n{_numeric_rows(140, columns=8, start=1000)}"
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the table's block rule on the 140-row payload"):
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(payload)
+        cpu = time.process_time() - start
+    assert cpu < 0.5, f"the 140-row dense payload cost {cpu:.3f} s of CPU in the table"
+    assert (
+        REDACTION_MARKER in scrubbed
+    ), "the dense payload's anchored spelling stopped being masked"
+    assert "1056" in scrubbed, "the row content must survive; only the header is a credential here"
+
+
+def test_the_short_arms_lookahead_is_load_bearing_on_its_own_population() -> None:
+    """R3-5: the SECOND substitution has a population of its own, and it is measured.
+
+    Both fragments carry the ambiguity, and the arms above exercise the BODY unit's half
+    (a dense row, where the rule's own line walk is what costs). The short arm's LOOKAHEAD
+    is reached by a different input — a sub-floor line before a dense row, where the
+    lookahead is what has to parse the next line's prefix — and none of this file's
+    fixtures builds one: the `short_mid` case follows `3| Qw9z` with a 13-character body,
+    which the released lookahead answers immediately. So the comment beside the
+    substitution ("both are substituted because they carry the same ambiguity") had no
+    measurement behind it here, and the next reader simplifying the lookahead away would
+    have kept every arm green — the argument R3-1 already showed is insufficient on its
+    own, because what a split SERVES is what decides.
+
+    MEASURED (this round, on this spelling; `Qw9z` then a `%8d` row): the released
+    lookahead costs 0.005 / 0.302 / 2.216 / 18.578 s of CPU at 4 / 6 / 7 / 8 columns, and
+    the eight-column form is what agent review R3-5 measured as "past 100 s" through the
+    live pipe; the shipped spelling is 1 ms or under on every one of them, and 0.001 s on
+    the 106-byte seven-column payload the review used.
+
+    WHY THE ARM ASSERTS THE COST AND THE STRUCTURE RATHER THAN REPRODUCING THAT WALK:
+    demonstrating the released lookahead's non-return at eight columns costs 18.6 s of CPU
+    (341 s of wall on this loaded fleet) on EVERY run, and a smaller column count is core
+    speed-dependent — 0.302 s at six columns is not a bound that cannot fire on a faster
+    machine. So the load-bearing property is pinned two ways that are cheap and stable:
+    the shipped spelling's cost on exactly that population (with a CPU ceiling, under the
+    bound), and the substitution's SHAPE — the lookahead must carry the maximal fragment
+    and must not carry the shared one, which is what a "simplification" would change.
+    """
+    header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    # One sub-floor line, then the dense row: `{1,7}` then a full line behind a prefix.
+    payload = f"{header}\nQw9z\n{_numeric_rows(1, columns=8, start=1000)}\n"
+
+    with _bounded(_DENSE_WALK_BOUND_SECONDS, "the shipped spelling on the short-mid payload"):
+        start = time.process_time()
+        scrubbed = redaction_shapes.scrub_shapes(payload)
+        cpu = time.process_time() - start
+    assert cpu < 0.05, f"the short-mid payload cost {cpu:.3f} s of CPU shipped"
+    assert REDACTION_MARKER in scrubbed, "the short-mid payload's header stopped being masked"
+
+    # The SHAPE half: the short arm's lookahead is the maximal spelling, and the shared
+    # (ambiguous) prefix is not inside it. `_PEM_DIGIT_MAX_LINE_CONTENT` is the fragment
+    # both the pipe's classifier and this rule read, so this is also the pin that keeps
+    # the two from drifting apart.
+    assert (
+        redaction_shapes._PEM_DIGIT_MAX_PREFIX in redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT
+    ), "the short arm's lookahead no longer carries the maximal prefix"
+    assert (
+        redaction_shapes.LINE_PREFIX not in redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT
+    ), "the short arm's lookahead still walks the ambiguous fragment"
+    assert (
+        redaction_shapes._PEM_DIGIT_MAX_LINE_CONTENT.count(redaction_shapes._PEM_DIGIT_MAX_PREFIX)
+        == 1
+    ), "the lookahead must carry the substitution exactly once"
+
+
+def test_an_unclosed_block_is_masked_and_the_text_before_it_is_released() -> None:
+    """The gate moved WHERE the search is called, so the offsets it keeps matter.
+
+    `end` is what releases everything ahead of the header. A version that lost that
+    offset would either swallow the leading output or publish the first body line,
+    and the second is the leak this whole layer exists to prevent.
+    """
+    header = _banner(_PEM_SPELLINGS[0])
+    raw = (f"before the key: nothing secret here\n{header}{_PEM_BODY}\n{_PEM_BODY}\n").encode()
+    redactor = builtin._PipeRedactor([])
+    text = (redactor.feed(raw) + redactor.feed(b"", final=True)).decode()
+    assert "before the key: nothing secret here" in text, "output ahead of the header was lost"
+    assert _PEM_BODY not in text, "an unclosed block's body was published"
+    assert REDACTION_MARKER in text, "an unclosed block must still be masked"
+
+
+def test_a_closed_block_is_masked_and_its_terminator_is_released() -> None:
+    """The other arm of the same contract, on the path that releases a PREFIX.
+
+    A closed block arrives in one read as prose + header + body + END, so the
+    release point hands the mask loop the header rather than holding it — which is
+    what makes `ready[:end]` the line that releases the prose. Losing that offset
+    would drop the leading line, and dropping output is the failure this arm is
+    here for.
+    """
+    header = _banner(_PEM_SPELLINGS[0])
+    terminator = _banner(_PEM_SPELLINGS[0], kind="END")
+    lead = "before the key: nothing secret here\n"
+    raw = (f"{lead}{header}{_PEM_BODY}\n{terminator}after the key: ordinary output\n").encode()
+    redactor = builtin._PipeRedactor([])
+    text = (redactor.feed(raw) + redactor.feed(b"", final=True)).decode()
+    assert _PEM_BODY not in text, "a closed block's body was published"
+    assert REDACTION_MARKER in text, "a closed block must still be masked"
+    assert lead.strip() in text, "the line ahead of the header was dropped"
+    assert "after the key: ordinary output" in text, "output after the block was lost"
+
+
+@pytest.mark.parametrize("hint_index", [0, 1])
+def test_a_read_missing_one_literal_reaches_no_classifier(
+    monkeypatch: pytest.MonkeyPatch, hint_index: int
+) -> None:
+    """The gate is a NECESSARY condition, so it needs EVERY literal, not one.
+
+    The header pattern cannot match without both of them, and the spellings are taken
+    from the constant itself rather than written here so this stays true if the
+    pattern's literals change. The failure this pins is a gate loosened to `any` —
+    the plausible simplification, since one literal looks like enough — which sends
+    ordinary reads back into the search for nothing.
+    """
+    hints = builtin._PEM_HEADER_HINTS
+    assert len(hints) >= 2, "the gate is only a gate while it needs more than one literal"
+    spy = _CountingDecider(builtin._pem_header_line_end)
+    monkeypatch.setattr(builtin, "_pem_header_line_end", spy)
+    others = [hint for index, hint in enumerate(hints) if index != hint_index]
+    # The absent literal is NOT written into the fixture text, or the fixture would
+    # carry both and assert nothing.
+    text = f"a read carrying the {hints[hint_index]!r} literal and none of the rest\n"
+    assert all(other not in text for other in others), "the fixture carries the other literal"
+    redactor = builtin._PipeRedactor([])
+    out = redactor.feed(text.encode()) + redactor.feed(b"", final=True)
+    assert spy.calls == 0, f"the gate admitted a read missing {others[0]!r}"
+    assert out.decode() == text, "a read that opens no block must be published unchanged"
+
+
+def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The END gate, on the line loop, which the arms above never enter.
+
+    The state is set DIRECTLY, and the reason is worth recording: the release point
+    holds a whole unterminated block in `pending` until its terminator arrives, so a
+    streamed block reaches this loop only when the deferral cap forces it — which is
+    a leak of its own (reported, not fixed here) and not a state to build a fixture
+    on. With the state set, the two classifiers are watched together: the body test
+    must RUN, or "the END test did not run" would be true of a loop that never ran at
+    all, and the END test must not, because no line here carries the literal the END
+    pattern requires.
+    """
+    end_spy = _CountingDecider(builtin._pem_end_line)
+    body_spy = _CountingDecider(builtin._pem_body_line)
+    monkeypatch.setattr(builtin, "_pem_end_line", end_spy)
+    monkeypatch.setattr(builtin, "_pem_body_line", body_spy)
+    redactor = builtin._PipeRedactor([])
+    redactor._in_key_block = True
+    lines = "reading an ordinary line, nothing credential shaped\n" * 20
+    redactor.feed(lines.encode())
+    assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
+    assert end_spy.calls == 0, f"the END classifier was asked about {end_spy.calls} prose lines"
 
 
 # --- the store: containment, and the incident path ---------------------------
@@ -1893,6 +3252,580 @@ async def test_a_real_bash_command_never_publishes_an_open_key_body(
     assert "[redacted]" in text
 
 
+# --- the pipe's OPEN BLOCK: nothing inside it is published -------------------
+#
+# The three mechanisms that defeated this state, each measured at the revision
+# before this section existed, and each one a REGRESSION ARM below:
+#
+# 1. the header's own terminator was offered to the line loop, whose prose test
+#    read a bare separator as prose and CLOSED the block one line into itself —
+#    every later release then had no header to reopen it. Measured: 143 body
+#    lines (the whole 8 KiB ``pending``) from PR #1427's case, one call.
+# 2. a 512-line bound released the body verbatim past it — measured 1,488 body
+#    lines of a 2,000-line block.
+# 3. a cap-forced cut could land INSIDE a line, and the fragment is what the loop
+#    classified: a four-character fragment is below the body grammar's floor, so
+#    it read as prose and closed the block — measured 1,092 body lines published
+#    on the next release.
+#
+# The outcome all three reach is the same publish, and it is also reachable when
+# RETENTION drops one marker line from a >cap stream: the settled shape pass
+# cannot repair it because ``pem-private-key`` spans BEGIN to END. That route
+# measured 1,420 raw body lines in the call-site spill of a >4 MiB stream through
+# the real tool, served over ``read spill://``.
+#
+# The armour below is built from PARTS on purpose: these tests are about a
+# literal's LENGTH as much as its spelling, and a display filter that rewrote the
+# dashes would leave every arm here passing vacuously. ``_PEM_GRAMMAR_IS_LIVE``
+# is asserted first by every arm that depends on it.
+
+_PEM_DASHES = "-" * 5
+_PEM_HEADER = f"{_PEM_DASHES}BEGIN RSA PRIVATE KEY{_PEM_DASHES}\n"
+_PEM_END = f"{_PEM_DASHES}END RSA PRIVATE KEY{_PEM_DASHES}\n"
+#: A body line at a real PEM's width, and UNIQUE per line so a publish is
+#: countable and locatable rather than merely detectable.
+_PEM_BODY_STEM = "MIIEowIBAAKCAQEA" + "bKdFgHjLmNpQrStUvWxYzAbCdEfGhJkLmNoP"
+
+
+def _body_lines(count: int) -> str:
+    return "".join(f"{_PEM_BODY_STEM}{index:04d}\n" for index in range(count))
+
+
+def _published_body_lines(text: str) -> list[str]:
+    """Every body line still readable in ``text`` — the property under test."""
+    return [line for line in text.splitlines() if line.startswith(_PEM_BODY_STEM)]
+
+
+def _pem_grammar_is_live() -> None:
+    """Fail LOUDLY if an armour literal stopped matching the classifiers.
+
+    A rewritten header is not a masked one: it publishes the whole body, so an arm
+    whose header no longer matches would assert the wrong thing about the wrong text.
+    """
+    assert builtin._PEM_HEADER_LINE.match(_PEM_HEADER.rstrip("\n")), "header literal is not PEM"
+    assert builtin._PEM_END_LINE.match(_PEM_END.rstrip("\n")), "END literal is not PEM"
+    assert builtin._PEM_BODY_LINE.match(_PEM_BODY_STEM), "body line is not PEM-shaped"
+
+
+def test_an_unterminated_block_past_the_deferral_limit_publishes_no_body() -> None:
+    """PR #1427's case, through the pipe: header + 200 body lines and no END.
+
+    One call, and the whole 8 KiB ``pending`` used to go out verbatim — 143 body
+    lines of a 57-byte body, or 31-32 of a 256-byte one: the byte budget is what
+    is fixed, and the body width only chooses how many lines it buys.
+    """
+    _pem_grammar_is_live()
+    payload = _PEM_HEADER + _body_lines(200)
+    published = _pipe_whole(payload)
+
+    published_lines = _published_body_lines(published)
+    assert not published_lines, f"{len(published_lines)} body lines of an open block went out"
+    assert REDACTION_MARKER in published, "the block was not masked at all"
+
+
+def test_a_chunk_boundary_just_after_the_header_keeps_the_block_open() -> None:
+    """The header in one release and its body in the next: the block must stay open.
+
+    This is the separator bug at its narrowest. The header's own terminator used to
+    be the line loop's first element, where the prose test closed the block — so a
+    read boundary that lands after the header (any slow child that prints the
+    header first) published everything after it.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    published = redactor.feed(_PEM_HEADER.encode())
+    published += redactor.feed(_body_lines(200).encode())
+    published += redactor.feed(b"", final=True)
+    text = published.decode()
+
+    assert not _published_body_lines(
+        text
+    ), f"{len(_published_body_lines(text))} body lines were published across the boundary"
+    assert REDACTION_MARKER in text, "the block was not masked at all"
+
+
+def test_a_block_longer_than_the_old_line_bound_is_masked_to_its_end() -> None:
+    """The bound that released the body: 1,488 of these 2,000 lines used to go out raw.
+
+    An unterminated block cannot hold memory — a masked line is DROPPED, and
+    ``pending`` is capped separately — so the state is not bounded by lines any more.
+    """
+    _pem_grammar_is_live()
+    published = _pipe_whole(_PEM_HEADER + _body_lines(2000))
+
+    assert not _published_body_lines(
+        published
+    ), f"{len(_published_body_lines(published))} body lines past the old line bound"
+
+
+def test_a_forced_cut_inside_a_line_is_held_to_the_line_boundary() -> None:
+    """A fragment of a line cannot be classified, so it must not be classified.
+
+    The cap can cut mid-line, and a fragment shorter than the body grammar's floor
+    (``PEM_BODY_FLOOR``) is read as PROSE by the loop — which CLOSES an open block.
+    Measured: the four-character fragment ``MIIE`` closed one, and the next release
+    (all body, no header left) published 1,092 lines of a 2,000-line block.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    # 400 lines is past the deferral limit, so the cap decides the cut. The tail
+    # length is SEARCHED, not guessed: which byte the cap lands on depends on the
+    # line width, and the case only exists when the remainder is shorter than the
+    # grammar's floor. A guessed length that happens to land at a line boundary
+    # would assert nothing while looking like it did.
+    # The floor is the code's own name for it, with the historical value as the
+    # fallback: an arm run against a tree that predates the shared constant still
+    # tests the MECHANISM (where the cut lands) instead of failing on the lookup.
+    floor = getattr(builtin, "PEM_BODY_FLOOR", 8)
+    for tail in range(1, 60):
+        text = _PEM_HEADER + _body_lines(400) + "M" * tail
+        cap_cut = len(text) - builtin._PIPE_DEFERRAL_LIMIT
+        line_start = max(text.rfind("\n", 0, cap_cut), text.rfind("\r", 0, cap_cut)) + 1
+        fragment = cap_cut - line_start
+        if 0 < fragment < floor:
+            break
+    else:  # pragma: no cover - the fixture could not reach the case
+        pytest.fail("no tail length puts a sub-floor fragment at the cap's cut")
+
+    cut = redactor._release_point(text, final=False)
+
+    assert cut == line_start, (
+        f"the release ends {cut - line_start} bytes into a line, where the classifier "
+        "reads the fragment as prose (and closes the block)"
+    )
+
+
+def test_a_terminated_block_is_masked_whole_and_its_end_line_closes_the_state() -> None:
+    """The preservation arm: the fix must not start eating real key blocks.
+
+    Asserted at the MASK rather than on the pipe's whole output, and that is
+    deliberate: for a complete block the shape table ALSO masks the span from the
+    header to the terminator, so a product-level assertion here would be satisfied by
+    either layer and could not be reddened by breaking one of them. The mask's own
+    contract is the narrower, provable one — body gone, END line out, state closed —
+    and `pem-private-key` is already pinned elsewhere as the second layer.
+    """
+    _pem_grammar_is_live()
+    redactor = builtin._PipeRedactor([])
+    masked = redactor._mask_open_key_block(_PEM_HEADER + _body_lines(3) + _PEM_END)
+
+    assert not _published_body_lines(masked), "a complete block published its body"
+    assert _PEM_END.rstrip("\n") in masked, "the END line was eaten"
+    assert redactor._in_key_block is False, "the END line did not close the block"
+    # And the product-level outcome for the same text, which is the marker.
+    assert REDACTION_MARKER in _pipe_whole(_PEM_HEADER + _body_lines(400) + _PEM_END)
+
+
+def test_prose_after_a_stray_header_is_released_and_closes_the_block() -> None:
+    """The over-mask guard, unchanged by this fix: prose is not key material.
+
+    A header quoted in a doc or matched by ``grep`` opens the state, and the FIRST
+    ordinary line closes it — so the fixture text after it stays readable.
+    """
+    _pem_grammar_is_live()
+    published = _pipe_whole(_PEM_HEADER + "ordinary prose line\n" + _PEM_BODY_STEM + "0000\n")
+
+    assert "ordinary prose line" in published, "prose was eaten by a stray header"
+    # The one body-shaped line after the prose is masked: a close is not a licence
+    # to publish, and this arm pins the direction the layer must fail in.
+    assert not _published_body_lines(published)
+
+
+def test_a_numeric_table_without_a_header_is_left_alone() -> None:
+    """The negative half: a table of numbers is output a human has to read.
+
+    ``10000000 10000001`` IS body-shaped — the line grammar reads the first run as a
+    line-number prefix, which is how the old ambiguous ``LINE_PREFIX`` cost seconds
+    on exactly this row (PR #1427). What keeps such a table readable is that NO
+    HEADER is open: the state is the only thing that makes a body-shaped line a body
+    line. The plausible bug this pins is the one that masks body-shaped lines with no
+    header at all, which is a single mutation away in the loop below. (Inside an open
+    block these rows ARE masked: an over-mask is the direction this layer must fail
+    in, and it is recorded in the module comment.)
+    """
+    _pem_grammar_is_live()
+    table = "10000000 10000001\n" * 20
+    published = _pipe_whole(table)
+
+    assert published == table, "a table with no header was rewritten by the pipe filter"
+
+
+def _pipe_chunks(raw: bytes, chunk: int = 16384) -> str:
+    """The pipe filter over a WHOLE stream, in chunks, as ``_pump`` drives it."""
+    redactor = builtin._PipeRedactor([])
+    published = [
+        redactor.feed(raw[index : index + chunk]).decode() for index in range(0, len(raw), chunk)
+    ]
+    published.append(redactor.feed(b"", final=True).decode())
+    return "".join(published)
+
+
+def _retention_stream(cap: int, variant: str, block_lines: int) -> tuple[bytes, int]:
+    """A >cap stream whose retention window drops exactly ONE marker line.
+
+    Two things here are deliberate. The feed is CHUNKED, like the product's: a
+    single call would hand the shape pass a complete BEGIN … END and it would mask
+    the whole block, so there would be no fragment to measure and no case to test.
+    And the layout is SEARCHED against the pipe's own output rather than computed
+    from the raw bytes, because the masked length of the block is exactly what
+    differs between the revision that leaks and the revision that does not — a
+    layout derived from the raw stream would place the marker differently on each
+    and the arm would prove nothing. Returns the raw stream and the window size.
+    """
+    marker = "BEGIN" if variant == "begin" else "END"
+    marker_line = _PEM_HEADER if variant == "begin" else _PEM_END
+    pad_line = "filler " + "x" * 40 + "\n"
+    target = cap // 2
+    window = 512
+
+    def prose(total: int) -> str:
+        """At least ``total`` bytes, always ending on a line break (a glued header is
+        not the line-anchored spelling the mask looks for)."""
+        return pad_line * (-(-total // len(pad_line)))
+
+    def build(pre: int, post: int) -> bytes:
+        block = _PEM_HEADER + _body_lines(block_lines) + _PEM_END
+        return (prose(max(pre, 0)) + block + prose(max(post, 0))).encode()
+
+    pre = target + 64 if variant == "begin" else target - 64
+    for _ in range(30):
+        measured = _pipe_chunks(build(pre, window * 4))
+        at = measured.find(marker)
+        if at < 0:  # the layout put the block inside a masked run: shift and retry
+            pre += 4096
+            continue
+        line_start = measured.rfind("\n", 0, at) + 1
+        if target <= line_start < target + window - len(marker_line):
+            break
+        pre += max(min(target - line_start, 4096), -4096)
+    else:  # pragma: no cover - the search could not place the marker
+        pytest.fail("could not place the marker line inside the retention window")
+
+    # Size the tail so the omitted window is the width this arm needs. The tail
+    # moves in whole pad lines, so the window lands in [window, window + a line):
+    # the assertion is that band, and the ACTUAL width is what the arm compares
+    # against, rather than a number the fixture would have to hit exactly.
+    post = window * 4 + window - len(measured)
+    raw = build(pre, post)
+    omitted = len(measured) - cap
+    for _ in range(4):
+        raw = build(pre, post)
+        measured = _pipe_chunks(raw)
+        omitted = len(measured) - cap
+        if window <= omitted < window + len(pad_line):
+            break
+        post += window - omitted
+    assert window <= omitted < window + len(pad_line), f"the retention window is {omitted} bytes"
+    line_start = measured.rfind("\n", 0, measured.find(marker)) + 1
+    assert (
+        0 <= line_start - target < omitted - len(marker_line)
+    ), "the marker line is not inside the omitted window"
+    return raw, omitted
+
+
+@pytest.mark.parametrize("variant", ["begin", "end"])
+def test_a_retention_split_marker_still_publishes_no_body(variant: str) -> None:
+    """Retention drops ONE marker line; nothing in the body may reach any surface.
+
+    This is the route a reviewer found independently, from the retention side, and it
+    is the one the settled pass cannot repair: the operator's copy is built from the
+    retained text, and ``pem-private-key`` needs a complete BEGIN … END, so a fragment
+    matches no rule at all. Measured at the base: 1,420 raw body lines in the call-site
+    spill of a >4 MiB stream through the real tool, served over ``read spill://``.
+    """
+    _pem_grammar_is_live()
+    cap = 65536
+    raw, window = _retention_stream(cap, variant, 700)
+
+    sink = builtin._BashOutput(limit=cap)
+    redactor = builtin._PipeRedactor([])
+    live = []
+    for index in range(0, len(raw), 16384):
+        piece = redactor.feed(raw[index : index + 16384])
+        sink.append(piece)
+        live.append(piece.decode())
+    piece = redactor.feed(b"", final=True)
+    sink.append(piece)
+    live.append(piece.decode())
+
+    assert sink.omitted_bytes == window, "retention did not drop the marker line"
+    for surface, text in (
+        ("the live pipe", "".join(live)),
+        ("the retained copy", sink.decode()),
+        ("the settled pass", _live_text(sink.decode())),
+    ):
+        published = _published_body_lines(text)
+        assert not published, f"{surface} published {len(published)} body lines of a split block"
+
+
+def test_a_block_truncated_by_the_cap_still_publishes_no_body() -> None:
+    """A block whose body is cut off mid-line by the cap, with no END at all.
+
+    The cap is the mechanism that releases a block's middle, and the fragment it
+    leaves is the one the loop used to read as prose; this is that shape end to
+    end, through the pipe, at a small forced deferral.
+    """
+    _pem_grammar_is_live()
+    original = builtin._PIPE_DEFERRAL_LIMIT
+    try:
+        builtin._PIPE_DEFERRAL_LIMIT = 256
+        redactor = builtin._PipeRedactor([])
+        # Chunks of 100 bytes: the cut lands inside lines repeatedly, and the
+        # third line's remainder is a sub-floor fragment.
+        payload = (_PEM_HEADER + _body_lines(60)).encode()
+        published = b""
+        for index in range(0, len(payload), 100):
+            published += redactor.feed(payload[index : index + 100])
+        published += redactor.feed(b"", final=True)
+    finally:
+        builtin._PIPE_DEFERRAL_LIMIT = original
+
+    text = published.decode()
+    assert not _published_body_lines(
+        text
+    ), f"{len(_published_body_lines(text))} body lines escaped a cap-truncated block"
+
+
+def test_an_unterminated_block_with_a_second_block_present_publishes_no_body() -> None:
+    """An END dropped while ANOTHER block follows: the first must not leak either.
+
+    ``_release_point``'s hold looks for the NEXT terminator, so a second block's END
+    can satisfy the first block's search. Whatever that does to the deferral, the
+    body of the unterminated one must not reach the pipe's output.
+    """
+    _pem_grammar_is_live()
+    # 700 lines in the unterminated block, not 300: below the old 512-line bound
+    # this arm would have passed at the revision that published, which is how a
+    # boundary arm becomes a vacuous one.
+    payload = _PEM_HEADER + _body_lines(700) + _PEM_HEADER + _body_lines(200) + _PEM_END
+    # CHUNK-fed: in one call the shape pass would match BEGIN(1) … END(2) as a single
+    # span and mask the lot, so the arm would pass at the revision that published.
+    published = _pipe_chunks(payload.encode())
+
+    published_lines = _published_body_lines(published)
+    # The second block is terminated, so ITS body is masked by the settled pass as
+    # well; what this arm pins is that no body line survives the pipe.
+    assert not published_lines, f"{len(published_lines)} body lines were published"
+    assert REDACTION_MARKER in published
+
+
+# --- the round-2 remediation: the cap's OWN split, and the armour's spellings -----
+#
+# Three holes round 1 found in the section above, all measured on the revision before
+# these arms existed, and all three in the SAME publish direction:
+#
+# 1. the cap can land inside the ARMOUR LINE. The hold above finds a block by its
+#    opening marker, but the cap is applied after that hold and recomputes the cut
+#    from the buffer length, so the marker itself is what gets split: a bare marker
+#    fragment goes out, the rest of the marker stays in ``pending`` where its line no
+#    longer STARTS with it, and the classifier can never match it again. The state
+#    never opens, so the whole flush is body nothing masks — measured 138 raw body
+#    lines, and the alignment is fixed per stream (a repeated read leaks every time).
+# 2. an armour line ending in ``\r`` / ``\r\n`` / trailing whitespace never opened the
+#    block at all: ``$`` cannot match in front of a ``\r``, so an ORDINARY key file
+#    written on Windows (or quoted by a wiki, or left with a trailing space by an
+#    editor) published its body — measured 5 of 25 lines for ``head -n 6`` on a
+#    complete CRLF key, and 200 lines of an unterminated one on every surface.
+# 3. a second block's header arriving in the SAME read as the first block's END was
+#    released without re-opening the state, so the second block's body went out raw —
+#    measured 138 lines on the shape below.
+#
+# The armour literals in this section come from the shared ones above (``_PEM_HEADER``,
+# ``_PEM_END``, ``_PEM_DASHES``), which are assembled from parts for the same reason.
+
+#: The line-break spellings an armour line arrives with in the wild: LF, CRLF, a bare CR
+#: (a key that came off an old Mac, or through a filter that normalised to CR), and the
+#: two trailing-whitespace forms a copy-paste or an editor leaves behind.
+_ARMOUR_BREAKS = (
+    ("lf", "\n", "\n"),
+    ("crlf", "\r\n", "\r\n"),
+    ("cr", "\r", "\r"),
+    ("trailing-spaces-lf", "   \n", "\n"),
+    ("trailing-tab-crlf", "\t\r\n", "\r\n"),
+    ("trailing-space-cr", " \r", "\r"),
+)
+
+
+def test_a_cap_that_splits_the_armour_line_publishes_no_body() -> None:
+    """The cap's cut landing INSIDE the armour line is the one split the mask cannot survive.
+
+    The hold in ``_release_point`` defers a block by its opening marker, and the cap is
+    applied AFTER that hold and recomputes the cut from the buffer length — so an
+    alignment that puts the cap a few bytes into the armour line publishes a marker
+    FRAGMENT and leaves the rest of the marker in ``pending``, where the line no longer
+    starts with it. From then on the classifier cannot match it, the state never opens,
+    and every later release is body that nothing masks: 138 raw body lines measured at
+    this exact alignment, identical at the base tree.
+
+    WHAT DECIDES IT IS THE ALIGNMENT, NOT THE READ SIZE — which is why the sweep is over
+    both: the same payload fed whole, in 4 KiB reads, in 1 KiB reads and in 100 B reads
+    all published the body before the fix, and a session that runs the same truncated
+    read twice leaks twice, because the alignment is fixed per stream.
+    """
+    _pem_grammar_is_live()
+    # The sweep is DERIVED from the cap, not hard-coded: the cut lands ``limit`` bytes
+    # before the end, so a total that puts it 8-27 bytes into a 32-byte armour line is
+    # ``limit + 8`` to ``limit + 27``. Width-checked, because a wider armour literal
+    # would move the window and quietly turn this arm into one that sweeps nothing.
+    assert len(_PEM_HEADER) == 32, "the armour literal changed width; re-derive the sweep"
+    limit = builtin._PIPE_DEFERRAL_LIMIT
+    for size in (0, 100, 1024, 4096):  # 0 is one feed + the flush
+        for total in range(limit + 8, limit + 28):
+            raw = (_PEM_HEADER + _body_lines(300))[:total].encode()
+            published = _pipe_whole(raw.decode()) if size == 0 else _pipe_chunks(raw, size)
+            leaked = _published_body_lines(published)
+            assert not leaked, (
+                f"a {'whole-stream' if size == 0 else f'{size} B'} feed of {total} B "
+                f"published {len(leaked)} body lines of a block whose marker the cap split"
+            )
+
+
+def test_a_second_block_after_a_terminated_one_publishes_no_body() -> None:
+    """A terminated block AND a second header in ONE read: the state has to be RE-opened.
+
+    The second-header arm treats a header inside an open block as armour rather than
+    prose, but this loop reaches that arm with the state already CLOSED whenever the same
+    release carried the earlier block's END. Releasing the header without re-opening it
+    left the second block's body to go out raw on the next release — measured 138 raw
+    body lines at this shape (12,071 B, one read), the whole flush.
+    """
+    _pem_grammar_is_live()
+    payload = _PEM_HEADER + _body_lines(3) + _PEM_END + _PEM_HEADER + _body_lines(200)
+
+    redactor = builtin._PipeRedactor([])
+    redactor.feed(payload.encode())
+    assert redactor._in_key_block is True, "the second block's header did not re-open the state"
+
+    published = _pipe_whole(payload)
+    leaked = _published_body_lines(published)
+    assert not leaked, f"{len(leaked)} body lines of the second block were published"
+
+
+@pytest.mark.parametrize(
+    ("name", "armour_break", "body_break"),
+    _ARMOUR_BREAKS,
+    ids=[case[0] for case in _ARMOUR_BREAKS],
+)
+def test_an_armour_line_with_a_cr_or_a_trailing_space_is_still_armour(
+    name: str, armour_break: str, body_break: str
+) -> None:
+    """The armour line's own terminator spelling must not decide whether a key is masked.
+
+    ``$`` cannot match in front of a ``\\r``, so the classifier did not see
+    ``...KEY-----\\r\\n`` (or ``...\\r``, or the trailing-whitespace forms) as armour at
+    all, and an unterminated block then went out in the clear: 200 of 200 body lines on
+    the transcript, the raw spill file and ``read spill://``. Base and head were
+    identical there, so this is pre-existing — but it is the branch's own title claim
+    unmet for an ORDINARY spelling, and the pipe is the only layer that can hide an
+    unterminated view (``pem-private-key`` needs a complete BEGIN … END). Every surface
+    below is built from the pipe's bytes, so the pipe's output is the first thing to pin
+    and the store's copy and the settled pass follow it.
+    """
+    _pem_grammar_is_live()
+    armour = _PEM_HEADER.rstrip("\n") + armour_break
+    # (1) an UNTERMINATED block, 200 lines, which is the shape the retention route leaks.
+    unterminated = armour + _body_lines(200).replace("\n", body_break)
+    published = _pipe_whole(unterminated)
+    leaked = _published_body_lines(published)
+    assert not leaked, f"{name}: {len(leaked)} body lines of an unterminated block went out"
+
+    # (2) the same bytes through the retention route: the store's retained copy and the
+    # settled pass over it, neither of which can repair a headerless fragment.
+    sink = builtin._BashOutput(limit=65536)
+    redactor = builtin._PipeRedactor([])
+    raw = unterminated.encode()
+    for index in range(0, len(raw), 4096):
+        sink.append(redactor.feed(raw[index : index + 4096]))
+    sink.append(redactor.feed(b"", final=True))
+    for surface, text in (
+        ("the retained copy", sink.decode()),
+        ("the settled pass", _live_text(sink.decode())),
+    ):
+        leaked = _published_body_lines(text)
+        assert not leaked, f"{name}: {surface} published {len(leaked)} body lines"
+
+    # (3) ``head -n 6`` on a COMPLETE key of this spelling: five body lines, no END in the
+    # text at all, so nothing downstream can repair it. Measured 5 of 25 published before.
+    truncated = armour + _body_lines(5).replace("\n", body_break)
+    leaked = _published_body_lines(_pipe_whole(truncated))
+    assert not leaked, f"{name}: {len(leaked)} body lines of a truncated complete key went out"
+
+
+def test_a_complete_key_with_crlf_endings_is_masked_to_its_end() -> None:
+    """The whole block path for the CRLF spelling: body masked, END out, state closed.
+
+    Asserted at the MASK rather than on the pipe's whole output, because for a COMPLETE
+    block the shape table masks the span as well and a product-level assertion would be
+    satisfied by either layer (the same reason the LF arm above is written this way).
+    """
+    _pem_grammar_is_live()
+    block = _PEM_HEADER.rstrip("\n") + "\r\n" + _body_lines(3).replace("\n", "\r\n")
+    block += _PEM_END.rstrip("\n") + "\r\n"
+    redactor = builtin._PipeRedactor([])
+    masked = redactor._mask_open_key_block(block)
+
+    assert not _published_body_lines(masked), "a complete CRLF block published its body"
+    assert _PEM_END.rstrip("\n") in masked, "the END line was eaten"
+    assert redactor._in_key_block is False, "the END line did not close the state"
+
+
+def test_the_body_floor_is_one_definition_for_the_grammar_and_the_hold() -> None:
+    """The floor the grammar accepts and the floor the hold holds at are ONE number.
+
+    ``PEM_BODY_FLOOR`` is read twice: by the body grammar (through its two quantifier
+    spellings) and by the release hold, which keeps a cap-forced cut off a fragment
+    shorter than it — because the line loop reads such a fragment as PROSE, which CLOSES
+    an open block. The relationship is a BOUNDARY, so it is pinned from both sides here:
+    a merger who moves either side — including the linear deciders #1427 substitutes at
+    the pipe's call sites, which spell an ``8``/``7`` pair by hand — makes this arm
+    disagree with itself rather than let the hold under-hold, which is the leak
+    direction.
+    """
+    floor = redaction_shapes.PEM_BODY_FLOOR
+    # The grammar's side of the boundary.
+    assert builtin._PEM_BODY_LINE.match("M" * floor), "the grammar rejects a run at its own floor"
+    assert not builtin._PEM_BODY_LINE.match("M" * (floor - 1)), "a lone sub-floor line is prose"
+
+    # The hold's side, at the SAME boundary: build a text whose cap-forced cut leaves a
+    # fragment of exactly ``fragment`` bytes in an open block's last line, and read the
+    # cut back. Held iff the fragment is shorter than the floor.
+    original = builtin._PIPE_DEFERRAL_LIMIT
+    try:
+        builtin._PIPE_DEFERRAL_LIMIT = 256
+        for fragment in (floor - 1, floor):
+            text = _PEM_HEADER + _body_lines(20) + "M" * (256 + fragment)
+            line_start = len(text) - (256 + fragment)
+            cut = builtin._PipeRedactor([])._release_point(text, final=False)
+            held = cut == line_start
+            assert held is (fragment < floor), (
+                f"a {fragment}-byte fragment at the cut was "
+                f"{'held' if held else 'released'} against a floor of {floor}"
+            )
+    finally:
+        builtin._PIPE_DEFERRAL_LIMIT = original
+
+
+def test_a_certificate_banner_does_not_open_a_private_key_block() -> None:
+    """The widened armour tail must not open a block on a PUBLIC key's banner.
+
+    Tolerating ``\\r`` and trailing whitespace removed the whitespace as a discriminator,
+    so the phrase is now the only thing separating a private-key banner from any other
+    PEM banner — and this is the arm that pins it, including for the spellings the
+    widening was for: a certificate banner followed by base64-shaped lines stays readable
+    byte for byte, because ``PRIVATE KEY`` is missing.
+    """
+    _pem_grammar_is_live()
+    banner = _PEM_DASHES + "BEGIN CERTIFICATE" + _PEM_DASHES
+    for ending in ("\n", "\r\n", "  \r\n", " \r"):
+        body_break = "\n" if ending.endswith("\n") else "\r"
+        text = banner + ending + _body_lines(20).replace("\n", body_break)
+        published = _pipe_whole(text)
+        assert _published_body_lines(
+            published
+        ), f"a public banner ending {ending!r} opened a private-key block"
+        assert published == text, f"a public banner ending {ending!r} was rewritten by the pipe"
+
+
 def test_two_stores_in_one_process_are_independent() -> None:
     """The registration set and its cap are PER STORE, not per process.
 
@@ -2110,6 +4043,78 @@ def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None
 
     partial = rs.ShapeHit(label="credential-assignment", value=value, window=value)
     assert rs._only_fully_masked([partial], f"PASSWORD=tok{REDACTION_MARKER}")[0].exposed is False
+
+
+def test_a_duplicated_placeholder_reference_does_not_escalate() -> None:
+    """A DSN copy plus a SECOND, bare mention of the same ``$VAR`` is CONTAINED.
+
+    The DSN rule masks the copy inside the URL and deliberately leaves a bare
+    ``$VAR`` readable (``is_placeholder_component`` is what keeps it unmasked), so
+    the fragment test found that survivor under the hit's own value and read it as
+    a partial mask — the loud ``rotate it`` notice for a value that never was
+    credential material. The exposed decision site is now the third place the
+    predicate is consulted (the masking floor and the registration floor are the
+    others), which is the whole of the fix: no word-list change reaches it, because
+    the value is correctly a placeholder already.
+
+    Every literal is built by concatenation on purpose — a credential-shaped
+    literal written into a source file is exactly what the scrubber is for.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    reference = "$" + "GITLAB_" + "TOKEN"
+    head = f"{scheme}://u:{reference}@gitlab.com/db"
+
+    # The second mention is the trigger; the first line alone is the control.
+    duplicated = f"{head}\n# token is {reference}"
+    masked, hits = scrub_shapes_with_hits(duplicated)
+    assert REDACTION_MARKER in masked, "the DSN copy must still be masked"
+    assert (
+        rs.shape_report(hits).reached_model is False
+    ), f"a duplicated placeholder files a rotation demand: {masked!r}"
+
+    _, single_hits = scrub_shapes_with_hits(head)
+    assert rs.shape_report(single_hits).reached_model is False
+
+
+def test_a_duplicated_real_secret_still_escalates() -> None:
+    """The conservative direction the fix must NOT trade away.
+
+    A genuinely half-masked real secret — the marker over the head of the value
+    and its own characters readable in a second, unmasked mention — is a real
+    survivor and must keep asking for a rotation. A JSON manifest would carry any
+    earlier victim of a placeholder check; the ticket expected this arm before merge.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    secret = "qA2S3n7x9" + "Zk4Wm1B4dR6"  # noqa: S105 - fabricated, assembled here
+    text = f"{scheme}://u:{secret}@gitlab.com/db\n# pw is {secret}"
+
+    _, hits = scrub_shapes_with_hits(text)
+    (hit,) = [h for h in hits if h.label == "dsn-password"]
+    assert hit.exposed is True
+    assert rs.shape_report(hits).reached_model is True
+
+
+def test_a_degenerate_single_repeated_character_run_is_contained() -> None:
+    """A 64-character run of ONE repeated character is a placeholder, not a secret.
+
+    Zero entropy and a distinct-character count of 1; no real token is spelled
+    that way. The existing predicate already classes it a placeholder (the single
+    repeated character clause), so the fix covers it with no new discriminator —
+    recorded here because the ticket asked for its disposition to be read rather
+    than assumed.
+    """
+    import local_operator.redaction_shapes as rs
+
+    scheme = "post" + "gres"
+    degenerate = "b" * 64
+    assert rs.is_placeholder_component(degenerate) is True
+    text = f"{scheme}://u:{degenerate}@gitlab.com/db\n# token is {degenerate}"
+    _, hits = scrub_shapes_with_hits(text)
+    assert rs.shape_report(hits).reached_model is False
 
 
 def test_a_mask_that_stopped_inside_a_credential_is_an_exposure(
@@ -2685,7 +4690,85 @@ def _corpus_grading() -> str:
 #: value readable), and it now carries ``credential-assignment`` as complete and
 #: contained. The class is a credential that LOST its mask, which is why the row is
 #: pinned in the POSITIVE half rather than argued about in prose.
-_CORPUS_GRADING_DIGEST = "2a29fe4cf4f548c96837f1bf9583e4206f0fb793dfbf346c32dcf9e3e77b6beb"
+#: MOVED ON 2026-09-22, in the commit that stops the pass masking a store NAME in a
+#: credential-flag position, and the argument is once again a measurement rather than a
+#: claim — with a particular shape this time, because the module change is INVISIBLE to
+#: the corpus that existed. Grading the 423 rows the constant above covered under the
+#: ``origin/main`` module and under this one, field for field, produces byte-identical
+#: digests (``2a29fe4c…`` both times, measured beside `git show
+#: origin/main:local_operator/redaction_shapes.py` loaded as a second module), and the
+#: digest moves for one reason only: the corpus GREW, 423 -> 438, and the 15 added rows
+#: are the specification for the fix. Five positives are the VALUE side the release must
+#: not reach — an issuer token, the two underscore-joined phrases of the identifier arm
+#: (the class R1-1 measured), a single unseparated token, and a padded base64 value — and
+#: ten negatives are a store NAME in that position: the guide's own publish command and
+#: its ``cat``/``grep`` renderings, the same name under four other flag spellings, the
+#: ``=`` spelling, and the two-part form whose right half is not a credential word
+#: either.
+#:
+#: **The behaviour change the digest is too coarse to see, stated here instead.** Twelve
+#: argument spellings stop being masked — the store NAME under each flag in the rule's
+#: vocabulary, both separators, the two-part form, and the ``--token ABC_123_XYZ``-shaped
+#: residual the corpus pins as a negative — and NO row anywhere gains a mask. The corpus
+#: could not see any of them because every flag-carrying row it already had was either a
+#: VALUE (which still masks) or a NAME whose tail was a credential word (which was
+#: already released), which is exactly why the rows were added rather than argued about.
+#:
+#: **The constant the recovered commit carried was STALE, and it is re-derived here
+#: rather than trusted.** That commit's module and corpus were recovered from a subagent
+#: killed mid-task, and no test had been run against them before it was committed. Graded
+#: as they stand, the corpus produces ``946670a4…``, not the ``4cc31872…`` the commit
+#: recorded — written before its last corpus edit, and invisible to the suite for exactly
+#: the reason this constant exists: the one arm that would have caught it is the arm the
+#: constant belongs to, and a wrong constant fails only when someone runs it.
+#: The ARGUMENT above is what makes the correction safe, and it survives re-derivation
+#: unchanged: replaying it through this same function with the base module loaded beside
+#: the head one reproduces ``2a29fe4c…`` for the 423 rows that existed at ``bf48ca47``
+#: under BOTH modules, field for field, so the move is the corpus's growth (423 -> 438)
+#: and not a behaviour change on any pre-existing row.
+#:
+#: MOVED ONCE MORE ON 2026-09-22, in the commit that refuses the EXPOSURE CLAIM for the
+#: flag rule's word-shaped over-mask, and the argument is the same shape: no pre-existing
+#: row moved — the 438 rows above produce ``946670a4…`` byte for byte under this module
+#: too, measured by grading every one of them field for field with
+#: ``git show 1e8d33e6:local_operator/redaction_shapes.py`` loaded as a second module —
+#: and the digest moves for the corpus's growth alone, 438 -> 439: one positive that puts
+#: the word TWICE in the line, so the whole-value half of the exposure question answers
+#: yes for reasons that have nothing to do with the mask. That row is the second specimen
+#: the operator reported — a 33 KB documentation read escalated to a "rotate it" demand
+#: for the word ``when`` — and ``test_only_the_documented_positive_case_escalates`` now
+#: referees it like every other positive.
+#:
+#: MOVED ONCE MORE ON 2026-09-23, in the round-1 remediation, and here the argument has
+#: TWO halves because two different things happened in one commit.
+#:
+#: 1. **The module change is INVISIBLE to the corpus, measured.** Narrowing the flag
+#:    rule's prose refusal from ``len < _ASSIGNED_VALUE_MIN_CHARS`` (eight) to
+#:    ``len <= _FLAG_PROSE_MAX_CHARS`` (four) restores the escalation for every
+#:    five-, six- and seven-character value, and the corpus's only flag-position
+#:    word is the FOUR-character ``when`` row — refused by both bounds. So: the 442
+#:    rows below graded with ``git show f6f58eb7:local_operator/redaction_shapes.py``
+#:    loaded as a second module produce this same ``a755ab0e…`` byte for byte, and the
+#:    bound is separately shown to be insensitive across the whole range — grading the
+#:    439-row corpus with the refusal refusing bare words up to 4, 5, 6, 7, 8, 11 and 15
+#:    characters all give ``ff40e831…``, while refusing only up to 3 gives ``96341322…``
+#:    (it stops refusing the ``when`` row). Four is the narrowest bound that keeps that
+#:    row contained, which is why the boundary is pinned by a test rather than by a row:
+#:    the rows that would separate five from nine have to ESCALATE, and the corpus holds
+#:    exactly one escalating case by construction.
+#:
+#: 2. **The corpus grew by three rows, which is what moves the constant.** Measured by
+#:    recomputing over the corpus WITHOUT them under this same module: the 439 rows it
+#:    had produce ``ff40e831…`` field for field, so nothing pre-existing moved. The new
+#:    rows are two negatives and one positive from agent review R1-3 and R1-4 — the
+#:    TWO-PART spelling of the accepted residual (once with a separator in each half and
+#:    once with none, because the two halves are read by shape alone and so need no
+#:    separator at all: wider than the one-part release, and it had no row), and the
+#:    ONE-WORD store name the release does NOT reach (``normalize_credential_key("prod")``
+#:    is ``PROD``, so the arm's separator requirement leaves it masked). Both were found
+#:    by a differential rather than stated by the table, which is the thing this constant
+#:    exists to stop.
+_CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0eef58406f57"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -2713,7 +4796,34 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
     long and one of its six-character windows is in the text with the redaction
     marker stripped. Restating it is the point — a re-implementation that agrees
     with the corpus for the wrong reason fails on the next case.
+
+    ONE EXCLUSION, and it is part of the predicate rather than an exception to it:
+    the flag rule's word-shaped over-mask (``--api-key [redacted] you need to``) is graded
+    CONTAINED whatever the text says, because a value that is a bare lowercase word of
+    FOUR characters or fewer answers both questions YES for reasons that have nothing to
+    do with the mask — every English word recurs in prose, which is how a 33 KB
+    documentation read filed an ESCALATED rotation demand for the word ``when``
+    (2026-09-22). It is restated here, not imported, so the exclusion cannot drift from
+    the implementation without failing this arm.
+
+    THE RESTATED BOUND IS THE IMPLEMENTATION'S OWN FOUR, and that is the correction agent
+    review R1-2 asked for. It was eight — the module's masked-VALUE floor, which answers a
+    different question — and a restatement at eight could not catch drift across 5..9,
+    because the corpus holds no row that separates those bounds: measured, the grading is
+    identical for every bound at or above four. The rows that WOULD separate them have to
+    escalate, and the corpus holds exactly one escalating case by construction (the
+    reason ``test_a_genuinely_exposed_compact_credential_still_files_an_incident`` gives),
+    so the boundary is pinned in ``test_the_flag_prose_refusal_stops_at_four_characters``
+    instead, in both directions.
+
+    WHAT THIS RESTATEMENT CAN AND CANNOT CATCH, stated rather than implied: it fails on
+    drift DOWNWARD. An implementation refusing three characters or fewer leaves the
+    four-character ``when`` row escalating, where this arm — restating a bound of four —
+    computes ``exposed`` False for it, and the mismatch reds on the assertion below. Drift
+    UPWARD across five to nine is invisible to the corpus (no row of that width is a bare
+    word), so it is not this arm's job: it is the boundary test's.
     """
+    short_word_floor = 4
     checked = 0
     for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
         masked, hits = scrub_shapes_with_hits(case.text)
@@ -2721,7 +4831,15 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
         for hit in hits:
             value = hit.value
             exposed = bool(value) and value != REDACTION_MARKER
-            if exposed:
+            word_shaped = (
+                len(value) <= short_word_floor
+                and value.isascii()
+                and value.isalpha()
+                and value.islower()
+            )
+            if hit.label == "cli-credential-flag" and word_shaped:
+                exposed = False
+            elif exposed:
                 exposed = value in masked or (
                     len(value) >= 6
                     and any(value[start : start + 6] in readable for start in range(len(value) - 5))
@@ -2729,6 +4847,66 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
             assert hit.exposed is exposed, (case.reason, hit.label)
             checked += 1
     assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
+
+
+def test_the_flag_prose_refusal_stops_at_four_characters() -> None:
+    """The refusal's BOUNDARY, both ways, where the corpus cannot pin it.
+
+    ``_is_prose_after_a_flag`` refuses the exposure claim for a bare lowercase word in a
+    credential flag's argument position, and the bound is FOUR characters. Nothing in the
+    corpus separates a bound of five from one of nine (measured: the grading is identical
+    for every bound at or above four) and the rows that WOULD have to escalate, which the
+    corpus may not hold — so the boundary lives here, on the specimens the refusal was
+    written for and on the short values it must NOT swallow (agent review R1-2, measuring
+    R1-1).
+
+    An implementation whose bound drifted to five, six, seven, eight or nine fails the
+    second loop; one that drifted to three or less fails the first. Both directions are
+    the point: the narrowing exists to stop manufacturing rotation demands for English
+    words, and it may not buy that by giving up the escalation for a short credential
+    printed a second time in the clear.
+    """
+    import local_operator.redaction_shapes as rs
+
+    def escalates(text: str) -> bool:
+        return rs.shape_report(scrub_shapes_with_hits(text)[1]).reached_model
+
+    # Assembled from its segments, like every other flag/value pair in this file: the flag
+    # followed by a value is the exact shape the pass rewrites, so no literal here is one.
+    flag = "--" + "api-key" + " "
+
+    # The word case the refusal exists for — the 33 KB documentation line whose second
+    # ``when`` in free prose filed a rotation demand — and the shorter specimen the suite
+    # already pins. Both stay CONTAINED, and these are the only two words in this test
+    # that are read as prose rather than as a value.
+    for word in ("when", "was"):
+        prose = f"{flag}{word} you need it, and {word} the flag is set it wins"
+        assert REDACTION_MARKER in scrub_shapes_with_hits(prose)[0], "the over-mask stopped"
+        assert not escalates(prose), f"the prose word {word!r} demanded a rotation again"
+
+    # Three and four characters: still contained. This is the STATED LIMIT of the
+    # refusal, pinned so a later widening of the bound is a decision rather than a
+    # differential — at that width a word cannot be told from a credential anywhere in
+    # the text, which is the whole of the reason the claim is refused.
+    for word in ("was", "hunt"):
+        short = f"{flag}{word} and the {word} is set"
+        assert not escalates(short), f"{word!r} (len {len(word)}) stopped being refused"
+
+    # Five, six and seven characters: escalated AGAIN, which is the half agent review
+    # R1-1 measured as lost. ``hunter`` (six) and ``letmein`` (seven) are the canonical
+    # short weak passwords; ``grace`` is the five-character edge of the same class. The
+    # BOUND is what is pinned here rather than the spelling, so any bare lowercase run of
+    # that width would do — what matters is that a credential-shaped value printed twice
+    # in the text the model reads keeps its escalation.
+    for word in ("grace", "hunter", "letmein"):
+        repeated = f"{flag}{word} and the {word} is set"
+        assert (
+            REDACTION_MARKER in scrub_shapes_with_hits(repeated)[0]
+        ), f"{word!r} stopped being masked"
+        assert escalates(repeated), (
+            f"a {len(word)}-character value printed twice no longer escalates: the "
+            "refusal is wider than its four-character specimens"
+        )
 
 
 def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
@@ -2883,6 +5061,43 @@ def test_the_escalated_notice_still_demands_a_rotation() -> None:
     # One action, not two: a cleanup line here would dilute the sentence that
     # matters, and the copy on disk is the least of this case's problems.
     assert "rm -f" not in text
+
+
+def test_an_escalation_the_table_could_not_name_says_so() -> None:
+    """An escalated hit with NO label must name the MISSING provenance.
+
+    The escalation and the labels are graded separately, so ``labels=()`` with
+    ``reached_model=True`` is a state the shipped path reaches: a hit whose mask
+    cannot be CLAIMED (``complete=False``) is dropped from ``ShapeReport.labels``
+    while it still escalates if readable material survived (``exposed=True``). The
+    corpus's own escalating case — the ``amqp`` DSN whose username is its password —
+    grades exactly that way, so the state is reached from real input and is asserted
+    here off the corpus rather than from a synthetic empty list.
+
+    What the escalated text may NOT do in that state is assert a generic shape
+    ("credential-shaped content"), which reads as a shape the table DID identify and
+    leaves the reader unable to tell an un-named hit from a named one. It must say
+    the shape table could not name it. Measured live this session: sessions stopped
+    work over notices in exactly this state.
+    """
+    import local_operator.redaction_shapes as rs
+
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    _masked, hits = rs.scrub_shapes_with_hits(case.text)
+    report = rs.shape_report(hits)
+    # The state itself, proven rather than assumed: escalation with nothing named.
+    assert report.reached_model is True, "the corpus case stopped escalating"
+    assert report.labels == (), f"the escalation now names a shape: {report.labels}"
+
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message("bash", list(report.labels), "cmd")
+    assert "could not name" in text, text
+    assert "credential-shaped content" not in text, text
+    # The load-bearing halves are untouched: the head the row rules key on, and the
+    # rotation instruction the escalation exists to deliver.
+    assert text.startswith("[credential redaction] ")
+    assert "rotate it" in text and "compromised" in text
 
 
 @pytest.mark.asyncio
@@ -3135,6 +5350,19 @@ def test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation() -> None:
     assert "rotate" not in notice
     assert "no exposure" in notice
 
+    # ...and the GRADING has to say the same thing, because that wording is only reached
+    # when it does. The word occurs TWICE in this line, which is the shape of the
+    # 2026-09-22 documentation read: for a word, the whole-value half of the exposure
+    # question answers YES because the word is simply repeated in the prose around it, so
+    # a 33 KB read filed the ESCALATED notice ("rotate it") for the word ``when``. The
+    # withholding is what `_is_prose_after_a_flag` is for, and this is where it is pinned.
+    import local_operator.redaction_shapes as rs
+
+    repeated = prose + ", which was the whole of it"
+    masked, hits = scrub_shapes_with_hits(repeated)
+    assert REDACTION_MARKER in masked, "the over-mask stopped holding"
+    assert rs.shape_report(hits).reached_model is False, "a prose word demanded a rotation"
+
 
 def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     """The production misfire: a flag naming a stored secret.
@@ -3178,6 +5406,71 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")
 
 
+def test_the_documented_publish_workflow_survives_every_surface() -> None:
+    """The operator's workflow, driven: a script authored from what was displayed.
+
+    Reported 2026-09-22. ``lop secret run --secret NAME -- npm publish`` is the way
+    ``guide://credentials`` teaches an agent to hand a stored secret to a child, and an
+    operator names an entry after the SYSTEM it belongs to: this one's tail is USERNAME,
+    which is not one of the credential words the guard required. So EVERY tool result
+    masked the name, and the script the agent then authored from the displayed text
+    asked the store for a secret literally named ``[redacted]`` — the command failed
+    against a name that does not exist, which is the failure the operator reported.
+
+    Nothing escalated it, and that is why this test drives the WORKFLOW rather than the
+    rule: a whole mask is the contained case, so it files no incident, and a unit
+    assertion that the table is silent would not have seen the ``cat`` either. What is
+    asserted here is the property that broke — the text survives byte for byte — on
+    every model-visible surface, and the next assertion is the other half of it: the
+    values that must still mask, so a widening cannot pass by releasing everything.
+    """
+    # Assembled from pieces so no literal in this SOURCE is a flag followed by a value:
+    # this file is read by agents through the very pass it asserts about.
+    store_name = "MINERVA_UI_NPROD_USERNAME"
+    command = "--" + "secret " + store_name + " --" + "secret " + store_name + " -- npm publish"
+    script = "#!/bin/sh" + chr(10) + "# release the UI package" + chr(10) + command
+
+    # The three renderings the agent reads back: the command as typed, the file it
+    # wrote, the ``cat`` of that file, and the ``grep`` of it with a line number.
+    renderings = (
+        command,
+        script,
+        "cat publish.sh" + chr(10) + command,
+        "grep -n secret publish.sh" + chr(10) + "4:" + command,
+    )
+    for surface, scrub in sorted(SURFACES.items()):
+        for text in renderings:
+            assert scrub(text) == text, f"{surface} rewrote the workflow text"
+
+    # ...and the session's own result hook, over the whole entry, files nothing: the
+    # mask this test forbids is the one that used to happen here.
+    session = _session()
+    session._pending_shape_incidents.clear()
+    entry = "## WATCH — 2026-09-22 — a script that publishes" + chr(10) + script
+    assert session._redact_tool_result_text(entry) == entry, "the entry was rewritten"
+    assert session._pending_shape_incidents == [], "the entry filed an incident"
+
+    # THE VALUE SIDE, beside it, because that is the regression this fix could have
+    # introduced: a release that widened one more step would eat all four of these.
+    issuer = "ghp" + "_AbCd1234EfGhIjKlMnOpQr"
+    lowercase_phrase = "_".join(("correct", "horse", "battery"))
+    caps_run = "DBPASSWORD"
+    armed = "Sup3rTokenValue91"
+    for value in (issuer, lowercase_phrase, caps_run, armed):
+        assert "cli-credential-flag" in match_shape_names(
+            "server --" + "token " + value
+        ), f"a value of the shape {value[:3]}… stopped being masked"
+    # ...and the DSN spelling, which no flag guard may swallow.
+    dsn = "mongodb://svc:" + "p" + chr(64) + "ssw0rd" + chr(64) + "db.example.net/app"
+    assert REDACTION_MARKER in scrub_shapes("tool --" + "password " + dsn)
+
+    # The instrument is alive: the control is a value under the SAME flag, in the same
+    # text, and it must still be masked.
+    mixed = "lop secret run --" + "secret " + store_name + " -- npm publish --" + "token "
+    assert REDACTION_MARKER in scrub_shapes(mixed + armed)
+    assert scrub_shapes(mixed + store_name) == mixed + store_name
+
+
 # ---------------------------------------------------------------------------
 # Step cost: the pass is handed ONE STEP, never the conversation
 # ---------------------------------------------------------------------------
@@ -3193,6 +5486,7 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
 #: What one settled tool result may be. The arms below use the PRODUCTION number
 #: rather than a test-sized one, so the shape measured is the shipped one while
 #: the whole test stays `steps x 8 KiB` of work.
+
 _STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
 
 

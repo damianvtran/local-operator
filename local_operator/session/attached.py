@@ -194,6 +194,43 @@ COLD_FALLBACK_S = 8.0
 #: a stalled one does not, and the read does not care.
 READ_ATTACH_BUDGET_S = 2.0
 
+#: How long a desktop READ route waits for its (background) attach before it
+#: answers from the durable facade.
+#:
+#: ``READ_ATTACH_BUDGET_S`` still bounds the ATTEMPT; this bounds only how much of
+#: it the first paint pays. The attempt runs as a single-flight task on the
+#: bridge (``DesktopSessionBridge.acquire``), so a read that outlives this grace
+#: answers cold and the attach lands behind it as the rollover frame the renderer
+#: already consumes. Before this split every snapshot/``/history``/``/events`` of a
+#: busy owner paid the full 2 s (4 s when two reads serialised on the bridge lock,
+#: and 17-20 s behind a control attach — measured with a SIGSTOPped runtime).
+#:
+#: 50 ms because a HEALTHY owner's attach is dial + sync + history cut, measured
+#: at 17 ms p50 / 29 ms p95 on this fleet at load ~100, so a live owner still
+#: paints its first frame live; and because the operator's budget for the whole
+#: open is 300 ms, of which the snapshot's own encode is 10-40 ms.
+READ_FIRST_FRAME_GRACE_S = 0.05
+
+#: The whole envelope a DESKTOP CONTROL call (``/warm``, ``/messages``, every
+#: control route) gives an EXISTING owner to welcome and sync before it is told
+#: the runtime is busy.
+#:
+#: Not ``FRONTEND_SYNC_FOREGROUND_S``: that 15 s is the TUI's envelope for a user
+#: watching a slash command in a terminal, and the TUI's own redial arithmetic
+#: derives from it (``tui/app.py``), so it stays. The desktop renderer instead
+#: cuts every control call at 20 s (``DESKTOP_CONTROL_DEADLINE_MS``) and, before
+#: this, a live-but-silent owner consumed 15 s of that on the welcome alone and
+#: then answered a generic 503 at 15.0-15.7 s. A healthy owner welcomes and syncs
+#: in tens of milliseconds, so 3 s only ever expires against an owner whose loop
+#: is genuinely not answering — and the answer it produces is the typed
+#: ``RuntimeUnresponsiveError``, which the route turns into a RETRYABLE
+#: ``runtime_busy`` refusal. Retrying is safe: admissions are at-most-once by the
+#: receipt journal, keyed by the client's request id.
+#:
+#: Scoped to ``surface == "desktop"`` (see ``_foreground_envelope``); every other
+#: surface keeps the historical envelope.
+DESKTOP_CONTROL_ATTACH_S = 3.0
+
 #: How long a read's RETAINED dial may wait for its canonical sync before the
 #: socket is abandoned.
 #:
@@ -2428,7 +2465,9 @@ class AttachedSession:
             self._can_go_cold or self._recovering or (client is not None and client.connected)
         )
 
-    async def attach_existing(self, *, budget: float | None = None) -> bool:
+    async def attach_existing(
+        self, *, budget: float | None = None, control_budget: float | None = None
+    ) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
         Desktop read/subscription requests use the cold viewer's recovery policy
@@ -2458,6 +2497,15 @@ class AttachedSession:
         ``None`` (the default) is the CONTROL envelope every existing caller
         keeps: one attempt on the foreground envelope, and a raise when the
         owner does not serve it.
+
+        ``control_budget`` narrows that CONTROL attempt to a DEADLINE over the
+        whole dial + sync, for the desktop's control routes
+        (``DESKTOP_CONTROL_ATTACH_S``). An owner that accepts the socket and
+        never welcomes — the SIGSTOPped/busy shape — used to hold the request
+        for ``ACK_TIMEOUT_S`` (15 s) on the welcome alone; the deadline covers
+        the welcome too, and an expiry is raised as the typed
+        :class:`RuntimeUnresponsiveError` (the runtime is alive and busy), which
+        the route answers as a retryable ``runtime_busy``. Ignored in read mode.
 
         The return value is the same question in both modes — is this facade
         attached — so a read that served cold answers ``False`` while leaving the
@@ -2523,8 +2571,37 @@ class AttachedSession:
                 if budget is not None:
                     self._note_read_cold_reason(record, owner)
                 return False
+            if budget is not None:
+                # CLASSIFIED BEFORE THE DIAL, not only after it. The desktop read
+                # no longer waits for this attempt (it answers after
+                # ``READ_FIRST_FRAME_GRACE_S`` while the dial carries on behind
+                # it), so a frame taken mid-dial would otherwise fall back to
+                # ``no-runtime`` — "no pid holds the lease" — about a pid whose
+                # record is in hand. The record already says which of the two
+                # live tokens is true; the attempt below re-classifies on its
+                # outcome and clears it on success.
+                self._note_read_cold_reason(record, owner)
             if budget is None:
-                await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
+                if control_budget is None:
+                    await self._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
+                    return True
+                try:
+                    await self._bind_to(
+                        record,
+                        sync_timeout=control_budget,
+                        deadline=time.monotonic() + control_budget,
+                    )
+                except TimeoutError as error:
+                    # The DIAL'S expiry (``_connect_client``'s wrap around the
+                    # welcome) arrives as a bare ``TimeoutError`` (and a lapsed
+                    # re-assert ack as ``OwnerAckTimeout``, also one), while the
+                    # sync wait's already arrives typed as
+                    # ``RuntimeUnresponsiveError`` and passes through untouched.
+                    # Both say the same thing about a record that is live: the
+                    # runtime is there and did not answer inside the envelope.
+                    # Anything else (a refused dial, a socket that died) is not
+                    # busy and keeps its own class.
+                    raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from error
                 return True
             await self._attach_existing_for_read(record, budget=budget)
             return not self.is_cold
@@ -3642,7 +3719,15 @@ class AttachedSession:
                 return
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
-            self._install_frontend(frontend.snapshot, publish=True)
+            # A READ publishes its rollover AFTER ``_finish_sync``, the ordering
+            # ``_await_late_sync`` already keeps and for its reason: the desktop
+            # bridge no longer waits for a read's attach before painting
+            # (``READ_FIRST_FRAME_GRACE_S``), so a stream is usually open when
+            # this sync lands, and a rollover published from
+            # ``_install_frontend`` would carry ``cold: true`` — the facade has
+            # not finished syncing at that instant — over a now-live owner.
+            # Every other caller keeps its historical ordering.
+            self._install_frontend(frontend.snapshot, publish=not retain_unsynced)
             await self._load_frontend_history(frontend)
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
@@ -3650,6 +3735,10 @@ class AttachedSession:
             self._deliberate_stop = False
             self._stopped_announced = False
             self._runtime_ready.set()
+            if retain_unsynced:
+                store = self._frontend_store
+                assert store is not None, "_install_frontend just installed the store"
+                store.replace_and_notify(frontend.snapshot)
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
             # not leak the half-open socket or inherit its queued epoch suffix.
@@ -7430,19 +7519,53 @@ class AttachedSession:
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Usage], None] | None = None,
     ) -> str:
+        """Ask the owner for the off-record answer, STREAMING it as it arrives.
+
+        ``aside_instruction`` rides the wire with the request and the owner acts
+        on it: it is the caller's declaration that its turns still need the
+        off-record wrapper (see ``SessionProtocol.complete_aside``). False is what
+        a viewer that wrapped its own question sends — the TUI's ``/btw`` overlay
+        and its goal-loop judge — and sending it is what keeps the owner from
+        wrapping a request that already carries its own instruction.
+
+        ``on_delta`` is fed each chunk the owner streams while this request is
+        in flight — the same connection carries them, tagged with this request's
+        id — so the card paints the answer as the model writes it rather than
+        after the receipt. The RETURNED string is still the authoritative answer
+        (the receipt's ``detail``); a chunk that never arrived is cosmetic, a
+        receipt that never arrived is a failure.
+
+        THE FALLBACK IS THE OLD BEHAVIOUR, and it is deliberately kept: an owner
+        that sent NO deltas at all (one built before the stream existed, which
+        simply ignores the callback) gets its settled answer fed through the same
+        callback ONCE at the end. ``streamed`` is what stops a streaming owner
+        from being charged twice — the single post-hoc call fires only when
+        nothing was streamed, never as well as it.
+        """
         client = self._client
         if client is None:
             raise ConnectionError(self._unavailable_reason())
-        # The authoritative request currently returns a settled answer. Feed it
-        # through the normal delta callback once so the existing aside widget
-        # uses the same rendering path without inventing remote-only UI state.
+        payload = [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+        if on_delta is None:
+            # No sink to feed, so nothing to fall back to: the settled answer is
+            # the whole reply, exactly as this method behaved before the stream.
+            return await client.complete_aside(payload, aside_instruction=aside_instruction)
+        streamed = False
+
+        def relay(text: str) -> None:
+            nonlocal streamed
+            streamed = True
+            if text:
+                on_delta(text)
+
         answer = await client.complete_aside(
-            [turn.model_dump(mode="json") for turn in turns if hasattr(turn, "model_dump")]
+            payload, aside_instruction=aside_instruction, on_delta=relay
         )
-        if answer and on_delta is not None:
+        if answer and not streamed:
             on_delta(answer)
         return answer
 

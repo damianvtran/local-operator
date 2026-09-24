@@ -467,6 +467,57 @@ SIGNAL_DRAIN_S = 120.0
 #: constant in another is one rename away from describing a wait nobody waits.
 BUILD_DRAIN_PROGRESS_S = 15 * 60.0
 
+#: How long a BUILD drain may hold the handover at all — the DWELL bound — before
+#: the runtime stops waiting and gives the handover up (``process._drain_for``).
+#:
+#: WHY A SECOND BOUND, WHEN THE ONE ABOVE EXISTS. :data:`BUILD_DRAIN_PROGRESS_S`
+#: bounds STALENESS, and the clock that feeds it is reset by every observable sign
+#: that the work advanced (``process._work_motion``). That is exactly right for a
+#: hold that has gone quiet, and it is blind by construction to the shape that
+#: wedged this host: a hold whose work KEEPS MOVING. A subagent lane that steps,
+#: a job that keeps printing, or a parent whose transcript keeps gaining rows resets
+#: the staleness clock forever, so the latched drain never expires — and while it is
+#: latched nothing else in the process ends it: a draining runtime REFUSES admissions,
+#: it holds the transcript lease (``session/runtime/launch.py`` forbids a successor
+#: while a live pid holds it), so the session is unwritable and unhandover-able for
+#: as long as the lane keeps stepping. Measured on the reporting host: a runtime
+#: latched a stale-build drain and held it for EIGHT HOURS while its subagents kept
+#: stepping, and the staleness bound only fired once the lanes finally stopped. The
+#: dwell bounds the HOLD itself, which is the only thing left to bound once movement
+#: is no longer a signal of "this will finish soon".
+#:
+#: HOW LONG IS NOT A FREE CHOICE. 30 min, which is D7's own proposed ceiling for this
+#: state (``BUILD_DRAIN_MAX_S``, default 1800 s, in
+#: ``docs/design-ownerless-session-attach.md``), adopted here for the arm that keeps
+#: serving rather than exiting. From below it is pinned by the bound above: the dwell
+#: must sit strictly ABOVE 15 min, or the staleness arm could never fire and this one
+#: would become the only clock — abandoning holds that were merely silent at the
+#: 15-minute mark, which reports the weaker observation for the sharper state. It
+#: reads no work at all, so the residual it must tolerate is the opposite of the
+#: staleness arm's: a handover whose work is genuinely progressing and merely long.
+#: The measured long silent steps (up to 44.6 min in ``logs/exec-jobs.jsonl``) are
+#: NOT this arm's problem — a silent step is the arm above's, and it fires at 15 min
+#: — while a handover that is still REPORTING after half an hour is one an operator
+#: should be told about rather than made to wait out.
+#:
+#: WHAT FIRING COSTS, which is what makes a bound this short defensible where a
+#: force-cut was not. The departure is NOT lost: ``process._reaper`` keeps the drain
+#: object and the commitment it carries, so the runtime still leaves at the first idle
+#: instant it reaches and the newer build still gets the handover — firing only means
+#: the wait stops being one the operator is locked out of. Firing while work continues
+#: releases the latch, so the session takes work again, and publishes the failure under
+#: :data:`UPDATE_FAILED_CAUSE` so the state is reportable instead of silent. It does
+#: NOT exit the process and does NOT cut the turn in flight: a runtime is replaced
+#: when its turn is COMPLETE, never on a heuristic of inactivity (the operator's rule
+#: for every build move), and it is the reason the arm this bound drives abandons the
+#: handover rather than taking the signal drain's bounded exit.
+#:
+#: HERE, beside the two bounds it is measured against, for their own reason: an
+#: operator comparing what a runtime promises against what a bound can take away has
+#: to read all three in one place, and the failure this bound publishes carries its
+#: number onto the incident row from this constant rather than from a copy.
+BUILD_DRAIN_DWELL_S = 30 * 60.0
+
 
 def bound_text(seconds: float) -> str:
     """One bound, as a person reads it: ``2 min``, ``2.5 min``, ``30s``.
@@ -1073,6 +1124,44 @@ class SessionRecord:
     #: No front end is attached. A working session with nobody watching is
     #: exactly what this release makes possible, so it is worth naming.
     detached: bool = False
+    #: WHEN this session's last viewer left (``time.time()``), or ``None`` if no
+    #: viewer has ever been attached. Cleared back to ``None`` when one attaches.
+    #:
+    #: WHICH MOMENT, not merely that. The residency policy keeps a runtime a
+    #: viewer has left warm for ``runtime.keep_alive_seconds``, and bounds how
+    #: many such runtimes one machine holds by evicting the least recently
+    #: detached (``process._keep_alive_victim``). That bound needs an ORDER, and
+    #: this is the only field that carries one: ``heartbeat_at`` cannot, because
+    #: a detached idle runtime keeps beating, and ``detached`` is a boolean.
+    #: ``None`` is load-bearing rather than a missing value — it is what tells
+    #: the keep-alive that this runtime is one nobody has looked at, which is the
+    #: population the ordinary 3 s drain was written for.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, exactly like the block above:
+    #: ``from_json`` drops unknown keys, so a mixed-version fleet reads and
+    #: writes records with and without this field interchangeably, and
+    #: ``PROTOCOL_VERSION`` deliberately does not move for it. Nothing is
+    #: required to read it: a runtime without it keeps today's residency.
+    detached_at: float | None = None
+    #: At least one attach CLIENT is connected — the reaper's own term 3
+    #: (``RuntimeServer.attach_clients``), which is NOT the same fact as
+    #: ``detached`` directly above.
+    #:
+    #: WHY BOTH EXIST, because two fields that look alike invite exactly one
+    #: mistake (review round 1, F1). ``detached`` is VISIBILITY: it is true while
+    #: a multiplexing TUI has switched to another session and left this one's
+    #: terminal attached but not on screen (``viewer_watch displaying=False``),
+    #: and it is what a picker paints a row from. This one is ATTACHMENT, which
+    #: is what forbids an exit. A caller asking "may this runtime go?" needs
+    #: this one; a caller painting "nobody is watching" needs the other. The
+    #: keep-alive cap charged itself on ``detached`` until this field existed, so
+    #: a switched-away TUI's runtime — which can never enter a drain while its
+    #: viewer holds it — sat in a cap slot that could never be given back.
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, like ``detached_at`` above:
+    #: ``from_json`` drops unknown keys, an older runtime's record defaults to
+    #: False, and ``PROTOCOL_VERSION`` deliberately does not move for it.
+    watching: bool = False
     #: This session is WAITING FOR A PERSON: ``"approval"``, ``"ask"``, or
     #: None. A parked gate holds the runtime resident for up to a day, so the
     #: cost has to be findable — this field is what puts it in `lop sessions`

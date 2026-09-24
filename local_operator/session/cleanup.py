@@ -653,6 +653,57 @@ def delete_session(
     children = _subagent_child_count(directory)
     clock = time.time() if now is None else now
     reason = _guard(directory, config_dir, clock)
+    if reason is not None and reason in _KEEP_ALIVE_PREEMPTABLE_GUARDS:
+        from local_operator.session.runtime import registry
+
+        # THE KEEP-ALIVE IS NOT AN OCCUPANT (QA round 1, Q-1). A conversation
+        # whose only obstacle is a runtime this policy is holding warm is
+        # deleted AT ONCE, by asking that runtime to leave and waiting for it:
+        # the alternative was a five-minute window in which an explicit,
+        # confirmed delete was refused with "That conversation is open in a
+        # running session. Stop it before deleting it." about a session the user
+        # had just closed. The design note never considered this interaction —
+        # this is where it is extended, and it is stated in the PR.
+        #
+        # A REHEARSAL ASKS FOR NOTHING **AND TOUCHES NOTHING** (review round 2,
+        # R2-1; QA round 2, Q2-1). Two bugs lived in the one-line arm this used
+        # to be, and both were in the rehearsal:
+        #
+        #   * it WITHDREW a request it had not written. The withdrawal sits on
+        #     the asking arm — its condition is "we asked and the delete still
+        #     refuses" — and a rehearsal that asks nothing has nothing to take
+        #     back. Running it there removed the file of a REAL delete running
+        #     at that moment, so the runtime never saw the request and the real
+        #     delete refused after its whole bound: a rehearsal defeating the act
+        #     it was rehearsing.
+        #   * it REPORTED the refusal the real call does not give. Re-reading
+        #     ``_guard`` for the dry arm returns the lease sentence the real call
+        #     is about to clear, so a user who rehearsed first was told the
+        #     conversation could not be deleted and never reached the confirmed
+        #     call — the opposite of what this comment used to claim.
+        #
+        # So the dry arm reports the guards AS THEY WOULD STAND once the resident
+        # this policy is holding has left (``live_owner_gone``), which is the
+        # question the real call answers after its wait, and it writes nothing.
+        # What it does not do is promise the deletion: if the real call's request
+        # goes unanswered the real call refuses, in the same sentence, on the
+        # same outcome field, and every host reports it.
+        resident = _keep_alive_resident(directory, config_dir)
+        if resident is not None:
+            if dry_run:
+                reason = _guard(directory, config_dir, clock, live_owner_gone=True)
+            elif _ask_keep_alive_to_leave(resident, directory, actor=actor):
+                reason = _guard(directory, config_dir, clock)
+                if reason is not None:
+                    # THE REQUEST BELONGED TO AN ACT THAT DID NOT HAPPEN. The
+                    # lease is gone — the runtime left — but something else still
+                    # refuses (a wake armed in the meantime, mail that arrived, a
+                    # guard that stopped answering), and this act is over.
+                    # Leaving the file behind would end the NEXT runtime for this
+                    # conversation at its first idle drain: bounded now by the
+                    # request's own freshness window, and still not a thing to
+                    # leave behind (see ``registry.EXIT_REQUEST_NAME``).
+                    registry.remove_exit_request(directory)
     if reason is not None:
         return DeleteOutcome(
             session_id=session_id,
@@ -736,6 +787,127 @@ def _claimed(directory: Path, now: float) -> bool:
     return _is_claimed(directory, now)
 
 
+#: How long an explicit delete waits for a KEEP-ALIVE resident to leave after
+#: it has been asked (:func:`_ask_keep_alive_to_leave`).
+#:
+#: MEASURED, not chosen for looks: an idle, clientless runtime — exactly the
+#: population that can be asked — exits 0.13 s after the request (p50 of five
+#: runs, 0.21 s max, lease released in the same instant; probe in the authoring
+#: session's scratchpad). The bound is what the DELETE may spend waiting, so it
+#: is set ~10x the observed exit and the poll interval below decides the typical
+#: cost: a request the runtime grants returns in ~0.15 s, and only a runtime that
+#: does NOT leave (work arrived, or an older build that cannot read the request)
+#: spends the whole bound before the delete refuses as it did before.
+KEEP_ALIVE_PREEMPT_WAIT_S = 2.0
+
+#: How often the wait above re-reads the lease. 20 ms is well under the reaper's
+#: own 250 ms tick, so the wait is bounded by the runtime's exit and not by this
+#: poll — and it is cheap: one ``read_text`` of a ~40-byte file per tick.
+_KEEP_ALIVE_PREEMPT_POLL_S = 0.02
+
+#: The guards an EXPLICIT delete may PREEMPT, by asking the runtime the
+#: keep-alive alone is holding to leave. Both are the same fact — a live process
+#: owns this session's claim/lease — and both are released by that process's own
+#: exit path, so one request clears both.
+#:
+#: THE OTHER GUARDS ARE NOT PREEMPTABLE, deliberately: an armed wake, unread
+#: spooled mail and a guard that could not be evaluated are not about a process
+#: being alive, so nothing this module can ask would clear them.
+_KEEP_ALIVE_PREEMPTABLE_GUARDS = frozenset(
+    {"claimed by a live process", "leased by a live process"}
+)
+
+
+def _lease_pid(directory: Path) -> int | None:
+    """The pid the ``.execution-lease`` names, or ``None``.
+
+    Narrower than :func:`_lease_runtime_alive` on purpose, and used only to
+    IDENTIFY a target: a lease that cannot be read or parsed names no pid, so
+    the caller has nothing to ask and asks nothing. The liveness question keeps
+    its own fail-closed reader above, because "unreadable" and "not alive" are
+    different answers there.
+    """
+    try:
+        pid = json.loads((directory / ".execution-lease").read_text(encoding="utf-8")).get("pid")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return pid if isinstance(pid, int) else None
+
+
+def _keep_alive_resident(directory: Path, config_dir: Path) -> object | None:
+    """The runtime the keep-alive ALONE holds for this session, or ``None``.
+
+    The whole safety of the preempt is in this predicate, so it is deliberately
+    narrow: the record must be THIS conversation's, must belong to the pid the
+    lease names (so the process a signal-free request reaches is the one holding
+    the directory), and must report no work in flight and NO ATTACH CLIENT —
+    the reaper's own term 3. A busy runtime, one someone is looking at, another
+    conversation's record, or a lease that cannot be matched to a record all
+    answer ``None``, and the delete then refuses exactly as it did before this
+    change.
+
+    ``record.watching`` rather than ``record.detached`` for the reason
+    ``process._keep_alive_candidates`` states: ``detached`` is VISIBILITY, so a
+    multiplexing TUI that has switched away reads as detached while still
+    holding its viewer.
+    """
+    try:
+        from local_operator.session.runtime import registry
+
+        lease_pid = _lease_pid(directory)
+        if lease_pid is None:
+            return None
+        for record, state in registry.scan(config_dir, reap=False):
+            if state == "stale" or record.pid != lease_pid:
+                continue
+            if record.session_id != directory.name:
+                return None
+            if getattr(record, "busy", False) or getattr(record, "watching", False):
+                return None
+            return record
+    except Exception:  # noqa: BLE001 — a target that cannot be proved is not asked
+        logger.debug("session cleanup: could not classify the live owner", exc_info=True)
+    return None
+
+
+def _ask_keep_alive_to_leave(record: object, directory: Path, *, actor: str) -> bool:
+    """Ask the resident :func:`_keep_alive_resident` found to leave, and wait.
+
+    Returns True once the lease is released (the caller re-runs the guard and
+    the delete proceeds in THIS request), False when the runtime did not go —
+    in which case the request is withdrawn, because a request that outlived the
+    act it belonged to would end the NEXT runtime for this conversation at its
+    first idle drain.
+
+    A FILE AND NOT A SIGNAL, and the runtime grants it only inside its own idle
+    drain: see ``registry.EXIT_REQUEST_NAME`` for why (SIGTERM would drain and
+    then cut work two minutes later; a new signal is fatal to an older build in
+    a mixed-version fleet).
+    """
+    from local_operator.session.runtime import registry
+
+    try:
+        registry.write_exit_request(
+            directory,
+            {
+                "session_id": getattr(record, "session_id", "") or "",
+                "pid": getattr(record, "pid", None),
+                "actor": actor,
+                "requested_at": time.time(),
+            },
+        )
+    except OSError as exc:
+        logger.warning("session cleanup: could not ask the runtime to leave: %s", exc)
+        return False
+    deadline = time.monotonic() + KEEP_ALIVE_PREEMPT_WAIT_S
+    while time.monotonic() < deadline:
+        if not _lease_runtime_alive(directory):
+            return True
+        time.sleep(_KEEP_ALIVE_PREEMPT_POLL_S)
+    registry.remove_exit_request(directory)
+    return False
+
+
 def _lease_runtime_alive(directory: Path) -> bool | None:
     """Whether the ``.execution-lease`` names a live pid; ``None`` = no lease."""
     lease = directory / ".execution-lease"
@@ -811,7 +983,9 @@ def _has_spooled_mail(directory: Path) -> bool:
         return True
 
 
-def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
+def _guard(
+    directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+) -> str | None:
     """The hard guards, in one place. Returns the guard's name when the
     directory must be kept, ``None`` when the policy may consider it.
 
@@ -819,12 +993,21 @@ def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
     failures, and the outer ``except`` makes an exception NONE of them
     anticipated (a bug in ``_process_alive``, a ``MemoryError`` mid-read)
     also "keep", with the probe named so the refusal is diagnosable.
+
+    ``live_owner_gone`` SKIPS the two live-owner probes, and only a REHEARSAL
+    passes it (review round 2, R2-1). The question it asks is the one the real
+    call answers *after* its preempt wait, i.e. "with the resident this policy is
+    holding removed, what is left to refuse?" — every other guard is still
+    consulted, so a rehearsal cannot promise a deletion a wake or spooled mail
+    will refuse. The real path never passes it: there the lease is genuinely
+    gone, and the guards are read as they stand.
     """
     try:
-        if _claimed(directory, now):
-            return "claimed by a live process"
-        if _lease_runtime_alive(directory):
-            return "leased by a live process"
+        if not live_owner_gone:
+            if _claimed(directory, now):
+                return "claimed by a live process"
+            if _lease_runtime_alive(directory):
+                return "leased by a live process"
         if _has_armed_wake(config_dir, directory.name):
             return "has an armed wake"
         if _has_spooled_mail(directory):

@@ -2433,6 +2433,56 @@ class ServingSessionHandle(SessionHandle):
         """
         return self._session.subscribe_frontend(on_update, display_window=display_window)
 
+    def subscribe_frontend_nowait(self, on_update: Callable[[Any], None]) -> Any:
+        """Bind a viewer from THIS thread when the session loop cannot answer.
+
+        THE FALLBACK FOR A BUSY OWNER, and it exists because the on-loop bind
+        is only as fast as the owner's own turn. ``subscribe_frontend`` marshals
+        its whole body onto the loop that owns the session
+        (``@_on_session_loop``), which is required for the refresh it publishes
+        — but it makes the caller wait out whatever synchronous step the turn is
+        inside. Measured on a blocked owner: 15.0 s and a failed control attach,
+        while the session was merely busy and the serving plane was idle.
+
+        The SUBSCRIBE half needs no loop at all. ``subscribe_threadsafe`` admits
+        the callback and captures the snapshot in one critical section of the
+        store's publish lock, so this returns immediately and the loop is left
+        carrying only the refresh.
+
+        THE REFRESH IS DEFERRED, NOT LOST. ``Session.subscribe_frontend``
+        refreshes BEFORE snapshotting so a joiner sees the freshest state at its
+        own sequence; here the refresh is scheduled onto the session loop and
+        lands as an ordinary delta (sequence +1) whenever that loop frees. That
+        is correct by the same exact-``+1`` rule every client already enforces,
+        and it is the ONLY semantic difference from the on-loop path.
+
+        NO DISPLAY WINDOW, deliberately: ``capture_window`` reads the loop-owned
+        transcript, so it stays on the loop. A viewer bound this way falls back
+        to its own durable replay (``_load_frontend_history``), which is what it
+        already does for an owner that never negotiated the capability.
+
+        A handle whose session exposes no store raises rather than binding
+        nothing: the caller has already decided the on-loop bind is too slow,
+        and a silent no-op would leave the connection waiting for a frame
+        nobody is going to send.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            raise RuntimeError("session exposes no frontend state store")
+        subscription = store.subscribe_threadsafe(on_update)
+        loop = getattr(self, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            try:
+                # Fire-and-forget on purpose: the point of this path is that the
+                # caller never waits on the session loop. A loop that closes
+                # between the check and the call loses only the extra refresh —
+                # the snapshot this bind already carries is the freshest state
+                # that loop published, so the bind itself stands.
+                loop.call_soon_threadsafe(self._session.refresh_frontend_state)
+            except RuntimeError:
+                logger.debug("deferred frontend refresh could not be scheduled", exc_info=True)
+        return subscription
+
     @_on_session_loop
     async def record_shell(self, command: str, result: Any) -> None:
         await self._session.record_shell(command, result)
@@ -3820,10 +3870,11 @@ class ServingSessionHandle(SessionHandle):
         overnight) and the user answers it when they come back.
 
         The short cap survives for exactly the case it was written for: no
-        client can present the card at all. With a viewer attached, or a phone
-        watching, something is showing the question to someone; with nothing
-        attached the card exists only in this process's memory, and a bounded
-        wait is still the honest behaviour there.
+        client can present the card at all. With an interface attached — a
+        terminal, a phone, or a desktop pane holding this conversation —
+        something can show the question to someone; with nothing attached the
+        card exists only in this process's memory, and a bounded wait is still
+        the honest behaviour there.
         """
         if self._registrant is None:
             # No control socket at all: an embedded or reduced host, where the
@@ -3834,10 +3885,11 @@ class ServingSessionHandle(SessionHandle):
             # because the policy stopped reading it.
             return PENDING_REQUEST_TIMEOUT_S
         parked = self._parked_timeout_s()
-        if self._watching_surfaces() or self._desktop_notification_available():
-            # A visible terminal/phone or a notification-capable desktop can
-            # reach a person. This is not the interactivity probe: background
-            # delivery earns a parked wait, never an assertion somebody is here.
+        if self._attached_surfaces() or self._desktop_notification_available():
+            # Something can PRESENT the card, or an OS banner can reach a person
+            # out of band. This is the attachment predicate, not the attention
+            # one: parking is a bet that a question will eventually be seen, which
+            # a mounted pane settles whether or not anyone is looking this second.
             return parked
         # Nothing is presenting the card. A parked gate is still preferable to
         # a denial when the user has an out-of-band way to be told about it
@@ -3888,7 +3940,7 @@ class ServingSessionHandle(SessionHandle):
         return DEFAULT_UNATTENDED_GATE_TIMEOUT_H
 
     def _install_interactivity_probe(self) -> None:
-        """Let the MODEL know whether anyone can answer a question.
+        """Let the MODEL know whether a question can be PRESENTED to anyone.
 
         The runtime is the only component that knows — it owns the control
         socket's connection table — and the session's goal-state holder is
@@ -3898,12 +3950,19 @@ class ServingSessionHandle(SessionHandle):
         the prompt closure asks at turn start, so a viewer that comes and
         goes fifty times costs exactly one line of context, and no transcript
         row is ever written for an attach or a detach.
+
+        It reads ATTACHMENT, never attention. The attention predicate is the
+        one that told a focused, visible desktop app's own session that nobody
+        was at a screen, because the machine-wide record could not name the
+        conversation (see ``docs/design/attached-interface-signal.md``); it also
+        flaps with window focus, which is the one thing a block inside the
+        persisted system prefix must never do.
         """
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
         try:
-            holder.interactive_probe = lambda: bool(self._watching_surfaces())
+            holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
 
@@ -3932,6 +3991,45 @@ class ServingSessionHandle(SessionHandle):
                 return frozenset(cast("frozenset[str]", reader()))
             except Exception:  # noqa: BLE001 — routing must never raise into a gate
                 logger.debug("could not read the watching surfaces", exc_info=True)
+        return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
+
+    def _attached_surfaces(self) -> frozenset[str]:
+        """Which kinds of surface can PRESENT a question, for the MODEL.
+
+        The ATTACHMENT predicate, not the attention one: see
+        ``RuntimeServer.attached_surfaces`` for why those are different questions
+        and why focus is absent from this one. This is what the interactivity
+        probe reads, so it is what decides the ``<interactivity>`` block the
+        model carries.
+
+        Falls back to the narrow answers an OLDER registrant can still give. Two
+        of them, in this order, and the order is the point:
+
+        1. ``watching_surfaces()`` — the ATTENTION question. Attention is a
+           strict SUBSET of attachment (a surface somebody is looking at can
+           present a card), so an older registrant's attention answer is sound
+           evidence of attachment. Reading it first is what keeps a PHONE
+           watcher parking a gate on a mixed-version fleet, which is the case
+           ``test_parked_gates.test_a_phone_watching_parks_for_the_configured_day``
+           pins.
+        2. ``attach_clients()`` — the same question one bit wide, and the
+           reading this handle's own probe already had available.
+
+        Both arms can only ever turn "unattached" into "attached". That is the
+        direction the whole predicate is biased: a wrong "attached" costs a
+        parked gate and a late answer, a wrong "unattached" costs a turn that
+        gives up on a question the operator was ready to answer.
+        """
+        server = self._registrant
+        reader = getattr(server, "attached_surfaces", None)
+        if callable(reader):
+            try:
+                return frozenset(cast("frozenset[str]", reader()))
+            except Exception:  # noqa: BLE001 — an unreadable probe must not fail a turn
+                logger.debug("could not read the attached surfaces", exc_info=True)
+        watching = self._watching_surfaces()
+        if watching:
+            return watching
         return frozenset({"attach"}) if self._attached_clients() > 0 else frozenset()
 
     def _session_id_for_resume(self) -> str:
@@ -4531,7 +4629,13 @@ class ServingSessionHandle(SessionHandle):
         return result
 
     @_on_session_loop
-    async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
+    async def complete_aside(
+        self,
+        turns: list[dict[str, Any]],
+        *,
+        aside_instruction: bool = True,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str:
         """Run an off-record provider request against this session.
 
         The aside seam: a viewer asks a question that must NOT enter the
@@ -4540,22 +4644,62 @@ class ServingSessionHandle(SessionHandle):
         needs the real model, credentials and context — which is why it
         cannot be answered viewer-side.
 
+        THIS IS THE REMOTE SEAM'S INSTRUCTION SITE, and that is a placement,
+        not an implementation detail: :func:`wrap_aside_turns` wraps the last
+        user turn here because every remote caller reaches the primitive
+        through a handle like this one. It used to be applied by the TUI alone,
+        so the desktop ``/asides`` route sent the model the user's raw question
+        with no instruction that it was off the record and no instruction not
+        to call a tool — which is why tool calls appeared on that surface.
+        :meth:`Session.complete_aside` deliberately stays bare: its in-process
+        callers supply their own instruction, and the goal-loop judge (which
+        calls it with ``LOOP_JUDGE_PROMPT``) must never receive an aside wrap.
+        The stored/returned aside turns stay RAW — only the provider request
+        carries the wrapper, so the user never sees ``<aside>`` XML.
+
+        ``aside_instruction`` IS THE CALLER'S DECLARATION, not the seam's
+        assumption, and it defaults to True for the reporters this seam exists
+        for: a caller that sends RAW turns (the desktop ``/asides`` route, the
+        phone's quick-ask) gets the instruction applied here whether or not it
+        knows this parameter exists. A caller that supplies its OWN instruction
+        — the TUI's ``/btw`` overlay, and the goal-loop judge, whose question is
+        ``LOOP_JUDGE_PROMPT`` and not an aside at all — passes ``False``.
+        WITHOUT THE FLAG the TUI's pre-wrapped question was wrapped a second
+        time on a session it was only VIEWING (its ``self._session`` is an
+        ``AttachedSession`` there, so this handle runs in the owner), the judge
+        was framed as an aside question, and both failures were silent.
+        :func:`wrap_aside_turns` is idempotent underneath, so a caller that gets
+        the flag wrong is not doubled — the two cannot disagree without the
+        turn list showing it.
+
+        ``on_delta`` forwards each streamed text chunk to the caller that asked
+        for it, as it arrives. OPTIONAL, and probed by signature against the
+        primitive: an older/reduced session without the parameter is answered in
+        one settled piece exactly as before. The ``on_usage`` accrual below is
+        NOT optional and must keep riding every call — it is what stops a hidden
+        way of spending tokens for free (a remote aside, the goal judge) from
+        costing zero.
+
         Found by the post-U9 migration audit rather than by a review: without
         it every aside answered "this owner cannot run off-record requests".
         """
         from local_operator.harness.types import Message
+        from local_operator.session.aside import wrap_aside_turns
 
-        messages = [Message.model_validate(turn) for turn in turns]
+        parsed = [Message.model_validate(turn) for turn in turns]
+        messages = wrap_aside_turns(parsed) if aside_instruction else parsed
         complete = self._session.complete_aside
         store = getattr(self._session, "_frontend_state_store", None)
-        if store is not None and "on_usage" in inspect.signature(complete).parameters:
+        forwards = inspect.signature(complete).parameters
+        fields: dict[str, Any] = {}
+        if on_delta is not None and "on_delta" in forwards:
+            fields["on_delta"] = on_delta
+        if store is not None and "on_usage" in forwards:
             # A remote caller receives text, not a billable usage callback. The
             # authoritative owner must charge the request here; otherwise a
             # hidden goal judge (and other remote asides) silently costs zero.
-            return await complete(
-                messages, on_usage=lambda usage: store.accrue_usage(self._session, usage)
-            )
-        return await complete(messages)
+            fields["on_usage"] = lambda usage: store.accrue_usage(self._session, usage)
+        return await complete(messages, **fields)
 
     @_on_session_loop
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:

@@ -732,6 +732,7 @@ class FakeSession:
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Any], None] | None = None,
     ) -> str:
@@ -5746,6 +5747,13 @@ class GoalSession(FakeSession):
         #: any staged verdict is returned — exercises the judge-error path.
         self.judge_raises = 0
         self.judge_calls = 0
+        #: The turns and the ``aside_instruction`` flag each judge call carried.
+        #: The judge is NOT an aside: it reaches the same primitive, so the flag
+        #: is what keeps a remote seam from framing a verdict request as an
+        #: off-record side question (see
+        #: ``test_the_judge_asks_without_the_aside_instruction``).
+        self.judge_turns: list[list[Any]] = []
+        self.judge_instruction: list[bool] = []
         #: When set, `prompt` awaits it before recording — lets a test observe
         #: the loop mid-flight (the fake is otherwise instantaneous and the
         #: worker settles before the test can look at `_loop_running`).
@@ -5799,12 +5807,15 @@ class GoalSession(FakeSession):
         self,
         turns: list[Any],
         *,
+        aside_instruction: bool = True,
         on_delta: Callable[[str], None] | None = None,
         on_usage: Callable[[Any], None] | None = None,
     ) -> str:
         # Scriptable judge: raise `judge_raises` times, then serve staged
         # verdicts, then default to ACHIEVED so an unstaged test terminates.
         self.judge_calls += 1
+        self.judge_turns.append(list(turns))
+        self.judge_instruction.append(aside_instruction)
         if on_usage is not None:
             on_usage(SimpleNamespace())
         if self.judge_raises > 0:
@@ -6082,6 +6093,34 @@ async def test_loop_goal_dispatch_is_not_numeric() -> None:
         text = _transcript_text(app)
     assert "usage: /loop" not in text
     assert session.prompts  # at least one turn ran
+
+
+@pytest.mark.asyncio
+async def test_the_judge_asks_without_the_aside_instruction() -> None:
+    """The goal judge's request is NOT an aside, and says so at the call site.
+
+    The judge reaches the same ``complete_aside`` primitive the ``/btw``
+    overlay uses, so on a TUI VIEWING another owner its request crosses the same
+    remote seam — which, without the flag, wrapped ``LOOP_JUDGE_PROMPT`` in the
+    off-record instruction. The model was then told no work was being asked for
+    and to answer briefly, on the one request whose entire purpose is to report
+    a verdict about a running goal. ``session/aside.py`` and both seams state
+    that must never happen; this pins the call site that made it happen.
+    """
+    from local_operator.session.goal_loop import LOOP_JUDGE_PROMPT
+
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop finish the parser")
+        await _settle_loop(pilot, app)
+
+    assert session.judge_calls == 1
+    assert session.judge_instruction == [False]
+    (sent,) = session.judge_turns[0]
+    assert sent.text == LOOP_JUDGE_PROMPT.format(goal="finish the parser")
+    assert "<aside>" not in sent.text
 
 
 @pytest.mark.asyncio
