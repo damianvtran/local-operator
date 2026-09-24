@@ -6259,6 +6259,41 @@ async def test_loop_goal_judge_error_continues_with_warning() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_loop_turn_is_stamped_as_harness_chrome() -> None:
+    """Agent review round 3: a loop's own turn is chrome, and now says so.
+
+    Both loops are admitted through ``_prompt_loop_turn``, and the stamp lives
+    THERE because a caller-side stamp is how the goal-mode loop went without one:
+    ``LOOP_GOAL_PROMPT`` is in neither ``harness_chrome_prompts()`` nor any
+    producer-side recogniser, and the desktop is marker-only by contract
+    (``docs/DESKTOP_API.md`` names "the goal loop's own prompt" as a row that must
+    carry it) — so an unstamped row replayed on every surface as the USER's own
+    words. Pinned with its own negative control in the same transcript: the
+    person's typed turn is NOT stamped, which is the half that would hide a
+    human's words if the marker leaked.
+    """
+    from local_operator.session.goal_loop import LOOP_GOAL_PROMPT
+
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        # A person's own turn, typed plainly (not through `_type_command`, which
+        # opens the slash picker): this is the row the marker must never hide.
+        app.query_one(Editor).load_text("ship it now")
+        await pilot.press("enter")
+        await pilot.pause()
+        session.judge_verdicts = ["VERDICT: ACHIEVED\ndone"]
+        await _type_command(pilot, app, "loop do the thing")
+        await _settle_loop(pilot, app)
+    loop_turn = LOOP_GOAL_PROMPT.format(goal="do the thing")
+    assert session.prompts == ["ship it now", loop_turn]
+    assert session.injected_prompts == [
+        loop_turn
+    ], "the loop's turn carries the structural marker; the typed one does not"
+
+
+@pytest.mark.asyncio
 async def test_loop_goal_judge_failure_breaker() -> None:
     # A judge that never returns a readable verdict trips the breaker after
     # MAX_LOOP_JUDGE_FAILURES, rather than spinning forever.

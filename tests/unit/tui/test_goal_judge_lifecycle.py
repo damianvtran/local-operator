@@ -74,6 +74,12 @@ async def test_a_local_turn_end_judges_once_and_settles_the_goal() -> None:
         assert session.goal_status == "done"
         assert [row["text"] for row in session.history_view()] == [GOAL]
         assert session.prompts == [], "an ACHIEVED verdict admits no continuation"
+        # ...and the judge asked WITHOUT the aside's off-record framing. Both
+        # judges share ``_ask_judge``, so this is the standing-goal half of the
+        # pin ``test_the_judge_asks_without_the_aside_instruction`` makes for the
+        # `/loop` one: losing the flag frames a VERDICT request as "no work is
+        # being asked for, answer briefly", silently and only on a remote host.
+        assert session.judge_instruction == [False]
 
 
 @pytest.mark.asyncio
