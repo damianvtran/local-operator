@@ -6381,7 +6381,13 @@ def test_the_exit_leg_follows_the_work_from_one_fire_to_the_next(tmp_path: Path)
     assert (
         text.count(stall_watchdog.FIRED_MARKER) >= 2
     ), f"no later dump was recorded after work cleared: {text[:600]!r}"
-    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is True
+    # ...AND THE LIVE STATE FOLLOWS THE LATER FIRE, not the first one (2026-09-24). This
+    # cell used to assert ``True`` here, which pinned the sticky reading: the held
+    # marker was never withdrawn, so a runtime whose most recent fire found nothing in
+    # flight still read ``bound held; lop stop`` for the rest of its life. Both markers
+    # stay in the artifact above; only the "stalled with work, needs a person" reading
+    # is superseded by the observation that followed it.
+    assert stall_watchdog.held_fire(pid, tmp_path / "logs") is False
 
 
 def test_a_caller_with_no_busy_probe_keeps_dump_only_policy(
