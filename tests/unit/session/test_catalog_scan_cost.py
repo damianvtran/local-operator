@@ -59,9 +59,10 @@ from typing import Any, Callable
 
 import pytest
 
+import local_operator.session.catalog as session_catalog
 import local_operator.session.retention as retention
 from local_operator.resume import _recent_sessions_with_origin
-from local_operator.session.catalog import load_catalog
+from local_operator.session.catalog import CatalogueScope, catalogue_page, load_catalog
 from local_operator.session.creation import ensure_session_created_at
 from local_operator.session.retention import session_activity, session_activity_path
 
@@ -264,6 +265,118 @@ class TestActivityBetweenPollsIsSeenImmediately:
 # ---------------------------------------------------------------------------
 # Visibility and ordering are unchanged
 # ---------------------------------------------------------------------------
+
+
+def _band(store: Path, *, visible: int, hidden: int) -> None:
+    """A store with two populations, every visible session carrying a binding.
+
+    The hidden population is what makes the scan's own skip observable at all: it
+    is ~91% of a real store and costs zero syscalls when the skip is armed, so a
+    fixture without it cannot tell "the scan did not grow" from "there was
+    nothing there to walk".
+    """
+    from local_operator.resume import write_session_attachment
+
+    for index in range(hidden):
+        _session(store, f"sub{index:08d}", transcript="{}\n", origin="subagent", stamp=1_000.0)
+    for index in range(visible):
+        session_id = f"chat{index:07d}"
+        _session(
+            store,
+            session_id,
+            transcript="{}\n",
+            stamp=1_000.0 + index,
+            created=1_000.0 + index,
+        )
+        # Through the real writer: the census reads what a session stores.
+        write_session_attachment(store / "sessions" / session_id, team="lopdev", agent="", goal="")
+
+
+class TestAScopedPageIsTheSameScan:
+    """T4, as a structural invariant rather than as a wall-clock bound.
+
+    The claim the page buys: a scope is a FILTER over the ranking the scan already
+    built, so neither the scope nor the page size adds a walk. Measured on a
+    40-visible / 200-hidden store, warm: ``scandir`` is 3 for every shape, and the
+    ``stat`` difference between a scoped page and an unscoped page of the SAME
+    limit is exactly the visible population -- one ``attachment.json`` stat per
+    candidate, which is the census (see ``TestAScopedPageReadsTheCensusOnce`` in
+    ``test_catalog_scope.py`` for the read half).
+
+    WHAT IT DELIBERATELY DOES NOT CLAIM: ``load_catalog``'s TOTAL syscall count
+    does grow with ``limit``, because hydration is per-page-row and that is the one
+    thing a page size is supposed to buy. The scan is the term that must not move,
+    and the existing cost model above pins the same property for the unstructured
+    call.
+    """
+
+    @staticmethod
+    def _profile(run: Callable[[], Any]) -> dict[str, int]:
+        with _counting() as counter:
+            run()
+        return dict(counter.counts)
+
+    def test_the_walk_is_identical_at_every_page_size_and_scope(self, tmp_path: Path) -> None:
+        _band(tmp_path, visible=40, hidden=200)
+        # Warm the birth memo first: this is about the WALK, not about which memo
+        # a first call happens to fill.
+        catalogue_page(tmp_path, limit=5)
+
+        small = self._profile(lambda: catalogue_page(tmp_path, limit=5))
+        large = self._profile(lambda: catalogue_page(tmp_path, limit=200))
+        scoped = self._profile(
+            lambda: catalogue_page(tmp_path, scope=CatalogueScope("team", "lopdev"), limit=25)
+        )
+
+        assert small["scandir"] == large["scandir"] == scoped["scandir"], (
+            small,
+            large,
+            scoped,
+        )
+        # The hidden population still costs nothing: the skip is armed by the
+        # inode the scandir batch already carried, and 200 hidden directories add
+        # no per-directory stat to any shape.
+        assert scoped["lstat"] == small["lstat"] == large["lstat"]
+
+    def test_a_scoped_page_adds_exactly_one_stat_per_visible_session(self, tmp_path: Path) -> None:
+        """The census is bounded by the STORE, not by the page.
+
+        Both calls ask for the same 5 rows, so the only difference is the binding
+        read -- and it is exactly one ``stat`` per visible session, whatever the
+        page size, because the filter and the counts share it.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+        catalogue_page(tmp_path, limit=5)
+
+        plain = self._profile(lambda: catalogue_page(tmp_path, limit=5))
+        scoped = self._profile(
+            lambda: catalogue_page(tmp_path, scope=CatalogueScope("team", "lopdev"), limit=5)
+        )
+        counted = self._profile(lambda: catalogue_page(tmp_path, limit=5, with_counts=True))
+
+        assert scoped["stat"] - plain["stat"] == 40, (plain, scoped)
+        # And a scoped page costs what the HEAD answer the client actually sends
+        # costs, because the census is the same read -- there is no third term.
+        assert counted["stat"] == scoped["stat"], (scoped, counted)
+
+    def test_a_warm_census_re_reads_no_binding(self, tmp_path: Path) -> None:
+        """T5's stat half: an unchanged store is answered from the memo.
+
+        The stats stay (the memo is validated by each sidecar's
+        inode/mtime/size), and the READS the memo saves are asserted in
+        ``test_catalog_scope.py``; what this pins is that the second call is not
+        slower than the first by any walk it started.
+        """
+        _band(tmp_path, visible=40, hidden=200)
+
+        # Everything BUT the binding memo is warmed first: a store's first call
+        # pays for the row cache as well, and this test is about one memo.
+        catalogue_page(tmp_path, limit=25)
+        session_catalog._BINDING_MEMO.clear()
+        cold = self._profile(lambda: catalogue_page(tmp_path, limit=25, with_counts=True))
+        warm = self._profile(lambda: catalogue_page(tmp_path, limit=25, with_counts=True))
+
+        assert warm == cold, (cold, warm)
 
 
 class TestTheListingIsUnchanged:

@@ -605,6 +605,59 @@ async def _page_ids(client, limit: int) -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_a_scoped_answer_carries_no_off_page_pin(pins_api) -> None:
+    """A scoped page speaks for its GROUP; only the head speaks for the pins.
+
+    ``pinned_off_page`` exists so a client holding one page can still draw a pin
+    made on an older conversation, and that argument is about the listing as a
+    whole -- which is the one thing a scoped request does not ask about. The
+    client gates its pin facts on the head answer for the same reason
+    (``pinFacts`` settled by a scope answer would erase a pin made outside that
+    scope), so an extra here would be a row belonging to another team arriving
+    under this team's name.
+    """
+    from local_operator.resume import write_session_attachment
+
+    client, root = pins_api
+    for index in range(4):
+        session_id = f"lop{index:07d}"
+        _session(root, session_id)
+        write_session_attachment(root / "sessions" / session_id, team="lopdev", agent="", goal="")
+    # Ranked LAST, so a page bound of 2 cannot carry it: the fixture stamps every
+    # session with the same `created_at`, so the id break-tie decides, and
+    # ``oldpin000001`` sorts after every ``lop...`` id.
+    older = "oldpin000001"
+    _session(root, older)
+    write_session_attachment(root / "sessions" / older, team="lopdev", agent="", goal="")
+    assert toggle_pin(root, older) is True
+
+    head = (await _json(client.get("/v1/desktop/sessions", params={"limit": 2})))["result"]
+    assert [row["id"] for row in head["sessions"]] == [
+        "lop0000000",
+        "lop0000001",
+        older,
+    ], "the head page still appends a pinned row it does not carry"
+
+    scoped = (
+        await _json(
+            client.get(
+                "/v1/desktop/sessions",
+                params={"limit": 2, "scope_kind": "team", "scope_name": "lopdev"},
+            )
+        )
+    )["result"]
+
+    assert [row["id"] for row in scoped["sessions"]] == ["lop0000000", "lop0000001"]
+    assert all(row["binding"]["team"] == "lopdev" for row in scoped["sessions"])
+    assert scoped["scope"] == {"kind": "team", "name": "lopdev"}
+    # ``truncated`` still means "this SCOPE held more than the page", and the
+    # cursor is the position that more can be read from -- the two are one fact
+    # (see ``SessionList.next_cursor``), so they agree on every answer.
+    assert scoped["truncated"] is True
+    assert scoped["next_cursor"] is not None
+
+
+@pytest.mark.asyncio
 async def test_a_pinned_conversation_beyond_the_page_is_carried_in_the_answer(pins_api) -> None:
     """THE FIX. A pin outside the page is a ROW in the answer, with its name and
     `pinned: true`, so the client's pinned section has something to draw."""
