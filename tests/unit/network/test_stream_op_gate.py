@@ -277,6 +277,28 @@ class _Deleted:
         return "this would delete it"
 
 
+def _settle(client: _StreamClient) -> None:
+    """Read until the owner stops pushing, so THIS connection is past its bind.
+
+    The runtime refuses every non-priority op while a connection's canonical sync
+    is still pending — "this viewer is still connecting to the session; the
+    request was not run — retry once the interface has connected" — and the flag
+    clears in the BIND TASK's ``finally`` (``server.py``), i.e. when the OWNER
+    finishes its own work. A raw viewer that sends a gate frame the instant the
+    welcome lands is racing that task: this file did exactly that and passed by
+    luck until it failed under load (measured), which is a flake wearing a security
+    test. The real client does not race it either — its dial sends its own
+    ``frontend_sync`` and waits for the answer — so waiting is the faithful shape
+    rather than a workaround.
+
+    Bounded, and it returns on the first quiet interval: the pushes stop when the
+    bind is done, and an idle fake session has nothing else to say.
+    """
+    for _ in range(20):
+        if client.recv(timeout=0.5) is None:
+            return
+
+
 def test_a_drive_member_cannot_archive_or_delete_through_the_slash_seam(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,6 +346,7 @@ def test_a_drive_member_cannot_archive_or_delete_through_the_slash_seam(
         try:
             assert client.open_stream(server_a.identity.device_id, SESSION)["op"] == "ack"
             assert client.recv() is not None  # the owner's welcome
+            _settle(client)
 
             replies: dict[str, dict[str, Any]] = {}
             for req, command in enumerate(("archive", "delete"), start=10):

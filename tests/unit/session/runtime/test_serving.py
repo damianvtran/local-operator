@@ -1567,7 +1567,11 @@ async def test_routed_mcp_reauth_runs_instead_of_refusing_the_local_user(
     handle, session = make_handle()
     session.mcp_manager = _GrantManager()
 
-    result = await handle._slash_result("mcp", "reauth notion", SlashResult)
+    # ``"local"`` is STATED rather than left to the default: the helpers this
+    # reaches read an un-forwarded locality as relayed now (round 2, R2-1), and
+    # this cell is the user at THIS machine — the one the regression above is
+    # about. The sibling below spells ``"remote"`` for the refusal it covers.
+    result = await handle._slash_result("mcp", "reauth notion", SlashResult, "local")
 
     assert "run it from a terminal on that machine" not in result.text
     assert "authorizing MCP server 'notion'" in result.text
@@ -1645,7 +1649,7 @@ async def test_the_settled_grant_reaches_viewers_as_a_notice(
 
     session._emit = _emit
 
-    await handle._slash_result("mcp", "login notion", SlashResult)
+    await handle._slash_result("mcp", "login notion", SlashResult, "local")
     # The grant settles first; the notice it emits is a SEPARATE task on the
     # ordinary holder (a notice must not go through the superseding path, or
     # it would cancel the grant reporting it).
@@ -1688,12 +1692,12 @@ async def test_a_second_grant_supersedes_the_first(fake_mcp_logout: list[str]) -
 
     session._emit = _emit
 
-    await handle._slash_result("mcp", "login one", SlashResult)
+    await handle._slash_result("mcp", "login one", SlashResult, "local")
     await asyncio.sleep(0)
     first = list(handle._mcp_grant_tasks)
     assert len(first) == 1
 
-    await handle._slash_result("mcp", "login two", SlashResult)
+    await handle._slash_result("mcp", "login two", SlashResult, "local")
     await asyncio.sleep(0)
     # The first was cancelled to make room, not left racing the second. The
     # count is of LIVE grants: the cancelled task's done-callback has not run
@@ -1731,7 +1735,7 @@ async def test_dispose_cancels_a_grant_parked_on_a_browser(
             raise AssertionError("unreachable")
 
     session.mcp_manager = _Parked()
-    await handle._slash_result("mcp", "login notion", SlashResult)
+    await handle._slash_result("mcp", "login notion", SlashResult, "local")
     await asyncio.sleep(0)
     tasks = list(handle._mcp_grant_tasks)
     assert len(tasks) == 1 and not tasks[0].done()

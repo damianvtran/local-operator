@@ -3537,17 +3537,26 @@ class ServingSessionHandle(SessionHandle):
         command: str,
         args: str,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> str:
         """Session-level slash commands — the ones with meaning off-terminal.
-        TUI chrome (/help tables, /usage panels) is the phone UI's own job."""
+        TUI chrome (/help tables, /usage panels) is the phone UI's own job.
+
+        THE ALLOWLIST IS THIS METHOD'S WHOLE SURFACE, and it is why the runtime
+        host cannot repeat carrier 5's defect: ``goal`` and ``compact`` are run,
+        and everything else is refused by name before anything happens. A relaying
+        caller is no more privileged here than a local one — there is no terminal
+        to type into — while the TUI host's twin, which DOES type into the owner's
+        terminal, has to allowlist separately (``network.types.
+        terminal_slash_refusal``).
+        """
         self._check_loop_thread()
         if command == "goal":
             # The authority travels even though ``/goal`` is not delete-scoped:
             # this method is the runtime's second door onto the dispatcher, and a
             # door that drops the connection's authority is how a gate ends up
-            # covering one route only (round 1's V2).
+            # covering one route only (round 1's V2, and round 2's R2-4).
             return await self.slash_images(
                 command, args, None, locality=locality, capabilities=capabilities
             )
@@ -4446,7 +4455,7 @@ class ServingSessionHandle(SessionHandle):
         args: str,
         images: list[dict[str, str]] | None = None,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> str:
         """Run a slash command that carries image attachments.
@@ -4607,7 +4616,14 @@ class ServingSessionHandle(SessionHandle):
         args: str,
         images: list[dict[str, str]] | None = None,
         *,
-        locality: str = "local",
+        #: ``None`` = "this caller has not said", read as RELAYED by every gate
+        #: below (round 2, R2-1). Not permissive on purpose: a carrier that fails
+        #: to forward the connection's facts must refuse rather than run a verb on
+        #: the owner. Every production caller passes the connection's own answer
+        #: explicitly — ``RuntimeServer`` reads it off the auth frame through
+        #: ``_authority_kwargs`` — so the default is only ever seen by a caller
+        #: that forgot, which is the case it exists to fail closed for.
+        locality: str | None = None,
         consumers: Iterable[str] | None = None,
         #: ``None`` = "this caller has not said", which the sentence builders
         #: read CONSERVATIVELY. The default is deliberately not permissive: every
@@ -4830,7 +4846,7 @@ class ServingSessionHandle(SessionHandle):
         command: str,
         args: str,
         SlashResult: Any,
-        locality: str = "local",
+        locality: str | None = None,
         may_loosen: bool | None = None,
         capabilities: frozenset[str] | None = None,
     ) -> Any:
@@ -5028,33 +5044,26 @@ class ServingSessionHandle(SessionHandle):
     @staticmethod
     def _delete_scope_refusal(
         command: str,
-        locality: str,
+        locality: str | None,
         capabilities: frozenset[str] | None,
         SlashResult: Any,
     ) -> Any | None:
         """The refusal for a delete-scoped verb this CONNECTION may not run, else ``None``.
 
-        Imported rather than restated: the same predicate gates the TUI-hosted
-        owner (``OperatorApp._slash_result``), and the two hosts must answer a
-        follower identically — a second copy of the rule here is free to drift on
-        this path alone. The SENTENCE is shared for the same reason, so the two
-        receipts cannot read differently. The import is function-local because
+        THE DECISION AND THE SENTENCE ARE NOT HERE and must not be: both live in
+        ``network.types.delete_scope_refusal``, which every routed host asks
+        (round 2, R2-5 — round 1 had the same three lines in three files). This
+        wrapper only wraps the sentence in THIS host's ``SlashResult``, which is
+        the one thing the hosts cannot share. The import is function-local because
         ``network.types`` is on the mesh vocabulary's side of the session plane's
         import graph, and this module is on the runtime's startup path.
         """
-        from local_operator.network.types import (
-            DELETE_SCOPED_SLASH,
-            delete_scope_refusal_sentence,
-            may_run_delete_scoped_slash,
-        )
+        from local_operator.network.types import delete_scope_refusal
 
-        if command not in DELETE_SCOPED_SLASH:
+        text = delete_scope_refusal(command, locality, capabilities)
+        if text is None:
             return None
-        if may_run_delete_scoped_slash(locality, capabilities):
-            return None
-        return SlashResult(
-            kind="notice", text=delete_scope_refusal_sentence(command), style="warning"
-        )
+        return SlashResult(kind="notice", text=text, style="warning")
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
@@ -5705,7 +5714,11 @@ class ServingSessionHandle(SessionHandle):
         session: Any,
         arg: str,
         SlashResult: Any,
-        locality: str = "local",
+        # ``None`` = "not said", read the same fail-closed way as the delete-scoped
+        # gate one call over (round 2, R2-1): a browser cannot be opened in front of
+        # a caller we cannot place. Before this it read ``locality != "remote"``,
+        # which made an un-forwarded locality permissive.
+        locality: str | None = None,
     ) -> Any:
         """The routed ``/mcp``: status from the session's own manager.
 
@@ -5777,7 +5790,7 @@ class ServingSessionHandle(SessionHandle):
                 session,
                 sub,
                 parts[1],
-                browser_is_reachable=locality != "remote",
+                browser_is_reachable=locality == "local",
                 notify=self._grant_notice,
                 spawn=self._spawn_grant,
             )
