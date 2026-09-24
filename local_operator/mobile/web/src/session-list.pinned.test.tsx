@@ -452,6 +452,9 @@ describe("a refused pin reports where the reader is looking (D12/D14, R8-2, Q4)"
 		sessionList = longList();
 		render(<SessionListScreen />);
 		const list = scroller();
+		/* Browser scroll anchoring must stay on: opting out moved a scrolled
+		   reader's rows on every unrelated list change (Q6, +76px measured). */
+		expect(list.className).not.toContain("overflow-anchor");
 		const onBandResize = observeTheBandCallbacks.get(errorBox());
 		expect(onBandResize).toBeDefined();
 		const column = modelTheColumn(list);
