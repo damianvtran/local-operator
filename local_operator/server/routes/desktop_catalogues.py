@@ -124,6 +124,16 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
             # because the cadence bounds the refetch rather than removing it.
             from local_operator.providers.controller import PICKER_TTL_S
 
+            # The engagement view this route's live read fetches by is one extra
+            # synchronous cost on the loop thread, and it belongs in this list for
+            # the same reason the others do: `_engaged_providers` is one
+            # `open_store()` over the encrypted secret store (measured ~20.4 ms with
+            # a store on disk, ~0.09 ms without, against ~0.022 ms for
+            # `usable_providers()` alone), and on a host whose store exists with no
+            # broker listening it can start a secret-broker daemon. Bounded and small
+            # beside the live fetch fan-out it feeds, and deliberately not memoised on
+            # the controller -- the store can change between the two calls a request
+            # makes.
             entries, statuses = await controller.live_catalogue(ttl_s=PICKER_TTL_S)
             # WHICH providers count as failing is ``catalogue_failures``'s
             # question now, and it lives on the controller so every desktop

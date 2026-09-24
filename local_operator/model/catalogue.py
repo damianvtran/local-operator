@@ -110,13 +110,25 @@ REVALIDATE_BACKOFF_S = 5 * 60
 #: user saying "ask now", and inside the window it is answered from the memory
 #: with no request at all. That is why the window is ONE MINUTE and not the five
 #: it started at: the automation this defends against (the renderer's refetch on
-#: window focus) is bounded in the UI, the in-app repair paths re-arm the memory
-#: immediately (``invalidate`` and ``invalidate_documents`` both clear it), and a
-#: user who repaired a provider outside the app waits a minute rather than five.
-#: What clears it EARLY, in full: any credential change or account removal
-#: (``invalidate_listing`` → ``invalidate_documents``), a newly configured local
-#: endpoint (``_configure_local`` → ``invalidate``), and a document that changed
-#: or vanished under the memory (see :func:`_document_stamp`).
+#: window focus) is bounded in the UI, every repair path that routes through
+#: ``_invalidate_cached_listing`` re-arms the memory immediately (``invalidate``
+#: and ``invalidate_documents`` both clear it, and that is the chain login, logout,
+#: account removal and a re-pointed local endpoint all take), and a user who
+#: repaired a provider outside the app waits a minute rather than five. A repair
+#: that does NOT route through that chain — ``PATCH /v1/credentials`` is the in-app
+#: one — waits out the window, which is named below rather than glossed.
+#: What clears it EARLY: a credential change that reaches
+#: ``_invalidate_cached_listing`` — which is ``invalidate_listing`` →
+#: ``invalidate_documents`` → the identity clear, the path every login, logout and
+#: account removal in the desktop and CLI surfaces takes, and the path
+#: ``_configure_local`` takes when a local provider is re-pointed — plus a document
+#: that changed or vanished under the memory (see :func:`_document_stamp`). It does
+#: NOT clear on a ``PATCH /v1/credentials`` save: that route writes the store row
+#: and drops only the model-info cache, so a key repaired there waits out the
+#: window or a restart. That gap is pre-existing and recorded rather than papered
+#: over (it is one of the reasons the window is a minute), and naming it here is
+#: the point — a reader told "any credential change re-arms" would believe a
+#: repair that does not.
 #:
 #: IN-PROCESS only, like its sibling: a restart retries at once, a second process
 #: is a second opinion rather than a client of this one's memory, and nothing here
@@ -860,12 +872,12 @@ def invalidate(key: str, *, cache_dir: Path | None = None) -> None:
     payload -- when a document it just read yielded no usable rows.
 
     Also forgets the document's failure backoff
-    (:data:`LISTING_FAILURE_BACKOFF_S`): this function IS the app's "forget what
-    you know about this document" call, and ``ProviderController._configure_local``
-    reaches it after the user points a local provider at a NEW endpoint. Leaving
-    the window standing there would answer a just-repaired connection with the
-    previous endpoint's failure for up to five minutes -- the one case the bound
-    promises not to hide.
+    (:data:`LISTING_FAILURE_BACKOFF_S`): every credential-change path in the app
+    goes through ``_invalidate_cached_listing`` → ``invalidate_listing`` →
+    :func:`invalidate_documents`, which clears it. Leaving the window standing
+    there would answer a just-repaired connection with the previous endpoint's
+    failure for the rest of the window -- the one case the bound promises not to
+    hide.
     """
     path = _cache_path(key, cache_dir)
     _clear_failure(path)

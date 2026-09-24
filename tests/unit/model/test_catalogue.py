@@ -192,9 +192,9 @@ def test_a_replaced_document_is_fetched_too(tmp_path) -> None:
 def test_the_window_elapsing_retries_at_once(tmp_path, monkeypatch) -> None:
     """The bound, not a blacklist: the very next read after it tries again.
 
-    Steered through the constant rather than by sleeping five minutes, so this
-    asserts the RULE (failures inside the window are skipped, and no longer) and
-    not the wall clock."""
+    Steered through the constant rather than by sleeping through the window, so
+    this asserts the RULE (failures inside the window are skipped, and no longer)
+    and not the wall clock."""
     calls = []
 
     def boom():

@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import os
+import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
@@ -1021,6 +1022,17 @@ def stored_provider_env_keys(base: Path | None = None) -> set[str]:
     :func:`provider_secret_value` documents. Enumeration must not become the one
     path that takes down the provider picker, which is precisely the failure the
     store's ``list`` verb was reworked to avoid.
+
+    That promise has to cover the STORE'S OWN exception family, not just this
+    module's: the store is a sqlite file, so a damaged one raises
+    ``sqlite3.DatabaseError`` ("file is not a database") and a ``chmod 000`` one
+    raises ``sqlite3.OperationalError``, and neither is an ``OSError`` — an earlier
+    version of this tuple caught neither, so `GET /v1/desktop/models?live=true`
+    (which reaches here through ``persisted_providers``) answered 500 on a store
+    this function is documented to survive (Q2-1). ``sqlite3.ProgrammingError`` is
+    re-raised the way ``usable_providers`` re-raises it: a connection used from
+    the wrong thread is a caller BUG, and a bug that dresses itself as "no
+    provider rows" is one nobody finds.
     """
     from local_operator.secrets.access import open_store
     from local_operator.secrets.errors import SecretStoreError
@@ -1037,6 +1049,17 @@ def stored_provider_env_keys(base: Path | None = None) -> set[str]:
             if record.name.startswith(PROVIDER_SECRET_PREFIX)
         }
     except (SecretStoreError, OSError, ValueError):
+        return set()
+    except sqlite3.ProgrammingError:
+        # Re-raised BEFORE the family below, which it belongs to: a connection
+        # crossing threads (or a closed handle) is a caller bug, not an unreadable
+        # store, and dressing it as "no provider rows" hides it forever. Same
+        # precedent and same rationale as ``usable_providers``.
+        raise
+    except sqlite3.Error:
+        # Damaged, locked or otherwise unopenable: the sqlite family's own answer
+        # to "this file is not a store I can read". Degrades exactly like an
+        # absent store, so no GET can be taken down by one.
         return set()
 
 
