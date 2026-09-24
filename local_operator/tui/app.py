@@ -2759,7 +2759,7 @@ class _HeldAnswerKey:
 
 
 class _AttachBehindAttempt:
-    """ONE conversation's paint-first attach: its narration, its bound, its one row.
+    """ONE conversation's paint-first attach: its narration, its bound, its carriers.
 
     KEYED ON THE CONVERSATION IT WAS STARTED FOR, NEVER ON WHAT IS ON SCREEN.
     The watch this replaced asked "is the app still bound to my token?" before
@@ -2774,12 +2774,10 @@ class _AttachBehindAttempt:
     on those: which row to restate, which band cue to silence, which composer
     gets the text back.
 
-    The only question asked of the present is WHERE the owning conversation's
-    row can be painted: into its transcript when that transcript is in front,
-    by restating the row where it already stands (a parked view keeps its
-    widgets), or, when neither holds, deferred until the conversation is next
-    adopted (:meth:`resurface`) — the rule ``_notice_for`` follows for every
-    other off-screen notice. It never decides WHOSE row it is.
+    The ROW is not held here. What the attempt says goes into the
+    conversation's :class:`_AttachBehindAccount`, which lives on the source and
+    outlives both this attempt (it ends when a carrier binds) and the view the
+    row was painted into (a re-commit replaces it) — agent review round 4, F-1.
 
     CARRIERS. The attach is carried by the background engage and by every
     message sent while it is pending (each message's send runs its own
@@ -2799,19 +2797,18 @@ class _AttachBehindAttempt:
         #: "pending" (nothing said yet), "narrated", "judged", "unsent" (a
         #: message came back), "landed" (a carrier bound).
         self.phase = "pending"
-        #: The user has been shown an OUTCOME (the verdict, or a returned
-        #: message). Kept across a re-armed retry, so the bind that finally
-        #: lands restates the row as recovered instead of silently removing
-        #: the account they read (UX round 1, U3).
-        self._spoke_outcome = False
         self._carriers = 0
-        self._row: NoticeBlock | None = None
-        #: What the row says now, kept so a transcript rebuilt while the
-        #: conversation was away can be given the same one row on return.
-        self._said: tuple[str, NoticeKind] | None = None
-        self._deferred = False
         self._timers: list[Any] = []
         self._arm()
+
+    @property
+    def _account(self) -> "_AttachBehindAccount":
+        """The conversation's account of this attach, held on its SOURCE.
+
+        Not on the attempt: the attempt ends when a carrier binds, and what it
+        said must outlive it (agent review round 4, F-1; UX round 4, U14).
+        """
+        return _AttachBehindAccount.of(self._app, self.source)
 
     # -- schedule --------------------------------------------------------
 
@@ -2856,7 +2853,7 @@ class _AttachBehindAttempt:
         if not self._alive() or self.phase != "pending":
             return
         self.phase = "narrated"
-        self._say(self._narration(), "warning")
+        self._account.say(self._narration(), "warning")
 
     def _judge(self) -> None:
         if not self._alive() or self.phase not in ("pending", "narrated"):
@@ -2865,9 +2862,10 @@ class _AttachBehindAttempt:
         # record and was dialled (UX round 1, U2); "session" is the user's word
         # for what they opened (U5).
         self.phase = "judged"
-        self._spoke_outcome = True
         self._stop_timers()
-        self._say(ATTACH_BEHIND_VERDICT.format(session_id=self._session_id), "warning")
+        self._account.say(
+            ATTACH_BEHIND_VERDICT.format(session_id=self._session_id), "warning", outcome=True
+        )
         # The pending cue ends WITH the verdict — for THIS conversation's band
         # only, read through `silences_cue`, never by clearing an app-wide flag
         # the conversation on screen may own.
@@ -2885,7 +2883,7 @@ class _AttachBehindAttempt:
         if self._carriers == 0 and self.phase in ("judged", "unsent"):
             self.phase = "narrated"
             self._arm()
-            self._say(self._narration(), "warning")
+            self._account.say(self._narration(), "warning")
             self._app._push_starting_band()
         self._carriers += 1
 
@@ -2921,41 +2919,50 @@ class _AttachBehindAttempt:
         self._carriers = max(0, self._carriers - 1)
 
     def returned(self) -> None:
-        """A message sent on this attempt came back unsent: say so in ITS conversation."""
+        """A message sent on this attempt came back unsent: say so in ITS conversation.
+
+        OWED EVEN WHEN THIS ATTEMPT IS OVER. Another carrier can bind the attach
+        (``landed`` closes the attempt) and the facade go cold again before this
+        message's own bind fails — ``is_cold``'s third disjunct,
+        ``not _ready_for_events``, is exactly that window. The text has already
+        gone back to the composer by then, so an attempt that answered "not
+        alive" with silence handed it back with no account at all (agent review
+        round 4, F-1a; a regression against ``3424719f``, which painted it). The
+        account lives on the source, so the row is painted whether or not the
+        attempt can still speak; only a conversation that no longer exists is
+        owed nothing.
+        """
         self._carriers = max(0, self._carriers - 1)
-        if not self._alive():
+        if self.source.retired:
             return
-        # One row per state: a second return restates the same row, whichever
-        # conversation is on screen when it lands (review round 3, MINOR).
-        self.phase = "unsent"
-        self._spoke_outcome = True
-        self._stop_timers()
-        self._say(ATTACH_BEHIND_UNSENT.format(session_id=self._session_id), "warning")
+        if self._alive():
+            # One row per state: a second return restates the same row,
+            # whichever conversation is on screen when it lands (review round 3).
+            self.phase = "unsent"
+            self._stop_timers()
+        self._account.say(
+            ATTACH_BEHIND_UNSENT.format(session_id=self._session_id), "warning", outcome=True
+        )
         self._app._push_starting_band()
 
     def landed(self) -> None:
         """A carrier BOUND: retire the narration, or restate an outcome as recovered."""
         if not self._alive() or self.phase == "landed":
             return
-        spoke = self._spoke_outcome
         self.phase = "landed"
-        self._stop_timers()
-        if spoke:
+        account = self._account
+        if account.outcome:
             # Restated rather than removed: the reader may have read the verdict,
             # and a row that silently vanished leaves them unsure which statement
-            # was the true one (UX round 1, U3).
-            self._say(ATTACH_BEHIND_RECOVERED.format(session_id=self._session_id), "info")
+            # was the true one (UX round 1, U3). The account goes on saying it
+            # after this attempt is gone, so a view swapped in later re-shows it.
+            account.say(ATTACH_BEHIND_RECOVERED.format(session_id=self._session_id), "info")
         else:
-            row = self._row
-            self._row = None
-            self._said = None
-            self._deferred = False
-            view = _owning_transcript(row)
-            if row is not None and view is not None:
-                # From ITS transcript — the one in front or the parked one.
-                view.remove_block(row)
-        if not self._deferred:
-            self.close()
+            # Only narration was said, and a bind makes it false: nothing is owed.
+            account.retire()
+        # Always closed: the row no longer needs the attempt to outlive the bind
+        # in order to be re-posted, so nothing lingers in the table (round 4, m-1).
+        self.close()
         self._app._push_starting_band()
 
     def close(self) -> None:
@@ -2963,34 +2970,92 @@ class _AttachBehindAttempt:
         if self._registered():
             del self._app._attach_behind_attempts[self.source.token]
 
-    # -- the one row ------------------------------------------------------
 
-    def _say(self, text: str, kind: NoticeKind) -> None:
-        self._said = (text, kind)
-        row = self._row
+class _AttachBehindAccount:
+    """What a paint-first attach has told ONE conversation: its row and last words.
+
+    Held on the conversation's ``SessionInteraction`` (``attach_behind_account``),
+    never on the attempt, because two things end sooner than the account may
+    (agent review round 4 on #1474, F-1; UX round 4, U14; QA round 4, Q-1):
+
+    * the ATTEMPT ends when a carrier binds, while a message sent on it can still
+      come back afterwards and is still owed its "did not answer" row (F-1a);
+    * the VIEW the row was painted into is replaced whenever the conversation is
+      re-committed — the switch back's own connect worker swaps in a fresh
+      replay as soon as the bind lands, and a frontend row is part of no replay —
+      so a row that lived only in a widget left with that widget, the "is
+      answering again" restatement U3 forbids removing included (F-1b).
+
+    So the account remembers what was said, and :meth:`resurface` re-posts it
+    into whatever view the conversation has in front. It never decides WHOSE row
+    it is; that was captured when the attempt was made (UX round 3, U10-U12).
+    """
+
+    def __init__(self, app: "OperatorApp", source: SessionInteraction) -> None:
+        self._app = app
+        self.source = source
+        self.row: NoticeBlock | None = None
+        #: What the row says now, so a view that replaced the one holding it can
+        #: be given the same one row.
+        self.said: tuple[str, NoticeKind] | None = None
+        #: The row has stated an OUTCOME (a verdict, a returned message). Kept
+        #: across a re-armed retry, so the bind that finally lands restates the
+        #: row as recovered instead of removing what the user read (U3).
+        self.outcome = False
+
+    @classmethod
+    def of(cls, app: "OperatorApp", source: SessionInteraction) -> "_AttachBehindAccount":
+        account = source.attach_behind_account
+        if not isinstance(account, cls):
+            account = cls(app, source)
+            source.attach_behind_account = account
+        return account
+
+    def say(self, text: str, kind: NoticeKind, *, outcome: bool = False) -> None:
+        self.said = (text, kind)
+        self.outcome = self.outcome or outcome
+        row = self.row
         if row is not None and row.is_attached:
             # Where it stands — the transcript in front, or the conversation's
             # parked view, whose widgets outlive the switch.
             row.restate(text, kind)
-            self._deferred = False
             return
-        self._row = None
+        self.row = None
         if self._app._is_current(self.source):
-            self._row = self._app._system_notice_block(text, kind)
-            self._deferred = False
-        else:
-            self._deferred = True
+            self.row = self._app._system_notice_block(text, kind)
+        # Otherwise OWED: `said` is kept and `resurface` paints it on return.
 
     def resurface(self) -> None:
-        """The conversation is in front again: give it its row if it has none."""
-        if not self._deferred and (self._row is None or self._row.is_attached):
+        """The conversation is in front again: make sure the view in front says it.
+
+        "Has its row" means a row IN THE VIEW NOW IN FRONT. A row still attached
+        to the outgoing view — the one a re-commit is replacing — counts as
+        missing (the old guard saw it attached and returned, QA round 4, Q-1),
+        so it is taken down there and painted here, once. When the conversation
+        is not in front nothing is painted and nothing is spent: the claim stays
+        owed for the adopt that does bring it in front (review round 4, n-1).
+        """
+        said = self.said
+        if said is None or not self._app._is_current(self.source):
             return
-        said = self._said
-        self._deferred = False
-        if said is not None and self._app._is_current(self.source):
-            self._row = self._app._system_notice_block(*said)
-        if self.phase == "landed":
-            self.close()
+        row = self.row
+        stale = _owning_transcript(row)
+        if stale is not None and stale is self._app._transcript_view():
+            return
+        if row is not None and stale is not None:
+            stale.remove_block(row)
+        self.row = self._app._system_notice_block(*said)
+
+    def retire(self) -> None:
+        """Nothing is owed any more: take the row down from ITS transcript."""
+        row, self.row = self.row, None
+        self.said = None
+        self.outcome = False
+        view = _owning_transcript(row)
+        if row is not None and view is not None:
+            view.remove_block(row)
+        if self.source.attach_behind_account is self:
+            self.source.attach_behind_account = None
 
 
 def _owning_transcript(block: Any) -> "TranscriptView | None":
@@ -7653,6 +7718,7 @@ class OperatorApp(App[None]):
         if not self._sidebar_source_releasable(source, reason=reason):
             return
         source.retired = True
+        self._retire_attach_behind(source)
         if source.unsubscribe_frontend is not None:
             source.unsubscribe_frontend()
             source.unsubscribe_frontend = None
@@ -13411,6 +13477,7 @@ class OperatorApp(App[None]):
         # never calls this path and therefore never retires its loops.
         navigation_generation = self._sidebar_navigation.generation
         self._interaction.retired = True
+        self._retire_attach_behind(self._interaction)
         previous_id = self._conversation_id()
         previous_len = self._history_length()
         preserve_outgoing = preserve_outgoing or (
@@ -19528,12 +19595,28 @@ class OperatorApp(App[None]):
         return attempt
 
     def _resurface_attach_behind(self, source: SessionInteraction) -> None:
-        """A conversation came back in front: repaint its attach row if it has none."""
+        """A conversation came back in front: repaint its attach row if it has none.
+
+        Read from the SOURCE, not from the attempt table: the attempt may be long
+        over (a carrier bound it) while its row is still owed (review round 4,
+        F-1 / U14).
+        """
+        account = source.attach_behind_account
+        if isinstance(account, _AttachBehindAccount):
+            account.resurface()
+        self._push_starting_band()
+
+    def _retire_attach_behind(self, source: SessionInteraction) -> None:
+        """The conversation is gone: drop its attempt and its account (review round 4, m-1).
+
+        Without this a judged or returned attempt — timers stopped, never
+        revisited — kept its ``SessionInteraction``, facade and detached row in
+        ``_attach_behind_attempts`` for the life of the app.
+        """
         attempt = self._attach_behind_attempts.get(source.token)
         if attempt is not None:
-            attempt.resurface()
-        # The cue is per conversation: re-read it for the one now in front.
-        self._push_starting_band()
+            attempt.close()
+        source.attach_behind_account = None
 
     def _report_start_engage_failure(
         self, *, reason: str, error: Exception, elapsed: float, binding_token: tuple[int, str]
