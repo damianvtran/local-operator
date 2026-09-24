@@ -129,7 +129,7 @@ def test_an_error_response_is_not_reported_as_nobody(probe_env: dict[str, Any]) 
         "http://127.0.0.1:1111/health",  # the URL the probe asked
         500,  # the status it answered with
         "Internal Server Error",
-        Message(),  # headers, in the shape the probe reads them from
+        Message(),  # headers; unread by this probe, which reads only ``exc.code``
         None,  # fp
     )
     probe = services.probe_address(_record())
