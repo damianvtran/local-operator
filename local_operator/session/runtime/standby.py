@@ -698,8 +698,11 @@ def _serve(root: Path) -> int:
     # must never take CPU from a session that is doing real work on this host.
     _background_priority(True)
     _warm()
-    warmth = _Warmth(root)
     _background_priority(False)
+    # The guard snapshot is taken at NORMAL priority: it is a handful of stats
+    # and two small file reads, and in the background band a host at load 100+
+    # starved it for over a minute after the imports had already finished.
+    warmth = _Warmth(root)
     path = socket_path(root)
     try:
         path.unlink()
@@ -932,7 +935,7 @@ def _become_runtime(operator_fd: int | None) -> int:
 
     The operator capability arrives exactly as it does for a cold child — as the
     NUMBER of a descriptor in ``sys.argv`` (``--operator-fd <n>``), read and
-    closed by ``approval.read_operator_cap_from_argv`` inside ``process.main``.
+    closed by the capability reader in ``harness/approval.py``, from ``process.main``.
     The descriptor is the one ``SCM_RIGHTS`` delivered, i.e. the child end of the
     requester's own handoff; its number is not a secret.
 
