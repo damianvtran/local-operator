@@ -14827,22 +14827,20 @@ class OperatorApp(App[None]):
         AN UNREACHABLE PEER IS REFUSED WITH ITS REASON, not opened into a viewer
         that can never bind (``mesh-ui.md`` §1.3 degraded states): the sentence
         names the device, the reason in words, and the one command that
-        diagnoses the link.
+        diagnoses the link. It is ``remote_open.unreachable_peer_sentence`` — the
+        SAME composer the desktop backend answers the same state with, so one
+        situation is described one way on both surfaces.
         """
-        from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
-        from local_operator.session.remote_open import remote_row_for
+        from local_operator.session.remote_open import (
+            remote_row_for,
+            unreachable_peer_sentence,
+        )
 
         row = remote_row_for(session_id, root)
         if row is None:
             return False
-        device = row.owner_label or UNNAMED_DEVICE
         if not row.reachable:
-            self._system_notice(
-                f"{session_id} is on {device}, which is unreachable "
-                f"({peer_reason_words(row.unreachable_reason)}). /network doctor "
-                f"{row.owner_device_name or row.owner_device} diagnoses the link.",
-                "warning",
-            )
+            self._system_notice(unreachable_peer_sentence(session_id, row), "warning")
             return True
         self._run_session_transition(self._open_remote_session(session_id, row, root))
         return True
