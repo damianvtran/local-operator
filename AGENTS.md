@@ -259,11 +259,14 @@ stylistic, and both are documented at length in `tests/e2e/watchdog.py`:
 
 - **Its failure mode is a hang, not an assertion.** The deadlock parks two
   threads inside syscalls, so `asyncio.wait_for`, thread watchdogs and
-  signal-based timeouts all fail to fire — verified, not assumed. Only
+  Python-level signal timeouts all fail to fire — verified, not assumed, and
+  *Python-level* is the narrow claim: a Python signal handler runs only between
+  bytecodes, which a wedged process never produces.
   `faulthandler.dump_traceback_later` survives it, because it runs in a C
   thread and needs no GIL. It is armed dump-only (`exit=False`): the C callback
   writes every thread's stack to a file and ends nothing, and the fast-fail is
-  a kernel-level `SIGALRM` one grace later. `python -m tests.e2e.watchdog`
+  a kernel-level `SIGALRM` one grace later — disposition `SIG_DFL`, so nothing
+  has to be scheduled for it to fire. `python -m tests.e2e.watchdog`
   prints the retained dump back.
 - **It is why the stage is deselected and runs `-n0`.** `faulthandler`'s timer
   is process-global, so under xdist a `bounded` block would take a worker's

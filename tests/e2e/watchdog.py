@@ -45,11 +45,15 @@ that hung instead of "the test was slow".
 
 ONE PROCESS-GLOBAL TIMER, SHARED WITH THE SHARD WATCHDOG
 ``faulthandler``'s timer is process-wide, so a ``bounded`` block displaces any
-other armed timer and its ``finally`` leaves nothing armed. The same is true of
-the ``SIGALRM`` arm (one interval timer per process), so two nested ``bounded``
-blocks leave only the INNER one's backstop armed until it exits -- the same
-displacement the dump timer already has, and the reason neither instrument is a
-substitute for the outer job ceiling. ``tests.shard_stall_watchdog``
+other armed timer and its ``finally`` leaves nothing armed. The ``SIGALRM`` arm
+is one interval timer per process too, and a block displaces whatever was
+PENDING on it for its duration -- but unlike the dump timer it PUTS THAT BACK on
+the way out (R4-3: the handler together with the timer's remaining delay),
+because an alarm this block silently cancelled is the one failure a watchdog
+must not hand out. So two nested ``bounded`` blocks leave only the INNER one's
+backstop armed while it runs, and the outer one's resumes when the inner exits
+(late by the inner block's duration); neither instrument is a substitute for the
+outer job ceiling, which is why the stage ships one. ``tests.shard_stall_watchdog``
 arms the same timer around one xdist test item, so a test body that entered
 ``bounded`` would take that worker's stacks away for the rest of the test (the
 controller would still name the test from xdist reports; only the stacks are
@@ -167,9 +171,22 @@ def bounded(seconds: float, what: str) -> Iterator[None]:
     # ``SIG_DFL`` RATHER THAN A PYTHON HANDLER, and this is the point rather than a
     # shortcut: a Python-level handler only runs between bytecodes, which is exactly what
     # a wedged process never produces -- the same reason this file does not use
-    # ``pytest-timeout``'s signal method. The previous disposition is restored on the way
-    # out so a block cannot silently disarm something else's alarm.
+    # ``pytest-timeout``'s signal method.
+    #
+    # WHAT A BLOCK TAKES, AND WHY IT TAKES BOTH HALVES (agent review round 4, R4-3).
+    # ``ITIMER_REAL`` is process-wide and ``setitimer`` REPLACES whatever was pending on
+    # it, so a block owns the alarm for its duration -- and restoring the handler alone
+    # would silently CANCEL the third party's timer that the block displaced (the
+    # ``finally`` zeroes it and never puts it back): an alarm that simply never arrives,
+    # which is the one failure a watchdog must not have. Nothing in ``tests/e2e`` arms
+    # ``ITIMER_REAL`` today (this is the tree's only site), so the restoration is latent
+    # rather than load-bearing -- which is exactly when it is cheap to get right. Stated
+    # rather than implied, the other half of owning it: an alarm a third party had
+    # PENDING at a shorter deadline than the block runs lands while ``SIG_DFL`` is
+    # installed and takes its default action. Restoring the disposition cannot undo that,
+    # so the honest arrangement is that no other caller shares this timer.
     previous_alarm = signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
     try:
         handle.write(f"[e2e watchdog] {what!r} exceeded {seconds:g}s; every thread follows.\n")
         handle.flush()
@@ -193,7 +210,13 @@ def bounded(seconds: float, what: str) -> Iterator[None]:
     finally:
         # Reached on the ordinary paths only: a step that is still wedged when the grace
         # expires is ended by the kernel and never gets here, which is the fast-fail.
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        #
+        # PUT BACK WHAT WAS THERE, IN THE STATE IT WAS IN (R4-3): the timer as well as
+        # the handler. A pending third-party timer is restored at its SAVED delay rather
+        # than at a delay reduced by how long this block ran, which can only make such an
+        # alarm LATE and never silent -- the direction a watchdog may be wrong in.
+        # ``(0.0, 0.0)``, the ordinary case here, is a plain cancel.
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
         signal.signal(signal.SIGALRM, previous_alarm)
         handle.close()
         # The timer's C thread may have written a real dump before the step returned.

@@ -3683,9 +3683,10 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
     be started with a bare ``ensure_future`` and named exactly twice — there and
     at shutdown — so when it RAISED, nothing observed it: ``asyncio`` reports an
     unretrieved exception only at garbage collection, and a bound-firing
-    ``_exit(1)`` never reaches GC at all. Nothing re-created the task either, so
-    the WORKLOAD stamp froze FOREVER and the bound fired one deadline later on a
-    runtime that was perfectly healthy, killing the turn in flight. Three
+    ``_exit(1)`` — which is what a fire of THAT date did, and what no build does now
+    (every expiry is dump-only) — never reached GC at all. Nothing re-created the
+    task either, so the WORKLOAD stamp froze FOREVER and the bound fired one deadline
+    later on a runtime that was perfectly healthy, killing the turn in flight. Three
     readings were wrong at once: the runtime was reported as silent while it was
     working, the reporter's own death was reported nowhere, and the artifact
     could not tell the two apart — ``faulthandler`` dumps THREADS, and a dead

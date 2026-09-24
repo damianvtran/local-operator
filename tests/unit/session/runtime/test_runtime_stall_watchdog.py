@@ -200,6 +200,37 @@ _THREAD_HEADER_RE = re.compile(r"^Thread 0x[0-9a-f]+ \(most recent call first\):
 _FRAME_RE = re.compile(r'^  File ".+", line \d+ in .+$')
 
 
+def _write_stopped_on_a_whole_line(lines: list[str]) -> bool:
+    """Did the artifact's last writer stop at a line a FINISHED dump can end on?
+
+    TWO WRITERS SHARE THIS FILE, and the condition has to admit both. ``faulthandler``'s
+    C thread writes the fire marker and then one block per thread -- a complete header,
+    then that thread's frames -- and stops on a FRAME line. This module itself appends
+    through the same ``O_APPEND`` handle, and BY DESIGN its lines land BELOW a fire
+    rather than above it (``_append_dump_line``; the HELD/OBSERVED aftermath of a fire
+    that did not end the process). So a file whose last write was one of those is
+    COMPLETE, and a condition that demanded a frame as the final line made the wait
+    unsatisfiable on the artifact the product actually writes -- the reap then settled
+    on the NEXT fire's stacks instead of the artifact it was built to wait for
+    (R4-1: reproduced with an artifact carrying two fires, which the killed child could
+    not have written).
+
+    SKIPPING THE MODULE'S OWN LINES IS WHAT KEEPS A RACE OUT rather than letting one
+    in: the boundary they are written at is the same ``write()`` boundary the C thread
+    uses, so a marker can land between two of its blocks (the interleaving
+    ``held_fire`` is explicitly tested against, and the sampler that writes the
+    aftermath reads the file itself). Walking back over them lands on the line the
+    writer was in the middle of, and only a COMPLETE frame is accepted there -- so a
+    marker that landed under a header the writer had not yet put frames under is
+    rejected, while the ordinary aftermath line, written under the finished stacks,
+    is accepted.
+    """
+    index = len(lines) - 1
+    while index >= 0 and lines[index].startswith(stall_watchdog.ARM_MARKER):
+        index -= 1
+    return index >= 0 and bool(_FRAME_RE.match(lines[index]))
+
+
 def _dump_settled(text: str, *, settled: tuple[str, ...] = ()) -> bool:
     """Is this dump FINISHED, rather than caught mid-write?
 
@@ -209,23 +240,21 @@ def _dump_settled(text: str, *, settled: tuple[str, ...] = ()) -> bool:
     on this fleet: the retained artifact ended at ``Thread 0x`` with no address and no
     ``parked_child.py`` frame, and the cell asserting on it went red against a product
     that was fine). This is an ARTIFACT-SHAPE condition rather than a wait on the
-    clock: it asks whether the file is where a finished dump stops.
+    clock: it asks whether the file is where a finished write stops.
 
-    ``faulthandler`` writes one block per thread -- a complete header, then its frames
-    indented -- and the last block it writes is the one the caller names, so requiring
-    the shape AND the caller's own evidence is what says the write finished rather than
-    started. A finished dump ends on a FRAME line; a truncated one ends on a thread
-    header, or mid-word inside either. ``repeat`` is False, so a settled file stays
-    settled.
+    The shape it accepts is :func:`_write_stopped_on_a_whole_line`'s, and the caller's
+    own evidence (``settled``) is required on top -- so a fire whose stacks are
+    incomplete still holds the wait, whatever the tail looks like. ``repeat`` is False,
+    so a settled file stays settled.
     """
     if stall_watchdog.FIRED_MARKER not in text:
         return False
     if not text.endswith("\n"):
         return False
     lines = text.splitlines()
-    if len(lines) < 2 or not _FRAME_RE.match(lines[-1]):
-        return False
     if not _THREAD_HEADER_RE.search(text):
+        return False
+    if not _write_stopped_on_a_whole_line(lines):
         return False
     return all(needle in text for needle in settled)
 
@@ -1253,6 +1282,13 @@ def test_the_stalled_harness_only_reads_a_settled_dump(tmp_path: Path) -> None:
     product that is fine (measured on this fleet: the retained dump held no
     ``parked_child.py`` frame at all). The condition this pins is the artifact's own
     shape, and it is what the helper breaks on instead of the marker.
+
+    AND THE SHAPE IS NOT "ENDS WITH A FRAME" (agent review round 4, R4-1): this module
+    appends its own lines BELOW a fire by design, so the artifact a beat leaves can end
+    on an aftermath line, and the frame-only condition held the wait open until the
+    NEXT fire -- a reap point that depended on a later fire than the one it waited for.
+    Both tails are pinned here, and so are the mid-write shapes that accepting the
+    module's own lines must not re-admit.
     """
     header = f"{stall_watchdog.ARM_MARKER}policy: dump-only (exit=False)\n"
     complete = (
@@ -1270,6 +1306,26 @@ def test_the_stalled_harness_only_reads_a_settled_dump(tmp_path: Path) -> None:
 
     assert _dump_settled(complete)
     assert _dump_settled(complete, settled=("parked_child.py",))
+    # THE SHAPE THE PRODUCT ACTUALLY WRITES, and the one R4-1 was reported against: a
+    # beat's aftermath line, which ``_append_dump_line`` puts BELOW a fire by design. The
+    # frame-only tail condition could not see it, so the wait ran on to the next fire's
+    # stacks -- a reap point that depended on a LATER fire than the one it waited for.
+    aftermath = (
+        f"{stall_watchdog.OBSERVED_MARKER}the bound fired at 2026-09-23 21:13:05 and did "
+        "NOT end this runtime. No work was in flight when the fire was observed.\n"
+    )
+    assert _dump_settled(
+        complete + aftermath, settled=("parked_child.py",)
+    ), "a dump whose last write is this module's own aftermath line is COMPLETE"
+    # ...and the two-fire artifact the reviewer retained, where the FIRST fire is what
+    # the caller was waiting for and the second is only on the file because the reap did
+    # not settle on the first.
+    second_fire = (
+        f"{stall_watchdog.FIRED_MARKER}0:00:00.172937)!\n"
+        "Thread 0x00000001f9ba7f80 (most recent call first):\n"
+        '  File "parked_child.py", line 7 in park_the_loop_deliberately\n'
+    )
+    assert _dump_settled(complete + aftermath + second_fire, settled=("parked_child.py",))
     assert not _dump_settled(
         at_bare_header
     ), "a dump cut inside the next thread header was read as whole"
@@ -1277,6 +1333,20 @@ def test_the_stalled_harness_only_reads_a_settled_dump(tmp_path: Path) -> None:
         after_a_header
     ), "a dump cut between a header and its frames was read as whole"
     assert not _dump_settled(mid_frame), "a dump cut inside a frame line was read as whole"
+    # THE INTERLEAVED SHAPE, which accepting module lines could otherwise re-admit: a
+    # marker written while the C writer was still inside its pass lands under a header
+    # with no frames yet, or under the fire's own marker. Both are mid-write, and the
+    # walk back over this module's lines is what tells them from an aftermath line
+    # written under finished stacks.
+    assert not _dump_settled(
+        complete + "Thread 0x00000001f9ba7f80 (most recent call first):\n"
+    ), "a dump cut between a LATER header and its frames was read as whole"
+    assert not _dump_settled(
+        complete + f"{stall_watchdog.FIRED_MARKER}0:00:00.17)!\n"
+    ), "a dump that stopped on the next fire's own marker is not yet a finished write"
+    assert not _dump_settled(
+        mid_frame + aftermath
+    ), "a marker under a frame line the writer had only begun was read as whole"
     assert not _dump_settled(
         complete.replace(stall_watchdog.FIRED_MARKER, "no fire")
     ), "an artifact with no fire is not a settled dump"

@@ -18,8 +18,14 @@ invisible to every surface.
 
 PRODUCTION EXPIRY IS DUMP-ONLY NOW, so this half asserts the contract THAT holds
 rather than the one the incident was measured under: the bound FIRES, dumps every
-thread beside its log, and the runtime CARRIES ON holding its work — while no
-surface narrates it as gone. A rig that waited for the child to die would wait
+thread beside its log, and the process that armed it is STILL ALIVE afterwards —
+while no surface narrates it as gone. The child below is deliberately the smallest
+thing that can arm a bound and survive a fire: a bare interpreter that calls
+``stall_watchdog.arm(seconds=2)`` and then parks in ``time.sleep(60)``. It holds
+no work and serves no turn, so it is a LIVENESS control rather than the shape the
+incident had — the runtime holding a turn in flight is the serving-plane cell's
+child, not this one, and this half's job is the naming rung plus the fire's
+aftermath. A rig that waited for the child to die would wait
 forever on this build and pass only against the source it replaced, which is
 exactly what this half did before the convergence round (MAJOR-1): ``--phase a``
 returned ``RC=1`` on the head and ``RC=0`` on the pre-change tree.
