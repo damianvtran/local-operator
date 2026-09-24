@@ -315,19 +315,22 @@ def test_the_live_fetch_is_handed_a_store_first_credential(
     assert seen["deepseek"] is None
 
 
-def test_the_providers_admission_path_never_opens_the_store(
+def test_the_providers_admission_path_never_computes_the_engagement_view(
     controller: ProviderController, isolated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R3-2: the engagement view is computed only where it is read.
 
     ``live_catalogue(providers=...)`` — the mobile daemon's admission path, itself
-    a ``GET`` — takes ``connected`` from the caller's own set, so the engagement
-    view is discarded there. Computing it anyway bought one ``open_store()`` and a
-    possible broker spawn per phone request for an answer nothing read.
+    a ``GET`` — takes ``connected`` from the caller's own set, so the view is
+    discarded there. Computing it anyway bought this CALL one ``open_store()`` and a
+    possible broker spawn for an answer nothing read. The saving is the call's, not
+    the request's (the phone's own ``persisted_providers()`` opens the same store a
+    line earlier), and neither is what this test measures: the instrument is the
+    method itself, so the assertion is about the VIEW being computed, not about
+    the store never being opened on that path.
 
-    The instrument is the method itself: a spy proves the DESKTOP path still asks
-    (so this is not a test that passes by never exercising the code) and that the
-    ``providers=`` path does not.
+    The spy proves the DESKTOP path still asks (so this is not a test that passes
+    by never exercising the code) and that the ``providers=`` path does not.
     """
     from local_operator.providers.controller import ProviderController as _PC
 

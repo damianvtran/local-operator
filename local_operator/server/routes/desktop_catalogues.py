@@ -139,9 +139,10 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
             # The engagement view this route's live read fetches by is one extra
             # synchronous cost on the loop thread, and it belongs in this list for
             # the same reason the others do: `_engaged_providers` is one
-            # `open_store()` over the encrypted secret store (measured ~20.4 ms with
-            # a store on disk, ~0.09 ms without, against ~0.022 ms for
-            # `usable_providers()` alone), and on a host whose store exists with no
+            # `open_store()` over the encrypted secret store (measured ~8.6-20.4 ms
+            # with a store on disk, ~0.09 ms without, against ~0.018 ms for
+            # `usable_providers()` alone — medians of 25 calls each, isolated root,
+            # fleet host), and on a host whose store exists with no
             # broker listening it can start a secret-broker daemon. Bounded and small
             # beside the live fetch fan-out it feeds, and deliberately not memoised on
             # the controller -- the store can change between the two calls a request

@@ -1067,19 +1067,27 @@ def stored_provider_env_keys(base: Path | None = None) -> set[str]:
         return set()
     except TypeError:
         # A ROW whose SHAPE is wrong, rather than a store that cannot be read: the
-        # decryptor's ``bytes(row[4])``/``bytes(row[5])`` raises "string argument
-        # without an encoding" when a column that must hold a BLOB holds text
-        # instead — hand-tampering, or a record-header desync left by disk damage.
-        # Caught
-        # for the same reason as the sqlite family above (this reader's contract is
-        # "no provider rows I can see", never an error into a GET), and NOT because
-        # this is the right layer: the principled fix lives in
-        # ``secrets.store._decode``, which should validate that the byte columns
+        # decryptor's ``bytes(row[1])`` (``name_index``), ``bytes(row[4])``
+        # (``nonce``) and ``bytes(row[5])`` (``ciphertext``) each raise "string
+        # argument without an encoding" when a column that must hold a BLOB holds
+        # text instead — hand-tampering, or a record-header desync left by disk
+        # damage. Caught for the same reason as the sqlite family above (this
+        # reader's contract is "no provider rows I can see", never an error into a
+        # GET), and NOT because this is the right layer: the principled fix lives
+        # in ``secrets.store._decode``, which should validate that the byte columns
         # are bytes-like and raise ``SecretCorrupt`` so ``_enumerate`` reports the
         # row through ``damaged_records`` — the treatment ``_read_meta_int``
         # already got for the same class of hand-corrupted row. That is the
         # secrets layer's contract to keep, out of scope for a listing fix, and
         # recorded here rather than skipped (R3-1).
+        #
+        # THE PRICE of catching this broadly, stated because the ``ProgrammingError``
+        # clause directly above re-raises for the same reason: a ``TypeError``
+        # raised by a genuine BUG in the store's decode path, rather than by a
+        # malformed row, is now reported as "no provider rows I can see" instead
+        # of failing loudly. Round 3 accepted that trade knowingly (the alternative
+        # leaves a 500 standing on a GET); the row-level fix above is what removes
+        # the need for it.
         return set()
 
 

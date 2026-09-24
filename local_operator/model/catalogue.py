@@ -872,15 +872,18 @@ def invalidate(key: str, *, cache_dir: Path | None = None) -> None:
     payload -- when a document it just read yielded no usable rows.
 
     Also forgets the document's failure backoff
-    (:data:`LISTING_FAILURE_BACKOFF_S`), and that is what makes a REPAIR take
-    effect at once: login, logout, account removal and a re-pointed local endpoint
-    all reach this function through ``_invalidate_cached_listing`` →
-    ``invalidate_listing`` → :func:`invalidate_documents`. Leaving the window
-    standing there would answer a just-repaired connection with the previous
-    endpoint's failure for the rest of the window -- the one case the bound
-    promises not to hide. Not every credential write comes through here, and the
-    ones that do not (``PATCH /v1/credentials`` is the in-app one) are named on
-    :data:`LISTING_FAILURE_BACKOFF_S` rather than assumed away.
+    (:data:`LISTING_FAILURE_BACKOFF_S`) for the document it drops, which is why the
+    bound promises not to hide a repair. The REPAIR paths reach that same clearing
+    through ``_invalidate_cached_listing`` → ``invalidate_listing`` →
+    :func:`invalidate_documents` — the sibling that clears it by identity, and does
+    so WITHOUT this function: ``invalidate``'s only callers are ``discovery``'s
+    unusable-document drop and the price catalogue, neither of them a credential
+    path. Login, logout, account removal and a re-pointed local endpoint all take
+    the sibling, so a just-repaired connection is not answered with the previous
+    endpoint's failure for the rest of the window. Not every credential write
+    clears it even so, and the ones that do not (``PATCH /v1/credentials`` is the
+    in-app one) are named on :data:`LISTING_FAILURE_BACKOFF_S` rather than assumed
+    away.
     """
     path = _cache_path(key, cache_dir)
     _clear_failure(path)
