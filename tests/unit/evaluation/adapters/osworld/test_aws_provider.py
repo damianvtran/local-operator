@@ -42,6 +42,7 @@ from lop_osworld_v2_adapter.providers.aws import (
     ttl_seconds_for,
 )
 from lop_osworld_v2_adapter.providers.base import (
+    DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
     MAX_OBSERVATION_CAUSE,
     guest_deadline_for,
@@ -1647,6 +1648,61 @@ async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_
         assert (await provider.observe())["screenshot"] == b"png"
 
 
+@pytest.mark.asyncio
+async def test_the_settle_the_provider_sleeps_is_the_settle_the_harness_funds() -> None:
+    """The apparatus pause and the harness's paper settle are ONE number.
+
+    This value is declared twice by necessity, not by accident: this provider
+    owns the pause it applies, and the harness script -- which funds the paper
+    policy's ``execute`` deadline from it AND seals it in the episode manifest --
+    runs with this distribution NOT installed (``scripts/osworld_tag_audit.py``
+    documents that the harness does not install the adapter), so it cannot
+    import the constant and mirrors it in ``_ACTION_SETTLE_SECONDS``. A mirror
+    drifts silently, and in the worst direction available: a sealed bundle
+    asserting an apparatus settle the apparatus never slept, which no later
+    audit of that bundle can detect.
+
+    So this test is the binding, and it MEASURES the pause rather than reading
+    either constant: the default path's real sleep, the harness's mirror and the
+    sealed metadata are asserted to be the same number. It lives in this suite
+    because the measurement needs this package's stubs, and the adapter source
+    tree is on ``sys.path`` here (see conftest) while it is not in the runner's.
+    """
+
+    from scripts import run_episode
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(
+            CREDS,
+            region=REGION,
+            lease_ref="lop-ttl-settle-mirror",
+            clients=stubs.clients,
+            sleep=stubs.sleep,
+        )
+        env = _FakeEnv()
+        provider._env = env
+        provider._public_ip = "127.0.0.1"
+        await provider.execute([])
+
+    # The adapter builds the paid provider with no ``action_delay_s`` (see
+    # ``OSWorldV2Adapter._build_aws_provider``), so this is the pause every
+    # settled execute pays and the funded deadline has to cover. It is the seam
+    # name too: a default edited in ``aws.py`` without moving
+    # ``DEFAULT_ACTION_DELAY_S`` fails here rather than silently re-creating the
+    # second literal this test exists to prevent.
+    assert stubs.slept == [DEFAULT_ACTION_DELAY_S] == [run_episode._ACTION_SETTLE_SECONDS]
+
+    # The manifest's portable metadata subset has no floats, so the sealed value
+    # is an integer: comparing numerically is what makes a fractional delay
+    # (which would seal a truncated 3) fail here instead of passing on
+    # ``int(3.5) == 3``.
+    for policy in ("paper", "throughput"):
+        metadata = run_episode._infra_disclosure_metadata(
+            [f"OSWORLD_ACTION_SETTLE_POLICY={policy}"]
+        )
+        assert float(metadata["osworld_action_settle_seconds"]) == float(stubs.slept[0])
+
+
 class _OpaqueSimulatorValue:
     def __str__(self) -> str:
         raise AssertionError("private simulator objects must not be stringified")
@@ -1766,12 +1822,24 @@ async def test_real_aws_answer_never_publishes_coerced_values(
                 return result.model_copy(update={"metadata": metadata})
 
             async def _call_raw(
-                self, method: Any, params: Any, result_type: Any, *, timeout: float
+                self,
+                method: Any,
+                params: Any,
+                result_type: Any,
+                *,
+                timeout: float,
+                execution_overhead_seconds_per_action: float = 0.0,
             ) -> Any:
                 if method == "ask_user_exchange":
                     self.calls.append(method)
                     return await adapter.ask_user_exchange(params)
-                return await super()._call_raw(method, params, result_type, timeout=timeout)
+                return await super()._call_raw(
+                    method,
+                    params,
+                    result_type,
+                    timeout=timeout,
+                    execution_overhead_seconds_per_action=(execution_overhead_seconds_per_action),
+                )
 
         async def rescue(descriptor: Any, **kwargs: Any) -> Any:
             return SimpleNamespace(complete=True)
