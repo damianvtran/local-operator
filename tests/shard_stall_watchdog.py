@@ -124,18 +124,47 @@ the source AND about behaviour in
 
 WHERE IT IS ENABLED
 -------------------
-Only when ``LOCAL_OPERATOR_SHARD_STALL_SECONDS`` is set, which the ``test`` job
-in ``.github/workflows/ci.yml`` does and nothing else does. The default absence
-is what keeps a developer run and the ``-n0`` e2e stage (which has its own,
-tighter bound) untouched; it also means the number is a CI budget rather than a
-wall-clock assertion about anyone's machine, which is the only kind of number
-AGENTS.md allows to be calibrated from CI.
+``LOCAL_OPERATOR_SHARD_STALL_SECONDS`` is the named bound, and the ``test`` job
+in ``.github/workflows/ci.yml`` sets it. When it is absent the module falls back
+to :data:`LOCAL_DEFAULT_SECONDS` on a host that is not CI, because the same
+silence that costs a CI shard costs a local whole-tree run an evening: measured
+2026-09-24, a local run with no bound at all was watched by hand for four hours
+and killed mid-progress, and its log tail (a wall-clock ``timeout`` killing the
+group, then orphaned workers finishing their own ``pytest_sessionfinish`` against
+a dead channel) read exactly like the CI stall signature -- a ``PluggyTeardownRaisedWarning``
+and an ``OSError: cannot send (already closed?)`` with no test named. Nothing was
+stuck; nobody could tell that from the artefact. The local default is a REPORTING
+bound (:data:`LOCAL_DEFAULT_SECONDS` explains the number), and it stays off on CI
+that did not ask for it, which is what keeps the ``-n0`` e2e stage -- its own
+tighter bound, no worker branch -- out of it.
+
+THE OPT-IN PER-TEST HARD BOUND
+------------------------------
+Reporting alone cannot end a run that is genuinely parked, so the worker's C
+timer can be armed with ``exit=True`` instead: make the process die, and let
+xdist's own crash reporting name the item. That is OFF everywhere by default and
+the timers are report-only (``exit=False``) unless
+``LOCAL_OPERATOR_TEST_TIMEOUT_SECONDS`` asks for it, because a fired bound kills
+a worker carrying unrelated tests -- the same reason the e2e stage runs ``-n0``
+(see below). ``pytest-timeout`` is not a dependency here and is not added for
+this: :mod:`faulthandler` already has the only mechanism that survives the #401
+class of park, and it is the one this module is built on.
+
+The per-test bound is SIZED, never typed in: :func:`sized_bound_seconds` reads
+``tests/durations.json`` -- the same committed per-file weights the CI sharder
+balances on -- and allows :data:`BOUND_SLACK` times a whole FILE's measured total,
+floored at :data:`BOUND_FLOOR_S`. Read that as what it is: a hang catcher, not a
+slow-test detector. A single item cannot trip it unless it alone outran four
+times what its entire file was measured to cost, which is why it is safe against
+a legitimately slow test under fleet load and why it still catches a park (a park
+does not finish at all).
 """
 
 from __future__ import annotations
 
 import contextlib
 import faulthandler
+import json
 import math
 import os
 import sys
@@ -144,8 +173,56 @@ import time
 from pathlib import Path
 
 #: Seconds of NO COMPLETED TEST before the controller reports. Set by the shard
-#: job. Unset (and therefore inert) everywhere else.
+#: job; absent on a developer machine, where :func:`local_seconds` supplies the
+#: fallback above.
 ENV_SECONDS = "LOCAL_OPERATOR_SHARD_STALL_SECONDS"
+
+#: The local run's own bound, and its off switch. Absent on a local run means
+#: :data:`LOCAL_DEFAULT_SECONDS`; a value that means OFF disables the instrument
+#: entirely (no thread, no dump directory), which a debugger session needs.
+LOCAL_ENV_SECONDS = "LOCAL_OPERATOR_LOCAL_STALL_SECONDS"
+
+#: The bound a LOCAL run reports at when nothing overrides it: 900s (15 min) of
+#: no completed test.
+#:
+#: Sized ABOVE every legitimate item rather than tightly, because the cost of
+#: being too tight is a false alarm on a healthy run -- which is how a diagnostic
+#: gets switched off and then is not there when it matters. The reference point is
+#: AGENTS.md's own measurement: the worst legitimate test in a full local run is
+#: 81s, and this host runs the suite at load average 80-200, so even a 5x
+#: load-slowed item is ~400s. CI's 240s is NOT the local number and is not a
+#: candidate for one: it is priced against a 20-minute job cap that a local run
+#: does not have.
+LOCAL_DEFAULT_SECONDS = 900.0
+
+#: Opt-in per-test HARD bound (kills the process, naming the item through xdist's
+#: crash report). Unset -> report-only everywhere, which is also what CI runs.
+#: ``1``/``true``/``yes`` -> enable it, sized by :func:`sized_bound_seconds`; a
+#: positive number -> that many seconds for every test. See the module docstring.
+TEST_TIMEOUT_ENV = "LOCAL_OPERATOR_TEST_TIMEOUT_SECONDS"
+
+#: Values of an env flag that mean "not set" / "off". Same reading as the root
+#: conftest's ``_FALSY_ENV_VALUES``; kept in step with it by the guard in
+#: ``tests/unit/test_shard_stall_watchdog.py``.
+FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+#: The committed per-file weights the CI sharder balances on, reused here as the
+#: input to :func:`sized_bound_seconds`. It is measured on a developer machine
+#: (see the manifest's own comment), which is exactly the right calibration for a
+#: bound that has to hold on one.
+MANIFEST_PATH = Path(__file__).with_name("durations.json")
+
+#: How many times a whole FILE's measured total one item may take before the
+#: hard bound fires. 4x a file total is deliberately generous: the manifest is
+#: per FILE, so an item's own cost is not in the data, and the bound must not
+#: fail a test whose file was measured on an idle host while the fleet runs at
+#: load 200.
+BOUND_SLACK = 4.0
+
+#: Floor for the hard bound, in seconds: a file whose measured total is 1.5s still
+#: gets a bound in minutes, because a park is measured in minutes and a small
+#: file's tests still have to boot a Textual app.
+BOUND_FLOOR_S = 300.0
 
 #: Shared by every xdist worker and readable by the controller -- see the module
 #: docstring for why this is not a ``tmp_path`` fixture directory.
@@ -246,6 +323,109 @@ def enabled_seconds() -> float | None:
     return seconds
 
 
+def local_seconds(on_ci: bool) -> float | None:
+    """The stall bound a LOCAL run gets, or ``None`` when the instrument is off here.
+
+    Resolution, first match wins:
+
+    * ``LOCAL_OPERATOR_LOCAL_STALL_SECONDS`` parsing as a usable bound -> that
+      value.
+    * a value that means OFF (``0``/``false``/``no``/``off``) -> ``None``. The
+      off switch has to exist: this instrument now arms itself on every local
+      run, and an operator stepping through a debugger has tests that look
+      stalled for as long as they sit there.
+    * unset, on CI -> ``None``. A CI job that did not ask for the shard bound
+      stays exactly as inert as it was before this default existed. That is not
+      politeness: it is what keeps the ``-n0`` e2e stage (one process, its own
+      tighter bound) out of this module's worker branch, because CI's own
+      explicit value is the only thing that can enable it there.
+    * unset, not CI -> :data:`LOCAL_DEFAULT_SECONDS`.
+
+    ``on_ci`` is passed in rather than read here because the caller already owns
+    that judgement: the root conftest denies ``CI`` when its own bash tool set
+    it, so a subagent running the suite on the operator's laptop must NOT be told
+    it is on a dedicated runner -- a mistake that hook has made once already (see
+    ``_in_agent_shell`` in ``conftest.py``).
+    """
+    raw = os.environ.get(LOCAL_ENV_SECONDS, "").strip()
+    fallback = None if on_ci else LOCAL_DEFAULT_SECONDS
+    if raw:
+        if raw.lower() in FALSY_ENV_VALUES:
+            return None
+        try:
+            seconds = float(raw)
+        except ValueError:
+            return fallback
+        if not math.isfinite(seconds) or seconds <= 0 or seconds >= MAX_BOUND_S:
+            return fallback
+        return seconds
+    return fallback
+
+
+def _manifest_seconds(nodeid: str) -> float | None:
+    """The measured seconds of ``nodeid``'s FILE, or ``None`` when unknown.
+
+    Read through a fresh read rather than a cached import-time load: this runs
+    once per test start in a worker, the file is ~30 KB, and a run that someone
+    regenerates mid-suite (``scripts/gen_test_durations.py``) should be believed
+    rather than shadowed by a snapshot taken at process start. Any failure -- a
+    missing manifest, a malformed one, a file pytest is running but the manifest
+    does not mention -- is ``None``, i.e. "use the floor", never an exception
+    from inside a pytest hook.
+    """
+    path = nodeid.split("::", 1)[0]
+    try:
+        raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    durations = raw.get("durations") if isinstance(raw, dict) else None
+    if not isinstance(durations, dict):
+        return None
+    value = durations.get(path)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def sized_bound_seconds(nodeid: str) -> float:
+    """The per-test hard bound for ``nodeid``: :data:`BOUND_SLACK` x its file, floored.
+
+    See the module docstring for why the manifest is the right input and why the
+    answer is a hang catcher. The floor is what an unmeasured file gets, so a new
+    test file (or one the manifest is missing) is bounded rather than exempt.
+    """
+    measured = _manifest_seconds(nodeid)
+    if measured is None:
+        return BOUND_FLOOR_S
+    return max(BOUND_FLOOR_S, measured * BOUND_SLACK)
+
+
+def per_test_bound() -> tuple[float | None, bool] | None:
+    """The per-test HARD bound as ``(seconds, exit)``, or ``None`` when not asked for.
+
+    ``seconds`` is ``None`` for the sized bound (:func:`sized_bound_seconds`, one
+    bound per test file) and a number when the operator typed one in, which is the
+    escape hatch for someone who has already seen the sized bound misfire.
+
+    The bound kills the process that hits it -- that is its whole purpose, and the
+    only way to turn a park into a failure rather than a silence -- which is why
+    it is OFF unless asked for and why a malformed value resolves to ``None``
+    (report-only). Note the asymmetry with :func:`local_seconds`: an unparseable
+    LOCAL bound falls through to the local default, which only prints, while an
+    unparseable HARD bound falls back to not killing anything.
+    """
+    raw = os.environ.get(TEST_TIMEOUT_ENV, "").strip()
+    if not raw or raw.lower() in FALSY_ENV_VALUES:
+        return None
+    if raw.lower() in {"1", "true", "yes", "on"}:
+        return (None, True)
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(seconds) or seconds <= 0 or seconds >= MAX_BOUND_S:
+        return None
+    return (seconds, True)
+
+
 def _dump_path(tag: str) -> Path:
     """The dump path for ``tag``; best-effort ensures the directory.
 
@@ -278,8 +458,12 @@ class _WorkerTimer:
     became an ``INTERNALERROR``.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, hard: tuple[float | None, bool] | None = None) -> None:
         self.seconds = seconds
+        #: The opt-in per-test HARD bound, or ``None`` for the report-only default.
+        #: Captured at install for the same reason ``seconds`` is: the value is
+        #: known to be usable there, whereas ``note_start`` runs inside a hook.
+        self.hard = hard
         self._handle = None
         self._path = _dump_path(f"worker-{os.getpid()}")
         self._armed = False
@@ -287,35 +471,64 @@ class _WorkerTimer:
         # failed open once per test for the rest of the run.
         self._disabled = False
 
+    def bound_for(self, nodeid: str) -> tuple[float, bool]:
+        """The ``(seconds, exit)`` to arm for ``nodeid``.
+
+        ONE place decides this, because two things must agree on it: the timer,
+        and the arm-time header that records what the timer was armed at. A header
+        naming a bound the timer was not armed at is the mislabelling the report
+        filters exist to prevent (see :data:`ARM_MARKER`).
+        """
+        if self.hard is None:
+            return (self.seconds, False)
+        seconds, _exit = self.hard
+        return (sized_bound_seconds(nodeid) if seconds is None else seconds, True)
+
     def arm(self, nodeid: str) -> None:
         """Start the C timer for ``nodeid``; disable quietly if it cannot.
+
+        One arm per item, because :meth:`disarm` runs on that item's teardown: the
+        timer's unit really is one test, in both modes. That is also the price of
+        the instrument -- one ``faulthandler`` thread create/cancel pair per test,
+        which is why the LOCAL default announces itself rather than being silent.
+
+        Should an arm ever arrive while one is still running (a test that reported
+        no teardown, i.e. a crash or a park), the stale timer is cancelled first
+        rather than left beside the new one: ``faulthandler`` allows several timers
+        per process, and a leftover would dump against the WRONG item's header --
+        and in the opt-in hard mode it would kill the process on the previous
+        item's clock.
 
         Every failure here is swallowed rather than raised. This runs inside a
         pytest hook, so an exception is an ``INTERNALERROR`` that fails the
         shard -- the diagnostic is not allowed to be the reason a run goes red,
         and a run whose dump directory is unusable is still a run worth having.
 
-        ``OverflowError`` is in the tuple even though :func:`enabled_seconds`
-        already refuses a bound no timer can hold: the value can also arrive
-        here from a direct construction, and this is the one call whose failure
-        mode is the whole shard. Belt and braces, because the cost of the extra
-        name is zero and the cost of missing it is a red run.
+        ``OverflowError`` is in the tuple even though the resolvers already refuse
+        a bound no timer can hold: the value can also arrive here from a direct
+        construction, and this is the one call whose failure mode is the whole
+        shard. Belt and braces, because the cost of the extra name is zero and the
+        cost of missing it is a red run.
         """
-        if self._armed or self._disabled:
+        if self._disabled:
             return
+        bound, hard = self.bound_for(nodeid)
         try:
             # The handle must exist and stay open for the life of the process:
             # the dump is written from a C thread with a raw descriptor, so the
             # file cannot be opened at the moment it fires.
             if self._handle is None or self._handle.closed:
                 self._handle = self._path.open("w", encoding="utf-8")
-            self._handle.write(
-                f"{ARM_MARKER}{nodeid} exceeded {self.seconds:g}s; every thread follows.\n"
-            )
+            self._handle.write(f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n")
             self._handle.flush()
-            faulthandler.dump_traceback_later(
-                self.seconds, file=self._handle, repeat=True, exit=False
-            )
+            if self._armed:
+                faulthandler.cancel_dump_traceback_later()
+            # ``repeat`` is the difference between the two modes, not a detail: a
+            # report-only bound is a floor and wants a fresh snapshot every
+            # interval, while a hard bound ENDS the process on the first firing
+            # (there is nothing left to repeat with), which is also why the two
+            # cannot be requested together.
+            faulthandler.dump_traceback_later(bound, file=self._handle, repeat=not hard, exit=hard)
         except (OSError, ValueError, TypeError, OverflowError):
             self._disabled = True
             return
@@ -477,7 +690,33 @@ _CONTROLLER: _Controller | None = None
 _WORKER: _WorkerTimer | None = None
 
 
-def install(config) -> None:
+def _announce(seconds: float, hard: tuple[float | None, bool] | None, source: str) -> None:
+    """One stderr line saying this reporter turned ITSELF on, and how to stop it.
+
+    Printed only for the LOCAL default, never for an explicit value: a CI shard or
+    an operator who set the variable already knows, and a per-worker line would be
+    spam (every xdist worker imports this conftest). The silence knob is named in
+    the line itself, because an instrument that reports on a healthy run has to be
+    switchable off by the person reading it -- and never raises, for the same
+    reason nothing else here does.
+    """
+    with contextlib.suppress(Exception):
+        detail = "reporting only"
+        if hard is not None:
+            detail = (
+                "per-test hard bound ON, sized per file"
+                if hard[0] is None
+                else f"per-test hard bound {hard[0]:g}s"
+            )
+        print(
+            f"{source} report: ON ({seconds:g}s of no completed test), {detail}. "
+            f"Silence it with {LOCAL_ENV_SECONDS}=0.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def install(config, on_ci: bool = False) -> None:
     """Wire the module up in whichever process this is. Idempotent.
 
     ``hasattr(config, "workerinput")`` is xdist's own discriminator between a
@@ -485,17 +724,30 @@ def install(config) -> None:
     a session exists -- the two processes need different instrumentation (one
     watches, the other is watched), so the branch has to happen here rather
     than inside a hook.
+
+    Only a WORKER ever arms a C timer, which is the invariant that keeps this
+    module out of the e2e stage's way: that stage runs ``-n0`` (no worker
+    process exists) with its own ``tests/e2e/watchdog`` timer, and
+    ``faulthandler``'s timer is process-global.
     """
     global _CONTROLLER, _WORKER
     seconds = enabled_seconds()
+    # Announced only when the fallback -- rather than an explicit bound -- is what
+    # enabled this, so a CI shard and a set variable stay silent.
+    local_default = seconds is None
+    if local_default:
+        seconds = local_seconds(on_ci)
     if seconds is None:
         return
+    hard = per_test_bound()
     if hasattr(config, "workerinput"):
         if _WORKER is None:
-            _WORKER = _WorkerTimer(seconds)
+            _WORKER = _WorkerTimer(seconds, hard)
     elif _CONTROLLER is None:
         _CONTROLLER = _Controller(seconds)
         _CONTROLLER.start()
+        if local_default:
+            _announce(seconds, hard, "local stall")
 
 
 def note_start(nodeid: str) -> None:
