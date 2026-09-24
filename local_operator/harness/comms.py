@@ -927,7 +927,18 @@ class RosterPass:
             # job row) is exactly the precedence this field wants, and having
             # one derivation means the roster and the node can no longer
             # disagree about the same child.
-            status=self.describe(record).status,
+            #
+            # ``_lifecycle`` DIRECTLY, not ``self.describe(record).status``:
+            # ``describe`` returns ``_lifecycle``'s status unchanged on every
+            # arm (``test_node_status_is_describes_status_for_every_arm`` pins
+            # that), and everything else it computes -- the resumable verdict,
+            # with its transcript ``stat()`` and twin lookup -- is thrown away
+            # here. ``nodes()`` runs per root event on the runtime host and per
+            # roster tick, so over a 128-record registry that discarded verdict
+            # was 128 filesystem probes per event on the loop every child
+            # shares (measured: ``scripts/bench_subagent_fanout.py --history``).
+            # ``status_counts`` already reads the status this way.
+            status=_lifecycle(record, self.job_row(record), self.is_running(record))[0],
             result_text=record.result_text or "",
             error_text=record.error_text or "",
         )
