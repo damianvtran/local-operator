@@ -2354,7 +2354,65 @@ _HANDSHAKE_ANSWERED_WORDS = "it answered, and the listing ran out of time before
 #: on a human line. A peer's own refusal message is the one arrival in this field
 #: this device did not write, and its single-word form reads the same way — as that
 #: peer's own refusal, which is what it is.
+#:
+#: A refusal raised on THIS device before the far one is involved — ``secrets_missing``
+#: and ``no_network_secret``, which ``store.require_secrets`` raises — reaches this
+#: field through the same fallback and is deliberately NOT in this family: the fault is
+#: ours, and "the link was refused" is a claim about the other machine (round 11's
+#: R11-6, where the pre-fix raw code at least named a local one). Those two have their
+#: own entries in the table below.
 _BARE_CODE_WORDS = "the link was refused"
+
+#: The stage words whose tail reports an address that ANSWERED before OUR clock
+#: expired — the listing's own (``relay.HANDSHAKE_NOT_ATTEMPTED``) and the spelling a
+#: relay started before round 24 wrote into a DOCTOR ``detail``, which a member row
+#: can still be handed (round 11, Q-R25-3). Generic across the two because they name
+#: one state and only the clock differs (round 24, Q-R24-2).
+#:
+#: ``not_attempted`` is in this set AND is a member-level PROSE producer
+#: (``relay.NOT_ATTEMPTED_REASON``, which says nothing was dialled): the set is only
+#: ever consulted for a tail that NAMES AN ENDPOINT, and that producer's tail does
+#: not, so its sentence survives while the doctor's address-bearing one does not.
+_ANSWERED_STAGES = frozenset({"handshake_not_attempted", "not_attempted"})
+
+#: A ``host:port`` (or a bracketed IPv6 ``[::1]:port``) as a whitespace-separated
+#: field. THE SHAPE OF THE THING A HUMAN LINE MUST NOT CARRY: the relay's prose
+#: reasons embed the endpoint that answered, and the addresses a candidate list
+#: carries are the other half of the same leak (see :func:`_names_an_endpoint`).
+_ENDPOINT_FIELD = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._-]+):\d{1,5}$")
+
+
+def _names_an_endpoint(text: str) -> bool:
+    """Does this text name a concrete ``host:port`` rather than describe a state?
+
+    THE SECOND DISCRIMINATOR, for prose the wire-token test cannot judge. A tail with
+    no ``;``-segment ending in a probe detail is not a machine list, but it is not
+    automatically fit to print either: the relay's own ``handshake_not_attempted``
+    sentences embed the endpoint that ANSWERED, and a member row can be handed the
+    doctor's pre-round-24 spelling of the same state (round 11, Q-R25-3). Neither is a
+    list, and both would put an address on a human line.
+
+    A bare hostname is deliberately NOT an endpoint here: hosts are advertised
+    verbatim and unvalidated, so ``host-a`` is as likely to be an English word as an
+    address, and a false positive would gloss a sentence that is safe to read. A
+    ``host:port`` is a dialable address and nothing else in these fields is — which
+    is also why the port must be present for this to fire.
+    """
+    return any(_ENDPOINT_FIELD.match(field) for field in text.split())
+
+
+#: The first N characters of a device id, for the sentences that have to name one.
+#: The TUI's peer table abbreviates to the same width (``network_panel.short_id``,
+#: whose prefix-carrying rationale this follows): a prefix is what makes two ids
+#: comparable, and the 34-character whole is a wall on a line a person reads.
+DEVICE_ID_CELLS = 12
+
+
+def short_device_id(device_id: str) -> str:
+    """One device id abbreviated for a human sentence. See :data:`DEVICE_ID_CELLS`."""
+    value = str(device_id or "")
+    return value[:DEVICE_ID_CELLS] if len(value) > DEVICE_ID_CELLS else value
+
 
 #: The relay's ``reason`` tokens, in the words a person reads. See
 #: :func:`peer_reason_words` for why the token itself is not the answer.
@@ -2374,6 +2432,15 @@ PEER_REASON_WORDS: dict[str, str] = {
     "no_answer": _NO_ADDRESS_ANSWERED,
     "not_attempted": "the listing ran out of time before it was tried",
     "bad_endpoint": "the address it publishes cannot be dialled",
+    # THIS DEVICE'S OWN FAULT, NOT THE PEER'S (round 11, R11-6). ``relay.dial``
+    # returns the CODE of a ``MeshRefusal`` raised HERE — ``store.require_secrets``
+    # refuses before the far device is involved at all — and the bare-code fallback
+    # read those as "the link was refused", a claim about the other machine where the
+    # missing thing is ours. Two codes, because the store names two states: a secrets
+    # file whose key is unusable, and no secrets file at all (the post-``disconnect``
+    # / ``rm`` state).
+    "secrets_missing": "this device's network secret is unusable",
+    "no_network_secret": "this device no longer holds that network's secret",
 }
 
 
@@ -2422,7 +2489,18 @@ def _carries_wire_tokens(tail: str) -> bool:
     segments = [segment for segment in tail.split(";") if segment.strip()]
     if not segments:
         return False
-    return all(_segment_ends_in_wire_detail(segment) for segment in segments)
+    # ANY, NOT ALL — THE RULE FAILS CLOSED (round 11, R11-2). It used to require
+    # EVERY segment to end in a detail, so one unrecognised segment handed the whole
+    # tail back as prose. That is unsound because SEGMENTATION IS NOT SOUND: an
+    # endpoint is operator config (``advertise_hosts``) or a peer's handshake
+    # ``peer_endpoints``, stored verbatim and unvalidated at both write points, so
+    # one ``;`` inside an address splits an ``<endpoint> <detail>`` pair in two and
+    # leaves a segment whose last field is an address — whereupon the old rule read a
+    # genuine machine list as prose and printed addresses and class names to a person.
+    # With ANY, one recognisable pair is enough to read the tail as wire, which costs
+    # at most a sentence on a tail that mixes prose with wire content (the blander
+    # direction this function documents as deliberate) and never an address.
+    return any(_segment_ends_in_wire_detail(segment) for segment in segments)
 
 
 def _segment_ends_in_wire_detail(segment: str) -> bool:
@@ -2505,6 +2583,15 @@ def peer_reason_words(reason: str) -> str:
     The tests walk that vocabulary from the source, so a code added without a reading
     fails them.
 
+    A SENTENCE IS ONLY RETURNED WHEN IT IS SAFE TO PRINT, and that is a second test
+    rather than a consequence of the first (round 11, Q-R25-3 and R11-2): a tail
+    that is not a machine list can still NAME AN ADDRESS — the relay writes the
+    endpoint that answered into two of its own sentences — so it is glossed rather
+    than handed over, and the machine-list test itself fails CLOSED for an endpoint
+    carrying a ``;`` (:func:`_carries_wire_tokens`). Reading a leak as prose is the
+    failure this function exists to prevent; reading ordinary prose as a leak costs
+    one blunter sentence, and the docstrings of both tests say so.
+
     Prefix-matched on the stage before the ``:`` rather than on the exception
     class, because the tail is whatever the dial raised: a vocabulary of Python
     class names would be a second registry to keep, and the distinction a reader
@@ -2558,6 +2645,17 @@ def peer_reason_words(reason: str) -> str:
         # ``pair_phase_requires_the_ceremony`` are the latter, and neither means
         # silence — the peer answered and refused — so they may not fall to the
         # "nothing answered" default below.
+        #
+        # THE TWO STAGE WORDS ARE READ FIRST (round 11, R11-4). They are bare
+        # identifiers, so the fallback matched them before any arm written for them
+        # could: the stage word that means "every address was tried and none of them
+        # answered" read as a REFUSAL — the opposite state, and the very inversion
+        # Q-R24-1 was raised for one line up — while the arm for it sat below,
+        # permanently unreachable. Neither word is a refusal.
+        if token == "unreachable":
+            return _NO_ADDRESS_ANSWERED
+        if token == "connect_failed":
+            return "it did not answer"
         return _BARE_CODE_WORDS if _is_bare_code(token) else token
     if " " in tail.strip():
         # A tail containing a space is EITHER the compound failure list or a
@@ -2569,16 +2667,30 @@ def peer_reason_words(reason: str) -> str:
         # failed candidates IS "none of its addresses answered".
         if _carries_wire_tokens(tail):
             return _NO_ADDRESS_ANSWERED
+        if _names_an_endpoint(tail) or _names_an_endpoint(token):
+            # PROSE THAT NAMES AN ADDRESS IS STILL NOT FIT TO PRINT (round 11,
+            # Q-R25-3). A ``stage: <sentence>`` whose sentence embeds the endpoint
+            # that answered is the doctor's PRE-round-24 spelling of the same state,
+            # which an old stored reason or a peer on an older build can still hand
+            # this register. The address is the only part of that tail a reader
+            # cannot use — the row is about the DEVICE, and the endpoint's own column
+            # is where an address belongs. The state the producers of that spelling
+            # report is an address that ANSWERED; any other stage keeps the module's
+            # own default rather than claiming that state on a stranger's behalf.
+            #
+            # The WHOLE TOKEN is tested as well as the tail, because a malformed
+            # arrival can put the address on the left of the first colon (``partition``
+            # splits at the first one, which is inside ``host:port``).
+            if stage in _ANSWERED_STAGES:
+                return _HANDSHAKE_ANSWERED_WORDS
+            return "it did not answer"
         return tail.strip()
     if stage == "connect_failed":
         return "it did not answer"
-    if stage == "unreachable":
-        # Every address this member declared was tried and none of them answered,
-        # reported as the bare stage word because they all failed the same way.
-        return _NO_ADDRESS_ANSWERED
     # The default is also the answer for a stage whose tail names a failure this
     # module has never seen: an unreadable reason is still "it did not answer" to
-    # the person reading the row.
+    # the person reading the row, and a claim about the peer's state is never
+    # invented out of a tail this module cannot read.
     return "it did not answer"
 
 
@@ -2639,6 +2751,12 @@ DOCTOR_DETAIL_WORDS: dict[str, str] = {
     "not_attempted": "the doctor ran out of time before this address was tried",
     "no_answer": _DOCTOR_NOTHING_ANSWERED,
     "bad_endpoint": "the address it publishes cannot be dialled",
+    # THIS DEVICE'S OWN FAULT, NOT THE PEER'S (round 11, R11-6): the same two codes
+    # ``relay.dial`` returns for a ``MeshRefusal`` raised HERE (``store.require_secrets``)
+    # before the far device is involved. A row whose subject is an address still must
+    # not say "the link was refused" about a fault on this machine.
+    "secrets_missing": PEER_REASON_WORDS["secrets_missing"],
+    "no_network_secret": PEER_REASON_WORDS["no_network_secret"],
 }
 
 
@@ -2702,12 +2820,93 @@ def doctor_detail_words(detail: str) -> str:
     if stage == "handshake_refused":
         # Written only on a socket that CONNECTED (``relay.handshake_refused_reason``).
         return _BARE_CODE_WORDS
-    if stage == "handshake_not_attempted" or (stage == "not_attempted" and tail.strip()):
-        # The second spelling is a relay started before this build; see the docstring.
+    if stage == "handshake_not_attempted" or (
+        stage == "not_attempted" and _names_an_endpoint(tail)
+    ):
+        # The second spelling is a relay started before this build, and it is told
+        # apart from the MEMBER's own ``not_attempted`` sentence — which says the
+        # opposite, that nothing was dialled — by the address it embeds, not by its
+        # stage word alone (round 11; QA round 25's Q-R25-3 fixes the same collision
+        # in the member table).
         return _DOCTOR_HANDSHAKE_ANSWERED_WORDS
+    if stage == "not_attempted":
+        # The member's own sentence, in a doctor field: an address that was never
+        # dialled reads as the doctor's own reading for that state rather than as the
+        # "it answered" claim above or the blunter default below.
+        return DOCTOR_DETAIL_WORDS["not_attempted"]
+    # FAIL CLOSED FOR A STAGE WORD THIS BUILD DOES NOT KNOW (round 11, R11-5, and
+    # QA round 25's Q-R25-2). A ``stage:tail`` whose stage is a WIRE IDENTIFIER is a
+    # shape this build's own producers do not write: every prose arrival in this
+    # field (the membership sentence, the local fallback's ``not probed: …``) has an
+    # English stage with a space in it, and each of the wire stages is an arm above.
+    # So an identifier stage with a tail is evidence of a producer this build cannot
+    # read, and the row gets the blunter sentence rather than the token. Without this
+    # the arm below handed an unrecognised shape back VERBATIM — QA round 25 fed it a
+    # compound machine list and got the list back whole, addresses and exception
+    # class names included, which is the same round-10 leak one table over — and it
+    # would equally hand back the next ``stage:<Class>`` a later build writes.
+    if _is_bare_code(stage):
+        return _DOCTOR_NOTHING_ANSWERED
     # A sentence this device did not write — the membership sentence, the local
     # fallback's "not probed: …" — is already prose for a reader, and every sentence
     # the doctor writes itself is an arm above this line.
+    return token
+
+
+#: The membership TABLE's own ``reason`` tokens, in the words a person reads.
+#:
+#: A THIRD TABLE, because this is a third vocabulary: a ``MembershipReport.silent``
+#: row is neither a peer reason nor a doctor detail — it answers "why did that
+#: member's TABLE not arrive?" — and it reached ``lop network ls``/``show`` (and the
+#: agent tool's digest of the same JSON, and the TUI through the same CLI) as a raw
+#: token beside the member's 34-character device id. It is Step 1 of round 11's own
+#: enumeration, and none of rounds 9-11 named it: the sweep counted the surfaces that
+#: render a PEER's reason and missed the ones that render a MEMBERSHIP row's.
+#: See :func:`table_reason_words` for the readings and what holds them.
+TABLE_REASON_WORDS: dict[str, str] = {
+    "no_live_link": "nothing is connected to it",
+}
+
+#: The one reading a table reason gets when this build cannot read it: blunter than
+#: the truth, and never the token. ``no_table:<why>`` is the producer's own spelling
+#: for "the read failed"; the ``why`` is the relay's error word, which is the part a
+#: reader does not act on.
+_TABLE_READ_FAILED = "it did not answer the table read"
+
+
+def table_reason_words(reason: str) -> str:
+    """One membership-table ``reason``, in the words a person reads. Never a token.
+
+    The producers are ``relay.RelayServer.refresh_membership``'s three:
+    ``no_live_link`` (this device holds no live link to that member), ``no_table:<why>``
+    (a link, and a read that failed) and ``not_asked: <sentence>`` (the refresh budget
+    expired before that member's turn — already a sentence, written for a reader).
+
+    THE SAME FAIL-CLOSED DIRECTION AS :func:`peer_reason_words`, for the same reason: a
+    shape this module does not recognise gets the blunter sentence rather than the
+    string, because the string is a machine token and the field has no
+    human-rendering contract of its own. A tail that is prose is returned as written —
+    unless it NAMES AN ADDRESS (:func:`_names_an_endpoint`), which is the one thing a
+    membership line must not carry, since the row it is on already names the device.
+    """
+    token = (reason or "").strip()
+    if not token:
+        return _TABLE_READ_FAILED
+    # THE WHOLE TOKEN FIRST: ``partition`` splits at the FIRST colon, which is inside a
+    # ``host:port``, so a sentence that names an address must be judged before that
+    # split rather than on whatever ends up in the tail.
+    if _names_an_endpoint(token):
+        return _TABLE_READ_FAILED
+    if token in TABLE_REASON_WORDS:
+        return TABLE_REASON_WORDS[token]
+    _stage, sep, tail = token.partition(":")
+    if sep and " " in tail.strip():
+        # ``not_asked: <sentence>`` — the relay wrote this tail for a reader.
+        return tail.strip()
+    if sep or _is_bare_code(token):
+        # ``no_table:<why>``, and any other token of this shape: the stage is the
+        # fact, the ``why`` is the relay's own error word.
+        return _TABLE_READ_FAILED
     return token
 
 

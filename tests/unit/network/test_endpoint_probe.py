@@ -43,10 +43,13 @@ than by loosening an assertion, because a test that cannot fail is not evidence:
 
 from __future__ import annotations
 
+import ast
+import inspect
+import re
 import socket
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -341,6 +344,18 @@ def test_every_code_the_doctor_can_print_has_a_reading_too() -> None:
             continue
         assert words != code, code
         assert ":" not in words and "_" not in words, (code, words)
+        # AND THE READING IS A STATED ONE, NOT THE FALLBACK (round 11, R11-1).
+        # "Something other than the code" is satisfied by the bare-code fallback —
+        # "the link was refused" — which is a sentence about a REFUSED link and
+        # simply the wrong one for a code nobody stated. Measured on `ad8102cf`:
+        # adding a fresh code to `DOCTOR_DETAIL_CODES` left this test GREEN while
+        # ``doctor_detail_words(that_code)`` read "the link was refused", i.e. the
+        # same invented refusal Q-R24-1 was raised for, one door along. The member
+        # table's own guard has asserted membership since round 10 (see
+        # ``test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person``); this is
+        # that same line, and it is the only thing that makes the comment on
+        # ``relay.DOCTOR_DETAIL_CODES`` true.
+        assert code in resume.DOCTOR_DETAIL_WORDS, code
     # The prefixed arrivals, each built by the producer that writes it rather than
     # typed here: the class name is what the reader is spared and ``--json`` keeps.
     for exc in (TimeoutError(), ConnectionRefusedError(), ConnectionResetError("closed")):
@@ -382,6 +397,150 @@ def test_every_code_the_doctor_can_print_has_a_reading_too() -> None:
     elsewhere = resume.doctor_detail_words(relay.doctor_link_elsewhere_detail("127.0.0.1:64994"))
     assert elsewhere == resume._DOCTOR_LINK_ELSEWHERE_WORDS, elsewhere  # noqa: SLF001
     assert "127.0.0.1" not in elsewhere, elsewhere
+
+
+def test_the_doctor_table_fails_closed_on_a_shape_it_does_not_know() -> None:
+    """Round 11 (R11-5) and QA round 25 (Q-R25-2): the last arm is not a print.
+
+    ``doctor_detail_words`` ended in ``return token``, so any ``stage:tail`` this
+    build did not recognise reached a person verbatim. Two shapes exercise it and
+    both are built by their real producers rather than typed: the COMPOUND machine
+    list round 10 taught the member table to gloss (fed to the doctor here — QA round
+    25 could not reach it from a live doctor producer, which is why it was filed
+    latent, and it is still the same fall-through), and a stage word no build knows.
+
+    The other half is the sentences that MUST survive, because they are the reason
+    the arm cannot simply be a gloss: the membership sentence and the local
+    fallback's ``not probed: …`` are prose this device writes for a reader, and their
+    stages are English with a space in them — which is exactly the property the
+    fail-closed test keys on.
+    """
+    import local_operator.resume as resume
+
+    compound = relay.probe_reason(
+        [
+            relay.CandidateAttempt("10.255.255.1:9", False, "connect_failed:TimeoutError"),
+            relay.CandidateAttempt(
+                "127.0.0.1:64996", False, "connect_failed:ConnectionRefusedError"
+            ),
+        ]
+    )
+    assert ";" in compound, compound  # the shape under test, from its own producer
+    read = resume.doctor_detail_words(compound)
+    assert read == resume._DOCTOR_NOTHING_ANSWERED, read  # noqa: SLF001
+    for leaked in ("127.0.0.1", "10.255.255.1", "TimeoutError", "ConnectionRefusedError"):
+        assert leaked not in read, (leaked, read)
+    # A stage word this build has never seen, with a tail: the same direction.
+    unknown = resume.doctor_detail_words("epoch_skew:ConnectionError")
+    assert unknown == resume._DOCTOR_NOTHING_ANSWERED, unknown  # noqa: SLF001
+    assert "epoch_skew" not in unknown and "ConnectionError" not in unknown, unknown
+    # AND THE PROSE SURVIVES, both producers, byte for byte.
+    assert (
+        resume.doctor_detail_words(
+            "not probed: no relay is running on this device, so nothing here can dial"
+        )
+        == "not probed: no relay is running on this device, so nothing here can dial"
+    )
+    membership = (
+        "peers are refusing this device's handshakes into qa-net: every attempt "
+        "reaches the peer and is closed during the handshake with no reason given"
+    )
+    assert resume.doctor_detail_words(membership) == membership
+
+
+def test_a_local_refusal_never_reads_as_the_peers_refusal() -> None:
+    """Round 11, R11-6: the bare-code fallback blamed the wrong machine.
+
+    ``relay.dial`` returns the CODE of a ``MeshRefusal`` raised on THIS device —
+    ``store.require_secrets`` refuses before the far device is involved at all — and
+    the fallback read those as "the link was refused": a claim about the other
+    machine where the missing thing is ours. The codes are read out of the producer's
+    own source rather than typed, so the test covers the family the store raises
+    instead of the two names this round happened to know.
+    """
+    import local_operator.resume as resume
+
+    # ``require_secrets`` delegates the read to ``load_secrets``, and the two codes
+    # this test is about are raised one in each: scan both, so the set is the
+    # producer's rather than the one function this round happened to open.
+    raise_ = inspect.getsource(store.require_secrets) + inspect.getsource(store.load_secrets)
+    codes = set(re.findall(r'raise MeshRefusal\(\s*\n?\s*"([a-z_]+)"', raise_))
+    assert codes == {"secrets_missing", "no_network_secret"}, codes
+    for code in sorted(codes):
+        words = resume.peer_reason_words(code)
+        assert words == resume.PEER_REASON_WORDS[code], (code, words)
+        assert words != resume._BARE_CODE_WORDS, (code, words)  # noqa: SLF001
+        # The same reading in the doctor's register, for a row whose subject is an
+        # address: the fault is still this device's.
+        assert resume.doctor_detail_words(code) == words, code
+
+
+def test_every_write_site_spells_its_probe_detail_from_the_closed_set() -> None:
+    """Round 11, R11-3: the WRITE side of the vocabulary is a check, not a convention.
+
+    The reader's guards enumerate the vocabulary from source, but nothing failed if a
+    new ``_AttemptOutcome`` detail appeared with no reading: the recognition turns on
+    :func:`relay.is_probe_detail`, so a detail outside the set is not recognised as a
+    list segment at all — which is how a machine list becomes prose (R11-2's leak with
+    a different door). So the AST of the module that writes these rows is walked and
+    every detail argument is resolved against the closed set: a ``Name`` is looked up
+    in the module and must satisfy ``is_probe_detail``, and an f-string must be the
+    ``connect_failed:<Class>`` family, whose prefix is asserted to be the one the
+    recognition admits. A literal string there fails, which is the shape a new code
+    would be written in.
+
+    A value PASSED THROUGH from another ``_AttemptOutcome`` is the one argument that
+    is allowed not to be a name into the set, and it is named as such rather than
+    waved through: the site that produced it is checked here too.
+    """
+    module_path = Path(relay.__file__)
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    members = vars(relay)
+    sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in ("_AttemptOutcome", "CandidateAttempt"):
+            continue
+        detail = next((kw.value for kw in node.keywords if kw.arg == "detail"), None)
+        if detail is None and len(node.args) >= 3:
+            detail = node.args[2]
+        assert detail is not None, f"{node.func.id} at line {node.lineno} writes no detail"
+        sites += 1
+        _assert_detail_is_written(node, detail, members, module_path)
+    # A truncated walk is not evidence: the module has six detail-writing call sites
+    # (four ``_AttemptOutcome``, two ``CandidateAttempt``) and the guard proves it saw
+    # them rather than proving it saw something.
+    assert sites >= 6, sites
+
+
+def _assert_detail_is_written(
+    node: ast.Call, detail: ast.AST, members: Mapping[str, object], module_path: object
+) -> None:
+    """One detail argument, resolved against ``relay.is_probe_detail``."""
+    where = f"{module_path}:{node.lineno}"
+    if isinstance(detail, ast.IfExp):
+        # ``DETAIL_X if cond else DETAIL_Y`` — every branch is a write site.
+        _assert_detail_is_written(node, detail.body, members, module_path)
+        _assert_detail_is_written(node, detail.orelse, members, module_path)
+        return
+    if isinstance(detail, ast.Name):
+        assert detail.id in members, f"{where}: {detail.id} is not a module constant"
+        value = members[detail.id]
+        assert isinstance(value, str) and relay.is_probe_detail(value), f"{where}: {detail.id}"
+        return
+    if isinstance(detail, ast.JoinedStr):
+        first = detail.values[0] if detail.values else None
+        inner = first.value if isinstance(first, ast.FormattedValue) else None
+        assert isinstance(inner, ast.Name) and inner.id == "CONNECT_FAILED_PREFIX", where
+        assert relay.is_probe_detail(f"{relay.CONNECT_FAILED_PREFIX}Anything"), where
+        return
+    if isinstance(detail, ast.Attribute):
+        # A passthrough from an ``_AttemptOutcome``: the site that wrote it is a
+        # ``_AttemptOutcome`` call, and those are checked by this same walk.
+        assert detail.attr == "detail", where
+        return
+    raise AssertionError(f"{where}: a detail written as {ast.dump(detail)[:60]}")
 
 
 # ---------------------------------------------------------------------------

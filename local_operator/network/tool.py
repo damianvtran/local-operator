@@ -370,9 +370,29 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         rows = payload.get("peers") or []
         if not rows:
             return ["no peers: this device is the only member of its networks"]
+        # THE WORDS, NOT THE TOKEN (round 11, R11-0; QA round 25, Q-R25-1). This
+        # branch printed the row's raw ``reason`` — a stage word, two endpoint
+        # addresses and a Python class name — beside the 34-character device id, on a
+        # digest the model reads the way a person reads `lop network peers`. The
+        # ``doctor`` branch of this same function was already routed through its own
+        # gloss for exactly that reason, and the asymmetry inside one function is what
+        # round 11 filed: a sweep that counted the CLI and the TUI and stopped one
+        # branch short of the agent's own digest. The gloss is the SHARED one (the
+        # member table ``_peer_line`` reads, so a peer is described in one voice on
+        # every surface), and the id is replaced by the NAME every other surface
+        # addresses a peer by (``resume.UNNAMED_DEVICE`` when it has none, design
+        # round 1 D8). Both the token and the id stay in this tool's ``details``, which
+        # is the machine register.
+        from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
+
         return [
             f"{'reachable' if row.get('reachable') else 'unreachable':11} "
-            f"{row.get('device_id')}  {row.get('name')}  {row.get('reason', '')}".rstrip()
+            f"{str(row.get('name') or '').strip() or UNNAMED_DEVICE}"
+            + (
+                ""
+                if row.get("reachable")
+                else f"  {peer_reason_words(str(row.get('reason') or ''))}"
+            )
             for row in rows
         ]
     if action == "doctor":
