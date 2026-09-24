@@ -871,6 +871,13 @@ _FRONTEND_LOCAL_SLASHES = {
     # and `/theme` make about config.yml. Routed to the runtime it would offer a
     # remote host's directories to someone who cannot see them, and move a
     # session into a path that may not exist here at all.
+    #
+    # The MOBILITY form (`/move … --to <peer|local>`) is frontend-local for a
+    # second reason of its own: it runs `lop sessions move` against THIS device's
+    # relay, and the session it moves is often the one this terminal must first
+    # LEAVE (an attached viewer blocks the owner's exclusive retire). Routed to
+    # the runtime it would ask the session to move itself out from under the
+    # socket carrying the request.
     "move",
     # A fork opens a window on THIS machine and reads THIS machine's config.yml
     # for where to put it — the same argument `/settings` and `/theme` make. On a

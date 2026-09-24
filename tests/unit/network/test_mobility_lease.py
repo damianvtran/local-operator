@@ -121,3 +121,38 @@ def test_a_move_of_a_session_a_recordless_process_holds_is_refused_then_succeeds
     assert moved["ok"] is True, moved
     assert not source.exists()
     assert _transcript(server_b.root, SESSION) == before
+
+
+def test_the_tui_runner_drives_the_real_cli_and_parses_the_contract(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """Slice V: ``/move --to`` runs ``lop sessions move … --json`` as a SUBPROCESS.
+
+    Nothing stubbed between the TUI's runner and the relay: the child is the real
+    CLI, resolving this device's relay from the ambient config dir exactly as a
+    user's `lop` does, and what comes back is the frozen contract the TUI renders.
+    """
+    from local_operator.tui.session_move import run_session_move
+
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="admin")
+    _owned_session(server_a)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
+
+    result = run_session_move(SESSION, "local")
+
+    assert result["ok"] is True, result
+    assert [item["phase"] for item in result["phases"]] == [
+        "prepared",
+        "handing_off",
+        "committed",
+        "done",
+    ]
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+
+    # AND A REFUSAL ARRIVES IN THE SAME SHAPE: moving it home again is refused by
+    # name, and nothing changed.
+    again = run_session_move(SESSION, "local")
+    assert again["ok"] is False, again
+    assert again.get("changed") is False, again
+    assert again.get("message"), again

@@ -328,6 +328,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # a setting rather than words the model is given, and the receipt names the
     # directory that ended up in force — strictly more than the typed words,
     # which may have been `~/x` or a relative path the app resolved.
+    #
+    # TWO GRAMMARS UNDER ONE WORD, and that is a documented decision rather than
+    # drift (``mesh-ui.md`` §1.7): `/move <path>` changes the working directory,
+    # `/move [<session>] --to <peer|local> [--keep]` moves a SESSION between
+    # devices. The discriminant is the presence of `--to` and nothing else
+    # (``tui/session_move.parse_move_to``). A THIRD meaning would be the design
+    # smell §1.7 names — give it its own command instead. The description below
+    # stays the path form's: it is the one every install has, and the mesh form
+    # is taught where the mesh is (`/network`, the design's §1.6 strings).
     SlashCommand(
         "move",
         # Names the two ways to answer it, because the argument form is the
