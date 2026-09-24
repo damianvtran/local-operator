@@ -459,6 +459,31 @@ TYPE_ANNOTATION_POSITIVES: tuple[Case, ...] = (
         "SESSION" + "_TOKEN=" + "Camel" + "::" + "Word9",
         "the same convention violation with a digit-carrying leaf",
     ),
+    # --- the R3-1 class: a credential-stem base that is QUALIFIED, or reference-marked ---
+    # ``_base_is_a_credential_stem`` read the WHOLE base, so a module-qualified spelling hid
+    # the stem behind a path and the entire class — 5 module prefixes x 12 stem leaves x 6
+    # argument shapes — was released with no hit, on spellings that mask at ``origin/main``.
+    # That is the FOURTH round on this clause: R1-1 was a digit position, R1-2 and R2-1 read
+    # the ARGUMENT where the fact was the base, R3-1 read the WHOLE BASE where the fact is
+    # the LEAF. A reference marker in front of the name defeats the same read the same way,
+    # so both spellings are pinned together here rather than in a second block.
+    #
+    # Every row is at least 8 characters, which is not decoration: below the assignment
+    # rule's own value floor NOTHING matches at all (``a::Pass`` is released at this head
+    # and at ``origin/main`` alike, and the type clause refuses it — the floor is upstream),
+    # so a shorter row here would pin a reading this clause cannot reach either way.
+    Case(
+        "API" + "_KEY=" + "foo" + "::" + "Pass",
+        "a QUALIFIED credential-stem base, no argument list",
+    ),
+    Case(
+        "API" + "_KEY=" + _generic("foo" + "::" + "Pass", "Word"),
+        "the same qualification with an argument list",
+    ),
+    Case(
+        "API" + "_KEY=" + "&" + _generic("Pass", "Word"),
+        "a REFERENCE-marked stem base: the marker is spelling, not the name",
+    ),
 )
 
 

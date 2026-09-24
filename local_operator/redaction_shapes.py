@@ -1247,6 +1247,34 @@ def _parse_type_expression(text: str, index: int, end: int, depth: int) -> tuple
     return True, index, is_a_type_name
 
 
+def _type_token_leaf(token: str) -> str:
+    """The NAME a type token denotes, with its spelling markers stripped.
+
+    A token in this grammar carries things beside its own name: a ``::``
+    qualification (``foo::bar::Baz``) and a reference marker (``&``, ``&&``). Both are
+    SPELLING, and every guard here that decides a release on what a token is CALLED has
+    to read the same part of it. That is the lesson of the fourth round on this clause:
+    R1-1 was a digit position, R1-2 and R2-1 read the ARGUMENT where the fact was the
+    base, and R3-1 read the WHOLE BASE where the fact is the leaf.
+
+    One helper rather than a ``rsplit`` per call site, because the two release-side
+    tests in :func:`_is_type_expression` are the SAME extraction
+    (:func:`_base_is_a_credential_stem` and :func:`is_credential_name`), and a leaf
+    fix applied to one of them and not the other is exactly the miss R3-1 was.
+
+    Only ``::`` and ``&`` are stripped, and that is the whole REACHABLE set: the
+    assigned value's own grammar excludes whitespace, so a lifetime reference can only
+    arrive FUSED to the name it qualifies, and a fused lifetime is not separable from
+    that name by any split — there is no marker left to cut on. A reference to a
+    primitive therefore still reads as that primitive, which is what keeps ``&str``
+    released.
+    """
+    leaf = token.rsplit("::", 1)[-1]
+    while leaf.startswith("&"):
+        leaf = leaf[1:]
+    return leaf
+
+
 def _base_is_a_credential_stem(base: str) -> bool:
     """Whether a type application's BASE is spelled like a credential word.
 
@@ -1265,11 +1293,26 @@ def _base_is_a_credential_stem(base: str) -> bool:
     hit. Any later widening of the ARGUMENT grammar must not be able to re-open this
     class, which is what putting the refusal on the base buys.
 
+    **The base is read as a WHOLE and as its LEAF** (agent review R3-1), because the
+    discriminating fact is the NAME the token denotes and a qualification hides that
+    name behind a path: a qualified spelling whose LEAF is in :data:`_CREDENTIAL_STEMS`
+    is that credential word with a namespace attached, and with only the whole base
+    tested the entire qualified class — 360 of 360 combinations of 5 module prefixes,
+    12 stem leaves and 6 argument shapes — was released whole with NO hit, so the value
+    was not even registered for the exact-value pass, and the no-argument spelling
+    (a bare qualified path) released through the path-convention branch too. The
+    whole-base test is kept beside the leaf test because a stem in a NON-leaf segment
+    is the same chosen value spelled the other way round, and because either test can
+    only ever refuse a release.
+
     A stem match is deliberately blunt: it only ever REFUSES a release, so the cost
     of a false hit is a masked type, which is the direction this clause trades in.
     """
-    lowered = base.lower()
-    return any(lowered.startswith(stem) for stem in _CREDENTIAL_STEMS)
+    return any(
+        part.lower().startswith(stem)
+        for part in (base, _type_token_leaf(base))
+        for stem in _CREDENTIAL_STEMS
+    )
 
 
 def _is_type_expression(value: str) -> bool:
@@ -1356,19 +1399,30 @@ def _is_type_expression(value: str) -> bool:
         # this value, and an argument that is a CamelCase name (``Pass<Phrase>``) or
         # a nested application (``Pass<Vec<u8>>``) is no more proof of a type than
         # ``int`` was — yet every such spelling was released whole, with no hit,
-        # while the qualifier stood. A type's own base is never a credential stem,
-        # so ``Vec<u8>``, ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their
-        # release: the refusal sits on the BASE and is silent about the argument,
+        # while the qualifier stood. NO primitive-carrying base in the paired tables is
+        # a stem, and that is the property this refusal has: the claim is about the base
+        # and its LAST segment (agent review R3-3 corrected this sentence — it read as a
+        # property of types, and R3-1 lived underneath exactly that reading). A type's
+        # own base is not spelled as a credential word, so ``Vec<u8>``,
+        # ``Option<Vec<u8>>`` and ``Arc<Mutex<String>>`` keep their release: the refusal
+        # sits on the BASE and is silent about the argument,
         # which is the direction that cannot trade containment back.
         return False
-    if is_credential_name(value.split(chr(60), 1)[0]):
+    if is_credential_name(base) or is_credential_name(_type_token_leaf(base)):
         # The BASE is a credential WORD, whatever the arguments are (agent review
         # R1-2): ``Pass<int>``, ``Pass<any>``, ``Token<void>``, ``Secret<str>``. A
-        # type's own base is never spelled as a credential word — ``Vec``, ``Option``,
-        # ``HashMap``, ``String`` and every custom type name are not — so this rejects
+        # type's base is not spelled as a credential word in the paired tables —
+        # ``Vec``, ``Option``, ``HashMap``, ``String`` and every custom type name are not
+        # (the R3-3 correction applies to this sentence too: the property is about the
+        # base and its LAST segment) — so this rejects
         # the class the argument grammar alone cannot, and it does it on the base
         # rather than on the argument, which is what keeps a real annotation over a
         # primitive (``Vec<u8>``, ``Option<Vec<u8>>``) released.
+        # The LEAF is read through the same helper as the stem test above (agent review
+        # R3-1): these are the two release-side extractions of the SAME slice, and
+        # passing the whole base to both of them is what left the qualified class
+        # released. ``base`` is deliberately reused rather than re-split so the two
+        # cannot drift apart again.
         return False
     path = _TYPE_PATH_RE.fullmatch(value)
     if path:
