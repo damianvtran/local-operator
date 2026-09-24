@@ -1306,29 +1306,59 @@ async def stop_session(
     # Read defensively, like every probe on this path: the ladder's contract is
     # that it never raises, and a record-shaped double handed in by a caller (or
     # one written by a runtime that predates the field) may simply lack it.
+    #
+    # THE LATCH LOSES TO A STOPPED HEARTBEAT (2026-09-24). Everything above says why
+    # the skip has to come first, and none of it survives the runtime that cannot
+    # reach the boundary it is latched to: the drain is finished BY the event loop,
+    # so a beat that stopped arriving past ``HEARTBEAT_TIMEOUT_S`` is the fleet's own
+    # answer that this owner is not reporting (``registry.classify`` — the single home
+    # of the live/wedged/stale vocabulary), and a wedged runtime never gets there.
+    # Until this fence, a runtime that had been leaving for 5.6 hours was still
+    # described to the operator as one that "leaves by itself, nothing to do", which
+    # is a false promise about a process only they can now end.
+    #
+    # WHY THE NEXT RUNG STILL PROTECTS THE LEGITIMATE DRAIN. A drain that is really
+    # working is a drain running a turn, and the busy skip below sits between here and
+    # the first signal — so the state that would be harmed by overriding the latch is
+    # still refused, by a rung that says what it saw ("a turn is in flight") instead of
+    # repeating a promise about a boundary. What this fence lets through is the case
+    # the ladder exists for: a target with work open whose owner stopped reporting.
+    #
+    # ``check_zombie=False`` RESTATES THE CHEAP PROBE THIS RUNG ALREADY MADE, so the
+    # liveness half of the answer is unchanged and the only new fact is the age; the
+    # probe's cost is a ``ps`` fork, which ``registry.classify``'s own policy spends
+    # only where it changes what a reader is told.
     leaving = getattr(record, "leaving", "") or ""
-    if leaving and not force and registry.pid_alive(record.pid):
-        # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
-        # asked: ``--force`` is a flag of ``lop stop`` and the TUI's ``/stop``
-        # takes no flags at all (U7). Named in the reader's own vocabulary —
-        # see ``_force_remedy`` — because a surface that offers an action it
-        # cannot accept is the defect, not the wording.
-        #
-        # AND THE FIRST REMEDY IS NOTHING. The exit is already scheduled by the
-        # runtime itself, so "skipped … (--force …)" alone reads as "this did
-        # not work — retry if you meant it", when the answer for almost every
-        # operator is to let it finish (UX round 2, NIT-2).
-        return StopOutcome(
-            pid=record.pid,
-            session_id=record.session_id,
-            name=name,
-            method="draining",
-            line=(
-                f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; stopping '
-                "it now cuts the turn it is finishing — it leaves by itself, nothing "
-                f"to do ({_force_remedy(record.pid, _from_a_shell(_command))})"
-            ),
-        )
+    liveness = registry.classify(record, check_zombie=False)
+    latch_note = ""
+    if leaving and not force and liveness.pid_alive:
+        if liveness.state != "wedged":
+            # THE REMEDY IS TWO-SIDED, and the line is read by whichever front end
+            # asked: ``--force`` is a flag of ``lop stop`` and the TUI's ``/stop``
+            # takes no flags at all (U7). Named in the reader's own vocabulary —
+            # see ``_force_remedy`` — because a surface that offers an action it
+            # cannot accept is the defect, not the wording.
+            #
+            # AND THE FIRST REMEDY IS NOTHING. The exit is already scheduled by the
+            # runtime itself, so "skipped … (--force …)" alone reads as "this did
+            # not work — retry if you meant it", when the answer for almost every
+            # operator is to let it finish (UX round 2, NIT-2).
+            return StopOutcome(
+                pid=record.pid,
+                session_id=record.session_id,
+                name=name,
+                method="draining",
+                line=(
+                    f'skipped "{name}" (pid {record.pid}) — it {_drain_phrase(record)}; stopping '
+                    "it now cuts the turn it is finishing — it leaves by itself, nothing "
+                    f"to do ({_force_remedy(record.pid, _from_a_shell(_command))})"
+                ),
+            )
+        # The override is SAID, not silent: every receipt this ladder composes after
+        # here carries the reason the latch did not apply, because the operator asked
+        # for this stop and is owed the fact that the promise it contradicted had
+        # expired. Composed once, in the words the same surfaces already use.
+        latch_note = _latch_expired_note(record, liveness.heartbeat_age_s)
 
     # Rung 1 — the graceful op. Both its failure shapes are scheduled misses:
     # an unreachable socket means already-gone-or-crashed, an error reply
@@ -1342,7 +1372,7 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes),
+            line=_stopped_line(record, method, wakes) + latch_note,
             wakes_dormant=wakes,
         )
 
@@ -1365,7 +1395,7 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=f'"{name}" already exited',
+            line=f'"{name}" already exited' + latch_note,
             wakes_dormant=wakes,
         )
 
@@ -1425,7 +1455,7 @@ async def stop_session(
             method=method,
             line=(
                 f'skipped "{name}" (pid {record.pid}) — a turn is in flight; '
-                "stop it again once the turn ends, or --force to signal it now"
+                "stop it again once the turn ends, or --force to signal it now" + latch_note
             ),
         )
 
@@ -1485,7 +1515,7 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=f'refused "{name}" (pid {record.pid}) — {why_not}',
+            line=f'refused "{name}" (pid {record.pid}) — {why_not}' + latch_note,
         )
 
     # Rung 2 — SIGTERM: the runtime's existing handler runs the same clean
@@ -1524,7 +1554,7 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes, forced=forced),
+            line=_stopped_line(record, method, wakes, forced=forced) + latch_note,
             wakes_dormant=wakes,
         )
 
@@ -1551,7 +1581,7 @@ async def stop_session(
         session_id=record.session_id,
         name=name,
         method=method,
-        line=_stopped_line(record, method, wakes, forced=forced),
+        line=_stopped_line(record, method, wakes, forced=forced) + latch_note,
         wakes_dormant=wakes,
     )
 
@@ -1912,6 +1942,25 @@ def _drain_phrase(record: SessionRecord) -> str:
     if record.leaving:
         return f"is {record.leaving}"
     return "was signalled and is leaving at its next boundary"
+
+
+def _latch_expired_note(record: SessionRecord, age_s: float) -> str:
+    """The clause a receipt carries when this ladder OVERRODE a leaving latch.
+
+    THE OVERRIDE IS SAID, NOT SILENT (2026-09-24). The first rung tells the operator
+    the runtime will leave by itself, and a receipt that then stopped it anyway would
+    read as the ladder ignoring its own rule. So the reason travels with whatever
+    outcome follows — the signal, the skip, the refusal — and it names the one fact
+    that expired the promise: the age of the beat the drain needs in order to reach
+    the boundary it is latched to.
+
+    It is a CLAUSE (``_drain_phrase`` supplies the verb), so it hangs off a finished
+    receipt line the same way the latch's own phrase hangs off a subject elsewhere.
+    """
+    return (
+        f" — it {_drain_phrase(record)}, but its heartbeat stopped "
+        f"{bound_text(age_s)} ago, so the stop went ahead"
+    )
 
 
 def _refresh_line(record: SessionRecord, running: str, method: str, detail: str) -> str:

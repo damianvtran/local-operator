@@ -180,6 +180,11 @@ class SessionLine:
     #: reached the JSON row and no screen). The same dump's OTHER reading — a fire over
     #: nothing, which is every idle, recovered or GIL-held observation — is deliberately
     #: not this one.
+    #: AND IT IS ABOUT THE CURRENT RE-ARM, not only about the fire (2026-09-24): the
+    #: marker records an EPISODE, so a runtime that recovered and went on beating
+    #: carried this state for the rest of its life and was rendered as one that needs a
+    #: person. A re-arm after the fire retires it (``stall_watchdog.rearmed_after_dump``),
+    #: which is what keeps the phrase meaning "it stopped reporting, with work open".
     stall_held: bool = False
     #: The runtime's OWN STALL DUMP: the path the search found for this life, or
     #: ``None``. Fenced like :attr:`stall_held`, and published as the FILE rather than
