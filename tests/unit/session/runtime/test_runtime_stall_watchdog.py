@@ -1,4 +1,4 @@
-"""The runtime bounds its OWN stall: a C-thread dump, then a departure.
+"""The runtime bounds its own stall: a Python fire, an outside signal, no native timer.
 
 WHY THESE TESTS ARE SHAPED THIS WAY, in one read.
 
@@ -7,8 +7,14 @@ The defect they exist for is a *hang*, not a slow function: five runtimes on
 instrument in the process was dead by construction (a thread watchdog needs the
 GIL a wedged thread never releases; a signal handler needs bytecodes; an
 asyncio timer needs the loop), and nothing named the line. So the mechanism
-under test is ``faulthandler.dump_traceback_later`` — armed in a C thread — and
-a green test that never occupies the loop would prove nothing about it.
+under test is TWO legs, and the split is the whole design (see the module
+docstring): the fire is taken in PYTHON by the sampler, which needs Python to be
+running at all, and the class Python cannot reach — a loop parked holding the
+GIL — is served by an out-of-process ``SIGUSR1``.
+``faulthandler.dump_traceback_later`` is NOT called anywhere any more: its arm
+path cancels a previous timer and waits for an in-flight dump while holding the
+GIL, which is itself the wedge. A green test that never occupies the loop would
+prove nothing about either leg.
 
 THE REPRODUCTION PARKS THE LOOP ON PURPOSE, and it claims NOTHING about why a
 real runtime parks. An earlier revision shipped a fixture that replayed a
@@ -25,10 +31,19 @@ file tests is the instrument and the policy for that — a deliberately parked l
 measurement that will name it. No claim in this file, or in the PR, depends on a
 caller being identified.
 
-AND A SPY on the C timer (``_FakeFaulthandler``) covers the structure a real
-fired timer cannot be asked about in-process: that every beat RE-ARMS the bound,
-that the header is on disk BEFORE the timer is armed, and that arming is
-idempotent rather than leaking a second handle.
+AND A SPY at the signal leg (``_FakeFaulthandler``) covers the one structure a real
+fire cannot be asked about in-process: that the leg is registered ONCE, with
+``chain=False`` (so it never displaces somebody else's handler) and
+``all_threads=False`` (the all-threads walk races a booting runtime's thread list
+from signal context, measured as a segfault). The deadline a re-arm produces is
+no longer a call into ``faulthandler`` at all — it is a RECORD, and the
+reader-visible copy of it is the ``.deadline`` sibling, which is what the cells
+that used to read the spy's ``armed`` list read now.
+
+SO THE SUITE NO LONGER CONTAINS A SUBSTITUTE FOR THE RETIRED TIMER. A double that
+recorded what ``dump_traceback_later`` was called with would pass while proving
+nothing about the code that ships, which is the failure mode this migration is
+against; the seam each cell observes is named in that cell's own docstring.
 
 The bound in the child runs is set through the same environment variable an
 operator uses (``LOP_RUNTIME_STALL_SECONDS``), so the production path — read the
@@ -54,6 +69,7 @@ import inspect
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -200,6 +216,57 @@ def _dump_for(config_dir: Path, pid: int) -> Path:
     return config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
 
 
+def _wait_for_armed(child: "subprocess.Popen[str]", timeout: float = 60.0) -> int:
+    """The pid the child PRINTED once its bound was armed.
+
+    Read from the child rather than assumed, because the dump is named by pid: a
+    cell that guessed would read a file it did not cause. The blocking read is the
+    wait — the line is the event — and the deadline is a backstop against a child
+    that never arms, not the assertion.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        line = child.stdout.readline() if child.stdout is not None else ""
+        if line.startswith("armed:"):
+            return int(line.split(":", 1)[1].split()[0])
+        if not line or time.monotonic() > deadline:
+            raise AssertionError(
+                f"the child never reported an armed bound: {line!r} (rc={child.poll()})"
+            )
+
+
+def _wait_for_dump_text(path: Path, needle: str, timeout: float = 30.0) -> str:
+    """The dump's text, once ``needle`` is in it — otherwise the last text read.
+
+    The signal leg is ASYNCHRONOUS: the handler writes from signal context and the
+    parent cannot know how soon, so the wait is on the bytes landing (the event)
+    rather than on a sleep. ``errors="replace"`` because the parent may read the
+    file while the handler is mid-write, and a decoding error there would look like
+    a missing dump rather than a partial one.
+    """
+    deadline = time.monotonic() + timeout
+    text = ""
+    while time.monotonic() < deadline:
+        text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+        if needle in text:
+            return text
+        time.sleep(0.1)
+    return text
+
+
+def _stop_child(child: "subprocess.Popen[str]") -> None:
+    """Kill and reap a child THIS CELL started, by its own pid and no other.
+
+    ``child.kill()`` targets the handle, never a program name: this host runs ~25
+    concurrent sessions, and an unscoped name sweep has already taken out two other
+    sessions' process trees. ``communicate`` after the kill is what reaps the child
+    and closes the pipes, so the cell leaves no zombie behind for the next one.
+    """
+    if child.poll() is None:
+        child.kill()
+    child.communicate(timeout=30)
+
+
 def _fired_seconds(text: str) -> float:
     """The value ``faulthandler`` printed on its own fired line, in seconds.
 
@@ -240,8 +307,16 @@ def _stamp_ages(stdout: str) -> tuple[list[float], list[float]]:
 #: holds the GIL for its whole duration, so every Python thread in the process
 #: stops — the stand-in for ``_sre_SRE_Pattern_search``. ``ctypes.PyDLL`` is the
 #: binding that does NOT release the GIL (``CDLL`` does), and ``sleep`` is chosen
-#: over a spin loop so a fired bound costs no CPU on a host already running ~25
+#: over a spin loop so the park costs no CPU on a host already running ~25
 #: sessions.
+#:
+#: NOTHING INSIDE THE PROCESS FIRES ON THIS CHILD ANY MORE, and keeping it exactly
+#: as it was is the point: the GIL it holds starves the sampler, so the deadline
+#: passes unwitnessed and no leg of the module ever reaches the dump. The cell
+#: below asserts that ABSENCE, and the evidence for this class comes from a
+#: ``SIGUSR1`` sent by whoever is watching. A child that must really FIRE uses
+#: ``_IDLE_CHILD``, which waits in Python and so leaves the sampler the GIL it
+#: needs.
 _PARKED_CHILD = f"""
 import ctypes
 import os
@@ -294,43 +369,114 @@ lib.sleep(600)
 """
 
 
-def test_a_stalled_loop_is_dumped_and_the_process_leaves(tmp_path: Path) -> None:
-    """The reproduction: a parked loop names itself and the runtime leaves.
+#: A child that arms and then WAITS IN PYTHON — the only state the bound's fire is
+#: reachable from now. The deadline is taken by the sampler, so the process has to
+#: be able to run Python at all: ``time.sleep`` releases the GIL and lets that
+#: thread run, where a park in a GIL-holding C call would starve it forever (see
+#: ``_PARKED_CHILD``, whose own cell asserts precisely that absence). The local
+#: sentinel is here for the same reason it is in the parked child: the dump must
+#: never carry it.
+_IDLE_CHILD = f"""
+import os
+import sys
+import time
 
-    What is asserted, and why each half is needed:
+from local_operator.session.runtime import stall_watchdog
 
-    * the process LEFT — rc 1 and the resumed-sentinel absent. rc alone could be
-      a crash; the sentinel is what separates "the bound fired" from "the call
-      returned and a later assertion failed".
-    * the dump NAMES THE PARKED FRAME with its source path — the line nothing in
-      the process could report before this (all five frozen runtimes needed
-      ``sample`` from outside, and one of them was reaped by hand 6.9 h later).
-    * the header PRECEDES the fired marker, which is write-then-act as a fact
-      about the file rather than as a promise.
-    * the LOCAL SENTINEL is absent — the property that makes this dump safe to
-      write into a directory that also holds prompts.
+secret = "{LOCAL_SENTINEL}"
+assert stall_watchdog.arm(seconds=float(sys.argv[1])), "the child could not arm the bound"
+print(f"armed:{{os.getpid()}}", flush=True)
+time.sleep(600)
+"""
+
+
+def test_a_stalled_loop_is_named_by_a_dump_pulled_from_outside(tmp_path: Path) -> None:
+    """The reproduction, on the leg that can still reach it: the park is NAMED.
+
+    WHAT THIS CELL ASSERTED BEFORE, AND WHY THE NAME MOVED WITH IT. It was
+    ``test_a_stalled_loop_is_dumped_and_the_process_leaves``, and its first
+    assertion was ``rc == 1``. That ending belonged to the C timer: its thread
+    wrote the dump with no Python running and then ``_exit``ed, so a thread parked
+    in a GIL-holding C call was still reachable from outside the interpreter. The
+    fire is taken in PYTHON now (see the module docstring), and THIS PARK is the one
+    state where Python does not run at all — the parked thread holds the GIL, so the
+    sampler cannot take it, the deadline passes unwitnessed, and no leg of this
+    module fires. The death is not late; it is not caused any more, and asserting it
+    would pin a mechanism the module deliberately gave up.
+
+    SO THE CELL ASSERTS THE TWO FACTS THAT REPLACED IT, and both are load bearing:
+
+    * NOTHING INSIDE THE PROCESS FIRES. The child is still running after the
+      deadline has passed, and its dump carries no fired marker. An edit that gives
+      the module a leg which cuts a GIL-held park — the native timer, back again —
+      goes red here instead of silently re-introducing the arm/cancel deadlock.
+    * THE PARK IS STILL NAMED, by the leg built for exactly this class: a
+      ``SIGUSR1`` from outside (``_register_evidence_signal`` — one registration,
+      ``chain=False``, ``all_threads=False``) writes this module's own file with the
+      signal thread's stack, and that thread IS the parked one.
+
+    The remaining two assertions are the original cell's, kept because they are
+    still true of this dump: the header PRECEDES the park (write-then-act as a fact
+    about the file, not a promise), and the LOCAL SENTINEL is absent —
+    ``faulthandler`` prints frames, never variables, which is what lets this file
+    live in a directory that also holds prompts.
+
+    WHAT BOUNDS THIS CLASS NOW, stated here because the cell that used to claim a
+    cut would otherwise imply one: the supervisor's ``.deadline`` sibling beside the
+    dump, plus the registry heartbeat. Neither is asserted here — this cell is the
+    EVIDENCE half, and the sibling has cells of its own.
     """
+    script = tmp_path / "parked_child.py"
+    script.write_text(_PARKED_CHILD, encoding="utf-8")
     resumed = tmp_path / "resumed.txt"
-    result = _run_script(
-        _PARKED_CHILD,
-        tmp_path,
-        args=(str(resumed), str(CHILD_BOUND_S)),
+    child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, str(script), str(resumed), str(CHILD_BOUND_S)],
+        env=_child_env(tmp_path),
+        cwd=str(tmp_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-
-    assert result.returncode == 1, f"the bound did not fire: {result.stdout!r} {result.stderr!r}"
-    assert not resumed.exists(), "the parked call resumed; the bound fired too late to matter"
-    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
-    dump = _dump_for(tmp_path, pid)
-    assert dump.is_file(), f"no dump was written; logs: {sorted((tmp_path / 'logs').glob('*'))}"
-    text = dump.read_text(encoding="utf-8")
-
-    assert stall_watchdog.FIRED_MARKER in text, text
-    assert "park_the_loop_deliberately" in text, text
-    assert "parked_child.py" in text, text
-    assert text.index(stall_watchdog.ARM_MARKER) < text.index(
-        stall_watchdog.FIRED_MARKER
-    ), "the dump was written before the header, so a reader cannot tell arm from fire"
-    assert LOCAL_SENTINEL not in text, "faulthandler printed local values into the dump"
+    try:
+        pid = _wait_for_armed(child)
+        dump = _dump_for(tmp_path, pid)
+        assert (
+            dump.is_file()
+        ), f"the bound never armed its own dump: {sorted((tmp_path / 'logs').glob('*'))}"
+        # THE DEADLINE COMES AND GOES FIRST, so what follows is "this mechanism never
+        # fired" rather than "it had not fired yet". Waiting on the clock is right
+        # here and only here: the event being waited for IS an absence, and an
+        # absence has nothing to wait ON.
+        time.sleep(CHILD_BOUND_S * 1.5)
+        assert child.poll() is None, (
+            f"the parked child left (rc={child.returncode}); no leg of this module can "
+            "fire while the parked call holds the GIL, so a departure here means a "
+            "native timer path has come back"
+        )
+        # SIGNAL THE PARK, AND RETRY: a first signal that lands while the child is
+        # still between its ``print`` and the C call names the ARMING frame instead,
+        # and the cell would then be measuring that race rather than the park.
+        deadline = time.monotonic() + 30.0
+        text = ""
+        while "park_the_loop_deliberately" not in text and time.monotonic() < deadline:
+            os.kill(pid, signal.SIGUSR1)
+            text = _wait_for_dump_text(dump, "park_the_loop_deliberately", timeout=3.0)
+        assert (
+            "park_the_loop_deliberately" in text
+        ), f"the evidence signal never named the parked frame: {text[-400:]!r}"
+        assert (
+            "parked_child.py" in text
+        ), f"the dump names the frame but not the file it is in: {text[-400:]!r}"
+        assert child.poll() is None, "the child died taking its own evidence signal"
+        assert (
+            stall_watchdog.FIRED_MARKER not in text
+        ), "a signal dump was read as a bound fire; the leg writes no fired marker"
+        assert text.index(stall_watchdog.ARM_MARKER) < text.index(
+            "park_the_loop_deliberately"
+        ), "the dump was written before the header, so a reader cannot tell arm from park"
+        assert LOCAL_SENTINEL not in text, "faulthandler printed local values into the dump"
+    finally:
+        _stop_child(child)
 
 
 def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Path) -> None:
@@ -365,12 +511,13 @@ def test_a_fired_dump_says_the_fire_is_an_observation_not_a_verdict(tmp_path: Pa
     ``arm`` and this cell -- and nothing else in the file -- goes red. A cell that
     cannot fail would be the same class of thing as the header it pins.
     """
-    resumed = tmp_path / "resumed.txt"
-    result = _run_script(
-        _PARKED_CHILD,
-        tmp_path,
-        args=(str(resumed), str(CHILD_BOUND_S)),
-    )
+    # THE CHILD IS THE IDLE ONE, and that is this cell's whole migration: the
+    # assertions below are about a dump that really FIRED, and a parked child can no
+    # longer produce one (see ``_PARKED_CHILD`` and the cell above). A child waiting
+    # in Python leaves the sampler the GIL, so the deadline is taken and this dump
+    # still carries the fired marker — which is what keeps every assertion here a
+    # statement about a fire rather than about a header-only file.
+    result = _run_script(_IDLE_CHILD, tmp_path, args=(str(CHILD_BOUND_S),))
     assert result.returncode == 1, f"the bound did not fire: {result.stdout!r} {result.stderr!r}"
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
