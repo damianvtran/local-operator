@@ -138,7 +138,7 @@ def test_a_silent_address_is_deaf_never_serving(probe_env: dict[str, Any]) -> No
     probe_env["state"]["answer"] = OSError("Connection refused")
     probe = services.probe_address(_record())
     assert probe.verdict == services.DEAF
-    assert "did not identify itself" in probe.detail
+    assert "did not answer" in probe.detail
 
 
 def test_the_probe_url_brackets_an_ipv6_host(probe_env: dict[str, Any]) -> None:
@@ -269,7 +269,7 @@ def test_status_says_none_serving_rather_than_none_running(
         ],
     )
     rendered = "\n".join(services.status_lines())
-    assert "serve daemons: none serving (1 recorded and not answering)" in rendered
+    assert "serve daemons: none serving (1 recorded, not serving its address)" in rendered
 
 
 def test_a_stale_record_is_not_offered_a_reclaim() -> None:
@@ -297,6 +297,7 @@ def _reclaim(
     alive: list[bool] | None = None,
     records: list[services.ServeDaemonReport] | None = None,
     probe_script: list[str] | None = None,
+    kill_lookup_error: bool = False,
     **over: Any,
 ) -> tuple[services.ReclaimReport, list[tuple[int, int]]]:
     """Run ``reclaim_serve_daemon`` against injected evidence.
@@ -343,13 +344,19 @@ def _reclaim(
             script.append(value)
         return services.AddressProbe(value, "" if value == services.SERVING else "silent")
 
+    def _kill(target: int, sig: int) -> None:
+        if kill_lookup_error and sig == 9:
+            # The daemon left between the last liveness read and the escalation.
+            raise ProcessLookupError(target)
+        kills.append((target, sig))
+
     outcome = services.reclaim_serve_daemon(
         pid,
         probe=_scripted if probe_script is not None else _probe,
         reports=lambda: reports,
         read_command=lambda _pid: command,
         read_uid=lambda _pid: (uid if uid is not None else os_mod.getuid()),
-        kill=lambda target, sig: kills.append((target, sig)),
+        kill=_kill,
         alive=_alive,
         sleep=lambda _s: None,
         term_grace_s=0.001,
@@ -656,8 +663,20 @@ def test_a_non_http_listener_is_classified_rather_than_raising() -> None:
 
     threading.Thread(target=_serve_once, daemon=True).start()
     probe = services.probe_address(_record(port=port))
-    assert probe.verdict == services.DEAF
-    assert "did not identify itself" in probe.detail
+    # SQUATTED, not DEAF (review round 2, R2-3): the port ANSWERED. Filing a talking
+    # port under "nothing is answering there" is the same defect class as R1-3 one
+    # bucket over, and catching the exception is what made it printable.
+    assert probe.verdict == services.SQUATTED
+    assert "answered with something that is not this product's health endpoint" in probe.detail
+    # And the other direction, so the two buckets cannot collapse into one: a port
+    # nobody is listening on is DEAF, and is the only arm that may say so.
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent_port = silent.getsockname()[1]
+    silent.close()
+    quiet = services.probe_address(_record(port=silent_port))
+    assert quiet.verdict == services.DEAF
+    assert "did not answer" in quiet.detail
 
 
 def test_a_wrapped_mention_of_the_launcher_is_not_a_serve_daemon() -> None:
@@ -690,12 +709,17 @@ def test_a_live_but_deaf_daemon_prints_exactly_one_row(
         probe=services.AddressProbe(services.DEAF, "nothing answered"),
     )
     monkeypatch.setattr(services, "serve_daemon_reports", lambda **_kwargs: [report])
+    # The OLD reader's seam, patched TOO. The duplicate this test exists for came
+    # from `status_lines` reading `live_serve_daemons()` for the ordinary rows and a
+    # second scan for the stuck ones, so a pin that patches only the new seam passes
+    # on the pre-fix tree without ever reproducing it (review round 2, R2-5).
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [report.record])
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
     lines = services.status_lines()
-    assert not any(line.startswith("serve daemon pid 9") for line in lines), (
-        "an ordinary row claims the daemon serves its address, and nothing answered"
+    assert sum(1 for line in lines if "pid 9" in line) == 1, (
+        "one record, one row: an ordinary `serve daemon` row claims the daemon "
+        "serves its address, and nothing answered, so the duplicate is the bug"
     )
-    assert sum(1 for line in lines if "serve pid 9" in line) == 1
     assert any("nothing is answering" in line for line in lines)
     assert any("lop services reclaim 9" in line for line in lines)
 
@@ -818,3 +842,45 @@ def test_the_update_warning_reuses_the_axis_sentence_and_real_remedies() -> None
     text = "\n".join(services.stuck_report_lines(stale))
     assert "its process has exited" in text
     assert "reclaim" not in text, "there is no pid left to reclaim"
+
+
+def test_an_address_that_changes_occupant_is_refused() -> None:
+    """R2-6: the `changed` refusal — the one gate that can refuse a legitimate reclaim.
+
+    A deaf address that becomes a different kind of unserved address while the
+    command is confirming is not the address the verdict was measured on. The
+    operator is told which two readings disagreed and told to run it again, rather
+    than being sent into the signal on a verdict the address no longer supports.
+    """
+    outcome, kills = _reclaim(
+        probe_script=[services.DEAF, services.DEAF, services.SQUATTED]
+    )
+    assert kills == []
+    assert outcome.problem == "changed"
+    assert "changed while this was being confirmed" in "\n".join(outcome.lines)
+
+
+def test_a_stale_record_is_refused_by_the_allow_list() -> None:
+    """R2-6: `not-actionable` — a state whose remedy is not this command.
+
+    ``stale`` means the pid is gone: the brand re-read would refuse it a moment
+    later, and the allow-list says so up front instead of relying on that.
+    """
+    stale = services.ServeDaemonReport(record=_record(pid=13), state="stale")
+    outcome, kills = _reclaim(13, records=[stale])
+    assert kills == []
+    assert outcome.problem == "not-actionable"
+    assert "nothing was sent" in "\n".join(outcome.lines)
+
+
+def test_a_pid_that_leaves_before_the_escalation_is_still_ended() -> None:
+    """R2-6: SIGKILL's ``ProcessLookupError`` is the outcome asked for, not a crash.
+
+    The daemon can exit between the last liveness read and the escalation signal;
+    ``os.kill`` then raises, and letting that out would report a successful reclaim
+    as a traceback.
+    """
+    outcome, kills = _reclaim(alive=[True], kill_lookup_error=True)
+    assert kills == [(4242, 15)], "SIGTERM only: the escalation found no process"
+    assert outcome.acted
+    assert "ended on SIGKILL" in "\n".join(outcome.lines)

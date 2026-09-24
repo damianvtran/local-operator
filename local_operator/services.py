@@ -42,6 +42,7 @@ from __future__ import annotations
 import http.client
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -163,11 +164,12 @@ class AddressProbe:
 class ServeDaemonReport:
     """One serve record as a reader needs it: its shared state, plus its address.
 
-    ``verdict`` is the composed answer — the shared classification where that is
-    the whole story (``stale``, ``wedged``), and the address probe's verdict when
-    the record says ``live``. Composing it in one place is what keeps
-    ``lop services status`` and ``lop services reclaim`` from disagreeing about
-    what they are looking at.
+    ``verdict`` is the COMPOSED answer, and the probe outranks the beat wherever a
+    probe ran: ``serving`` and ``squatted`` come from the address, ``deaf`` is a
+    ``live`` record the address could not reach, and ``wedged``/``stale`` keep the
+    shared classifier's word when the address agrees nobody is serving. Composing it
+    in one place is what keeps ``lop services status`` and ``lop services reclaim``
+    from disagreeing about what they are looking at.
     """
 
     record: Any
@@ -249,20 +251,33 @@ def probe_address(record: Any) -> AddressProbe:
             f"{record.host}:{record.port} answered {exc.code} — something is there "
             "that is not this record's daemon",
         )
-    except (
-        OSError,
-        ValueError,
-        urllib.error.URLError,
-        # NOT a subclass of any of the above, and the omission was measured: a
-        # non-HTTP squatter on the port (a bare TCP listener, a proxy that speaks
-        # something else) raises ``BadStatusLine``/``IncompleteRead`` out of the
-        # response parser, so `status_lines` — which made no network calls at all
-        # before this change — and `reload_serve_daemons`, whose docstring promises
-        # NEVER RAISES, both died with a traceback instead of classifying the
-        # address (review round 1, R1-2).
-        http.client.HTTPException,
-    ) as exc:
-        return AddressProbe(DEAF, f"{record.host}:{record.port} did not identify itself ({exc})")
+    except (OSError, urllib.error.URLError) as exc:
+        # NO ANSWER AT ALL — refused, timed out, or the connection died before a
+        # response (``RemoteDisconnected`` is both a ``ConnectionResetError`` and a
+        # ``BadStatusLine``, and it lands here because nothing was answered). This is
+        # the incident's ``deaf``, and the ONLY arm that may say "nothing is
+        # answering there".
+        return AddressProbe(DEAF, f"{record.host}:{record.port} did not answer ({exc})")
+    except http.client.HTTPException as exc:
+        # AN ANSWER ARRIVED AND WAS UNINTELLIGIBLE (``BadStatusLine``,
+        # ``IncompleteRead``) — so this is SQUATTED, not DEAF. The difference is
+        # what the operator does next, and the first version of this fix filed a
+        # TALKING port under "nothing is answering there": the same defect class as
+        # R1-3, one bucket over, and catching the exception is what made it
+        # printable (review round 2, R2-3).
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered with something that is not this "
+            f"product's health endpoint ({exc})",
+        )
+    except ValueError as exc:
+        # Bytes arrived and could not be read as JSON: an answer, not a silence, for
+        # the reason above.
+        return AddressProbe(
+            SQUATTED,
+            f"{record.host}:{record.port} answered with a body that is not a health "
+            f"report ({exc})",
+        )
     if not isinstance(payload, dict):  # pragma: no cover - a non-object body
         return AddressProbe(
             SQUATTED,
@@ -378,6 +393,11 @@ SERVE_LAUNCHER_NAMES = frozenset({"lop", "local-operator"})
 #: ``lop stop``.
 SERVE_LAUNCHER_VERB = "serve"
 
+#: The first words of the label :mod:`local_operator.procname` writes over argv[0].
+#: The fourth word is the port (``port=<digits>``), checked by pattern rather than
+#: listed, because the port is the machine's own number.
+SERVE_PROCNAME_LABEL = ("Local", "Operator", "[serve]")
+
 #: How long a reclaimed daemon is given to leave after ``SIGTERM``.
 #:
 #: Sized to uvicorn's own shutdown rather than to a drain bound: a serve daemon
@@ -436,28 +456,55 @@ def is_serve_command(command: str) -> bool:
     for index in range(len(words) - len(marker) + 1):
         if tuple(words[index : index + len(marker)]) == marker:
             return True
-    # THE LAUNCHER FORM IS ADJACENT, AT ARGV[0] — the process IS `lop serve`.
+    # THE LAUNCHER FORM IS ADJACENT — the process IS `lop serve`, so the two words
+    # are neighbours — AND IT SITS AT argv[0] OR RIGHT AFTER THE procname LABEL.
     #
-    # Measured drift (review round 1, R1-8): matching the pair anywhere in argv
-    # accepted ``/bin/zsh -c "lop serve --port 11331"`` and ``grep -rn lop serve``
-    # — a person or a script that merely MENTIONS the command, or wraps it. That
-    # matters here and nowhere else because a STRAY is signalled on this proof
-    # ALONE: no record of ours describes it, so `_address_from_argv`'s reading and
-    # this brand test are the entire case for acting. The spawn contract for this
-    # form is ``<launcher> serve …`` — how `lop serve` starts the daemon, and how a
-    # rig starts it too — so the words that carry it are the first two.
+    # Two measurements are both load-bearing here, and each one alone was wrong:
     #
-    # The BASENAME, because a launcher is reached by PATH: the machine's own
-    # ``lop`` is ``/Users/<me>/.local/bin/lop serve``, and a comparison against
-    # the bare word ``lop`` recognised only a daemon started from a directory
-    # on PATH — the exact daemons (a rig's, an installer's, a launchd agent's)
-    # this proof has to recognise. ``Path(...).name`` is the one place that
-    # takes a word and answers "which program is this".
-    return (
-        len(words) >= 2
-        and Path(words[0]).name in SERVE_LAUNCHER_NAMES
-        and words[1] == SERVE_LAUNCHER_VERB
-    )
+    # * matching the pair ANYWHERE in argv accepted ``/bin/zsh -c "lop serve …"``
+    #   and ``grep -rn lop serve`` — a person or a script that merely MENTIONS the
+    #   command (review round 1, R1-8). That matters here and nowhere else because
+    #   a STRAY is signalled on this proof ALONE: no record of ours describes it,
+    #   so this brand test and the argv reading are the entire case for acting.
+    # * requiring argv[0] killed the proof for the daemons it exists for, because
+    #   ``procname`` REPLACES argv[0] with a label. Measured on this host
+    #   (2026-09-24): a live daemon reads
+    #   ``Local Operator [serve] port=18490 /Users/…/local-operator serve --host …``
+    #   and the launcher is four words in, so the round-1 fix refused it and sent
+    #   the operator back to killing by hand (review round 2, R2-1).
+    #
+    # The BASENAME, because a launcher is reached by PATH: the machine's own ``lop``
+    # is ``/Users/<me>/.local/bin/lop serve``, and a comparison against the bare word
+    # ``lop`` recognised only a daemon started from a directory on PATH — the exact
+    # daemons (a rig's, an installer's, a launchd agent's) this proof has to
+    # recognise. ``Path(...).name`` is the one place that takes a word and answers
+    # "which program is this".
+    labelled = _procname_label_length(words)
+    for index in range(len(words) - 1):
+        if Path(words[index]).name not in SERVE_LAUNCHER_NAMES:
+            continue
+        if words[index + 1] != SERVE_LAUNCHER_VERB:
+            continue
+        if index in (0, labelled):
+            return True
+    return False
+
+
+def _procname_label_length(words: list[str]) -> int:
+    """How many leading words are the ``procname`` label; ``0`` when there is none.
+
+    ``procname`` is what makes this project's processes identifiable in the process
+    listing, and on this platform it works by REPLACING argv[0] (see
+    :mod:`local_operator.procname`), so a labelled daemon's real argv begins one
+    label further in. The shape is narrow on purpose and is the one measured on
+    this host — ``Local Operator [serve] port=18490 …`` — rather than a guess at
+    what a future label might look like: a looser rule is how a proof stops
+    proving.
+    """
+    if len(words) >= 4 and tuple(words[:3]) == SERVE_PROCNAME_LABEL:
+        if re.fullmatch(r"port=\d+", words[3]):
+            return 4
+    return 0
 
 
 def serve_process(pid: int, *, timeout_s: float = HEALTH_TIMEOUT_S) -> str | None:
@@ -967,15 +1014,6 @@ def reclaim_serve_daemon(
     )
 
 
-def _verdict_phrase(verdict: str) -> str:
-    """Kept for the one caller outside this module (the CLI's own tests).
-
-    The vocabulary itself lives in :data:`VERDICTS`; this is a read of that one
-    source rather than a second spelling of it (review round 1, N1).
-    """
-    return VERDICTS[verdict].phrase if verdict in VERDICTS else verdict
-
-
 def _await_exit(
     pid: int,
     alive: Callable[[int], bool | None],
@@ -985,29 +1023,26 @@ def _await_exit(
 ) -> bool | None:
     """Wait for a pid to disappear inside ``budget_s``.
 
-    ``True`` it is gone; ``False`` it is still there; ``None`` the process table
-    could not be read at the end of the wait. THREE ANSWERS, and the third is
-    DOUBT rather than death or survival: ``alive`` is itself three-valued (``None``
-    = unreadable) and an unreadable probe keeps waiting rather than reporting an
-    exit that was never observed — the same rule the record classifier states for
-    a heartbeat it could not read. ``None`` is returned so the caller can word it
-    as doubt; folding it into either other answer is how a reading that never
-    arrived became "it is wedged in the kernel; a reboot is the only way left"
-    (review round 1, R1-7).
+    ``True`` it is gone; ``False`` it is still there; ``None`` the LAST read could
+    not be taken. Three answers, and the third is DOUBT rather than death or
+    survival: ``alive`` is itself three-valued (``None`` = unreadable) and an
+    unreadable read keeps waiting rather than reporting an exit that was never
+    observed — the same rule the record classifier states for a heartbeat it could
+    not read. The answer describes the FINAL read rather than the worst one along
+    the way, because that is the reading the caller prints (review round 2, N-4: a
+    sticky "something was unreadable" flag could announce a doubt the last read had
+    already resolved).
     """
-    unknown = False
     waited = 0.0
     while waited < budget_s:
-        seen = alive(pid)
-        if seen is False:
+        if alive(pid) is False:
             return True
-        unknown = seen is None
         sleep(poll_s)
         waited += poll_s
     seen = alive(pid)
     if seen is False:
         return True
-    return None if (seen is None or unknown) else False
+    return None if seen is None else False
 
 
 def _current_stamp() -> Any:
@@ -1409,10 +1444,16 @@ def status_lines() -> list[str]:
     if not reports:
         lines.append("serve daemons: none running")
     elif not daemons:
+        # "none serving", NOT "not answering": the stuck set mixes records whose
+        # address is silent with records whose address is held by somebody else, and
+        # the summary is printed directly above rows that say which — so it must not
+        # claim the one reason while a `squatted` row sits two lines below it (review
+        # round 2, R2-4). The word for the state is the verdict; the count is the only
+        # thing this line adds.
         lines.append(
-            f"serve daemons: none serving ({len(stuck)} recorded and not answering)"
+            f"serve daemons: none serving ({len(stuck)} recorded, none serving their address)"
             if len(stuck) > 1
-            else "serve daemons: none serving (1 recorded and not answering)"
+            else "serve daemons: none serving (1 recorded, not serving its address)"
         )
     for record in daemons:
         lines.extend(_daemon_status_lines(record, stamp))
