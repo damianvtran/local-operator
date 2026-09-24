@@ -364,6 +364,13 @@ RULES: tuple[Rule, ...] = (
             "lop secret run --secret NAME=TOKEN -- env 2>/dev/null",
             "lop secret run --secret NAME=TOKEN -- env 2>&1 | grep TOKEN",
             "lop secret run --secret NAME=TOKEN -- env < /dev/null | rev",
+            # R5-2: the `env -i` exemption belongs to `env`'s own options, not to
+            # another wrapper's `-i` or an `-u` operand spelled `-i`.
+            "lop secret run --secret NAME=TOKEN -- stdbuf -i 0 env printenv TOKEN | rev",
+            "lop secret run --secret NAME=TOKEN -- env -u -i printenv TOKEN | rev",
+            # R5-3: `-p` clustered with `-e` still prints the program's result.
+            "lop secret run --secret NAME=TOKEN -- node -pe "
+            "'[...process.env.TOKEN].reverse().join(\"\")'",
         ),
         counterexamples=(
             "lop secret file GCP_SA_JSON -- gcloud auth activate-service-account "
@@ -383,6 +390,8 @@ RULES: tuple[Rule, ...] = (
             '-H "Authorization: Bearer $TOKEN" https://x',
             "lop secret run --secret NAME=TOKEN -- nice python3 client.py",
             "lop secret run --secret NAME=TOKEN -- env -i printenv",
+            "lop secret run --secret NAME=TOKEN -- timeout 5 env -iv printenv",
+            "lop secret run --secret NAME=TOKEN -- node -pe '1 + 1'",
             "lop secret run --secret NAME=TOKEN -- node app.js",
             "lop secret run --secret NAME=TOKEN -- awk '{print $1}' /etc/hosts",
             "lop secret file GCP_SA_JSON -- sh -c 'wc -c < \"$GOOGLE_APPLICATION_CREDENTIALS\"'",
@@ -1667,6 +1676,58 @@ def _wrapped_command_index(
     return cursor, frozenset(kept)
 
 
+def _env_clears_environment(wrappers: Sequence[str]) -> bool:
+    """Does an `env` in this wrapper chain start its child with no environment?
+
+    Only an `-i` (or `-`, `--ignore-environment`) that `env` ITSELF parses as an
+    option counts (R5-2). Searching every wrapper word accepted `stdbuf -i 0`
+    (stdbuf's stdin-buffer option) and `env -u -i` (unset a variable named
+    `-i`), and both leaked with the exemption granted. The walk is `env`'s own
+    getopt grammar from :data:`_PRECOMMANDS`: operand-taking options skip their
+    operand, a short cluster is read letter by letter until a letter that takes
+    the rest of the word as its operand, and the first non-option ends it.
+    Each wrapper's extent is found by :func:`_wrapped_command_index` itself, so
+    this is not a second copy of the chain grammar.
+    """
+    env_takes, _ = _PRECOMMANDS["env"]
+    operand_letters = {option[1] for option in env_takes if len(option) == 2} | {"S"}
+    cursor = 0
+    while cursor < len(wrappers):
+        wrapper = wrappers[cursor].rsplit("/", 1)[-1]
+        spec = _CONSUMER_WRAPPERS.get(wrapper)
+        if spec is None:
+            return False
+        # The extent of THIS wrapper only: its name is swapped for a key no
+        # other word can equal, so a nested `env env -i` is not swallowed into
+        # the first step, and a stand-in consumer follows because without a
+        # word after it the grammar reads the wrapper as the command itself.
+        step, _ = _wrapped_command_index(
+            ["\0", *wrappers[cursor + 1 :], "\0"], table={"\0": spec}
+        )
+        if step <= 0:
+            return False
+        if wrapper == "env":
+            probe = cursor + 1
+            while probe < cursor + step:
+                option = wrappers[probe]
+                if option in ("-", "-i", "--ignore-environment"):
+                    return True
+                if option == "--" or option[:1] != "-":
+                    break
+                if option in env_takes:
+                    probe += 2
+                    continue
+                if not option.startswith("--"):
+                    for letter in option[1:]:
+                        if letter == "i":
+                            return True
+                        if letter in operand_letters:
+                            break
+                probe += 1
+        cursor += step
+    return False
+
+
 #: `$l`, `${l}` or `"$l"` — a word that is one variable and nothing else, which
 #: is how `l=lop; $l secret get X` spells the program (R3-2).
 _BARE_REF_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
@@ -1741,6 +1802,10 @@ class _InlineLanguage:
     env_read: re.Pattern[str]
     file_read: re.Pattern[str]
     print_flags: frozenset[str] = frozenset()
+    #: Short-option letters that print the result wherever they sit in a
+    #: cluster: `node -pe '…'` is `-p -e '…'` (R5-3), and matching whole words
+    #: against ``print_flags`` alone let the clustered spelling through.
+    print_letters: frozenset[str] = frozenset()
 
 
 _PYTHON_LANGUAGE = _InlineLanguage(
@@ -1758,6 +1823,7 @@ _NODE_LANGUAGE = _InlineLanguage(
     env_read=re.compile(r"\bprocess\.env\b"),
     file_read=re.compile(r"\breadFileSync\b|\breadFile\b|\bcreateReadStream\b"),
     print_flags=frozenset({"-p", "--print"}),
+    print_letters=frozenset({"p"}),
 )
 
 #: The interpreters whose inline program a `run`/`file` consumer check reads,
@@ -2597,9 +2663,7 @@ class _ShellAnalyzer:
         arguments = resolved[start + 1 :]
         if verb == "run":
             variables = [name.split("=", 1)[-1] for name in names]
-            if "env" in (word.rsplit("/", 1)[-1] for word in wrappers) and any(
-                word in ("-i", "-", "--ignore-environment") for word in wrappers
-            ):
+            if _env_clears_environment(wrappers):
                 # `env -i` starts the child with an EMPTY environment. A
                 # `NAME=…` beside it is text the OUTER shell expanded, which
                 # never holds what `run` exported, so nothing of the value
@@ -2687,6 +2751,11 @@ class _ShellAnalyzer:
             return bool(
                 language.printer.search(text)
                 or any(argument in language.print_flags for argument in arguments)
+                or any(
+                    re.fullmatch(r"-[A-Za-z]+", argument)
+                    and set(argument[1:]) & language.print_letters
+                    for argument in arguments
+                )
             )
         if consumer not in _INTERPRETERS:
             return False
