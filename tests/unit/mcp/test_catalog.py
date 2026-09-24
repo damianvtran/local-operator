@@ -26,6 +26,7 @@ loop (it re-reads the environment on every call).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -813,6 +814,80 @@ def test_the_specs_accept_header_is_not_a_place_the_key_travels(
     assert "sign_in" not in row["actions"], row
 
 
+@pytest.mark.parametrize("header", ["Cookie", "X-Bearer", "X-Session", "X-Signature"])
+def test_a_carrier_named_without_the_first_six_tokens_is_still_a_carrier(
+    distinct: Path, challenges: dict[str, bool], header: str
+) -> None:
+    """Review round 5, m2: ``Cookie`` carries a session credential with no ``key`` in it.
+
+    Before ``cookie``/``bearer``/``session``/``signature`` were tokens, an
+    ``apikey`` server sending a literal one read ``needs_sign_in`` on the STORED
+    basis, before any Test, with ``add_key`` and a ``status_reason`` saying its
+    headers could not carry a key — the R3-M1 flip, reopened for names outside
+    the list. One case per token, so dropping any one of them fails by name.
+    """
+    from local_operator.mcp.catalog import offers_add_key
+
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": url,
+                "headers": {header: PLACEHOLDER},
+                "auth": {"type": "apikey"},
+            }
+        }
+    )
+    configs, _ = load_all_mcp_configs(distinct)
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": True, "secret_refs": []}, row
+    assert (row["status"], row["status_basis"]) == ("not_started", "stored"), row
+    assert row["status_reason"] is None, row
+    assert row["actions"] == ["test", "remove"], row
+    assert offers_add_key(configs["acme-api"]) is False
+
+
+@pytest.mark.parametrize("header", ["X-Author", "X-Authority", "Mcp-Session-Id"])
+def test_a_name_that_only_looks_like_a_carrier_keeps_add_key(
+    distinct: Path, challenges: dict[str, bool], header: str
+) -> None:
+    """Review round 5, m3 and n1: the two ways a NAME can falsely match a token.
+
+    ``X-Author``/``X-Authority`` contain ``auth`` as a substring and name a
+    person or an issuer, so ``auth`` is matched as a word (``_AUTH_WORD``); as a
+    substring these rows claimed ``signed_in: true`` and, after a 401, read
+    ``needs_sign_in`` with no key action — the R4-M1 dead end.
+    ``Mcp-Session-Id`` contains the ``session`` token but is the transport's own
+    per-connection id, so the ``TRANSPORT_OWNED_HEADERS`` exclusion keeps it out;
+    this case is what makes that exclusion's removal fail.
+    """
+    from local_operator.mcp.catalog import offers_add_key
+
+    url = "https://mcp.example.invalid/rpc"
+    _write_global(
+        {
+            "acme-api": {
+                "type": "http",
+                "url": url,
+                "headers": {header: "someone"},
+                "auth": {"type": "apikey"},
+            }
+        }
+    )
+    challenges[url] = False
+    configs, _ = load_all_mcp_configs(distinct)
+
+    (row,) = describe_servers(str(distinct))["servers"]
+
+    assert row["auth"] == {"kind": "api_key", "signed_in": False, "secret_refs": []}, row
+    assert row["status_reason"] == "The headers this server sends cannot carry a key.", row
+    assert row["actions"] == ["test", "add_key", "remove"], row
+    assert offers_add_key(configs["acme-api"]) is True
+
+
 #: Every shape the credential clause decides, as (label, server entry, ledger).
 #: The ledger is what a Test records on a 401/403 whose discovery found no OAuth
 #: authorization server; ``None`` is the fresh daemon that has measured nothing.
@@ -862,6 +937,32 @@ _CREDENTIAL_SHAPES: list[tuple[str, dict[str, Any], bool | None]] = [
         {"url": "https://h.invalid/rpc", "headers": {"Authorization": PLACEHOLDER}},
         False,
     ),
+    (
+        "apikey + author header",
+        {
+            "url": "https://g2.invalid/rpc",
+            "headers": {"X-Author": "someone"},
+            "auth": {"type": "apikey"},
+        },
+        False,
+    ),
+    (
+        "key-ish header + apikey",
+        {
+            "url": "https://g3.invalid/rpc",
+            "headers": {"X-Idempotency-Key": "abc"},
+            "auth": {"type": "apikey"},
+        },
+        False,
+    ),
+    (
+        "url user-info + apikey",
+        {
+            "url": "https://user:" + PLACEHOLDER + "@g4.invalid/rpc",
+            "auth": {"type": "apikey"},
+        },
+        False,
+    ),
     ("url query", {"url": "https://i.invalid/rpc?api_key=" + PLACEHOLDER}, False),
     ("url user-info", {"url": "https://user:" + PLACEHOLDER + "@j.invalid/rpc"}, False),
     ("url fragment only", {"url": "https://k.invalid/rpc#frag"}, False),
@@ -872,6 +973,27 @@ _CREDENTIAL_SHAPES: list[tuple[str, dict[str, Any], bool | None]] = [
     ),
     ("env reference", {"url": "https://m.invalid/rpc", "env": {"TOKEN": "${TOKEN}"}}, False),
 ]
+
+
+#: The shapes that reach ``needs_sign_in`` beside ``signed_in: true`` with only
+#: ``[test, remove]`` after a 401, ON PURPOSE, each with why the app cannot
+#: authenticate it for the user (review round 5, m3). The invariant test pins
+#: each to exactly that row, so narrowing or widening the clause fails here.
+_DEAD_END_BY_DESIGN: dict[str, str] = {
+    "literal key header + apikey": (
+        "the key is a literal in a header the server already sends; add_key could"
+        " only bind a second one, and the fix is that header's own value"
+    ),
+    "key-ish header + apikey": (
+        "the name mentions a key (X-Idempotency-Key), and the name is the only"
+        " evidence, so it is read as the carrier; erring the other way offers a"
+        " second key header beside a real one (R3-M1)"
+    ),
+    "url user-info + apikey": (
+        "the credential travels in the URL, which add_key cannot rewrite (it binds"
+        " a header); the fix is the URL in that config"
+    ),
+}
 
 
 @pytest.mark.parametrize(
@@ -898,13 +1020,22 @@ def test_no_shape_both_needs_a_sign_in_and_claims_to_be_signed_in(
     while the row is NOT claiming to be signed in — a sign-in the server then
     refuses is exactly what these rows must not offer.
 
-    The literal-key-header rows are the ONE deliberate exception, and the reason
-    the clause narrows to headers that cannot carry a key at all: such a server
-    already SENDS a credential, so ``signed_in: true`` is its claim about its own
-    config, ``add_key`` could only bind a SECOND header (the write refuses it),
-    and the way on is that config's own header (R3-M1, kept). The ``apikey`` one
-    is the shape that reaches ``signed_in: true``; the no-``auth``-block one reads
-    ``unknown`` and keeps a sign-in that can still work.
+    The rows in :data:`_DEAD_END_BY_DESIGN` are the deliberate exceptions, and
+    each is pinned to exactly that dead end so a change in either direction is a
+    decision, not a drift (review round 5, m3). Every one declares ``auth.type:
+    apikey`` and SENDS something the clause must read as its key, because the
+    name or the URL is the only evidence of where a hand-written config put it:
+    ``signed_in: true`` is the row's claim about its own config, ``add_key``
+    could only bind a SECOND credential beside it (the write refuses it), and the
+    way on is editing that config (R3-M1, kept). None can be authenticated
+    in-app, for the reason its entry states.
+
+    The no-``auth``-block literal header is NOT among them only because it never
+    claims ``signed_in: true``: it reads ``unknown`` and offers ``sign_in``. With
+    the ledger at ``False`` that sign-in cannot succeed either — discovery already
+    found no OAuth server — so the row passes this invariant's letter while its
+    only action fails with "No OAuth authorization server was discovered". That
+    shape predates the header narrowing and is recorded here rather than fixed.
     """
     url = server["url"]
     _write_global({"acme-api": {"type": "http", **server}})
@@ -925,8 +1056,8 @@ def test_no_shape_both_needs_a_sign_in_and_claims_to_be_signed_in(
     signed_in = row["auth"]["signed_in"]
     key_action = bool({"add_key", "set_key"} & set(row["actions"]))
     usable_sign_in = "sign_in" in row["actions"] and signed_in is not True
-    if label == "literal key header + apikey":
-        assert signed_in is True and not key_action, (label, row)
+    if label in _DEAD_END_BY_DESIGN:
+        assert signed_in is True and row["actions"] == ["test", "remove"], (label, row)
         return
     assert not (signed_in is True and not (key_action or usable_sign_in)), (label, row)
 
@@ -1124,6 +1255,86 @@ def test_the_legacy_projection_keeps_mains_empty_url(distinct: Path) -> None:
     assert row["status"] == "error", row
 
 
+def test_the_legacy_projection_pins_a_populated_stdio_row(distinct: Path) -> None:
+    """Review round 5, m4: ordering and populated fields, not just empty ones.
+
+    The two empty-field goldens could not tell ``sorted(env)`` from
+    ``list(env)``: an older renderer reads ``environment_keys`` as given, so
+    the keys are written OUT of sorted order here and the golden says sorted.
+    Verified byte-identical to ``desktop.public_server_config`` at the commit
+    before the catalog (``19cb5e58e^1``) for this exact config.
+    """
+    from local_operator.mcp.catalog import public_server_config
+
+    _write_global(
+        {
+            "local": {
+                "command": COMMAND,
+                "args": ["--port", "0", "--verbose"],
+                "env": {"ZETA_MODE": "fast", "ALPHA_KEY": "${ALPHA_KEY}", "MID_LEVEL": "3"},
+            }
+        }
+    )
+    configs, _ = load_all_mcp_configs(distinct)
+
+    legacy = public_server_config(configs["local"])
+
+    assert legacy == {
+        "transport": "stdio",
+        "command": COMMAND,
+        "argument_count": 3,
+        "url": None,
+        "endpoint_redacted": False,
+        "environment_keys": ["ALPHA_KEY", "MID_LEVEL", "ZETA_MODE"],
+        "header_keys": [],
+        "secret_refs": [{"id": "ALPHA_KEY", "bindings": [{"field": "env", "key": "ALPHA_KEY"}]}],
+        "transport_oauth_supported": False,
+        "downstream_authorization": "unknown",
+    }, legacy
+
+
+def test_the_legacy_projection_pins_a_populated_http_row(distinct: Path) -> None:
+    """Review round 5, m4: mixed literal/reference/transport headers, out of order.
+
+    A fragment is redacted in this shape (the catalog's ``_public_url`` fact),
+    unlike the credential check, where a fragment never leaves the client. Same
+    differential as the stdio golden above: byte-identical to ``19cb5e58e^1``.
+    """
+    from local_operator.mcp.catalog import public_server_config
+
+    _write_global(
+        {
+            "remote": {
+                "type": "http",
+                "url": "https://mcp.example.invalid/rpc#section",
+                "headers": {
+                    "X-Tenant-Id": "acme",
+                    "Authorization": "Bearer ${ACME_KEY}",
+                    "Accept": "application/json",
+                },
+            }
+        }
+    )
+    configs, _ = load_all_mcp_configs(distinct)
+
+    legacy = public_server_config(configs["remote"])
+
+    assert legacy == {
+        "transport": "http",
+        "command": None,
+        "argument_count": 0,
+        "url": None,
+        "endpoint_redacted": True,
+        "environment_keys": [],
+        "header_keys": ["Accept", "Authorization", "X-Tenant-Id"],
+        "secret_refs": [
+            {"id": "ACME_KEY", "bindings": [{"field": "headers", "key": "Authorization"}]}
+        ],
+        "transport_oauth_supported": None,
+        "downstream_authorization": "unknown",
+    }, legacy
+
+
 def test_the_legacy_projection_still_redacts_a_credentialed_url(distinct: Path) -> None:
     """The one thing the two projections SHARE: a URL that must not be published."""
     from local_operator.mcp.catalog import public_server_config
@@ -1187,12 +1398,45 @@ def test_a_last_seen_count_comes_from_the_tool_cache(distinct: Path) -> None:
     add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
     digest = config_digest(load_all_mcp_configs(distinct)[0]["echoer"])
     cache = McpToolCache(str(distinct / "cache.db"))
+    before = time.time()
     cache.put("echoer", [{"name": "one"}, {"name": "two"}], digest)
+    after = time.time()
 
     (row,) = describe_servers(str(distinct), tool_cache=cache)["servers"]
 
     assert (row["tool_count"], row["tool_count_basis"]) == (2, "last_seen")
     assert row["status"] == "not_started", "last_seen is not a connection claim"
+    # WHEN it was listed, in epoch SECONDS: the cache's own ``saved_at``. The UI
+    # read a seconds value as milliseconds once ("Worked 20700 d ago"), so the
+    # bound is on the real clock, not merely "not None".
+    assert before <= row["last_seen_at"] <= after, row
+    # A stored status is still not an observation; that field keeps its meaning.
+    assert (row["status_basis"], row["status_observed_at"]) == ("stored", None), row
+
+
+def test_last_seen_at_is_null_whenever_the_count_is_not_last_seen(distinct: Path) -> None:
+    """No cached list, no time: the field never outlives the count it dates.
+
+    And a live/probe count wins over the cache (precedence in ``_row``), so its
+    time is ``status_observed_at``, never a stale cache stamp beside it.
+    """
+    add_server("echoer", command=COMMAND, scope="global", cwd=distinct)
+    cfg = load_all_mcp_configs(distinct)[0]["echoer"]
+    digest = config_digest(cfg)
+    cache = McpToolCache(str(distinct / "cache.db"))
+
+    (cold,) = describe_servers(str(distinct), tool_cache=cache)["servers"]
+    assert (cold["tool_count_basis"], cold["last_seen_at"]) == (None, None), cold
+
+    cache.put("echoer", [{"name": "one"}], digest)
+    probe = ProbeResult(
+        status="connected", reason=None, tool_count=3, observed_at=1_000.0, digest=digest
+    )
+    (probed,) = describe_servers(
+        str(distinct), tool_cache=cache, probes={"echoer": probe}, now=1_001.0
+    )["servers"]
+    assert (probed["tool_count_basis"], probed["last_seen_at"]) == ("probe", None), probed
+    assert probed["status_observed_at"] == 1_000.0, probed
 
 
 def test_a_last_seen_count_honours_the_tool_deny_list(distinct: Path) -> None:
@@ -1318,6 +1562,14 @@ def test_the_pinned_fixture_still_matches_the_builder(distinct: Path) -> None:
         }
         assert row["status_basis"] in {"live", "probe", "operation", "stored"}
         assert row["tool_count_basis"] in {"live", "probe", "last_seen", None}
+        # ``last_seen_at`` dates a cached count and nothing else, in epoch
+        # SECONDS: a sample in milliseconds is exactly what taught a UI to render
+        # "20700 d ago", so the scale is pinned (1e9..1e11 is 2001..5138 AD).
+        if row["tool_count_basis"] == "last_seen":
+            assert isinstance(row["last_seen_at"], (int, float)), row["name"]
+            assert 1e9 < row["last_seen_at"] < 1e11, row["name"]
+        else:
+            assert row["last_seen_at"] is None, row["name"]
         assert row["transport"] in {"local_command", "remote_url"}
         assert row["scope"] in {"global", "project"}
         # The two facts a UI keys off to decide whether it may offer a write.
