@@ -21,19 +21,42 @@ rather than assumed:
   honest level to report on a host with no presence store, not so that the
   boundary can be claimed there.
 
-MEASURED, IN A THROWAWAY KEYCHAIN (macOS 26.6.2, uid 501, SIP on): a Secure
-Enclave key CANNOT be created in a legacy file keychain at all — every attribute
-shape tried against one (with and without ``kSecUseKeychain``, with each of
-``kSecAttrAccessibleWhenUnlocked`` / ``WhenUnlockedThisDeviceOnly`` /
-``WhenPasscodeSetThisDeviceOnly``, and with each of the ``privateKeyUsage`` and
-``userPresence`` flags) returns ``errSecParam`` ("inconsistent private key
-parameters for key generation"). Secure Enclave keys live in the data-protection
-keychain, i.e. the user's login keychain, and that placement is the OS's choice
-rather than ours. The consequence for TESTS is recorded here because it is easy
-to get wrong: a test can never exercise this backend without writing an item to
-the operator's login keychain, so the backend's contract is exercised through
-:class:`FileKeyBackend` and the Secure Enclave path is left to ``lop operator
-init``, which the operator runs deliberately.
+MEASURED (macOS 26.6.2, uid 501, SIP on, arm64), and recorded here because both
+findings are easy to re-derive wrongly:
+
+1. The ``errSecParam`` (-50) an earlier revision of this paragraph attributed to
+   keychain PLACEMENT is the ACCESS-CONTROL FLAG PAIR, not the keychain. A native
+   probe that creates nothing and touches no keychain reproduces it: with the pair
+   this file shipped, ``SecAccessControlCreateWithFlags`` returns NULL and OSStatus
+   -50 for every protection class, and the framework's own message names the
+   remedy — "kSecAccessControlUserPresence can be combined only with
+   kSecAccessControlApplicationPassword and kSecAccessControlPrivateKeyUsage".
+   With Apple's values (``userPresence`` 1<<0, ``privateKeyUsage`` 1<<30) it
+   returns an access object for every class. The old measurement could not tell
+   those apart, because access-control creation failed one step BEFORE anything
+   reached a keychain. See :attr:`SecureEnclaveBackend.PRIVATE_KEY_USAGE`.
+
+2. A Secure Enclave key can only live in the DATA-PROTECTION keychain, and that
+   keychain refuses a process with no code signature: ``SecKeyCreateRandomKey``
+   then fails with ``errSecMissingEntitlement`` (-34018, "failed to add key to
+   keychain: <SecKeyRef:('com.apple.setoken')>"). Measured on this host with a
+   native C probe, in BOTH attribute shapes, and reproduced through this package's
+   own ``create`` — while a generic-password add to the same keychain succeeds from
+   a SIGNED process (Apple's own ``python3``, ``Identifier=com.apple.python3``), and
+   under it a real Enclave key is created, exported as a 65-byte uncompressed P-256
+   point, found again by tag and deleted. Ad-hoc signing is not a workaround: with
+   ``keychain-access-groups`` / ``application-identifier`` in an ad-hoc signature
+   the kernel kills the process (SIGKILL, 137). A runtime distributed as an
+   unsigned Python build therefore cannot create this key on any host; ``init``
+   reports that failure rather than a level it did not reach.
+
+The consequence for TESTS is recorded here because it is easy to get wrong: a
+test can never exercise this backend without writing an item to the operator's
+login keychain, and on an unsigned host it cannot exercise it at all, so the
+backend's contract is exercised through :class:`FileKeyBackend` and through the
+CF-level tests in ``tests/unit/operator`` that assert structure and ownership
+without creating a key; the end-to-end path is left to ``lop operator init``,
+which the operator runs deliberately.
 """
 
 from __future__ import annotations
@@ -259,6 +282,8 @@ class _CF:
         self.S.SecItemDelete.argtypes = [void]
         self.S.CFErrorCopyDescription.restype = void
         self.S.CFErrorCopyDescription.argtypes = [void]
+        self.S.CFErrorGetCode.restype = ctypes.c_long
+        self.S.CFErrorGetCode.argtypes = [void]
         self.C.CFStringCreateWithBytes.restype = void
         self.C.CFStringCreateWithBytes.argtypes = [
             void,
@@ -285,6 +310,16 @@ class _CF:
         self.C.CFStringGetCString.restype = ctypes.c_bool
         self.C.CFStringGetCString.argtypes = [void, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
         self.C.CFRelease.argtypes = [void]
+        # kCFTypeDictionaryKeyCallBacks / kCFTypeDictionaryValueCallBacks, by
+        # ADDRESS. Each symbol is a struct whose first field is its version (0), so
+        # reading the symbol as a pointer would read that 0; the address is what
+        # CFDictionaryCreate takes. Declared here once because they never change.
+        self.TYPED_KEY_CALLBACKS = ctypes.addressof(
+            (ctypes.c_char * 0).in_dll(self.C, "kCFTypeDictionaryKeyCallBacks")
+        )
+        self.TYPED_VALUE_CALLBACKS = ctypes.addressof(
+            (ctypes.c_char * 0).in_dll(self.C, "kCFTypeDictionaryValueCallBacks")
+        )
 
     def const(self, name: str) -> int:
         value = ctypes.c_void_p.in_dll(self.S, name).value
@@ -309,9 +344,38 @@ class _CF:
         return int(self.cconst("kCFBooleanTrue" if value else "kCFBooleanFalse"))
 
     def dict(self, pairs: list[tuple[int, int]]) -> int:
+        """A ``CFDictionaryRef`` that RETAINS its keys and values.
+
+        Built with ``kCFTypeDictionaryKeyCallBacks`` / ``ValueCallBacks`` rather
+        than NULL callbacks. With NULL callbacks a dictionary holds BORROWED
+        pointers — it retains nothing and releases nothing — so every object put
+        into one must outlive it by hand, and that discipline is exactly what one
+        caller got wrong (a released ``CFDataRef`` was passed into a later
+        dictionary). With the typed callbacks a dictionary is self-sufficient and
+        the caller may release its own reference as soon as the dictionary is
+        built, which is the ownership rule :meth:`SecureEnclaveBackend.create`
+        follows.
+
+        Measured, and the reason this is not merely hygiene: on macOS 26.6.2 an
+        Enclave key-generation dictionary carrying the corrected flags SEGFAULTS
+        inside ``SecKeyCreateRandomKey`` when built with NULL callbacks (6 of 6
+        runs, from both a ctypes probe and a native C probe), and the identical
+        dictionary with these callbacks returns a clean OSStatus (6 of 6). NULL is
+        legal but means "these objects are not managed"; passing it asked the
+        framework to keep a promise nothing was keeping.
+        """
         keys = (ctypes.c_void_p * len(pairs))(*[k for k, _ in pairs])
         values = (ctypes.c_void_p * len(pairs))(*[v for _, v in pairs])
-        return int(self.C.CFDictionaryCreate(None, keys, values, len(pairs), None, None))
+        return int(
+            self.C.CFDictionaryCreate(
+                None,
+                keys,
+                values,
+                len(pairs),
+                self.TYPED_KEY_CALLBACKS,
+                self.TYPED_VALUE_CALLBACKS,
+            )
+        )
 
     def release(self, *refs: int) -> None:
         for ref in refs:
@@ -321,6 +385,17 @@ class _CF:
     def data_bytes(self, ref: int) -> bytes:
         length = self.C.CFDataGetLength(ref)
         return ctypes.string_at(self.C.CFDataGetBytePtr(ref), length)
+
+    def status(self, err: Any) -> int:
+        """The ``OSStatus`` inside a ``CFErrorRef``, WITHOUT releasing it.
+
+        Separate from :meth:`error`, which releases: the CODE picks the remedy the
+        operator is offered, while the DESCRIPTION is the precise detail, and
+        ``create`` needs both from the same error object.
+        """
+        if not err:
+            return 0
+        return int(self.S.CFErrorGetCode(err))
 
     def error(self, err: Any) -> str:
         """A CFErrorRef as text, releasing it. Never raises."""
@@ -338,6 +413,55 @@ class _CF:
             self.release(err)
 
 
+#: ``OSStatus`` values from the presence store that carry a REMEDY, with the
+#: sentence the operator needs. The framework's own text is precise but does not
+#: say what to do; these two do, and they are the two this repository has measured
+#: on a real host (see the module docstring).
+#:
+#: ``-50`` is ``errSecParam``: the access-control flags were refused. It means a
+#: build is carrying a flag pair Apple does not accept — ``userPresence`` combines
+#: only with ``applicationPassword`` and ``privateKeyUsage`` — and NO host will
+#: accept it, so the sentence says that rather than implying a host problem.
+_ERR_SEC_PARAM = -50
+
+#: ``-34018`` is ``errSecMissingEntitlement``. It is NOT a host defect and not a
+#: flag defect: the Secure Enclave keeps its keys in the data-protection keychain,
+#: and that keychain refuses a caller carrying no keychain entitlement — i.e. a
+#: process that is not code-signed (measured: an ad-hoc/linker-signed interpreter
+#: gets this, Apple's signed ``python3`` does not). The remedy names the level such
+#: a runtime can honestly create instead, so the failure routes the operator to a
+#: working path rather than leaving them with a negative number.
+_ERR_SEC_MISSING_ENTITLEMENT = -34018
+
+_SECURE_ENCLAVE_REMEDIES: dict[int, str] = {
+    _ERR_SEC_PARAM: (
+        "the access-control flags were refused (errSecParam): kSecAccessControlUserPresence "
+        "may be combined only with kSecAccessControlApplicationPassword and "
+        "kSecAccessControlPrivateKeyUsage, so a build carrying a wrong flag pair cannot "
+        "create a key on any host"
+    ),
+    _ERR_SEC_MISSING_ENTITLEMENT: (
+        "this process carries no keychain entitlement (errSecMissingEntitlement): the "
+        "Secure Enclave keeps its keys in the data-protection keychain, which refuses a "
+        "caller that is not code-signed, so this runtime cannot use the presence tier here "
+        "— `lop operator init --backend file-only` creates the level this runtime can "
+        "enforce, and `lop operator status` reports it as that"
+    ),
+}
+
+
+def secure_enclave_remedy(status: int) -> str:
+    """The actionable sentence for an ``OSStatus`` from the presence store.
+
+    An empty string for a status with no known remedy, deliberately: the caller
+    appends what it has and contributes nothing on a code we cannot explain,
+    rather than guessing a cause. Classification is a seam of its own so it can be
+    tested without a Secure Enclave, which matters because the two codes above
+    cannot both be produced on one host.
+    """
+    return _SECURE_ENCLAVE_REMEDIES.get(int(status), "")
+
+
 class SecureEnclaveBackend:
     """The macOS presence-gated backend.
 
@@ -350,9 +474,27 @@ class SecureEnclaveBackend:
     report claim presence the host does not enforce.
     """
 
-    #: ``kSecAccessControlPrivateKeyUsage`` and ``kSecAccessControlUserPresence``.
-    PRIVATE_KEY_USAGE = 1 << 0
-    USER_PRESENCE = 1 << 2
+    #: ``kSecAccessControlPrivateKeyUsage`` and ``kSecAccessControlUserPresence``,
+    #: as Apple's header defines them
+    #: (``Security.framework/Headers/SecAccessControl.h``:
+    #: ``kSecAccessControlUserPresence = 1u << 0``,
+    #: ``kSecAccessControlPrivateKeyUsage = 1u << 30``).
+    #:
+    #: DO NOT SIMPLIFY THESE BACK into a small shift pair. The two are not
+    #: interchangeable and the failure is not a subtle degradation:
+    #: ``SecAccessControlCreateWithFlags`` REFUSES a wrong pair with ``errSecParam``
+    #: (-50) — "kSecAccessControlUserPresence can be combined only with
+    #: kSecAccessControlApplicationPassword and kSecAccessControlPrivateKeyUsage" —
+    #: so every protection class in the ladder fails and ``create`` never reaches key
+    #: generation. This file shipped ``PRIVATE_KEY_USAGE = 1 << 0`` and
+    #: ``USER_PRESENCE = 1 << 2``: transposed, and two bits off Apple's
+    #: ``PrivateKeyUsage``. Measured with a native probe against this machine's SDK,
+    #: creating nothing and touching no keychain: the shipped pair returns NULL/-50
+    #: for both protection classes, Apple's pair returns a non-NULL access object for
+    #: both. ``tests/unit/operator/test_operator_authority.py`` asserts both constants
+    #: against the SDK header itself for exactly that reason.
+    PRIVATE_KEY_USAGE = 1 << 30
+    USER_PRESENCE = 1 << 0
 
     #: Tried in order; the strictest protection the host accepts wins.
     PROTECTION_LADDER = (
@@ -376,59 +518,110 @@ class SecureEnclaveBackend:
             return False
 
     def create(self) -> KeyHandle:
+        """Create the Enclave key, taking the first protection class the host accepts.
+
+        OWNERSHIP RULE — every CoreFoundation object created here is released
+        exactly once, in the scope that created it. The dictionaries RETAIN what
+        they hold (see :meth:`_CF.dict`), so an object handed to one is released as
+        soon as the dictionary holding it exists. ``tag`` is the deliberate
+        exception: it is created here, used by every iteration, and released once in
+        the ``finally`` below.
+
+        The previous shape released ``tag`` INSIDE the loop, on the iteration that
+        failed to make a key, and then handed it to the next iteration's dictionary:
+        a released ``CFDataRef``, i.e. freed memory walked by ``CFDictionaryCreate``
+        / ``objc_retain``. That path is reachable exactly when the access control
+        SUCCEEDS and key creation then FAILS — the documented case is a host whose
+        policy refuses the strictest protection class — which is why it went
+        unnoticed while the flag bug made every iteration fail one step earlier. The
+        two defects are coupled: fixing only the flags would have turned a precise
+        error into a crash on such a host, so both are fixed together.
+        """
         cf = self.cf
         tag = cf.data(APPLICATION_TAG.encode())
         failures: list[str] = []
-        for protection in self.PROTECTION_LADDER:
-            err = ctypes.c_void_p()
-            access = cf.S.SecAccessControlCreateWithFlags(
-                None,
-                cf.const(protection),
-                self.PRIVATE_KEY_USAGE | self.USER_PRESENCE,
-                ctypes.byref(err),
-            )
-            if not access:
-                failures.append(f"{protection}: {cf.error(err)}")
-                continue
-            private_attrs = cf.dict(
-                [
-                    (cf.const("kSecAttrIsPermanent"), cf.boolean(True)),
-                    (cf.const("kSecAttrApplicationTag"), tag),
-                    (cf.const("kSecAttrAccessControl"), int(access)),
-                ]
-            )
-            attrs = cf.dict(
-                [
-                    (cf.const("kSecAttrKeyType"), cf.const("kSecAttrKeyTypeECSECPrimeRandom")),
-                    (cf.const("kSecAttrKeySizeInBits"), self._cf_number(256)),
-                    (cf.const("kSecAttrTokenID"), cf.const("kSecAttrTokenIDSecureEnclave")),
-                    (cf.const("kSecUseDataProtectionKeychain"), cf.boolean(True)),
-                    (cf.const("kSecPrivateKeyAttrs"), private_attrs),
-                ]
-            )
-            err = ctypes.c_void_p()
-            key = cf.S.SecKeyCreateRandomKey(attrs, ctypes.byref(err))
-            cf.release(private_attrs, attrs, access, tag)
-            if not key:
-                failures.append(f"{protection}: {cf.error(err)}")
-                continue
-            try:
-                spki = self._public_point(int(key))
-            finally:
-                cf.release(int(key))
-            return KeyHandle(
-                backend=SECURE_ENCLAVE, key_id=key_id_for(spki), spki=spki, presence=True
-            )
-        raise KeyBackendError(
-            "the Secure Enclave refused to create an operator key (" + "; ".join(failures) + ")"
-        )
+        statuses: list[int] = []
+        try:
+            for protection in self.PROTECTION_LADDER:
+                err = ctypes.c_void_p()
+                access = cf.S.SecAccessControlCreateWithFlags(
+                    None,
+                    cf.const(protection),
+                    self.PRIVATE_KEY_USAGE | self.USER_PRESENCE,
+                    ctypes.byref(err),
+                )
+                if not access:
+                    statuses.append(cf.status(err))
+                    failures.append(f"{protection}: {cf.error(err)}")
+                    continue
+                private_attrs = cf.dict(
+                    [
+                        (cf.const("kSecAttrIsPermanent"), cf.boolean(True)),
+                        (cf.const("kSecAttrApplicationTag"), tag),
+                        (cf.const("kSecAttrAccessControl"), int(access)),
+                    ]
+                )
+                cf.release(access)
+                number = self._cf_number(256)
+                # ``kSecUseDataProtectionKeychain`` is not in Apple's documented
+                # Enclave generation dictionary, and on macOS 26.6.2 it is not
+                # LOAD-BEARING either: measured under a signed interpreter, both
+                # shapes create and re-find a key identically for both protection
+                # classes, and with it the round trip through this module's own
+                # ``load`` query (which does not set it) finds the same key. It is
+                # kept because it changes nothing measurable and removing it would
+                # be an unvalidated change; what puts the key in the data-protection
+                # keychain is ``kSecAttrTokenIDSecureEnclave``, not this attribute.
+                attrs = cf.dict(
+                    [
+                        (cf.const("kSecAttrKeyType"), cf.const("kSecAttrKeyTypeECSECPrimeRandom")),
+                        (cf.const("kSecAttrKeySizeInBits"), number),
+                        (cf.const("kSecAttrTokenID"), cf.const("kSecAttrTokenIDSecureEnclave")),
+                        (cf.const("kSecUseDataProtectionKeychain"), cf.boolean(True)),
+                        (cf.const("kSecPrivateKeyAttrs"), private_attrs),
+                    ]
+                )
+                cf.release(number, private_attrs)
+                err = ctypes.c_void_p()
+                key = cf.S.SecKeyCreateRandomKey(attrs, ctypes.byref(err))
+                cf.release(attrs)
+                if not key:
+                    statuses.append(cf.status(err))
+                    failures.append(f"{protection}: {cf.error(err)}")
+                    continue
+                try:
+                    spki = self._public_point(int(key))
+                finally:
+                    cf.release(int(key))
+                return KeyHandle(
+                    backend=SECURE_ENCLAVE, key_id=key_id_for(spki), spki=spki, presence=True
+                )
+            # The framework's own text stays first and stays precise; the remedy is
+            # appended once per distinct status so the operator is told what to do
+            # WITHOUT the failure being softened into a generic sentence.
+            detail = "; ".join(failures)
+            message = f"the Secure Enclave refused to create an operator key ({detail})"
+            remedies = [
+                remedy
+                for remedy in dict.fromkeys(secure_enclave_remedy(s) for s in statuses)
+                if remedy
+            ]
+            if remedies:
+                message += " — " + " ; ".join(remedies)
+            raise KeyBackendError(message)
+        finally:
+            cf.release(tag)
 
     def _cf_number(self, value: int) -> int:
-        """A ``CFNumberRef`` holding ``value``, released by the caller's dict release.
+        """A ``CFNumberRef`` holding ``value``. THE CALLER OWNS the +1 reference.
 
         Small and deliberate: ``CFNumberCreate`` is not part of the surface
-        ``_CF`` declares, and wrapping it here keeps the number's lifetime tied
-        to the dictionary that holds it.
+        ``_CF`` declares, so it is wrapped here. The ownership is the ordinary
+        CoreFoundation rule and NOT what this docstring claimed before: a dictionary
+        built with ``kCFTypeDictionaryKeyCallBacks``/``ValueCallBacks`` (see
+        :meth:`_CF.dict`) RETAINS what it holds, so putting this number into one
+        does not consume the reference the caller holds. ``create`` releases it, and
+        its predecessor leaked one CFNumberRef per successful call.
         """
         cf = self.cf
         cf.C.CFNumberCreate.restype = ctypes.c_void_p
@@ -477,10 +670,11 @@ class SecureEnclaveBackend:
         key = int(out.value or 0)
         if not key:  # pragma: no cover — defensive
             return None
+        point = self._public_point(key)
         handle = KeyHandle(
             backend=SECURE_ENCLAVE,
-            key_id=key_id_for(self._public_point(key)),
-            spki=self._public_point(key),
+            key_id=key_id_for(point),
+            spki=point,
             presence=True,
         )
         return _SecureEnclaveSigner(handle, key, cf)
