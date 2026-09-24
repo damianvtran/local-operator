@@ -1050,6 +1050,33 @@ def test_the_router_ladder_does_not_leak_onto_a_non_aggregator_auto() -> None:
     assert spec.reasoning_default_effort is None
 
 
+def _is_scalar_annotation(annotation: Any) -> bool:
+    """Whether a field annotation can only ever hold an immutable scalar.
+
+    Only a UNION is unpacked (``Optional[int]``, ``str | None``). Any other
+    parameterised type is a container whatever its arguments -- ``list[str]``
+    must fail even though ``typing.get_args`` would hand back ``(str,)``, which
+    is exactly the hole an ``get_args(...) or (ann,)`` check leaves open.
+    """
+    import types
+    import typing
+
+    scalars = (int, float, str, bool, type(None))
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        return all(_is_scalar_annotation(member) for member in typing.get_args(annotation))
+    return typing.get_origin(annotation) is None and annotation in scalars
+
+
+def test_the_scalar_pin_rejects_a_generic_container() -> None:
+    """The pin above must catch the containers it exists for, not just bare lists."""
+    from typing import Optional
+
+    for rejected in (list[str], dict[str, float], tuple[str, ...], Optional[list[str]], set[int]):
+        assert not _is_scalar_annotation(rejected), rejected
+    for accepted in (int, float, str, bool, Optional[int], str | None, Optional[float]):
+        assert _is_scalar_annotation(accepted), accepted
+
+
 def test_paint_resolution_isolates_the_memo_with_a_shallow_copy(monkeypatch) -> None:
     """The paint path hands out SHALLOW copies, and they are still isolated.
 
@@ -1062,12 +1089,8 @@ def test_paint_resolution_isolates_the_memo_with_a_shallow_copy(monkeypatch) -> 
     field inventory that makes the shallow copy safe, and the isolation itself
     on the memo arm and the registry-fallback arm.
     """
-    import typing
-
-    scalars = (int, float, str, bool, type(None))
     for name, field in ModelInfo.model_fields.items():
-        members = typing.get_args(field.annotation) or (field.annotation,)
-        assert all(member in scalars for member in members), (
+        assert _is_scalar_annotation(field.annotation), (
             f"ModelInfo.{name} is {field.annotation!r}: a non-scalar field makes "
             "resolve_model_info_paint's shallow copy share state with its memo"
         )

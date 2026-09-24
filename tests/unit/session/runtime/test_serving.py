@@ -2684,7 +2684,9 @@ class _CountingComms:
 
     def roster_pass(self, now: Any = None) -> Any:
         self.passes += 1
-        return SimpleNamespace(roster=lambda: [], nodes=lambda: [], job=lambda _job_id: None)
+        return SimpleNamespace(
+            roster=lambda: [], lifecycles=lambda: {}, nodes=lambda: [], job=lambda _job_id: None
+        )
 
 
 @pytest.mark.asyncio

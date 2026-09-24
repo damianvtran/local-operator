@@ -2419,12 +2419,10 @@ class ProjectionFold:
         read = comms.roster_pass()
         # ``lifecycles()`` rather than ``roster()``: this runs per root event,
         # and ``roster()``'s resumable verdict (a transcript ``stat()`` per
-        # record) is a field this fold never reads. Probed so a registry
-        # stand-in that only offers ``roster()`` keeps working unchanged.
-        lifecycles = getattr(read, "lifecycles", None)
-        roster = (
-            lifecycles() if callable(lifecycles) else {item.job_id: item for item in read.roster()}
-        )
+        # record) is a field this fold never reads. Called directly, with no
+        # ``roster()`` fallback: a fallback is a second path only test doubles
+        # would reach, and the doubles are what must match production.
+        roster = read.lifecycles()
         nodes = read.nodes()
         by_id = {node.job_id: node for node in nodes}
         children: dict[str | None, list[Any]] = {}
