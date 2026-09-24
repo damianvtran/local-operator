@@ -141,9 +141,10 @@ class ArgumentShape(Enum):
     #: ONE whitespace-free token — a selector the desktop forwards as a
     #: ``selection``/``filter``/``selected`` value (a view, a mode, a session id).
     #: A sentence here is prose, which is what keeps `/usage more prose` a message.
-    #: The vocabulary is ``slash_commands.command_argument_words``, empty for this
-    #: shape's rows and honoured by BOTH arms (the validator and the catalogue),
-    #: so a row needing one has a single place to declare it.
+    #: The vocabulary is ``slash_commands.command_argument_words``, empty (any
+    #: word) for every row but ``/session``, whose one word is the ``--copy``
+    #: flag. Honoured by BOTH arms (the validator and the catalogue), so a row
+    #: needing one has a single place to declare it.
     WORD = "word"
     #: One token naming a provider THIS INSTALL knows — the route's own lookup
     #: (``get_provider_definition``), so ``/login openai`` is the command and

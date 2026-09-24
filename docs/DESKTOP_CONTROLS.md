@@ -28,7 +28,11 @@ endpoint's admission rule and the composer's planner both read:
 * `argument_shape` / `argument_words` — the third source, for text the desktop
   VALIDATES or FORWARDS rather than completes. `argument_words` is the vocabulary
   the first token must come from, empty meaning any word:
-  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`);
+  - `word` — one whitespace-free selector token (`/usage on`, `/stop now`).
+    `/session --copy` is a `word` row with a one-word vocabulary
+    (`argument_words: ["--copy"]`): the copy is terminal-only, so the command
+    route refuses it with "/session --copy works in the terminal; the /session
+    view shows the ID" rather than opening the view and dropping the flag;
   - `provider` — one token naming a provider this install knows, so `/login
     openai` is the command and `/login zzz` is a message;
   - `subcommand` — `<subcommand> [name]`, the MCP shape, at most two tokens, so
