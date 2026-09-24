@@ -42,6 +42,7 @@ import {
 	clearSessionPinMark,
 	retainProjectionStream,
 	retainSessionListStream,
+	usePinMarks,
 	useProjection,
 	useSessions,
 } from "../store";
@@ -116,7 +117,8 @@ function Header({
 	   answer immediately. Only the list's own sectioning waits for the daemon —
 	   see the mark/section split in `store.ts` for why a row must not move until
 	   the pin is confirmed. */
-	const { sessions, pinMarks } = useSessions();
+	const { sessions } = useSessions();
+	const pinMarks = usePinMarks();
 	const row = sessions.find((r) => r.session_id === sessionId);
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
 	const [pinError, setPinError] = useState("");
