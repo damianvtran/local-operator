@@ -111,7 +111,7 @@ def test_a_store_first_credential_engages_the_provider(
     `live_catalogue` fetches anonymously (a keyless aggregator's listing 401s, so
     the failure is real).
     """
-    store_provider_key("OPENROUTER_API_KEY", "sk-or-from-settings", base=isolated)
+    store_provider_key("OPENROUTER_API_KEY", "fixture-key", base=isolated)
     # The gap this test is about, asserted rather than assumed.
     assert "openrouter" not in (controller.usable_providers() or set())
     assert "openrouter" in (controller.persisted_providers() or set())
@@ -313,3 +313,40 @@ def test_the_live_fetch_is_handed_a_store_first_credential(
     # The control: a provider nothing engaged is still fetched keyless, so the
     # assertion above is about the engagement axis and not about the spy.
     assert seen["deepseek"] is None
+
+
+def test_the_providers_admission_path_never_opens_the_store(
+    controller: ProviderController, isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-2: the engagement view is computed only where it is read.
+
+    ``live_catalogue(providers=...)`` — the mobile daemon's admission path, itself
+    a ``GET`` — takes ``connected`` from the caller's own set, so the engagement
+    view is discarded there. Computing it anyway bought one ``open_store()`` and a
+    possible broker spawn per phone request for an answer nothing read.
+
+    The instrument is the method itself: a spy proves the DESKTOP path still asks
+    (so this is not a test that passes by never exercising the code) and that the
+    ``providers=`` path does not.
+    """
+    from local_operator.providers.controller import ProviderController as _PC
+
+    calls: list[int] = []
+    real = _PC._engaged_providers
+
+    def spy(self: _PC) -> set[str] | None:
+        calls.append(1)
+        return real(self)
+
+    monkeypatch.setattr(_PC, "_engaged_providers", spy)
+    monkeypatch.setattr(
+        "local_operator.providers.controller.available_models",
+        lambda _provider_id, **_kwargs: ([], "unauthenticated"),
+    )
+    monkeypatch.setattr("local_operator.model.prices.models_dev_providers", lambda **_kw: {})
+
+    asyncio.run(controller.live_catalogue(providers=["deepseek"]))
+    assert calls == [], "the admission path discards the view — it must not pay for it"
+
+    asyncio.run(controller.live_catalogue())
+    assert calls == [1], "the desktop path still reads it, once per call"

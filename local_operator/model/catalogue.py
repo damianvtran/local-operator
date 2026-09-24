@@ -872,12 +872,15 @@ def invalidate(key: str, *, cache_dir: Path | None = None) -> None:
     payload -- when a document it just read yielded no usable rows.
 
     Also forgets the document's failure backoff
-    (:data:`LISTING_FAILURE_BACKOFF_S`): every credential-change path in the app
-    goes through ``_invalidate_cached_listing`` → ``invalidate_listing`` →
-    :func:`invalidate_documents`, which clears it. Leaving the window standing
-    there would answer a just-repaired connection with the previous endpoint's
-    failure for the rest of the window -- the one case the bound promises not to
-    hide.
+    (:data:`LISTING_FAILURE_BACKOFF_S`), and that is what makes a REPAIR take
+    effect at once: login, logout, account removal and a re-pointed local endpoint
+    all reach this function through ``_invalidate_cached_listing`` →
+    ``invalidate_listing`` → :func:`invalidate_documents`. Leaving the window
+    standing there would answer a just-repaired connection with the previous
+    endpoint's failure for the rest of the window -- the one case the bound
+    promises not to hide. Not every credential write comes through here, and the
+    ones that do not (``PATCH /v1/credentials`` is the in-app one) are named on
+    :data:`LISTING_FAILURE_BACKOFF_S` rather than assumed away.
     """
     path = _cache_path(key, cache_dir)
     _clear_failure(path)

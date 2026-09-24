@@ -1023,16 +1023,20 @@ def stored_provider_env_keys(base: Path | None = None) -> set[str]:
     path that takes down the provider picker, which is precisely the failure the
     store's ``list`` verb was reworked to avoid.
 
-    That promise has to cover the STORE'S OWN exception family, not just this
-    module's: the store is a sqlite file, so a damaged one raises
+    That promise has to cover the STORE'S OWN exception family and a malformed
+    ROW, not just this module's: the store is a sqlite file, so a damaged one raises
     ``sqlite3.DatabaseError`` ("file is not a database") and a ``chmod 000`` one
-    raises ``sqlite3.OperationalError``, and neither is an ``OSError`` — an earlier
-    version of this tuple caught neither, so `GET /v1/desktop/models?live=true`
-    (which reaches here through ``persisted_providers``) answered 500 on a store
-    this function is documented to survive (Q2-1). ``sqlite3.ProgrammingError`` is
-    re-raised the way ``usable_providers`` re-raises it: a connection used from
-    the wrong thread is a caller BUG, and a bug that dresses itself as "no
-    provider rows" is one nobody finds.
+    raises ``sqlite3.OperationalError`` — neither is an ``OSError`` — while a row
+    whose BLOB columns hold text raises ``TypeError`` out of the decryptor. An
+    earlier version of this tuple caught none of the three, so
+    `GET /v1/desktop/models?live=true` (which reaches here through
+    ``persisted_providers``) answered 500 for states this function is documented to
+    survive (Q2-1, R3-1). For the row case the deeper fix belongs to
+    ``secrets.store._decode``, which should raise ``SecretCorrupt`` for a byte
+    column that is not bytes-like; see the clause's comment.
+    ``sqlite3.ProgrammingError`` is re-raised the way ``usable_providers``
+    re-raises it: a connection used from the wrong thread is a caller BUG, and a bug
+    that dresses itself as "no provider rows" is one nobody finds.
     """
     from local_operator.secrets.access import open_store
     from local_operator.secrets.errors import SecretStoreError
@@ -1060,6 +1064,22 @@ def stored_provider_env_keys(base: Path | None = None) -> set[str]:
         # Damaged, locked or otherwise unopenable: the sqlite family's own answer
         # to "this file is not a store I can read". Degrades exactly like an
         # absent store, so no GET can be taken down by one.
+        return set()
+    except TypeError:
+        # A ROW whose SHAPE is wrong, rather than a store that cannot be read: the
+        # decryptor's ``bytes(row[4])``/``bytes(row[5])`` raises "string argument
+        # without an encoding" when a column that must hold a BLOB holds text
+        # instead — hand-tampering, or a record-header desync left by disk damage.
+        # Caught
+        # for the same reason as the sqlite family above (this reader's contract is
+        # "no provider rows I can see", never an error into a GET), and NOT because
+        # this is the right layer: the principled fix lives in
+        # ``secrets.store._decode``, which should validate that the byte columns
+        # are bytes-like and raise ``SecretCorrupt`` so ``_enumerate`` reports the
+        # row through ``damaged_records`` — the treatment ``_read_meta_int``
+        # already got for the same class of hand-corrupted row. That is the
+        # secrets layer's contract to keep, out of scope for a listing fix, and
+        # recorded here rather than skipped (R3-1).
         return set()
 
 
