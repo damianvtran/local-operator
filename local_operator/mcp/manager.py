@@ -4155,13 +4155,22 @@ class McpManager:
         can.
 
         The sentinel is a real TYPE (:class:`_NotRecorded`), not ``Any``, so a
-        call site that hands over the wide ``marker`` value without checking for
-        it fails type-check rather than silently blocking against the sentinel.
-        That check IS the contract: :data:`_MARKER_NOT_RECORDED` means "cannot
-        say", and it must be resolved here or never passed.
+        call site that hands over the wide ``marker`` value without resolving it
+        fails type-check rather than silently blocking against the sentinel —
+        which is how ``self._auth_grant_marker[name]`` below was found storing
+        the unresolved union. Resolution is by ``isinstance`` rather than by
+        ``is``: the sentinel is one INSTANCE, but the type system cannot prove
+        it is the only one, so ``is`` narrows nothing and any future value of
+        the type would slip past.
         """
         self._auth_blocked.add(name)
-        marker = self._grant_marker(name) if attempted is _MARKER_NOT_RECORDED else attempted
+        if isinstance(attempted, _NotRecorded):
+            # The caller cannot say: the store is the evidence. This is the
+            # pre-feature behaviour and it is still correct whenever no grant was
+            # written during the attempt.
+            marker: tuple[float, bool] | None = self._grant_marker(name)
+        else:
+            marker = attempted
         if marker is not None or name not in self._auth_grant_marker:
             self._auth_grant_marker[name] = marker
 
